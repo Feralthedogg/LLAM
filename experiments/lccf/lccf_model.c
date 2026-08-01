@@ -815,6 +815,8 @@ static int validate_metrics(const lccf_model_batch_t *batch,
                        callback_count + instances) ||
           !metric_room(metrics->fact_site_lookups,
                        callback_count + instances) ||
+          !metric_room(metrics->fact_changed_site_materializations,
+                       callback_count) ||
           !metric_room(metrics->fact_module_pins, instances) ||
           !metric_room(metrics->fact_payload_pins, instances) ||
           !metric_room(metrics->fact_stale_losers,
@@ -1970,6 +1972,10 @@ static int consume_fact_transaction(
     bool execute;
     int rc;
 
+    if (instance->cell->next_site !=
+        instance->fact_cell->raw_ticket.site_index) {
+        metrics->fact_changed_site_materializations += UINT64_C(1);
+    }
     rc = lccf_fact_consume(
         instance->fact_cell, instance->frame->generation,
         instance->cell->next_site, consumer, guard, &counters,
@@ -2013,6 +2019,10 @@ static int materialize_and_invoke_fact(
     int rc;
 
     counters.guard_rechecks = 1U;
+    if (instance->cell->next_site !=
+        instance->fact_cell->raw_ticket.site_index) {
+        metrics->fact_changed_site_materializations += UINT64_C(1);
+    }
     rc = lccf_fact_materialize(
         instance->fact_cell, instance->frame->generation,
         instance->cell->next_site, &counters, &fact);
@@ -2564,6 +2574,8 @@ static void accumulate_metrics(
     target->facts_build_failed += source->facts_build_failed;
     target->fact_normalizations += source->fact_normalizations;
     target->fact_site_lookups += source->fact_site_lookups;
+    target->fact_changed_site_materializations +=
+        source->fact_changed_site_materializations;
     target->fact_module_pins += source->fact_module_pins;
     target->fact_payload_pins += source->fact_payload_pins;
     target->fact_stale_losers += source->fact_stale_losers;

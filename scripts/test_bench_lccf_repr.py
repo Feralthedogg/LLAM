@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import subprocess
 from copy import deepcopy
+from pathlib import Path
 
 from bench_lccf_repr import (
     bootstrap_median_ci,
@@ -409,11 +412,77 @@ def test_selection_fixtures() -> None:
     assert rejected.selected_representation is None
 
 
+def test_binary_contract() -> None:
+    binary_value = os.environ.get("LCCF_REPR_TEST_BINARY")
+    if binary_value is None:
+        return
+    binary = Path(binary_value).resolve()
+    command = [
+        str(binary),
+        "--workload", "completion_io_pipeline",
+        "--route", "queue",
+        "--process-id", "0",
+        "--instances", "17",
+        "--frame-bytes", "64",
+        "--sites", "8",
+        "--chain", "8",
+        "--blocks", "2",
+        "--minimum-window-ns", "1000000",
+        "--warmup-rounds", "1",
+        "--seed", "7810769610227647856",
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    lines = completed.stdout.splitlines()
+    assert len(lines) == 12
+    rows = [parse_raw_row(line) for line in lines]
+    assert {row.contrast for row in rows} == set(CONTRASTS)
+    assert {row.order for row in rows} == {"ABBA", "BAAB"}
+    for contrast in CONTRASTS:
+        selected = [row for row in rows if row.contrast == contrast]
+        assert len(selected) == 4
+        assert {(row.block, row.pair) for row in selected} == {
+            (0, 0), (0, 1), (1, 0), (1, 1)
+        }
+        assert len({row.rounds for row in selected}) == 1
+        assert selected[0].rounds > 0
+
+    invalid_commands = [
+        command + ["--blocks", "2"],
+        ["0" if value == "2" and command[index - 1] == "--blocks" else value
+         for index, value in enumerate(command)],
+        ["1" if value == "8" and command[index - 1] == "--sites" else value
+         for index, value in enumerate(command)],
+        ["0" if value == "1000000" else value for value in command],
+        ["18446744073709551615"
+         if value == "17" and command[index - 1] == "--instances" else value
+         for index, value in enumerate(command)],
+    ]
+    for invalid in invalid_commands:
+        rejected = subprocess.run(
+            invalid,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert rejected.returncode != 0
+        assert rejected.stdout == ""
+
+
 def main() -> int:
     test_strict_raw_parser()
     test_process_median_and_order_balance()
     test_bootstrap_contract()
     test_selection_fixtures()
+    test_binary_contract()
     print("[test_bench_lccf_repr] all checks passed")
     return 0
 

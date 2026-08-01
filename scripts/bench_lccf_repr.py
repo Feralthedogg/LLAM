@@ -4,11 +4,16 @@
 
 from __future__ import annotations
 
+import argparse
+import csv
 import json
 import math
 import random
 import statistics
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
@@ -899,3 +904,320 @@ def classify_lines(
             reasons=(str(exc),),
             intervals={},
         )
+
+
+def _cell_slug(cell: Cell) -> str:
+    return (
+        f"{cell.workload}__{cell.route}__f{cell.frame_bytes}"
+        f"__i{cell.instances}__s{cell.sites}__c{cell.chain}"
+    )
+
+
+def _binary_command(
+    binary: Path,
+    cell: Cell,
+    *,
+    process_id: int,
+    blocks: int,
+    minimum_window_ns: int,
+    warmup_rounds: int,
+    seed: int,
+) -> list[str]:
+    return [
+        str(binary),
+        "--workload", cell.workload,
+        "--route", cell.route,
+        "--process-id", str(process_id),
+        "--instances", str(cell.instances),
+        "--frame-bytes", str(cell.frame_bytes),
+        "--sites", str(cell.sites),
+        "--chain", str(cell.chain),
+        "--blocks", str(blocks),
+        "--minimum-window-ns", str(minimum_window_ns),
+        "--warmup-rounds", str(warmup_rounds),
+        "--seed", str(seed),
+    ]
+
+
+def _run_binary(
+    command: Sequence[str],
+    *,
+    timeout: float,
+    expected_rows: int,
+) -> list[str]:
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"representation process failed ({completed.returncode}): "
+            f"{' '.join(command)}\nstdout={completed.stdout}\n"
+            f"stderr={completed.stderr}"
+        )
+    if completed.stderr:
+        raise RuntimeError(
+            f"representation process wrote stderr: {completed.stderr}"
+        )
+    lines = completed.stdout.splitlines()
+    if len(lines) != expected_rows:
+        raise RuntimeError(
+            f"representation process emitted {len(lines)} rows; "
+            f"expected {expected_rows}"
+        )
+    return lines
+
+
+def _summary_payload(
+    decision: Decision,
+    *,
+    configuration: dict[str, Any],
+    raw_rows: int,
+    process_medians: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "decision": decision.status,
+        "selected_representation": decision.selected_representation,
+        "eligibility": {
+            "B": decision.b_eligibility,
+            "C": decision.c_eligibility,
+        },
+        "reasons": list(decision.reasons),
+        "intervals": {
+            key: {"lower": value.lower, "upper": value.upper}
+            for key, value in sorted(decision.intervals.items())
+        },
+        "counts": {
+            "cells": 24,
+            "processes": 120,
+            "raw_pair_rows": raw_rows,
+            "process_medians": process_medians,
+        },
+        "configuration": configuration,
+    }
+
+
+def _summary_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def _summary_csv(decision: Decision) -> str:
+    from io import StringIO
+
+    stream = StringIO(newline="")
+    writer = csv.writer(stream, lineterminator="\n")
+    writer.writerow(("interval", "lower", "upper"))
+    for key, value in sorted(decision.intervals.items()):
+        writer.writerow((key, repr(value.lower), repr(value.upper)))
+    return stream.getvalue()
+
+
+def _read_raw_lines(raw_dir: Path) -> list[str]:
+    paths = sorted(raw_dir.glob("*.jsonl"))
+    if len(paths) != 24:
+        raise ValueError("raw evidence directory must contain 24 cell files")
+    lines: list[str] = []
+    for path in paths:
+        lines.extend(path.read_text(encoding="utf-8").splitlines())
+    return lines
+
+
+def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    binary = args.binary.resolve()
+    output_dir = args.output_dir.resolve()
+    if not binary.is_file():
+        raise FileNotFoundError(f"benchmark binary not found: {binary}")
+    raw_dir = output_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    cells = [
+        Cell(workload, route, frame_bytes,
+             args.instances, 8, args.chain)
+        for workload in sorted(WORKLOADS)
+        for route in sorted(ROUTES)
+        for frame_bytes in args.frame_bytes
+    ]
+    all_rows: list[RawPair] = []
+    raw_line_count = 0
+    expected_rows = len(CONTRAST_REPRESENTATIONS) * args.blocks * 2
+    for cell_index, cell in enumerate(cells):
+        raw_path = raw_dir / f"{_cell_slug(cell)}.jsonl"
+        with raw_path.open("w", encoding="utf-8", newline="\n") as output:
+            for process_id in range(args.samples):
+                process_seed = derived_seed(
+                    args.seed,
+                    f"{_cell_slug(cell)}|process={process_id}",
+                )
+                command = _binary_command(
+                    binary,
+                    cell,
+                    process_id=process_id,
+                    blocks=args.blocks,
+                    minimum_window_ns=args.minimum_window_ms * 1_000_000,
+                    warmup_rounds=args.warmup_rounds,
+                    seed=process_seed,
+                )
+                lines = _run_binary(
+                    command,
+                    timeout=args.timeout,
+                    expected_rows=expected_rows,
+                )
+                for line in lines:
+                    row = parse_raw_row(line)
+                    if row.process_id != process_id or row.cell != cell or \
+                            row.seed != process_seed:
+                        raise ValueError(
+                            "binary row identity differs from requested cell"
+                        )
+                    all_rows.append(row)
+                    output.write(line + "\n")
+                    raw_line_count += 1
+        print(
+            f"[{cell_index + 1}/{len(cells)}] {_cell_slug(cell)} complete",
+            flush=True,
+        )
+    decision = classify_evidence(
+        all_rows,
+        seed=args.seed,
+        resamples=args.resamples,
+    )
+    process_medians = collapse_process_medians(all_rows)
+    configuration = {
+        "seed": args.seed,
+        "resamples": args.resamples,
+        "samples": args.samples,
+        "blocks": args.blocks,
+        "minimum_window_ms": args.minimum_window_ms,
+        "instances": args.instances,
+        "chain": args.chain,
+        "frame_bytes": list(args.frame_bytes),
+        "warmup_rounds": args.warmup_rounds,
+    }
+    payload = _summary_payload(
+        decision,
+        configuration=configuration,
+        raw_rows=raw_line_count,
+        process_medians=len(process_medians),
+    )
+    (output_dir / "run-config.json").write_text(
+        json.dumps(configuration, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "summary.json").write_text(
+        _summary_json(payload), encoding="utf-8"
+    )
+    (output_dir / "summary.csv").write_text(
+        _summary_csv(decision), encoding="utf-8"
+    )
+    return payload
+
+
+def audit_evidence(output_dir: Path) -> dict[str, Any]:
+    output_dir = output_dir.resolve()
+    configuration = json.loads(
+        (output_dir / "run-config.json").read_text(encoding="utf-8"),
+        object_pairs_hook=_unique_object,
+        parse_constant=_reject_constant,
+    )
+    lines = _read_raw_lines(output_dir / "raw")
+    rows = [parse_raw_row(line) for line in lines]
+    decision = classify_evidence(
+        rows,
+        seed=_integer(configuration["seed"], "seed"),
+        resamples=_integer(
+            configuration["resamples"], "resamples", positive=True
+        ),
+    )
+    payload = _summary_payload(
+        decision,
+        configuration=configuration,
+        raw_rows=len(rows),
+        process_medians=len(collapse_process_medians(rows)),
+    )
+    expected_json = _summary_json(payload)
+    expected_csv = _summary_csv(decision)
+    if (output_dir / "summary.json").read_text(encoding="utf-8") != \
+            expected_json or \
+            (output_dir / "summary.csv").read_text(encoding="utf-8") != \
+            expected_csv:
+        raise ValueError("stored summaries do not reproduce from raw evidence")
+    return payload
+
+
+def _parse_frames(text: str) -> tuple[int, ...]:
+    try:
+        values = tuple(int(value) for value in text.split(",") if value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("invalid frame byte list") from exc
+    if values != (64, 256):
+        raise argparse.ArgumentTypeError(
+            "representation evidence requires frame bytes 64,256"
+        )
+    return values
+
+
+def _parse_seed(text: str) -> int:
+    try:
+        value = int(text, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("invalid seed") from exc
+    if value < 0 or value > 0xFFFFFFFFFFFFFFFF:
+        raise argparse.ArgumentTypeError("seed must fit uint64")
+    return value
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run or audit paired LCCF representation evidence"
+    )
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--blocks", type=int, default=4)
+    parser.add_argument("--minimum-window-ms", type=int, default=25)
+    parser.add_argument("--instances", type=int, default=257)
+    parser.add_argument("--chain", type=int, default=8)
+    parser.add_argument("--frame-bytes", type=_parse_frames,
+                        default=(64, 256))
+    parser.add_argument("--warmup-rounds", type=int, default=4)
+    parser.add_argument("--resamples", type=int, default=20_000)
+    parser.add_argument("--seed", type=_parse_seed,
+                        default=0x6C6363662D726570)
+    parser.add_argument("--timeout", type=float, default=300.0)
+    args = parser.parse_args(argv)
+    if args.audit_only:
+        return args
+    if args.binary is None:
+        parser.error("--binary is required unless --audit-only is set")
+    if args.samples != 5 or args.blocks != 4:
+        parser.error("the declared evidence contract requires 5 samples and 4 blocks")
+    for name in (
+        "minimum_window_ms", "instances", "chain", "resamples"
+    ):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.warmup_rounds < 0 or args.timeout <= 0:
+        parser.error("warmup rounds and timeout must be valid")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.audit_only:
+        payload = audit_evidence(args.output_dir)
+    else:
+        payload = run_evidence(args)
+    print(json.dumps({
+        "decision": payload["decision"],
+        "selected_representation": payload["selected_representation"],
+        "cells": payload["counts"]["cells"],
+    }, sort_keys=True))
+    return 2 if payload["decision"] == "REJECT" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

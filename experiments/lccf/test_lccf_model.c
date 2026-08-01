@@ -1376,6 +1376,8 @@ static bool fact_pair_routing_metrics_equal(
            baseline->facts_built == candidate->facts_built &&
            baseline->facts_build_failed ==
                candidate->facts_build_failed &&
+           baseline->fact_changed_site_materializations ==
+               candidate->fact_changed_site_materializations &&
            baseline->fact_module_pins == candidate->fact_module_pins &&
            baseline->fact_payload_pins == candidate->fact_payload_pins &&
            baseline->fact_stale_losers ==
@@ -1707,7 +1709,10 @@ static int run_representation_triple_case(
         metrics[1].fact_normalizations != completions ||
         metrics[1].fact_site_lookups != materializations ||
         metrics[2].fact_normalizations != completions ||
-        metrics[2].fact_site_lookups != completions + changed_sites) {
+        metrics[2].fact_site_lookups != completions + changed_sites ||
+        metrics[0].fact_changed_site_materializations != changed_sites ||
+        metrics[1].fact_changed_site_materializations != changed_sites ||
+        metrics[2].fact_changed_site_materializations != changed_sites) {
         fprintf(stderr,
                 "[test_lccf_model] representation work mode=%s "
                 "workload=%s frame=%zu materializations=%" PRIu64

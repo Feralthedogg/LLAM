@@ -98,6 +98,7 @@ typedef struct lccf_model_metrics {
     uint64_t facts_build_failed;
     uint64_t fact_normalizations;
     uint64_t fact_site_lookups;
+    uint64_t fact_changed_site_materializations;
     uint64_t fact_module_pins;
     uint64_t fact_payload_pins;
     uint64_t fact_stale_losers;
