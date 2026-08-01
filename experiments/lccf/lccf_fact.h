@@ -12,6 +12,7 @@
 #include <stdatomic.h>
 
 #include "lccf_portable_errno.h"
+#include "lccf_representation.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -251,6 +252,7 @@ int lccf_fact_ticket_from_logical(
 int lccf_fact_normalize(const lccf_fact_ticket_t *ticket,
                         uint64_t fact_id,
                         lccf_fact_core_t *out_fact);
+uint64_t lccf_fact_compute_id(const lccf_fact_core_t *fact);
 int lccf_fact_try_publish(lccf_fact_cell_t *cell,
                           const lccf_fact_ticket_t *ticket,
                           bool shared,

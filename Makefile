@@ -40,6 +40,7 @@ CLEAN_FILES = \
 	test_lccf_model \
 	bench_lccf_model \
 	test_lccf_fact \
+	test_lccf_representation \
 	bench_lccf_fact \
 	test_lcwe_model \
 	bench_lcwe_model \
@@ -90,6 +91,7 @@ CLEAN_FILES = \
 	test_lccf_model.exe \
 	bench_lccf_model.exe \
 	test_lccf_fact.exe \
+	test_lccf_representation.exe \
 	bench_lccf_fact.exe \
 	test_lcwe_model.exe \
 	bench_lcwe_model.exe \
@@ -548,7 +550,8 @@ LCWE_MODEL_BENCH_OBJS = \
 	$(OBJDIR)/experiments/lcwe/bench_lcwe_model.o
 LCCF_FACT_CORE_OBJS = \
 	$(OBJDIR)/experiments/lccf/lccf_fact.o \
-	$(OBJDIR)/experiments/lccf/lccf_fact_layout.o
+	$(OBJDIR)/experiments/lccf/lccf_fact_layout.o \
+	$(OBJDIR)/experiments/lccf/lccf_representation.o
 LCCF_MODEL_CORE_OBJS = \
 	$(LCCF_FACT_CORE_OBJS) \
 	$(OBJDIR)/experiments/lccf/lccf_platform.o \
@@ -561,6 +564,8 @@ LCCF_MODEL_BENCH_OBJS = \
 LCCF_FACT_TEST_OBJS = \
 	$(OBJDIR)/experiments/lccf/lccf_platform.o \
 	$(OBJDIR)/experiments/lccf/test_lccf_fact.o
+LCCF_REPRESENTATION_TEST_OBJS = \
+	$(OBJDIR)/experiments/lccf/test_lccf_representation.o
 LCCF_FACT_BENCH_OBJS = \
 	$(OBJDIR)/experiments/lccf/bench_lccf_fact.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
@@ -602,6 +607,7 @@ BUILD_OBJS = \
 	$(LCCF_MODEL_TEST_OBJS) \
 	$(LCCF_MODEL_BENCH_OBJS) \
 	$(LCCF_FACT_TEST_OBJS) \
+	$(LCCF_REPRESENTATION_TEST_OBJS) \
 	$(LCCF_FACT_BENCH_OBJS)
 LINK_TARGETS = \
 	demo \
@@ -614,6 +620,7 @@ LINK_TARGETS = \
 	test_lccf_model \
 	bench_lccf_model \
 	test_lccf_fact \
+	test_lccf_representation \
 	bench_lccf_fact \
 	test_lcwe_model \
 	bench_lcwe_model \
@@ -2113,6 +2120,9 @@ bench_lccf_model: $(LCCF_MODEL_CORE_OBJS) $(LCCF_MODEL_BENCH_OBJS)
 
 test_lccf_fact: $(LCCF_FACT_CORE_OBJS) $(LCCF_FACT_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCCF_FACT_CORE_OBJS) $(LCCF_FACT_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+test_lccf_representation: $(LCCF_FACT_CORE_OBJS) $(LCCF_REPRESENTATION_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LCCF_FACT_CORE_OBJS) $(LCCF_REPRESENTATION_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
 
 bench_lccf_fact: $(LCCF_MODEL_CORE_OBJS) $(LCCF_FACT_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCCF_MODEL_CORE_OBJS) $(LCCF_FACT_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)

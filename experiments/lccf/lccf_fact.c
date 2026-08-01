@@ -162,7 +162,7 @@ static uint64_t i64_to_bits(int64_t value) {
     return result;
 }
 
-static uint64_t canonical_fact_id(const lccf_fact_core_t *fact) {
+uint64_t lccf_fact_compute_id(const lccf_fact_core_t *fact) {
     uint64_t hash = UINT64_C(1469598103934665603);
     static const uint64_t prime = UINT64_C(1099511628211);
     const uint64_t words[] = {
@@ -637,7 +637,7 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
             return rc;
         }
         cell->fact_storage->fact_id =
-            canonical_fact_id(cell->fact_storage);
+            lccf_fact_compute_id(cell->fact_storage);
         if (cell->fact_storage->event_kind == LCCF_FACT_EVENT_FAIL) {
             counter_increment(&counters->fact_build_failures);
             if ((ticket->raw_flags &
@@ -757,7 +757,7 @@ int lccf_fact_materialize(const lccf_fact_cell_t *cell,
                     counter_increment(&counters->site_lookups);
                     out_fact->resolved_site = resolved_site;
                     out_fact->site_index = (uint16_t)site_index;
-                    out_fact->fact_id = canonical_fact_id(out_fact);
+                    out_fact->fact_id = lccf_fact_compute_id(out_fact);
                 }
             }
         }
@@ -784,7 +784,7 @@ int lccf_fact_materialize(const lccf_fact_cell_t *cell,
     ticket.site_index = site_index;
     rc = lccf_fact_normalize(&ticket, 0U, out_fact);
     if (rc == 0) {
-        out_fact->fact_id = canonical_fact_id(out_fact);
+        out_fact->fact_id = lccf_fact_compute_id(out_fact);
     }
     if (reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U) != 0 &&
         rc == 0) {
