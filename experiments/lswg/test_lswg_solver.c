@@ -708,6 +708,106 @@ test_stable_orphan_is_confirmed(void)
     lswg_graph_destroy(&second_graph);
     return true;
 }
+
+static bool
+build_reportable_fixture(lswg_graph_t *graph, lswg_verdict_t verdict,
+                         uintptr_t raw_bias)
+{
+    const lswg_node_ref_t task_1 = ref(LSWG_NODE_TASK, 601U, 8U, 2U);
+    const lswg_node_ref_t task_2 = ref(LSWG_NODE_TASK, 602U, 9U, 2U);
+    lswg_node_ref_t source;
+    uint32_t flags = 0U;
+    lswg_edge_kind_t wait_kind;
+
+    if (verdict == LSWG_VERDICT_PROVEN_CYCLE) {
+        TEST_CHECK(lswg_graph_init(graph, 2U, 2U, NULL) ==
+                   LSWG_STATUS_OK);
+        TEST_CHECK(add_node(graph, node(task_1, 0U, 0U,
+                                        raw_bias + 0x100U)));
+        TEST_CHECK(add_node(graph, node(task_2, 0U, 0U,
+                                        raw_bias + 0x200U)));
+        TEST_CHECK(add_edge(graph, edge(task_1, task_2,
+                                        LSWG_EDGE_TASK_WAITS_JOIN,
+                                        LSWG_EDGE_AND_REQUIRED |
+                                            LSWG_EDGE_GENERATION_STABLE)));
+        TEST_CHECK(add_edge(graph, edge(task_2, task_1,
+                                        LSWG_EDGE_TASK_WAITS_JOIN,
+                                        LSWG_EDGE_AND_REQUIRED |
+                                            LSWG_EDGE_GENERATION_STABLE)));
+        return true;
+    }
+
+    switch (verdict) {
+    case LSWG_VERDICT_PROVEN_ORPHAN:
+        source = ref(LSWG_NODE_MUTEX, 71U, 4U, 0U);
+        wait_kind = LSWG_EDGE_TASK_WAITS_MUTEX;
+        break;
+    case LSWG_VERDICT_MATCHABLE_LOST_WAKE:
+        source = ref(LSWG_NODE_CHANNEL, 72U, 4U, 0U);
+        flags = LSWG_NODE_READY_NOW | LSWG_NODE_MATCHABLE_STUCK;
+        wait_kind = LSWG_EDGE_TASK_WAITS_CHANNEL_RECV;
+        break;
+    case LSWG_VERDICT_OVERDUE_SOURCE:
+        source = ref(LSWG_NODE_TIMER, 601U, 8U, 10U);
+        flags = LSWG_NODE_OVERDUE_STUCK;
+        wait_kind = LSWG_EDGE_TASK_WAITS_TIMER;
+        break;
+    case LSWG_VERDICT_NONE:
+    case LSWG_VERDICT_OPEN:
+    case LSWG_VERDICT_PROGRESS_CHANGED:
+    case LSWG_VERDICT_INCOMPLETE:
+    case LSWG_VERDICT_PROVEN_CYCLE:
+        return false;
+    }
+
+    TEST_CHECK(lswg_graph_init(graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(graph,
+                        node(task_1, 0U, 0U, raw_bias + 0x100U)));
+    TEST_CHECK(add_node(graph,
+                        node(source, flags, 10U, raw_bias + 0x200U)));
+    TEST_CHECK(add_edge(graph, edge(task_1, source, wait_kind,
+                                    LSWG_EDGE_AND_REQUIRED |
+                                        LSWG_EDGE_GENERATION_STABLE)));
+    return true;
+}
+
+static bool
+test_all_reportable_verdicts_require_two_stable_snapshots(void)
+{
+    static const lswg_verdict_t verdicts[] = {
+        LSWG_VERDICT_PROVEN_CYCLE,
+        LSWG_VERDICT_PROVEN_ORPHAN,
+        LSWG_VERDICT_MATCHABLE_LOST_WAKE,
+        LSWG_VERDICT_OVERDUE_SOURCE,
+    };
+    size_t index;
+
+    for (index = 0U; index < sizeof(verdicts) / sizeof(verdicts[0]); ++index) {
+        lswg_graph_t first_graph;
+        lswg_graph_t second_graph;
+        lswg_result_t first;
+        lswg_result_t second;
+        lswg_result_t confirmed;
+
+        TEST_CHECK(build_reportable_fixture(&first_graph, verdicts[index],
+                                             0x1000U));
+        TEST_CHECK(build_reportable_fixture(&second_graph, verdicts[index],
+                                             0x9000U));
+        first_graph.capture_seq = 200U;
+        second_graph.capture_seq = 201U;
+        TEST_CHECK(solve_graph(&first_graph, &first));
+        TEST_CHECK(solve_graph(&second_graph, &second));
+        TEST_CHECK(first.verdict == verdicts[index]);
+        TEST_CHECK(second.verdict == verdicts[index]);
+        TEST_CHECK(lswg_confirm(&first, 120U, &second, 120U, &confirmed) ==
+                   LSWG_STATUS_OK);
+        TEST_CHECK(confirmed.verdict == verdicts[index]);
+        TEST_CHECK(confirmed.confirmed);
+        lswg_graph_destroy(&first_graph);
+        lswg_graph_destroy(&second_graph);
+    }
+    return true;
+}
 #endif
 #endif
 
@@ -721,6 +821,14 @@ test_generation_identity_and_raw_address_rules(void)
         node(ref(LSWG_NODE_MUTEX, 7U, 2U, 0U), 0U, 0U, 0x1000U);
 
     TEST_CHECK(lswg_graph_init(&graph, 2U, 0U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, first));
+    TEST_CHECK(add_node(&graph, reused));
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_OK);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 0U, NULL) == LSWG_STATUS_OK);
+    first = node(ref(LSWG_NODE_TASK, 88U, 5U, 10U), 0U, 0U, 0x4000U);
+    reused = node(ref(LSWG_NODE_TASK, 88U, 5U, 11U), 0U, 0U, 0x4000U);
     TEST_CHECK(add_node(&graph, first));
     TEST_CHECK(add_node(&graph, reused));
     TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_OK);
@@ -779,6 +887,19 @@ test_malformed_select_is_rejected(void)
     TEST_CHECK(add_edge(&graph, edge(task, select,
                                      LSWG_EDGE_TASK_WAITS_SELECT,
                                      LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_MALFORMED_SELECT);
+    TEST_CHECK(!graph.finalized);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(
+        &graph,
+        node(ref(LSWG_NODE_CHANNEL, 4U, 1U, 0U), 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(
+        &graph,
+        edge(task, ref(LSWG_NODE_CHANNEL, 4U, 1U, 0U),
+             LSWG_EDGE_SELECT_ALTERNATIVE, LSWG_EDGE_OR_ALTERNATIVE)));
     TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_MALFORMED_SELECT);
     TEST_CHECK(!graph.finalized);
     lswg_graph_destroy(&graph);
@@ -1055,6 +1176,8 @@ main(int argc, char **argv)
         {"confirmation_gates_progress_open_and_incomplete",
          test_confirmation_gates_progress_open_and_incomplete},
         {"stable_orphan_is_confirmed", test_stable_orphan_is_confirmed},
+        {"all_reportable_verdicts_require_two_stable_snapshots",
+         test_all_reportable_verdicts_require_two_stable_snapshots},
 #endif
 #endif
         {"generation_identity_and_raw_address_rules",

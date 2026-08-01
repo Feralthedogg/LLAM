@@ -249,44 +249,96 @@ lswg_graph_mark_incomplete(lswg_graph_t *graph, uint32_t reasons)
     }
 }
 
-static bool
-select_has_valid_alternative(const lswg_graph_t *graph, size_t select_index)
+static lswg_status_t
+validate_edge_shape(const lswg_graph_t *graph, const lswg_edge_t *edge)
 {
-    size_t edge_index;
-    bool has_alternative = false;
+    const lswg_node_kind_t source_kind =
+        graph->nodes[edge->source_index].desc.ref.kind;
+    const lswg_node_kind_t target_kind =
+        graph->nodes[edge->target_index].desc.ref.kind;
 
-    for (edge_index = 0U; edge_index < graph->edge_count; ++edge_index) {
-        const lswg_edge_t *current = &graph->edges[edge_index];
-
-        if (current->desc.kind == LSWG_EDGE_SELECT_ALTERNATIVE) {
-            if (graph->nodes[current->source_index].desc.ref.kind !=
-                    LSWG_NODE_SELECT ||
-                (current->desc.flags & LSWG_EDGE_OR_ALTERNATIVE) == 0U) {
-                return false;
-            }
-            if (current->source_index == select_index) {
-                has_alternative = true;
-            }
-        }
-        if (current->desc.kind == LSWG_EDGE_TASK_WAITS_SELECT &&
-            graph->nodes[current->target_index].desc.ref.kind !=
-                LSWG_NODE_SELECT) {
-            return false;
-        }
+    switch (edge->desc.kind) {
+    case LSWG_EDGE_TASK_WAITS_MUTEX:
+        return source_kind == LSWG_NODE_TASK && target_kind == LSWG_NODE_MUTEX
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_MUTEX_OWNED_BY_TASK:
+        return source_kind == LSWG_NODE_MUTEX && target_kind == LSWG_NODE_TASK
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_JOIN:
+        return source_kind == LSWG_NODE_TASK && target_kind == LSWG_NODE_TASK
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_CHANNEL_SEND:
+    case LSWG_EDGE_TASK_WAITS_CHANNEL_RECV:
+        return source_kind == LSWG_NODE_TASK &&
+                       target_kind == LSWG_NODE_CHANNEL
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_SELECT:
+        return source_kind == LSWG_NODE_TASK && target_kind == LSWG_NODE_SELECT
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_MALFORMED_SELECT;
+    case LSWG_EDGE_SELECT_ALTERNATIVE:
+        return source_kind == LSWG_NODE_SELECT &&
+                       (edge->desc.flags & LSWG_EDGE_OR_ALTERNATIVE) != 0U
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_MALFORMED_SELECT;
+    case LSWG_EDGE_CHANNEL_MATCHED_BY_TASK:
+        return source_kind == LSWG_NODE_CHANNEL && target_kind == LSWG_NODE_TASK
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_COND:
+        return source_kind == LSWG_NODE_TASK && target_kind == LSWG_NODE_COND
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_IO:
+        return source_kind == LSWG_NODE_TASK && target_kind == LSWG_NODE_IO_REQ
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_IO_OWNED_BY_NODE:
+        return source_kind == LSWG_NODE_IO_REQ ? LSWG_STATUS_OK
+                                                : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_TIMER:
+        return source_kind == LSWG_NODE_TASK && target_kind == LSWG_NODE_TIMER
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_WAITS_BLOCK_JOB:
+        return source_kind == LSWG_NODE_TASK &&
+                       target_kind == LSWG_NODE_BLOCK_JOB
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_TASK_CAN_CANCEL:
+        return source_kind == LSWG_NODE_TASK &&
+                       target_kind == LSWG_NODE_CANCEL_TOKEN
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_RESOURCE_EXTERNAL_SIGNAL:
+        return (source_kind == LSWG_NODE_COND ||
+                source_kind == LSWG_NODE_CHANNEL) &&
+                       target_kind == LSWG_NODE_EXTERNAL_SOURCE
+                   ? LSWG_STATUS_OK
+                   : LSWG_STATUS_INVALID_KIND;
+    case LSWG_EDGE_KIND_COUNT:
+        return LSWG_STATUS_INVALID_KIND;
     }
-    return has_alternative;
+    return LSWG_STATUS_INVALID_KIND;
 }
 
 lswg_status_t
 lswg_graph_finalize(lswg_graph_t *graph)
 {
     size_t index;
+    size_t edge_cursor = 0U;
 
     if (graph == NULL || graph->finalized) {
         return LSWG_STATUS_INVALID_ARGUMENT;
     }
-    qsort(graph->nodes, graph->node_count, sizeof(*graph->nodes),
-          compare_nodes);
+    if (graph->node_count > 1U) {
+        qsort(graph->nodes, graph->node_count, sizeof(*graph->nodes),
+              compare_nodes);
+    }
     for (index = 1U; index < graph->node_count; ++index) {
         if (identity_equal(graph->nodes[index - 1U].desc.ref,
                            graph->nodes[index].desc.ref)) {
@@ -294,21 +346,48 @@ lswg_graph_finalize(lswg_graph_t *graph)
         }
     }
     for (index = 0U; index < graph->edge_count; ++index) {
+        lswg_status_t validation_status;
+
         if (!find_node(graph, graph->edges[index].desc.source,
                        &graph->edges[index].source_index) ||
             !find_node(graph, graph->edges[index].desc.target,
                        &graph->edges[index].target_index)) {
             return LSWG_STATUS_MISSING_ENDPOINT;
         }
+        validation_status = validate_edge_shape(graph, &graph->edges[index]);
+        if (validation_status != LSWG_STATUS_OK) {
+            return validation_status;
+        }
+    }
+    if (graph->edge_count > 1U) {
+        qsort(graph->edges, graph->edge_count, sizeof(*graph->edges),
+              compare_edges);
     }
     for (index = 0U; index < graph->node_count; ++index) {
-        if (graph->nodes[index].desc.ref.kind == LSWG_NODE_SELECT &&
-            !select_has_valid_alternative(graph, index)) {
+        size_t edge_index;
+        bool has_alternative = false;
+
+        while (edge_cursor < graph->edge_count &&
+               graph->edges[edge_cursor].source_index < index) {
+            edge_cursor += 1U;
+        }
+        if (graph->nodes[index].desc.ref.kind != LSWG_NODE_SELECT) {
+            continue;
+        }
+        for (edge_index = edge_cursor;
+             edge_index < graph->edge_count &&
+             graph->edges[edge_index].source_index == index;
+             ++edge_index) {
+            if (graph->edges[edge_index].desc.kind ==
+                    LSWG_EDGE_SELECT_ALTERNATIVE) {
+                has_alternative = true;
+                break;
+            }
+        }
+        if (!has_alternative) {
             return LSWG_STATUS_MALFORMED_SELECT;
         }
     }
-    qsort(graph->edges, graph->edge_count, sizeof(*graph->edges),
-          compare_edges);
     graph->finalized = true;
     return LSWG_STATUS_OK;
 }
