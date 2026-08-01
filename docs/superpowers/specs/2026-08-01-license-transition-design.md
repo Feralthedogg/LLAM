@@ -26,16 +26,15 @@ about the enforceability of the custom license.
 ## License application
 
 The repository root `LICENSE` will contain the supplied LLAM Commercial
-Reciprocity License 1.0 text. Section 1.4 will use the repository-aware
-`Software` definition approved for this transition:
+Reciprocity License 1.0 text. Section 1.4 defines `Software` through an express
+application notice:
 
 ```text
 1.4. "Software" means source code, object code, documentation, tests,
-examples, build materials, configuration, and other materials included in a
-release, branch, commit, package, repository snapshot, or copy to which this
-License is expressly applied by a LICENSE file, package metadata, file header,
+examples, build materials, configuration, and other materials to which this
+License is expressly applied by a LICENSE file, package notice, file header,
 or other accompanying notice, excluding materials expressly identified as
-being governed by another license.
+governed by another license.
 ```
 
 The root `LICENSE` therefore applies the new terms to the complete repository
@@ -110,7 +109,7 @@ qualification.
 - request version, platform, backend, modification status, impact,
   reproduction steps, and supporting evidence;
 - describe the license's seven-day security-defect reporting requirement and
-  thirty-day non-security-defect reporting requirement; and
+  forty-five-day non-security-defect reporting requirement; and
 - avoid promising a response or remediation service-level agreement.
 
 Private Vulnerability Reporting will be enabled and verified for the public
@@ -168,7 +167,7 @@ verified before the transition is considered complete.
 ## Acceptance criteria
 
 1. Current tracked LLAM materials and generated release archives are governed
-   by the supplied custom license, with the approved section 1.4.
+   by the supplied custom license and its express application notice.
 2. Historical Apache-licensed releases remain untouched and documented.
 3. Private and public defect-reporting routes exist and are usable.
 4. Contribution licensing and DCO sign-off are documented.

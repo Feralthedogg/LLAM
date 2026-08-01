@@ -37,7 +37,8 @@ GitHub Actions, GitHub repository security settings.
 
 - [x] Add a failing policy fixture/test for the exact section 1.4 text and
       prohibited stale Apache notices.
-- [x] Replace `LICENSE` with the supplied text and approved section 1.4.
+- [x] Replace `LICENSE` with the supplied text and its express application
+      notice.
 - [x] Convert existing LLAM-authored notices to
       `LicenseRef-LLAM-Commercial-Reciprocity-1.0`.
 - [x] Document that `v2.2.1` and earlier remain Apache 2.0 while `v3.0.0`
@@ -53,7 +54,7 @@ GitHub Actions, GitHub repository security settings.
 - Create: `CONTRIBUTING.md`
 
 - [x] Add supported-version and private-reporting guidance with the required
-      seven-day security and thirty-day general-defect reporting windows.
+      seven-day security and forty-five-day general-defect reporting windows.
 - [x] Add a structured non-security defect form with version, platform,
       backend, modification, reproduction, evidence, and impact fields.
 - [x] Add the exact contribution-license clause and DCO sign-off workflow.

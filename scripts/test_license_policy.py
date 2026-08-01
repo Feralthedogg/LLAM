@@ -24,12 +24,6 @@ CURRENT_LICENSE_TEXT = (SOURCE_ROOT / "LICENSE").read_text(encoding="utf-8")
 HISTORICAL_APACHE_TEXT = (
     SOURCE_ROOT / HISTORICAL_LICENSE_RELATIVE
 ).read_text(encoding="utf-8")
-SOFTWARE_DEFINITION = """1.4. "Software" means source code, object code, documentation, tests,
-examples, build materials, configuration, and other materials included in a
-release, branch, commit, package, repository snapshot, or copy to which this
-License is expressly applied by a LICENSE file, package metadata, file header,
-or other accompanying notice, excluding materials expressly identified as
-being governed by another license."""
 CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion in LLAM, you agree
 to license that contribution under the LLAM Commercial Reciprocity License
 1.0, unless the submission is conspicuously marked "Not a Contribution" or a
@@ -39,19 +33,19 @@ LICENSE_FILE_NOTICE = "See the LICENSE file distributed with this Software."
 INDENTED_LICENSE_TEXT = """LLAM COMMERCIAL RECIPROCITY LICENSE 1.0
 
    1.4. "Software" means source code, object code, documentation, tests,
-        examples, build materials, configuration, and other materials
-        included in a release, branch, commit, package, repository snapshot,
-        or copy to which this License is expressly applied by a LICENSE file,
-        package metadata, file header, or other accompanying notice,
-        excluding materials expressly identified as being governed by
-        another license.
+        examples, build materials, configuration, and other materials to
+        which this License is expressly applied by a LICENSE file, package
+        notice, file header, or other accompanying notice, excluding
+        materials expressly identified as governed by another license.
 
 APPLICATION NOTICE (NOT PART OF THE TERMS)
 
    This License is expressly applied to the LLAM repository snapshot,
    distribution, or copy that contains this LICENSE file, except for materials
-   conspicuously identified as governed by another license. LLAM-authored files
-   use the following notice in the appropriate comment syntax:
+   conspicuously identified as governed by another license.
+
+   LLAM-authored source files may use the following notice in the appropriate
+   comment syntax:
 
    Copyright 2026 Feralthedogg
    SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
@@ -113,7 +107,7 @@ class LicensePolicyTest(unittest.TestCase):
             f"{LICENSE_NOTICE}\n"
             f"{LICENSE_FILE_NOTICE}\n"
             "Report privately at /security/advisories/new within 7 calendar days.\n"
-            "Report non-security defects within 30 calendar days.\n",
+            "Report non-security defects within 45 calendar days.\n",
         )
         self._write(
             ".github/ISSUE_TEMPLATE/defect-report.yml",
@@ -436,6 +430,24 @@ class LicensePolicyTest(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode)
         self.assertIn(".github/SECURITY.md: reporting requirements are incomplete", result.stderr)
+
+    def test_rejects_obsolete_nonsecurity_reporting_deadline(self) -> None:
+        self._write(
+            ".github/SECURITY.md",
+            f"SPDX-License-Identifier: {LICENSE_REF}\n"
+            f"{LICENSE_NOTICE}\n"
+            f"{LICENSE_FILE_NOTICE}\n"
+            "Report privately at /security/advisories/new within 7 calendar days.\n"
+            "Report non-security defects within 30 calendar days.\n",
+        )
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            ".github/SECURITY.md: reporting requirements are incomplete",
+            result.stderr,
+        )
 
     def test_rejects_release_packager_that_omits_license(self) -> None:
         self._write("scripts/package_release.sh", 'cp "$root_dir/README.md" "$stage/"\n')

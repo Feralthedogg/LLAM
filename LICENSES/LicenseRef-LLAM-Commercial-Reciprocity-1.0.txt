@@ -2,9 +2,13 @@
 
    Copyright 2026 Feralthedogg
 
-   This License governs the Software and grants rights only on condition of
-   compliance with its terms. Commercial Use is permitted without a license fee,
-   subject to the mandatory defect-reporting obligations in Section 8.
+   This License permits private, academic, nonprofit, governmental, and
+   commercial use of the Software without a license fee. It permits the Software
+   to be linked with proprietary or open-source works where the applicable
+   license terms can be complied with simultaneously, requires source
+   availability only for the covered LLAM portion when copies are distributed,
+   and requires certain commercial users to report material defects of which
+   they obtain Actual Knowledge.
 
    This is a custom source-available software license. It is not an OSI-approved
    open-source license.
@@ -19,17 +23,17 @@
         been incorporated into the Software.
 
    1.3. "You" and "Your" mean the individual or legal entity exercising rights
-        under this License, together with entities that directly or indirectly
-        control, are controlled by, or are under common control with that legal
-        entity. "Control" means ownership of more than fifty percent of the
-        voting interests or the legal power to direct management.
+        under this License. For a legal entity, "You" includes entities that
+        directly or indirectly control, are controlled by, or are under common
+        control with that legal entity. "Control" means ownership of more than
+        fifty percent of the voting interests or the legal power to direct
+        management.
 
    1.4. "Software" means source code, object code, documentation, tests,
-        examples, build materials, configuration, and other materials included
-        in a release, branch, commit, package, repository snapshot, or copy to
-        which this License is expressly applied by a LICENSE file, package
-        metadata, file header, or other accompanying notice, excluding materials
-        expressly identified as being governed by another license.
+        examples, build materials, configuration, and other materials to which
+        this License is expressly applied by a LICENSE file, package notice,
+        file header, or other accompanying notice, excluding materials expressly
+        identified as governed by another license.
 
    1.5. "Source Form" means the preferred form for reading, understanding,
         testing, and modifying the Software.
@@ -48,8 +52,9 @@
 
    1.9. "Corresponding Source" means:
 
-      (a) the Source Form of the Software and every Modified Covered File
-          included in a distributed Object Form;
+      (a) the Source Form corresponding to the portion of the Software included
+          in the distributed Object Form, including every Modified Covered File
+          included in that Object Form;
 
       (b) the build scripts, configuration, interface definitions, and other
           materials reasonably necessary to build the covered portion of that
@@ -60,9 +65,9 @@
 
         Corresponding Source does not include source code belonging solely to a
         Separate Work, credentials, cryptographic secrets, signing keys,
-        customer data, personal data, regulated data, or other information that
-        is not reasonably necessary to build the covered portion of the Object
-        Form.
+        customer data, personal data, regulated data, privileged material, or
+        other information not reasonably necessary to build the covered portion
+        of the Object Form.
 
    1.10. "Separate Work" means source code or separately compiled object code
          that uses or communicates with the Software through public APIs, ABI
@@ -91,58 +96,77 @@
          Allowing users to interact with the Software solely over a network does
          not by itself constitute Distribution.
 
-   1.13. "Commercial Use" means use of the Software, directly or indirectly:
+   1.13. "Commercial Deployment" means use of the Software by or on behalf of a
+         for-profit business, whether operated by an individual, partnership,
+         corporation, or other organization:
 
-      (a) in production operations of a for-profit business;
+      (a) in production business operations;
 
-      (b) in, with, or for a paid product, subscription, hosted service,
-          consulting service, support service, or other offering provided for
-          compensation;
+      (b) in or for a product, subscription, hosted service, consulting service,
+          support service, or other offering supplied for compensation;
 
-      (c) to generate revenue, materially reduce commercial operating costs,
-          obtain a commercial advantage, or directly support production business
-          operations;
+      (c) in an externally available service that directly generates revenue or
+          materially supports revenue-generating operations; or
 
-      (d) for development, testing, integration, or research that directly
-          supports a then-current use described in paragraphs (a) through (c);
-          or
+      (d) in development, testing, integration, security response, or
+          maintenance directly tied to a current use described in paragraphs (a)
+          through (c).
 
-      (e) by or on behalf of a for-profit business after the Commercial
-          Evaluation period has expired, unless another express exclusion in
-          this License applies.
+         Commercial Deployment does not include personal use; noncommercial
+         education; academic or nonprofit research; or non-production internal
+         evaluation, benchmarking, proof-of-concept work, or research performed
+         solely to determine whether to adopt the Software, provided that the
+         Software is not then used to serve external users, support production
+         operations, or provide an offering for compensation.
 
-         Commercial Use does not include a Commercial Evaluation. Incidental
-         donations or reimbursement of actual costs to an individual,
-         educational institution, or nonprofit organization do not alone
-         constitute Commercial Use.
+   1.14. "Responsible Personnel" means:
 
-   1.14. "Commercial Evaluation" means non-production, internal evaluation,
-         testing, proof-of-concept work, or research performed solely to
-         determine whether to adopt the Software, during the ninety calendar
-         days beginning on the first day that You use the Software, provided
-         that the Software is not used to serve external users, generate
-         revenue, materially reduce production operating costs, or support
-         production operations.
+      (a) You, if You are an individual; and
 
-         The Commercial Evaluation period is available only once to You,
-         including all entities treated as part of You under Section 1.3, and is
-         not restarted by a new release, branch, package, or Modification. The
-         period ends immediately when any use described in Section 1.13(a)
-         through (d) begins. Any continued use described in Section 1.13(e) is
-         Commercial Use.
+      (b) Your employees, officers, or contractors whose assigned duties include
+          developing, integrating, testing, securing, deploying, operating,
+          investigating, or maintaining the Commercial Deployment in which the
+          Software is used and who have ordinary responsibility to record,
+          escalate, investigate, or remediate material technical defects.
 
-   1.15. "Actual Knowledge" means knowledge acquired by You, if You are an
-         individual, or by one or more of Your employees, officers, or
-         contractors who are directly assigned to develop, integrate, test,
-         secure, deploy, operate, investigate, or maintain a system using the
-         Software. Actual Knowledge requires facts sufficient to form a
-         reasonable technical suspicion. It does not include constructive
-         knowledge, rumors, or knowledge held solely by personnel unrelated to
-         the Software.
+   1.15. "Actual Knowledge" means that one or more members of the Responsible
+         Personnel actually possess facts sufficient to form a reasonable
+         technical suspicion of a Reportable Defect.
 
-   1.16. "Material Technical Impact" means one or more of the following
-         occurring in a configuration or use documented as supported, or, for
-         paragraph (a), reasonably capable of affecting supported use:
+         Actual Knowledge may be established, without limitation, by evidence
+         that such facts were:
+
+      (a) recorded in an ordinary engineering, incident, security, support,
+          test, code-review, or issue-tracking record;
+
+      (b) communicated to another member of the Responsible Personnel, a
+          responsible manager, or a security, legal, or compliance function; or
+
+      (c) used as the basis for remedial action.
+
+         Actual Knowledge is not negated merely because the facts were not
+         recorded, communicated, or acted upon.
+
+         Actual Knowledge does not include constructive knowledge, rumors,
+         unsupported speculation, knowledge held solely by personnel unrelated
+         to the Software, or knowledge held by another entity before that entity
+         became part of You unless, after that event, one or more members of the
+         Responsible Personnel actually possess the material facts.
+
+   1.16. "Supported Configuration" means a platform, architecture, compiler,
+         backend, build mode, feature, API, or usage pattern expressly
+         identified as supported in documentation accompanying the applicable
+         Software at the time the relevant behavior is observed.
+
+         Behavior observed only in a configuration identified as experimental,
+         preview, unsupported, best-effort, or research does not by itself make
+         that configuration a Supported Configuration. Such behavior may
+         nevertheless support a Reportable Defect when it is reasonably capable
+         of causing an impact listed in Section 1.17(a) in a Supported
+         Configuration or of otherwise materially affecting a Supported
+         Configuration.
+
+   1.17. "Material Technical Impact" means one or more of the following:
 
       (a) unauthorized access, privilege escalation, memory corruption,
           information disclosure, integrity loss, availability loss,
@@ -162,22 +186,22 @@
           causes incorrect results, interoperability failure, or substantial
           operational disruption; or
 
-      (e) a repeated performance failure that materially impairs normal
-          supported production use and is demonstrated by controlled, materially
-          comparable measurements outside ordinary measurement variance or by
-          violation of a documented performance guarantee.
+      (e) a repeated and controlled violation of an express written performance
+          guarantee made by the Licensor in documentation accompanying the
+          applicable Software that materially impairs normal supported
+          production use.
 
-   1.17. "Reportable Defect" means a good-faith and technically reasonable
+   1.18. "Reportable Defect" means a good-faith and technically reasonable
          suspicion, based on observed behavior, logs, test results, code
          inspection, crash data, or reproducible conditions, that a defect
-         originates wholly or partly in the Software, has or creates a
-         substantial risk of Material Technical Impact, and either:
+         originates wholly or partly in the Software, affects or is reasonably
+         capable of affecting a Supported Configuration, and has or creates a
+         substantial risk of Material Technical Impact.
 
-      (a) is reproducible under conditions reasonably capable of being repeated;
-          or
-
-      (b) is reasonably likely, based on the available technical evidence, to
-          recur or to affect users beyond Your specific environment.
+         The suspicion must either be reproducible under conditions reasonably
+         capable of being repeated or be reasonably likely, based on available
+         technical evidence, to recur or affect users beyond Your specific
+         environment.
 
          A suspected Security Defect need not be reproduced when code
          inspection, crash evidence, or observed behavior provides a reasonable
@@ -185,46 +209,55 @@
 
          A Reportable Defect does not include a feature request, an immaterial
          cosmetic issue, an immaterial documentation error, normal measurement
-         variance, behavior affecting only unsupported or experimental use,
-         misuse contrary to documentation that cannot reasonably affect
-         supported users, behavior already documented as a known limitation
-         before You obtained Actual Knowledge, speculation without technical
-         evidence, a defect caused solely by a Separate Work, or a defect caused
-         solely by an unmodified third-party dependency.
+         variance, a performance observation not covered by Section 1.17(e),
+         behavior confined to unsupported or experimental use, misuse contrary
+         to documentation that cannot reasonably affect supported users,
+         behavior documented as a known limitation before Actual Knowledge
+         arose, speculation without technical evidence, a defect caused solely
+         by a Separate Work, or a defect caused solely by an unmodified
+         third-party dependency.
 
-   1.18. "Security Defect" means a Reportable Defect involving an impact listed
-         in Section 1.16(a).
+   1.19. "Security Defect" means a Reportable Defect involving a vulnerability
+         or other adversarially exploitable weakness that causes or creates a
+         substantial risk of an impact listed in Section 1.17(a).
 
-   1.19. "Official Repository" means https://github.com/Feralthedogg/LLAM or a
+   1.20. "Official Repository" means https://github.com/Feralthedogg/LLAM or a
          successor location publicly designated by the Licensor.
 
-   1.20. "Security Policy" means a file named SECURITY.md in the Official
+   1.21. "Security Policy" means a file named SECURITY.md in the Official
          Repository, or a successor security-reporting document publicly
          designated by the Licensor.
 
-   1.21. "Reporting Channel" means:
+   1.22. "Reporting Channel" means:
 
       (a) for a Security Defect, any usable private vulnerability-reporting
           feature of the Official Repository, private reporting method
-          designated in the Security Policy, or private email address or other
-          private contact method publicly designated by the Licensor in the
-          Official Repository, canonical project website, or package metadata;
-          and
+          designated in the Security Policy, or private contact method publicly
+          designated by the Licensor in the Official Repository, canonical
+          project website, or package metadata; and
 
-      (b) for any other Reportable Defect, the issue tracker of the Official
-          Repository, unless the Licensor publicly designates another reporting
-          method.
+      (b) for another Reportable Defect, the issue tracker of the Official
+          Repository or another reporting method publicly designated by the
+          Licensor.
 
-   1.22. "Report Materials" means technical descriptions, logs, reproduction
+   1.23. "Submitted" means that an electronic report or fallback notice has been
+         accepted by the applicable Reporting Channel or by a fallback
+         submission method permitted under Section 8.5, or has been sent to an
+         electronic address designated under Section 1.22 without a failure or
+         rejection notice. An item sent through an issue tracker or private
+         vulnerability-reporting system is Submitted when that system confirms
+         its creation.
+
+   1.24. "Report Materials" means technical descriptions, logs, reproduction
          instructions, test cases, patches, samples, and other materials
          intentionally submitted as part of a defect report.
 
-   1.23. "Contribution" means an original work of authorship intentionally
+   1.25. "Contribution" means an original work of authorship intentionally
          submitted to the Licensor for inclusion in the Software under Section
-         11. A submission clearly marked "Not a Contribution" is not a
+         11. A submission conspicuously marked "Not a Contribution" is not a
          Contribution.
 
-2. ACCEPTANCE, APPLICABILITY, AND COPYRIGHT LICENSE
+2. ACCEPTANCE AND COPYRIGHT LICENSE
 
    2.1. By exercising any permission granted by this License, You accept and
         agree to its terms.
@@ -245,22 +278,21 @@
       (f) link, embed, load, call, or otherwise combine the Software with a
           Separate Work or Larger Work.
 
-   2.3. Commercial Use is permitted without a license fee. The copyright and
-        patent grants in Sections 2 and 3, solely as exercised for Commercial
-        Use, are expressly conditioned on compliance with Section 8. A material
-        violation of Section 8 affects the scope or termination of those grants
-        only as stated in Section 15.
+   2.3. Commercial Deployment is permitted without a license fee. The copyright
+        and patent grants in Sections 2 and 3, solely as exercised for
+        Commercial Deployment, are conditioned on compliance with Section 8. A
+        violation affects those grants only as provided in Section 15.
 
    2.4. Every recipient of the Software receives the applicable rights directly
-        from the Contributors under this License. You may not relicense the
-        Software or Modified Covered Files under different terms.
+        from the Contributors under this License. Except where an express
+        alternative license notice applies under Section 10.4, You may not
+        remove this License from the Software or Modified Covered Files.
 
-   2.5. This License applies only to Software that expressly carries notice of
-        this License. It does not withdraw, limit, replace, or modify rights
-        validly granted under a different license for an earlier release,
-        branch, commit, package, file, or copy of the Software. A person who
-        received such material under an earlier license may continue to exercise
-        the rights granted by that earlier license according to its terms.
+   2.5. This License does not withdraw, limit, replace, or modify rights validly
+        granted under a different license for an earlier release, branch,
+        commit, package, file, or copy of the Software. A person who received
+        such material under that different license may continue to exercise
+        those rights according to its terms.
 
 3. PATENT LICENSE
 
@@ -273,8 +305,7 @@
         Software to which it was contributed.
 
    3.2. The patent license does not cover claims infringed only because of later
-        modifications or combinations that were not contributed by that
-        Contributor.
+        modifications or combinations not contributed by that Contributor.
 
    3.3. Section 13 states the consequences of patent litigation.
 
@@ -285,12 +316,13 @@
 
    4.2. Source code or separately compiled object code belonging solely to a
         Separate Work does not become governed by this License merely because it
-        is designed to link to, embed, communicate with, or use the public
-        interfaces of the Software.
+        links to, embeds, communicates with, or uses the public interfaces of
+        the Software.
 
    4.3. You may license a Separate Work or Larger Work under terms of Your
-        choice, including proprietary terms, provided that those terms do not
-        restrict a recipient's rights in the Software or Modified Covered Files.
+        choice, including proprietary or open-source terms, provided those terms
+        do not restrict a recipient's rights in the Software or Modified Covered
+        Files.
 
    4.4. This License does not require disclosure of:
 
@@ -303,25 +335,23 @@
       (d) credentials, cryptographic secrets, signing keys, or authorization
           materials; or
 
-      (e) customer data, personal data, or regulated data.
+      (e) customer data, personal data, regulated data, or privileged material.
 
    4.5. Code copied or translated from the implementation of the Software
         remains subject to this License even if placed in a new file or
-        incorporated into a Separate Work.
+        incorporated into another work.
 
-   4.6. For clarity, application source code and separately compiled application
-        object files may be a Separate Work. A statically linked executable that
-        incorporates Object Form of the Software is a Larger Work and an Object
-        Form containing the Software. The source-availability obligations in
+   4.6. A statically linked executable that incorporates Object Form of the
+        Software is a Larger Work and an Object Form containing the Software.
         Sections 5 and 6 apply only to the covered Software portion, Modified
         Covered Files, copied or translated implementation code, and materials
         reasonably necessary to build that covered portion. They do not extend
-        to source code belonging solely to the Separate Work.
+        to source code belonging solely to a Separate Work.
 
 5. DISTRIBUTION OF UNMODIFIED SOFTWARE
 
-   You may Distribute unmodified Software in Source Form or Object Form only if
-   You:
+   While exercising rights under this License, You may Distribute unmodified
+   Software in Source Form or Object Form if You:
 
       (a) include a complete copy of this License;
 
@@ -331,21 +361,24 @@
       (c) identify the applicable release, tag, commit, or package identifier
           when reasonably available;
 
-      (d) provide the corresponding Source Form with the Object Form, or provide
-          a stable and no-charge location from which recipients can obtain that
-          Source Form;
+      (d) provide the corresponding Source Form with the Object Form or provide
+          a stable, no-charge location from which recipients can obtain the
+          exact corresponding Source Form; and
 
-      (e) keep separately provided Source Form available for at least three
-          years after Your final Distribution of the corresponding Object Form;
-          and
-
-      (f) do not state or imply that the Licensor or Contributors endorse Your
+      (e) do not state or imply that the Licensor or Contributors endorse Your
           Separate Work, Larger Work, product, or service.
+
+   You are not required to mirror the corresponding Source Form while the exact
+   official source location remains available without charge. If You rely on
+   that location and it becomes unavailable at any time before three years after
+   Your final Distribution of the corresponding Object Form, You must, upon a
+   recipient's reasonable request made before that deadline, provide the exact
+   corresponding Source Form or another stable no-charge location.
 
 6. DISTRIBUTION OF MODIFIED SOFTWARE
 
-   6.1. You may Distribute Modified Covered Files or an Object Form containing
-        them only if You:
+   6.1. While exercising rights under this License, You may Distribute Modified
+        Covered Files or an Object Form containing them if You:
 
       (a) place a prominent notice in each Modified Covered File stating that it
           has been modified;
@@ -353,7 +386,8 @@
       (b) identify the modification date or a revision identifier containing the
           Modification;
 
-      (c) license every Modified Covered File under this License;
+      (c) license every Modified Covered File under this License, except where
+          an express alternative license notice applies under Section 10.4;
 
       (d) preserve applicable copyright, attribution, patent, and license
           notices;
@@ -363,21 +397,23 @@
       (f) make the Corresponding Source available to every recipient without a
           license fee.
 
-   6.2. Corresponding Source may be provided with the Object Form or through a
-        publicly accessible source repository or download location. When
-        provided separately, it must remain available for at least three years
-        after Your final Distribution of the corresponding Object Form.
+   6.2. Corresponding Source may be provided with the Object Form, through a
+        stable no-charge source repository or download location, or through a
+        written offer. A separately provided repository or download location
+        must remain available, and a written offer must remain valid, for at
+        least three years after Your final Distribution of the corresponding
+        Object Form.
 
    6.3. You may charge for physical media, bandwidth, hosting, support,
         maintenance, integration, certification, warranty, indemnification, or
-        other services, but You may not charge a license fee solely for access
-        to Corresponding Source required by this Section.
+        other services, but not a license fee solely for access to Corresponding
+        Source required by this Section.
 
-   6.4. The obligations in this Section apply only to the Software, Modified
-        Covered Files, copied or translated implementation code, and the
-        materials needed to build that covered portion. They do not extend to a
-        Separate Work merely because it is distributed in the same package, runs
-        in the same process, or is statically or dynamically linked.
+   6.4. This Section applies only to the Software, Modified Covered Files,
+        copied or translated implementation code, and materials needed to build
+        that covered portion. It does not extend to a Separate Work merely
+        because it is distributed in the same package, runs in the same process,
+        or is statically or dynamically linked.
 
 7. PRIVATE, INTERNAL, AND NETWORK USE
 
@@ -392,42 +428,43 @@
         the Software does not trigger the Corresponding Source obligations in
         Section 6.
 
-   7.4. Sections 7.1 through 7.3 do not remove or reduce the defect-reporting
-        obligations in Section 8. Those obligations apply to Commercial Use
-        whether or not Distribution occurs.
+   7.4. Sections 7.1 through 7.3 do not remove or reduce the reporting
+        obligations in Section 8 when a Commercial Deployment exists.
 
-8. COMMERCIAL USE AND MANDATORY DEFECT REPORTING
+8. COMMERCIAL DEPLOYMENT AND MANDATORY DEFECT REPORTING
 
-   8.1. Condition of Commercial Use.
+   8.1. Condition of Commercial Deployment.
 
-        When You make Commercial Use, compliance with this Section is a
-        condition of the copyright and patent rights granted for that Commercial
-        Use. A material violation of this Section terminates only the rights
-        exercised for Commercial Use, including Distribution undertaken as part
-        of that Commercial Use, and only as provided in Section 15. It does not
-        by itself terminate rights exercised solely for noncommercial use.
+        Compliance with this Section is a condition of the copyright and patent
+        rights granted for Commercial Deployment. A material violation affects
+        only those rights and only as provided in Section 15. It does not by
+        itself affect rights exercised solely outside a Commercial Deployment.
 
    8.2. Reporting Duty.
 
-        After obtaining Actual Knowledge of a Reportable Defect during
-        Commercial Use, You must submit an initial report through the Reporting
-        Channel:
+        After obtaining Actual Knowledge of a Reportable Defect in connection
+        with a Commercial Deployment, You must ensure that an initial report is
+        Submitted in accordance with this Section:
 
       (a) for a Security Defect, without unreasonable delay and no later than
           seven calendar days after obtaining Actual Knowledge; and
 
-      (b) for any other Reportable Defect, no later than thirty calendar days
+      (b) for another Reportable Defect, no later than forty-five calendar days
           after obtaining Actual Knowledge.
 
-        An initial report may state that the issue is suspected, that the root
-        cause is uncertain, or that investigation is ongoing. The report does
-        not need to prove that the Software is defective.
+        For a deadline stated in calendar days, the day on which Actual
+        Knowledge arises is day zero, and the deadline expires at 23:59 UTC on
+        the final day.
 
-        If You obtain Actual Knowledge during a Commercial Evaluation and later
-        begin Commercial Use, that knowledge is treated as obtained on the first
-        day of Commercial Use when the suspected defect remains applicable to
-        the Software You use and You still possess the technical basis for the
-        suspicion.
+        An initial report may state that the issue is suspected, that the root
+        cause is uncertain, or that investigation is ongoing. It does not need
+        to prove that the Software is defective.
+
+        If Actual Knowledge arises before Commercial Deployment begins, the
+        reporting period begins on the first day of Commercial Deployment only
+        when the suspected defect remains applicable to the Software then used
+        and one or more members of the Responsible Personnel still possess the
+        technical basis for the suspicion.
 
    8.3. No Duty to Discover.
 
@@ -435,41 +472,38 @@
         auditing, penetration testing, reverse engineering, monitoring,
         benchmarking, or code review; search for defects; reproduce a defect
         reported by another person; determine a definitive root cause; or
-        continue investigating after providing a reasonable initial report.
+        continue investigating after a reasonable initial report.
 
         The reporting duty arises only from Actual Knowledge obtained during
-        activities You otherwise choose to perform, subject to the final
-        paragraph of Section 8.2.
+        activities You otherwise choose to perform.
 
-   8.4. Minimum Report Content.
+   8.4. Minimum Initial Report.
 
         To the extent reasonably known and available, the initial report must
         include:
 
       (a) the affected release, tag, commit, or package identifier;
 
-      (b) the operating system, architecture, compiler, build mode, and relevant
-          I/O or runtime backend;
+      (b) the expected and observed behavior;
 
-      (c) whether the affected Software was modified and a high-level
-          description of relevant Modifications;
+      (c) the known or reasonably suspected Material Technical Impact;
 
-      (d) the expected and observed behavior;
+      (d) reproduction steps, logs, stack traces, crash data, a minimal
+          reproducer, or other technical evidence when reasonably available;
 
-      (e) reproduction steps, a minimal reproducer, logs, stack traces, crash
-          data, or other technical evidence when reasonably available;
+      (e) relevant platform, architecture, compiler, backend, build mode, or
+          Modification information when material to the suspected defect; and
 
-      (f) the known or reasonably suspected impact; and
+      (f) a safe contact method for reasonable follow-up.
 
-      (g) a contact method for reasonable follow-up.
-
-        If You later obtain material additional information without conducting a
-        new investigation solely for that purpose, You must provide it within
-        thirty calendar days after obtaining Actual Knowledge of that
-        information, while the report remains open or is reasonably capable of
-        receiving an update. You are not required to retain logs or other
-        materials beyond Your ordinary retention practices solely because of
-        this License.
+        If You later obtain material additional information through activities
+        You otherwise perform, You must ensure that the material additional
+        information is Submitted through an update to the existing report or an
+        applicable Reporting Channel within forty-five calendar days after
+        obtaining it, while the report remains open or is reasonably capable of
+        receiving an update. You are not required to create new evidence or
+        retain materials beyond Your ordinary retention practices solely because
+        of this License.
 
    8.5. Security Reports.
 
@@ -479,8 +513,9 @@
         in a public issue merely to satisfy this License.
 
         If no private Reporting Channel is usable but the public issue tracker
-        is usable, the deadline is satisfied by submitting a public issue
-        containing only:
+        is usable, the deadline is satisfied when a public issue containing only
+        the following information is Submitted through that public issue
+        tracker:
 
       (a) the affected release or commit identifier;
 
@@ -488,10 +523,12 @@
 
       (c) a safe contact method.
 
-        Technical details must then be supplied within seven calendar days after
-        the Licensor provides a usable private channel.
+        Technical details must then be Submitted through the usable private
+        channel within seven calendar days after the Licensor communicates that
+        channel to You through the contact method supplied in the fallback
+        notice.
 
-   8.6. Confidential, Personal, and Legally Restricted Information.
+   8.6. Confidential, Privileged, Personal, and Restricted Information.
 
         This License does not require You to disclose:
 
@@ -502,26 +539,31 @@
       (c) credentials, cryptographic secrets, personal data, customer data, or
           regulated data;
 
-      (d) information whose disclosure is prohibited by law, court order, or a
+      (d) attorney-client communications, attorney work product, or other
+          privileged material;
+
+      (e) information whose disclosure is prohibited by law, court order, or a
           binding third-party confidentiality obligation; or
 
-      (e) information that would create an unreasonable security risk.
+      (f) information whose disclosure would create an unreasonable security
+          risk.
 
         You must instead provide a sanitized report or the minimum lawful notice
-        reasonably sufficient to identify the suspected defect. Additional
-        information may be provided under a separate written confidentiality
-        agreement.
+        reasonably sufficient to identify the suspected defect. Providing a
+        report does not waive a privilege or confidentiality protection.
+        Additional information may be provided under a separate written
+        confidentiality agreement.
 
    8.7. Duplicate Reports.
 
         No duplicate report is required when the same defect affecting the same
         relevant releases is known to You to be publicly tracked or has been
-        acknowledged by the Licensor to You through a private report or
-        advisory, and You possess no material new evidence.
+        acknowledged by the Licensor to You through a private report or advisory
+        and You possess no material new evidence.
 
-        If You possess material new evidence, affected-environment information,
-        or a materially different impact, You must add that information to the
-        existing report when reasonably possible or submit it through the
+        You must ensure that material new evidence, materially different impact,
+        or materially different affected-environment information is Submitted as
+        an update to the existing report when reasonably possible or through the
         appropriate Reporting Channel.
 
    8.8. Unavailable or Unusable Reporting Channel.
@@ -532,19 +574,19 @@
         or reasonably be created or used, or access is blocked by a legal or
         technical restriction.
 
-        If a channel can accept a safe text notice but cannot accept attachments
-        because of an upload or size limit, You must submit the safe text notice
-        by the applicable deadline and may provide larger materials through a
-        mutually agreed method. An attachment limit alone does not pause the
-        deadline when a safe text notice can be submitted.
+        If a channel can accept a safe text notice but cannot accept
+        attachments, You must submit the safe text notice by the applicable
+        deadline and may provide larger materials through a mutually agreed
+        method.
 
-        If the Official Repository and every applicable Reporting Channel are
-        unusable, the reporting deadline is paused while no usable channel
-        exists. You must preserve a reasonable internal record under Your
-        ordinary security and retention practices and submit the report within
-        seven calendar days after a usable channel becomes available.
+        The reporting deadline is paused only when neither a usable Reporting
+        Channel nor any applicable fallback submission method under Section 8.5
+        is available. While no usable submission method exists, You must retain
+        a reasonable internal record under Your ordinary security and retention
+        practices. You must ensure that the report is Submitted within seven
+        calendar days after a usable method becomes available.
 
-   8.9. Good-Faith Reports and Classification.
+   8.9. Good-Faith Safe Harbor.
 
         A report that later proves inaccurate does not violate this License when
         made honestly and on a reasonable technical basis.
@@ -553,23 +595,68 @@
         does not violate this License unless the decision was knowingly false or
         recklessly disregarded clear technical evidence.
 
-   8.10. Report Materials.
+        An immaterial error or omission in a timely initial report does not
+        violate this License when corrected within a reasonable period after
+        discovery or written notice.
 
-         You retain ownership of Your Report Materials. You grant the Licensor a
-         worldwide, non-exclusive, royalty-free license to use, reproduce,
-         analyze, test, and modify Report Materials as reasonably necessary to
-         investigate, reproduce, mitigate, and fix the reported defect.
+   8.10. Handling of Non-Public Reports.
+
+         The Licensor may use non-public reports to investigate, reproduce,
+         mitigate, fix, and coordinate disclosure of the reported defect.
+
+         The Licensor may disclose non-public reports and Report Materials on a
+         need-to-know basis to Contributors, project maintainers, professional
+         advisers, security researchers, service providers, and affected
+         upstream or downstream vendors solely as reasonably necessary to
+         investigate, reproduce, mitigate, fix, or coordinate disclosure of the
+         reported defect. The Licensor must not disclose more than reasonably
+         necessary and may make such disclosure only to persons subject to
+         confidentiality duties reasonably appropriate to the sensitivity of the
+         materials.
+
+         The Licensor must not publicly identify the reporting person or entity
+         without consent, except to the extent required by law. When
+         identification is required by law, the Licensor must disclose no more
+         identifying information than the law requires.
+
+         The Licensor may publish sanitized technical information derived from
+         non-public Report Materials when reasonably necessary to protect users,
+         after removing confidential, privileged, personal, customer, and
+         regulated information and taking reasonable steps to avoid identifying
+         the reporting person or entity.
+
+         Nothing in this Section creates a warranty of confidentiality or
+         requires the Licensor to enter into a separate confidentiality
+         agreement.
+
+   8.11. Report Materials.
+
+         You retain ownership of Your Report Materials. To the extent You have
+         authority to grant such rights, You grant the Licensor a worldwide,
+         perpetual, non-exclusive, royalty-free license to use, reproduce,
+         disclose, distribute, analyze, test, and modify Report Materials,
+         subject to Sections 8.6 and 8.10, solely as reasonably necessary to
+         investigate, reproduce, mitigate, fix, and coordinate disclosure of the
+         reported defect.
+
+         The Licensor may permit a person to whom non-public Report Materials
+         may be disclosed under Section 8.10 to exercise those rights solely as
+         reasonably necessary for those purposes and subject to Sections 8.6 and
+         8.10.
+
+         This grant does not transfer ownership, grant rights in a Separate Work
+         beyond the submitted materials, or grant a patent license except to the
+         extent expressly stated in a separate written agreement.
 
          A patch or other code intentionally offered for incorporation into the
          Software, and not marked "Not a Contribution," is a Contribution under
          Section 11.
 
-   8.11. No Duty to Fix or Support.
+   8.12. No Duty to Fix or Support.
 
-         A report does not require the Licensor or any Contributor to confirm,
+         A report does not require the Licensor or a Contributor to confirm,
          fix, disclose, support, or provide a schedule for the reported issue.
-         The Software remains subject to the warranty disclaimer and limitation
-         of liability in this License.
+         The Software remains subject to Sections 16 and 17.
 
 9. ATTRIBUTION AND NOTICES
 
@@ -577,13 +664,13 @@
         that apply to the Software.
 
    9.2. You may add Your own notices for Your Modifications and Separate Works,
-        provided that they do not alter, contradict, or obscure this License as
-        it applies to the Software.
+        provided they do not alter, contradict, or obscure this License as it
+        applies to the Software.
 
    9.3. Modified distributions must be clearly identified as modified and must
         not be represented as official LLAM releases.
 
-10. NO ADDITIONAL RESTRICTIONS AND LICENSE COMPATIBILITY
+10. OTHER SOFTWARE AND LICENSE COMBINATIONS
 
    10.1. You may not impose legal or technical terms that prevent a recipient
          from exercising the rights granted by this License in the Software or
@@ -593,18 +680,38 @@
          those terms do not restrict the recipient's rights in the Software
          itself.
 
-   10.3. Unless all necessary copyright holders separately grant permission,
-         this License does not authorize You to relicense the Software or
-         Modified Covered Files under the GNU General Public License, GNU Lesser
-         General Public License, GNU Affero General Public License, or another
-         license that requires the covered Software to be available under
-         different terms. No secondary-license permission or express
-         compatibility with those licenses is granted by this License.
+   10.3. You may aggregate or combine the Software with a Separate Work governed
+         by another license, including the GNU General Public License, GNU
+         Lesser General Public License, or GNU Affero General Public License,
+         when all applicable licenses can be complied with simultaneously.
 
-         This Section does not prohibit mere aggregation or use of the Software
-         by a Separate Work when the applicable licenses can be complied with
-         simultaneously without relicensing the Software or Modified Covered
-         Files.
+         Covered Files remain governed by this License unless an express
+         alternative license notice applies. Reference to another license by
+         name does not grant any secondary-license permission, relicense a
+         Covered File, or represent that the Software is compatible with that
+         license in every or any particular form of linking, combination, or
+         Distribution. You are responsible for determining whether the
+         applicable terms can be satisfied together.
+
+         The classification of material as a Separate Work or Larger Work under
+         this License does not determine whether another license treats that
+         material or a combination containing it as a derivative, combined,
+         corresponding, or covered work.
+
+   10.4. A Covered File may carry an express alternative-license notice,
+         including an SPDX license expression containing "OR." An
+         alternative-license notice is effective only to the extent it was
+         placed or expressly authorized by each copyright holder whose
+         permission is necessary to grant the stated alternative license. You
+         may not add or broaden an alternative-license notice without that
+         authority. While exercising rights under this License, You must
+         preserve any applicable alternative-license notice.
+
+         When a recipient validly elects an alternative license, the recipient's
+         exercise of rights under that alternative is governed solely by that
+         alternative's terms, and this License imposes no additional conditions
+         on that exercise. The presence of an alternative notice in one file
+         does not change the license of another file.
 
 11. CONTRIBUTIONS
 
@@ -613,9 +720,15 @@
          that contributions are accepted under this License is licensed under
          this License.
 
-   11.2. A submission conspicuously marked "Not a Contribution" is excluded.
+   11.2. By submitting a Contribution, You state that, to the best of Your
+         knowledge, the Contribution is Your original work or You have
+         sufficient rights to submit it under this License, and that the
+         submission does not knowingly violate a binding obligation to another
+         person or entity.
 
-   11.3. Nothing in this Section overrides a separately signed contributor
+   11.3. A submission conspicuously marked "Not a Contribution" is excluded.
+
+   11.4. Nothing in this Section overrides a separately signed contributor
          license agreement or copyright assignment.
 
 12. TRADEMARKS
@@ -642,52 +755,69 @@
 
 14. THIRD-PARTY AND DIFFERENTLY LICENSED MATERIALS
 
-   Third-party components, dependencies, generated materials, Contributions, or
-   other works identified as being governed by another license remain governed
-   by their respective terms. A Contribution or code portion for which the
-   necessary rights have not been licensed under this License does not become
-   governed by this License merely because it is distributed with the Software
-   or included in the same repository. This License grants no rights that the
-   Licensor or Contributors do not have authority to grant.
+   Third-party components, dependencies, generated materials, Contributions, and
+   other works identified as governed by another license remain governed by
+   their respective terms. A code portion for which the necessary rights have
+   not been licensed under this License does not become governed by this License
+   merely because it is distributed with the Software or included in the same
+   repository. This License grants no rights that a Licensor or Contributor
+   lacks authority to grant.
 
 15. COMPLIANCE, TERMINATION, CURE, AND SURVIVAL
 
-   15.1. Rights granted under this License terminate automatically when You
-         materially violate its terms. A material violation of Section 8
-         terminates only the copyright and patent rights granted under Sections
-         2 and 3 as exercised for Commercial Use, including Distribution
-         undertaken as part of that Commercial Use. It does not by itself
-         terminate rights exercised solely for noncommercial use.
+   15.1. Except for termination under Section 13, rights granted to You by a
+         Licensor or Contributor under this License terminate only with respect
+         to that granting party if You materially violate this License, receive
+         written notice from that party identifying the violation with
+         reasonable specificity, and fail to cure the violation within thirty
+         calendar days after receiving that notice.
 
-   15.2. Except for termination under Section 13, Your terminated rights are
-         automatically reinstated if You fully cure the violation within thirty
-         calendar days after You first discover it or receive written notice
-         identifying it with reasonable specificity, whichever occurs first.
-         Reinstatement does not erase liability, if any, arising during the
-         period of termination.
+         A material violation of Section 8 terminates, with respect to the
+         granting party whose notice was not cured, only the copyright and
+         patent rights exercised for Commercial Deployment, including
+         Distribution undertaken as part of that Commercial Deployment. It does
+         not by itself terminate rights exercised solely outside a Commercial
+         Deployment.
 
-   15.3. A failure to report under Section 8 is cured by submitting the required
-         report or by providing the Licensor a reasonable written explanation,
-         supported by the information then available, showing that the issue was
-         not a Reportable Defect, that no reporting duty arose, or that
-         reporting was legally prohibited.
+   15.2. A failure to report under Section 8 is cured by ensuring that the
+         required report is Submitted or by providing the Licensor and any
+         notifying Contributor a reasonable written explanation, supported by
+         the information then available, showing that the issue was not a
+         Reportable Defect, that Actual Knowledge did not arise, that no
+         Commercial Deployment existed, that the report had already been
+         Submitted, or that reporting was legally prohibited or technically
+         impossible.
 
-   15.4. A copyright holder may extend a cure period or reinstate rights in
-         writing.
+   15.3. An immaterial reporting error is cured by correcting it within the
+         applicable cure period in Section 15.1 or within another period agreed
+         in writing by the notifying party.
 
-   15.5. Termination does not terminate the rights of recipients who received
+   15.4. A cure completed before the applicable cure period in Section 15.1
+         expires prevents termination. If rights have terminated under Section
+         15.1 and You later fully cure the violation, the affected rights
+         granted by that party are provisionally reinstated when You provide
+         that party written notice reasonably describing the cure. The
+         reinstatement becomes permanent unless that party provides You written
+         notice of final termination within sixty calendar days after receiving
+         Your notice. A Licensor or Contributor may extend a cure period
+         applicable to that party or permanently reinstate, in writing, only the
+         rights granted by that party.
+
+   15.5. Cure and reinstatement do not erase liability, if any, arising during a
+         period in which rights were terminated.
+
+   15.6. Termination does not terminate the rights of recipients who received
          the Software from You. Each recipient's rights remain subject to that
          recipient's own compliance with this License.
 
-   15.6. Termination does not end obligations that by their nature or express
-         terms apply after termination. Without limitation, the
-         source-availability commitments in Sections 5(d) and 5(e), Section
-         6.1(f), Section 6.2, and Section 6.3 for prior Distributions, any
-         reporting duty that arose under Section 8 before termination, Sections
-         8.10 and 8.11, and Sections 9 and 12 through 19 survive termination.
+   15.7. Obligations that by their nature or express terms apply after
+         termination survive. Without limitation, source-availability
+         commitments for prior Distributions, reporting duties that arose before
+         termination, Sections 8.10 through 8.12, and Sections 9 and 12 through
+         19 survive termination.
 
-   15.7. The cure and reinstatement provisions of this Section do not restore a
-         patent license terminated under Section 13.
+   15.8. Sections 15.1 through 15.4 do not restore a patent license terminated
+         under Section 13.
 
 16. DISCLAIMER OF WARRANTY
 
@@ -726,7 +856,7 @@
    18.3. The Licensor may offer under a separate license any part of the
          Software for which the Licensor owns or controls the necessary rights.
          A separate agreement does not reduce rights already validly received
-         under this License or under an earlier license.
+         under this License.
 
 19. GENERAL TERMS
 
@@ -738,21 +868,18 @@
          enforce it later.
 
    19.3. Section headings are for convenience only and do not limit or alter the
-         meaning of any provision.
+         meaning of a provision.
 
    19.4. Verbatim copies of this License text may be copied and distributed. A
          modified license text must use a different name and must not be
          represented as the LLAM Commercial Reciprocity License.
 
-   19.5. The English text of this License is controlling. Any translation is for
+   19.5. The English text of this License is controlling. A translation is for
          convenience only.
 
    19.6. For a particular release, branch, commit, package, file, or copy, the
          license text distributed with or expressly applied to that material
-         controls. The canonical text for an immutable LLAM release is the
-         LICENSE file stored at the corresponding release tag or commit in the
-         Official Repository. A published cryptographic hash may be used to
-         verify an exact copy but does not replace the controlling text.
+         controls.
 
 END OF TERMS
 
@@ -760,8 +887,10 @@ APPLICATION NOTICE (NOT PART OF THE TERMS)
 
    This License is expressly applied to the LLAM repository snapshot,
    distribution, or copy that contains this LICENSE file, except for materials
-   conspicuously identified as governed by another license. LLAM-authored files
-   use the following notice in the appropriate comment syntax:
+   conspicuously identified as governed by another license.
+
+   LLAM-authored source files may use the following notice in the appropriate
+   comment syntax:
 
    Copyright 2026 Feralthedogg
    SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0

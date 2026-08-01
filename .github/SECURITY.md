@@ -55,11 +55,12 @@ is ongoing.
 ## License reporting windows
 
 If Section 8 of the LLAM Commercial Reciprocity License 1.0 applies to your
-Commercial Use, an initial Security Defect report is due without unreasonable
-delay and no later than **7 calendar days** after Actual Knowledge. Any other
-Reportable Defect must be reported no later than **30 calendar days** after
-Actual Knowledge. See the repository [LICENSE](../LICENSE) for the controlling
-definitions, exceptions, unavailable-channel procedure, and complete terms.
+Commercial Deployment, an initial Security Defect report is due without
+unreasonable delay and no later than **7 calendar days** after Actual Knowledge.
+Any other Reportable Defect must be reported no later than **45 calendar days**
+after Actual Knowledge. See the repository [LICENSE](../LICENSE) for the
+controlling definitions, exceptions, unavailable-channel procedure, and
+complete terms.
 
 This reporting channel does not promise confirmation, remediation, disclosure,
 support, or a response schedule.

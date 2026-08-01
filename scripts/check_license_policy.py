@@ -14,19 +14,20 @@ from pathlib import Path
 
 
 SOFTWARE_DEFINITION = """1.4. "Software" means source code, object code, documentation, tests,
-examples, build materials, configuration, and other materials included in a
-release, branch, commit, package, repository snapshot, or copy to which this
-License is expressly applied by a LICENSE file, package metadata, file header,
+examples, build materials, configuration, and other materials to which this
+License is expressly applied by a LICENSE file, package notice, file header,
 or other accompanying notice, excluding materials expressly identified as
-being governed by another license."""
+governed by another license."""
 CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion in LLAM, you agree
 to license that contribution under the LLAM Commercial Reciprocity License
 1.0, unless the submission is conspicuously marked "Not a Contribution" or a
 separate written agreement applies."""
 APPLICATION_SCOPE = """This License is expressly applied to the LLAM repository snapshot,
 distribution, or copy that contains this LICENSE file, except for materials
-conspicuously identified as governed by another license. LLAM-authored files
-use the following notice in the appropriate comment syntax:"""
+conspicuously identified as governed by another license.
+
+LLAM-authored source files may use the following notice in the appropriate
+comment syntax:"""
 STALE_APACHE_MARKERS = (
     "SPDX-License-Identifier: Apache-2.0",
     'Licensed under the Apache License, Version 2.0',
@@ -221,7 +222,11 @@ def main() -> int:
         errors.append("CONTRIBUTING.md: DCO sign-off instructions are missing")
 
     security_text = (root / ".github/SECURITY.md").read_text(encoding="utf-8")
-    security_markers = ("security/advisories/new", "7 calendar days", "30 calendar days")
+    security_markers = (
+        "security/advisories/new",
+        "7 calendar days",
+        "45 calendar days",
+    )
     if not all(marker in security_text for marker in security_markers):
         errors.append(".github/SECURITY.md: reporting requirements are incomplete")
 
