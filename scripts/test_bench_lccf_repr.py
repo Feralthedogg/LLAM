@@ -477,12 +477,45 @@ def test_binary_contract() -> None:
         assert rejected.stdout == ""
 
 
+def test_binary_fairness_latency_is_not_logical_identity() -> None:
+    binary_value = os.environ.get("LCCF_REPR_TEST_BINARY")
+    if binary_value is None:
+        return
+    command = [
+        str(Path(binary_value).resolve()),
+        "--workload", "completion_mixed_fairness",
+        "--route", "fused",
+        "--process-id", "0",
+        "--instances", "257",
+        "--frame-bytes", "64",
+        "--sites", "8",
+        "--chain", "8",
+        "--blocks", "1",
+        "--minimum-window-ns", "25000000",
+        "--warmup-rounds", "4",
+        "--seed", "12723167542156389659",
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    rows = [parse_raw_row(line) for line in completed.stdout.splitlines()]
+    assert len(rows) == 6
+    assert {row.contrast for row in rows} == set(CONTRASTS)
+
+
 def main() -> int:
     test_strict_raw_parser()
     test_process_median_and_order_balance()
     test_bootstrap_contract()
     test_selection_fixtures()
     test_binary_contract()
+    test_binary_fairness_latency_is_not_logical_identity()
     print("[test_bench_lccf_repr] all checks passed")
     return 0
 

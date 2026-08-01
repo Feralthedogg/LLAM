@@ -420,6 +420,7 @@ static int validate_window(const bench_options_t *options,
     uint64_t materializations;
     uint64_t normalizations;
     uint64_t lookups;
+    uint64_t fairness_samples;
 
     if (options == NULL || representation == NULL || sample == NULL ||
         rounds == 0U || rounds > UINT64_MAX / options->instances) {
@@ -430,6 +431,10 @@ static int validate_window(const bench_options_t *options,
         return EOVERFLOW;
     }
     callbacks = completions * (uint64_t)options->chain;
+    fairness_samples =
+        options->workload == LCCF_MODEL_COMPLETION_MIXED_FAIRNESS ?
+            callbacks / UINT64_C(32) :
+            UINT64_C(0);
     attempts = completions *
         (options->workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL
              ? UINT64_C(3)
@@ -469,6 +474,9 @@ static int validate_window(const bench_options_t *options,
         metrics->facts_built != completions ||
         metrics->stale_tickets != stale ||
         metrics->fact_stale_losers != stale ||
+        metrics->fairness_samples != fairness_samples ||
+        (fairness_samples == 0U && metrics->fairness_p99_ns != 0U) ||
+        (fairness_samples != 0U && metrics->fairness_p99_ns == 0U) ||
         metrics->facts_build_failed != 0U ||
         metrics->fact_module_pins != completions ||
         metrics->fact_payload_pins != completions ||
@@ -522,7 +530,6 @@ static bool common_metrics_equal(const lccf_model_metrics_t *left,
            left->forced_escapes == right->forced_escapes &&
            left->remote_pushes == right->remote_pushes &&
            left->fairness_samples == right->fairness_samples &&
-           left->fairness_p99_ns == right->fairness_p99_ns &&
            left->hot_allocations == right->hot_allocations &&
            left->facts_attempted == right->facts_attempted &&
            left->facts_built == right->facts_built &&
