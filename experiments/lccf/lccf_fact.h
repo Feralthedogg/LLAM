@@ -210,6 +210,8 @@ lccf_fact_state_t lccf_fact_unpack_state(uint64_t word);
 int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
                         lccf_fact_layout_t layout,
                         uint32_t ticket_count);
+size_t lccf_fact_layout_hot_bytes(lccf_fact_layout_t layout);
+size_t lccf_fact_layout_sidecar_bytes(lccf_fact_layout_t layout);
 int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
                        uint32_t ticket_count);
 int lccf_fact_ticket_from_logical(
