@@ -1,5 +1,7 @@
 // Copyright 2026 Feralthedogg
 // SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+// Licensed under the LLAM Commercial Reciprocity License 1.0.
+// See the LICENSE file distributed with this Software.
 
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L

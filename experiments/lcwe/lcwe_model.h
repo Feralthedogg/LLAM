@@ -1,5 +1,7 @@
 // Copyright 2026 Feralthedogg
 // SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+// Licensed under the LLAM Commercial Reciprocity License 1.0.
+// See the LICENSE file distributed with this Software.
 
 #ifndef LLAM_EXPERIMENTS_LCWE_MODEL_H
 #define LLAM_EXPERIMENTS_LCWE_MODEL_H

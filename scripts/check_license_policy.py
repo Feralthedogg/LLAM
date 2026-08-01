@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Copyright 2026 Feralthedogg
 # SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+# Licensed under the LLAM Commercial Reciprocity License 1.0.
+# See the LICENSE file distributed with this Software.
 
 from __future__ import annotations
 
@@ -21,12 +23,18 @@ CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion
 to license that contribution under the LLAM Commercial Reciprocity License
 1.0, unless the submission is conspicuously marked "Not a Contribution" or a
 separate written agreement applies."""
+APPLICATION_SCOPE = """This License is expressly applied to the LLAM repository snapshot,
+distribution, or copy that contains this LICENSE file, except for materials
+conspicuously identified as governed by another license. LLAM-authored files
+use the following notice in the appropriate comment syntax:"""
 STALE_APACHE_MARKERS = (
     "SPDX-License-Identifier: Apache-2.0",
     'Licensed under the Apache License, Version 2.0',
 )
 COPYRIGHT_NOTICE = "Copyright 2026 Feralthedogg"
 LICENSE_REF = "SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0"
+LICENSE_NOTICE = "Licensed under the LLAM Commercial Reciprocity License 1.0."
+LICENSE_FILE_NOTICE = "See the LICENSE file distributed with this Software."
 ACTIVE_LICENSE_RELATIVE = Path(
     "LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
 )
@@ -93,21 +101,30 @@ def requires_current_license(relative: Path) -> bool:
     return any(prefix in relative.parents for prefix in HEADER_REQUIRED_PREFIXES)
 
 
-def has_current_license(
+def current_license_status(
     root: Path,
     path: Path,
     relative: Path,
     text: str,
     tracked_relatives: set[Path],
-) -> bool:
+) -> str:
     if LICENSE_REF in text:
-        return True
+        lines = text.splitlines()
+        license_line_index = next(
+            index for index, line in enumerate(lines) if LICENSE_REF in line
+        )
+        notice_block = "\n".join(
+            lines[license_line_index + 1 : license_line_index + 4]
+        )
+        if LICENSE_NOTICE in notice_block and LICENSE_FILE_NOTICE in notice_block:
+            return "complete"
+        return "incomplete"
     sidecar = path.with_name(path.name + ".license")
     sidecar_relative = relative.with_name(relative.name + ".license")
     if sidecar_relative not in tracked_relatives or not sidecar.is_file():
-        return False
+        return "missing"
     sidecar_text = sidecar.read_text(encoding="utf-8", errors="replace")
-    return LICENSE_REF in sidecar_text
+    return "sidecar" if LICENSE_REF in sidecar_text else "missing"
 
 
 def main() -> int:
@@ -145,6 +162,9 @@ def main() -> int:
     license_text = (root / "LICENSE").read_text(encoding="utf-8")
     if SOFTWARE_DEFINITION not in license_text:
         print("LICENSE: approved Section 1.4 is missing", file=sys.stderr)
+        return 1
+    if APPLICATION_SCOPE not in license_text:
+        print("LICENSE: application scope notice is missing", file=sys.stderr)
         return 1
 
     errors: list[str] = []
@@ -233,14 +253,18 @@ def main() -> int:
             continue
         data = path.read_bytes()
         text = "" if b"\0" in data else data.decode("utf-8", errors="replace")
+        license_status = current_license_status(
+            root, path, relative, text, tracked_relatives
+        )
+        current_license_required = requires_current_license(relative) or (
+            COPYRIGHT_NOTICE in text
+        )
         if has_stale_apache_notice(text):
             errors.append(f"{relative}: stale Apache license notice")
-        elif requires_current_license(relative) and not has_current_license(
-            root, path, relative, text, tracked_relatives
-        ):
+        elif current_license_required and license_status == "missing":
             errors.append(f"{relative}: current LicenseRef is missing")
-        elif COPYRIGHT_NOTICE in text and LICENSE_REF not in text:
-            errors.append(f"{relative}: current LicenseRef is missing")
+        elif current_license_required and license_status == "incomplete":
+            errors.append(f"{relative}: current application notice is incomplete")
 
     if errors:
         print("\n".join(errors), file=sys.stderr)

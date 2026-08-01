@@ -13,6 +13,8 @@
  *
  * @par License
  * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+ * Licensed under the LLAM Commercial Reciprocity License 1.0.
+ * See the LICENSE file distributed with this Software.
  */
 
 #ifndef LLAM_REHOME_POLL_COMPLETION_T

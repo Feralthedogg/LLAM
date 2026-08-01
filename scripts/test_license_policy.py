@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Copyright 2026 Feralthedogg
 # SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+# Licensed under the LLAM Commercial Reciprocity License 1.0.
+# See the LICENSE file distributed with this Software.
 
 from __future__ import annotations
 
@@ -32,6 +34,12 @@ CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion
 to license that contribution under the LLAM Commercial Reciprocity License
 1.0, unless the submission is conspicuously marked "Not a Contribution" or a
 separate written agreement applies."""
+APPLICATION_SCOPE = """This License is expressly applied to the LLAM repository snapshot,
+distribution, or copy that contains this LICENSE file, except for materials
+conspicuously identified as governed by another license. LLAM-authored files
+use the following notice in the appropriate comment syntax:"""
+LICENSE_NOTICE = "Licensed under the LLAM Commercial Reciprocity License 1.0."
+LICENSE_FILE_NOTICE = "See the LICENSE file distributed with this Software."
 
 
 class LicensePolicyTest(unittest.TestCase):
@@ -84,17 +92,23 @@ class LicensePolicyTest(unittest.TestCase):
         self._write(
             ".github/SECURITY.md",
             f"SPDX-License-Identifier: {LICENSE_REF}\n"
+            f"{LICENSE_NOTICE}\n"
+            f"{LICENSE_FILE_NOTICE}\n"
             "Report privately at /security/advisories/new within 7 calendar days.\n"
             "Report non-security defects within 30 calendar days.\n",
         )
         self._write(
             ".github/ISSUE_TEMPLATE/defect-report.yml",
             f"# SPDX-License-Identifier: {LICENSE_REF}\n"
+            f"# {LICENSE_NOTICE}\n"
+            f"# {LICENSE_FILE_NOTICE}\n"
             "name: Defect report\n",
         )
         self._write(
             ".github/ISSUE_TEMPLATE/config.yml",
             f"# SPDX-License-Identifier: {LICENSE_REF}\n"
+            f"# {LICENSE_NOTICE}\n"
+            f"# {LICENSE_FILE_NOTICE}\n"
             "blank_issues_enabled: false\n"
             "contact_links:\n"
             "  - name: Private security report\n"
@@ -107,11 +121,15 @@ class LicensePolicyTest(unittest.TestCase):
         self._write(
             "scripts/package_release.sh",
             f"# SPDX-License-Identifier: {LICENSE_REF}\n"
+            f"# {LICENSE_NOTICE}\n"
+            f"# {LICENSE_FILE_NOTICE}\n"
             'cp "$root_dir/LICENSE" "$stage/"\n',
         )
         self._write(
             "scripts/package_release_windows.ps1",
             f"# SPDX-License-Identifier: {LICENSE_REF}\n"
+            f"# {LICENSE_NOTICE}\n"
+            f"# {LICENSE_FILE_NOTICE}\n"
             'Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination $Stage\n',
         )
         self._write(
@@ -119,6 +137,8 @@ class LicensePolicyTest(unittest.TestCase):
             "/*\n"
             " * Copyright 2026 Feralthedogg\n"
             f" * SPDX-License-Identifier: {LICENSE_REF}\n"
+            f" * {LICENSE_NOTICE}\n"
+            f" * {LICENSE_FILE_NOTICE}\n"
             " */\n",
         )
         subprocess.run(
@@ -239,6 +259,62 @@ class LicensePolicyTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("LICENSE: approved Section 1.4 is missing", result.stderr)
 
+    def test_rejects_license_without_explicit_application_scope(self) -> None:
+        license_text = CURRENT_LICENSE_TEXT.replace(APPLICATION_SCOPE, "")
+        self._write("LICENSE", license_text)
+        self._write(ACTIVE_LICENSE_RELATIVE, license_text)
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("LICENSE: application scope notice is missing", result.stderr)
+
+    def test_rejects_spdx_header_without_application_notice(self) -> None:
+        self._write(
+            "src/example.c",
+            "/*\n"
+            " * Copyright 2026 Feralthedogg\n"
+            f" * SPDX-License-Identifier: {LICENSE_REF}\n"
+            " */\n",
+        )
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("src/example.c: current application notice is incomplete", result.stderr)
+
+    def test_rejects_partial_application_notice(self) -> None:
+        self._write(
+            "src/example.c",
+            "/*\n"
+            " * Copyright 2026 Feralthedogg\n"
+            f" * SPDX-License-Identifier: {LICENSE_REF}\n"
+            f" * {LICENSE_NOTICE}\n"
+            " */\n",
+        )
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("src/example.c: current application notice is incomplete", result.stderr)
+
+    def test_rejects_application_notice_away_from_spdx_header(self) -> None:
+        self._write(
+            "src/example.c",
+            "/*\n"
+            " * Copyright 2026 Feralthedogg\n"
+            f" * SPDX-License-Identifier: {LICENSE_REF}\n"
+            " */\n\n"
+            f'const char *spdx = "SPDX-License-Identifier: {LICENSE_REF}";\n'
+            f'const char *license_notice = "{LICENSE_NOTICE}";\n'
+            f'const char *license_file_notice = "{LICENSE_FILE_NOTICE}";\n',
+        )
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("src/example.c: current application notice is incomplete", result.stderr)
+
     def test_rejects_stale_apache_notice_in_tracked_source(self) -> None:
         self._write(
             "src/example.c",
@@ -258,6 +334,8 @@ class LicensePolicyTest(unittest.TestCase):
             "scripts/policy_data.py",
             f'# Copyright 2026 Feralthedogg\n'
             f'# SPDX-License-Identifier: {LICENSE_REF}\n'
+            f'# {LICENSE_NOTICE}\n'
+            f'# {LICENSE_FILE_NOTICE}\n'
             'STALE_SPDX = "SPDX-License-Identifier: Apache-2.0"\n'
             'STALE_BOILERPLATE = "Licensed under the Apache License, Version 2.0"\n',
         )

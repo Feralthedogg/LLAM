@@ -1,6 +1,8 @@
 <!--
 Copyright 2026 Feralthedogg
 SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+Licensed under the LLAM Commercial Reciprocity License 1.0.
+See the LICENSE file distributed with this Software.
 -->
 
 # Contributing to LLAM
@@ -24,13 +26,16 @@ submission and confirm that its terms permit inclusion.
 ## New files and third-party material
 
 New LLAM-authored source, test, example, script, build, workflow, and project
-policy files must carry the current SPDX identifier near the top of the file.
+policy files must carry the complete current license notice near the top of the
+file.
 For C-family files, use:
 
 ```c
 /*
  * Copyright 2026 Feralthedogg
  * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+ * Licensed under the LLAM Commercial Reciprocity License 1.0.
+ * See the LICENSE file distributed with this Software.
  */
 ```
 
@@ -39,6 +44,8 @@ For formats with `#` comments, use:
 ```text
 # Copyright 2026 Feralthedogg
 # SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+# Licensed under the LLAM Commercial Reciprocity License 1.0.
+# See the LICENSE file distributed with this Software.
 ```
 
 If a generated or uncommentable file cannot retain a header, add an adjacent

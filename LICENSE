@@ -720,8 +720,10 @@ END OF TERMS
 
 APPLICATION NOTICE (NOT PART OF THE TERMS)
 
-To apply this License to a source file, the following short notice may be used
-in the appropriate comment syntax:
+This License is expressly applied to the LLAM repository snapshot,
+distribution, or copy that contains this LICENSE file, except for materials
+conspicuously identified as governed by another license. LLAM-authored files
+use the following notice in the appropriate comment syntax:
 
 Copyright 2026 Feralthedogg
 SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0

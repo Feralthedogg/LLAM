@@ -15,7 +15,7 @@
 - `OLD-LICENSES/Apache-2.0.txt` must be the exact text shipped in `v2.2.1`, whose SHA-256 is `7d16370e642185e2eecad74eaf1e15179b27e2690f82644e7d247b395b600430`.
 - `LICENSES/` contains only active license texts; Apache 2.0 stays outside it.
 - Custom release archives and installed metadata include `LICENSE` and the active `LICENSES/` text, but exclude `OLD-LICENSES/`.
-- New LLAM implementation, test, example, script, build, and GitHub policy files require `SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0` in the file or an adjacent `.license` file.
+- New LLAM implementation, test, example, script, build, and GitHub policy files require the complete LLAM application notice in the file, or the SPDX identifier in an adjacent `.license` file when an in-file header is not possible.
 - Separately licensed material must live in a conspicuous `third_party/` or `vendor/` location with its own terms.
 - Product metadata remains `3.0.0`; shared-library ABI major remains `2`.
 - Do not merge the draft PR, create `v3.0.0`, or publish a release until the owner explicitly lifts the hold.
@@ -44,6 +44,8 @@ Create the active text as an exact copy of root `LICENSE`. Create the historical
 <!--
 Copyright 2026 Feralthedogg
 SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+Licensed under the LLAM Commercial Reciprocity License 1.0.
+See the LICENSE file distributed with this Software.
 -->
 
 # Historical licenses
