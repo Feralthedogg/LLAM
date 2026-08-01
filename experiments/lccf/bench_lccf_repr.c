@@ -645,6 +645,7 @@ static int resize_latencies(contrast_runner_t *contrast,
 static int calibrate_contrast(const bench_options_t *options,
                               contrast_runner_t *contrast) {
     uint64_t rounds = UINT64_C(1);
+    bool duration_confirmed = false;
 
     for (;;) {
         window_sample_t left;
@@ -671,8 +672,13 @@ static int calibrate_contrast(const bench_options_t *options,
         }
         if (left.wall_ns >= options->minimum_window_ns &&
             right.wall_ns >= options->minimum_window_ns) {
-            return 0;
+            if (duration_confirmed) {
+                return 0;
+            }
+            duration_confirmed = true;
+            continue;
         }
+        duration_confirmed = false;
         if (rounds > UINT64_MAX / UINT64_C(2)) {
             return EOVERFLOW;
         }

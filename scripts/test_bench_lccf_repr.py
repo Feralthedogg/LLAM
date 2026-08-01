@@ -481,32 +481,39 @@ def test_binary_fairness_latency_is_not_logical_identity() -> None:
     binary_value = os.environ.get("LCCF_REPR_TEST_BINARY")
     if binary_value is None:
         return
-    command = [
-        str(Path(binary_value).resolve()),
-        "--workload", "completion_mixed_fairness",
-        "--route", "fused",
-        "--process-id", "0",
-        "--instances", "257",
-        "--frame-bytes", "64",
-        "--sites", "8",
-        "--chain", "8",
-        "--blocks", "1",
-        "--minimum-window-ns", "25000000",
-        "--warmup-rounds", "4",
-        "--seed", "12723167542156389659",
-    ]
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
+    binary = str(Path(binary_value).resolve())
+    cases = (
+        ("fused", "64", "12723167542156389659"),
+        ("mixed", "256", "9312776134767968772"),
     )
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stderr == ""
-    rows = [parse_raw_row(line) for line in completed.stdout.splitlines()]
-    assert len(rows) == 6
-    assert {row.contrast for row in rows} == set(CONTRASTS)
+    for route, frame_bytes, seed in cases:
+        command = [
+            binary,
+            "--workload", "completion_mixed_fairness",
+            "--route", route,
+            "--process-id", "0",
+            "--instances", "257",
+            "--frame-bytes", frame_bytes,
+            "--sites", "8",
+            "--chain", "8",
+            "--blocks", "1",
+            "--minimum-window-ns", "25000000",
+            "--warmup-rounds", "4",
+            "--seed", seed,
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stderr == ""
+        rows = [parse_raw_row(line)
+                for line in completed.stdout.splitlines()]
+        assert len(rows) == 6
+        assert {row.contrast for row in rows} == set(CONTRASTS)
 
 
 def main() -> int:
