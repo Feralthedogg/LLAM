@@ -58,6 +58,51 @@ static const lccf_fact_site_descriptor_t *const TEST_SITE_TABLE[8] = {
     &TEST_SITE_DESCRIPTORS[7],
 };
 
+static const lccf_representation_t TEST_REPRESENTATIONS[] = {
+    LCCF_REP_CANONICAL_HELPER,
+    LCCF_REP_SHARED_EVENT,
+    LCCF_REP_FULL_FACT,
+};
+
+typedef union test_representation_storage {
+    lccf_event_core_t event;
+    lccf_fact_core_t fact;
+} test_representation_storage_t;
+
+static void *test_representation_storage(
+    lccf_representation_t representation,
+    test_representation_storage_t *storage) {
+    if (representation == LCCF_REP_SHARED_EVENT) {
+        return &storage->event;
+    }
+    if (representation == LCCF_REP_FULL_FACT) {
+        return &storage->fact;
+    }
+    return NULL;
+}
+
+static int test_cell_init_representation(
+    lccf_fact_cell_t *cell,
+    uint64_t generation,
+    lccf_fact_layout_t layout,
+    uint32_t ticket_count,
+    lccf_representation_t representation,
+    test_representation_storage_t *storage) {
+    memset(storage, 0xa5, sizeof(*storage));
+    return lccf_fact_cell_init_representation(
+        cell, generation, layout, ticket_count, representation,
+        test_representation_storage(representation, storage));
+}
+
+static int test_observe_fact(
+    const lccf_fact_cell_t *cell,
+    uint64_t generation,
+    lccf_fact_counters_t *counters,
+    lccf_fact_core_t *out_fact) {
+    return lccf_fact_materialize(
+        cell, generation, 3U, counters, out_fact);
+}
+
 static lccf_fact_ticket_t ticket_for(lccf_fact_source_t source,
                                      uint64_t generation) {
     lccf_fact_ticket_t ticket;
@@ -259,10 +304,14 @@ static int test_shared_fact_removes_repeated_materialization_work(void) {
     return 0;
 }
 
-static int test_failure_paths_publish_or_retire_without_leaks(void) {
+static int test_failure_paths_for_representation(
+    lccf_representation_t representation) {
     lccf_fact_cell_t malformed_cell;
     lccf_fact_cell_t payload_cell;
     lccf_fact_cell_t module_cell;
+    test_representation_storage_t malformed_storage;
+    test_representation_storage_t payload_storage;
+    test_representation_storage_t module_storage;
     lccf_fact_counters_t counters;
     lccf_fact_ticket_t ticket;
     lccf_fact_core_t fact;
@@ -272,13 +321,15 @@ static int test_failure_paths_publish_or_retire_without_leaks(void) {
     memset(&counters, 0, sizeof(counters));
     ticket = ticket_for(LCCF_FACT_SOURCE_LINUX_CQE, 41U);
     ticket.raw_flags |= LCCF_FACT_TICKET_MALFORMED;
-    CHECK(lccf_fact_cell_init(&malformed_cell, 41U,
-                              LCCF_FACT_LAYOUT_SPLIT64_64, 1U, NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &malformed_cell, 41U, LCCF_FACT_LAYOUT_SPLIT64_64, 1U,
+              representation, &malformed_storage) == 0,
           "malformed cell initialization");
-    CHECK(lccf_fact_try_publish(&malformed_cell, &ticket, true,
-                                &counters, &won) == 0 && won,
+    CHECK(lccf_fact_try_publish_configured(
+              &malformed_cell, &ticket, &counters, &won) == 0 && won,
           "malformed completion publishes failure fact");
-    CHECK(lccf_fact_acquire(&malformed_cell, 41U, &fact) == 0 &&
+    CHECK(test_observe_fact(
+              &malformed_cell, 41U, &counters, &fact) == 0 &&
               fact.event_kind == LCCF_FACT_EVENT_FAIL &&
               fact.error_code == EPROTO,
           "malformed completion canonical failure");
@@ -287,13 +338,15 @@ static int test_failure_paths_publish_or_retire_without_leaks(void) {
     ticket = ticket_for(LCCF_FACT_SOURCE_IOCP, 42U);
     ticket.raw_flags |= LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN;
     won = false;
-    CHECK(lccf_fact_cell_init(&payload_cell, 42U,
-                              LCCF_FACT_LAYOUT_UNIFIED128, 1U, NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &payload_cell, 42U, LCCF_FACT_LAYOUT_UNIFIED128, 1U,
+              representation, &payload_storage) == 0,
           "payload cell initialization");
-    CHECK(lccf_fact_try_publish(&payload_cell, &ticket, true,
-                                &counters, &won) == 0 && won,
+    CHECK(lccf_fact_try_publish_configured(
+              &payload_cell, &ticket, &counters, &won) == 0 && won,
           "payload pin failure publishes conservative failure");
-    CHECK(lccf_fact_acquire(&payload_cell, 42U, &fact) == 0 &&
+    CHECK(test_observe_fact(
+              &payload_cell, 42U, &counters, &fact) == 0 &&
               fact.event_kind == LCCF_FACT_EVENT_FAIL &&
               fact.payload_word == 0U,
           "failed payload is not exposed");
@@ -306,11 +359,12 @@ static int test_failure_paths_publish_or_retire_without_leaks(void) {
     ticket = ticket_for(LCCF_FACT_SOURCE_KQUEUE, 43U);
     ticket.raw_flags |= LCCF_FACT_TICKET_FAIL_MODULE_PIN;
     won = true;
-    CHECK(lccf_fact_cell_init(&module_cell, 43U,
-                              LCCF_FACT_LAYOUT_SPLIT96_64, 1U, NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &module_cell, 43U, LCCF_FACT_LAYOUT_SPLIT96_64, 1U,
+              representation, &module_storage) == 0,
           "module cell initialization");
-    CHECK(lccf_fact_try_publish(&module_cell, &ticket, true,
-                                &counters, &won) == ENODEV && !won,
+    CHECK(lccf_fact_try_publish_configured(
+              &module_cell, &ticket, &counters, &won) == ENODEV && !won,
           "module pin failure is terminal");
     CHECK(counters.fact_build_failures == 1U &&
               counters.fact_builds == 0U,
@@ -321,6 +375,20 @@ static int test_failure_paths_publish_or_retire_without_leaks(void) {
         CHECK(atomic_load_explicit(&module_cell.references[index],
                                    memory_order_acquire) == 0U,
               "module pin failure leaks a reference");
+    }
+    return 0;
+}
+
+static int test_failure_paths_publish_or_retire_without_leaks(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_failure_paths_for_representation(
+                  TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation failure-path matrix");
     }
     return 0;
 }
@@ -390,18 +458,21 @@ static int test_one_winner_publishes_one_immutable_fact(void) {
     return 0;
 }
 
-static int test_stale_generation_cannot_retire_current_refs(void) {
+static int test_stale_generation_for_representation(
+    lccf_representation_t representation) {
     lccf_fact_cell_t cell;
+    test_representation_storage_t storage;
     lccf_fact_counters_t counters;
     lccf_fact_ticket_t stale = ticket_for(LCCF_FACT_SOURCE_LINUX_CQE, 8U);
     bool won = true;
 
     memset(&counters, 0, sizeof(counters));
-    CHECK(lccf_fact_cell_init(&cell, 9U, LCCF_FACT_LAYOUT_UNIFIED128,
-                              1U, NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &cell, 9U, LCCF_FACT_LAYOUT_UNIFIED128, 1U,
+              representation, &storage) == 0,
           "cell initialization");
-    CHECK(lccf_fact_try_publish(&cell, &stale, true, &counters, &won) ==
-              LCCF_FACT_ESTALE,
+    CHECK(lccf_fact_try_publish_configured(
+              &cell, &stale, &counters, &won) == LCCF_FACT_ESTALE,
           "stale publication result");
     CHECK(!won, "stale ticket cannot win");
     CHECK(counters.generation_mismatches == 1U,
@@ -418,6 +489,20 @@ static int test_stale_generation_cannot_retire_current_refs(void) {
               &cell.state_generation, memory_order_acquire)) ==
               LCCF_FACT_STATE_ARMED,
           "stale ticket cannot change state");
+    return 0;
+}
+
+static int test_stale_generation_cannot_retire_current_refs(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_stale_generation_for_representation(
+                  TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation generation-isolation matrix");
+    }
     return 0;
 }
 
@@ -573,18 +658,20 @@ static int run_publication_race(void *opaque) {
     while (!atomic_load_explicit(race->go, memory_order_acquire)) {
         atomic_signal_fence(memory_order_seq_cst);
     }
-    race->rc = lccf_fact_try_publish(race->cell, &race->ticket, true,
-                                     &race->counters, &race->won);
+    race->rc = lccf_fact_try_publish_configured(
+        race->cell, &race->ticket, &race->counters, &race->won);
     return 0;
 }
 
-static int test_publication_race_has_one_winner(void) {
+static int test_publication_race_for_representation(
+    lccf_representation_t representation) {
     static const lccf_fact_source_t sources[] = {
         LCCF_FACT_SOURCE_LINUX_CQE,
         LCCF_FACT_SOURCE_KQUEUE,
         LCCF_FACT_SOURCE_IOCP,
     };
     lccf_fact_cell_t cell;
+    test_representation_storage_t storage;
     publication_race_case_t cases[sizeof(sources) / sizeof(sources[0])];
     lccf_platform_thread_t
         *threads[sizeof(sources) / sizeof(sources[0])] = {NULL};
@@ -597,9 +684,10 @@ static int test_publication_race_has_one_winner(void) {
 
     atomic_init(&ready, 0U);
     atomic_init(&go, false);
-    CHECK(lccf_fact_cell_init(&cell, 51U, LCCF_FACT_LAYOUT_SPLIT64_64,
-                              (uint32_t)(sizeof(cases) / sizeof(cases[0])), NULL) ==
-              0,
+    CHECK(test_cell_init_representation(
+              &cell, 51U, LCCF_FACT_LAYOUT_SPLIT64_64,
+              (uint32_t)(sizeof(cases) / sizeof(cases[0])),
+              representation, &storage) == 0,
           "publication race cell initialization");
     memset(cases, 0, sizeof(cases));
     for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
@@ -638,6 +726,20 @@ static int test_publication_race_has_one_winner(void) {
     return 0;
 }
 
+static int test_publication_race_has_one_winner(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_publication_race_for_representation(
+                  TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation publication-race matrix");
+    }
+    return 0;
+}
+
 typedef struct consume_race_case {
     lccf_fact_cell_t *cell;
     lccf_fact_guard_t guard;
@@ -662,8 +764,10 @@ static int run_consume_race(void *opaque) {
     return 0;
 }
 
-static int test_double_consume_race_has_one_callback(void) {
+static int test_double_consume_race_for_representation(
+    lccf_representation_t representation) {
     lccf_fact_cell_t cell;
+    test_representation_storage_t storage;
     lccf_fact_ticket_t ticket = ticket_for(LCCF_FACT_SOURCE_LINUX_CQE, 52U);
     lccf_fact_counters_t publish_counters;
     consume_race_case_t cases[2];
@@ -678,11 +782,12 @@ static int test_double_consume_race_has_one_callback(void) {
     memset(&publish_counters, 0, sizeof(publish_counters));
     atomic_init(&ready, 0U);
     atomic_init(&go, false);
-    CHECK(lccf_fact_cell_init(&cell, 52U, LCCF_FACT_LAYOUT_UNIFIED128,
-                              1U, NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &cell, 52U, LCCF_FACT_LAYOUT_UNIFIED128, 1U,
+              representation, &storage) == 0,
           "consume race cell initialization");
-    CHECK(lccf_fact_try_publish(&cell, &ticket, true, &publish_counters,
-                                &won) == 0 && won,
+    CHECK(lccf_fact_try_publish_configured(
+              &cell, &ticket, &publish_counters, &won) == 0 && won,
           "consume race publication");
     memset(cases, 0, sizeof(cases));
     for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
@@ -717,6 +822,20 @@ static int test_double_consume_race_has_one_callback(void) {
           "double consume leaves one callback reference");
     CHECK(lccf_fact_finish(&cell, 52U, &publish_counters) == 0,
           "winning callback can finish");
+    return 0;
+}
+
+static int test_double_consume_race_has_one_callback(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_double_consume_race_for_representation(
+                  TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation consume-race matrix");
+    }
     return 0;
 }
 
@@ -1077,8 +1196,10 @@ static int test_external_storage_and_resolved_site_are_real(void) {
     return 0;
 }
 
-static int test_rearm_rejects_generation_rollback(void) {
+static int test_rearm_for_representation(
+    lccf_representation_t representation) {
     lccf_fact_cell_t cell;
+    test_representation_storage_t storage;
     lccf_fact_counters_t counters = {0};
     lccf_fact_ticket_t ticket =
         ticket_for(LCCF_FACT_SOURCE_IOCP, 140U);
@@ -1088,12 +1209,12 @@ static int test_rearm_rejects_generation_rollback(void) {
     uint64_t terminal_word;
     bool won = false;
 
-    CHECK(lccf_fact_cell_init(&cell, 140U,
-                              LCCF_FACT_LAYOUT_UNIFIED128, 1U,
-                              NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &cell, 140U, LCCF_FACT_LAYOUT_UNIFIED128, 1U,
+              representation, &storage) == 0,
           "rollback cell initialization");
-    CHECK(lccf_fact_try_publish(&cell, &ticket, true, &counters,
-                                &won) == 0 && won,
+    CHECK(lccf_fact_try_publish_configured(
+              &cell, &ticket, &counters, &won) == 0 && won,
           "rollback fact publication");
     CHECK(lccf_fact_consume(&cell, 140U, 3U, LCCF_FACT_CONSUMER_DIRECT,
                             &guard, &counters, &decision, &fact) == 0 &&
@@ -1113,8 +1234,24 @@ static int test_rearm_rejects_generation_rollback(void) {
     return 0;
 }
 
-static int test_abort_releases_every_owned_reference(void) {
+static int test_rearm_rejects_generation_rollback(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_rearm_for_representation(
+                  TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation rearm matrix");
+    }
+    return 0;
+}
+
+static int test_abort_for_representation(
+    lccf_representation_t representation) {
     lccf_fact_cell_t cell;
+    test_representation_storage_t storage;
     lccf_fact_counters_t counters = {0};
     lccf_fact_ticket_t ticket =
         ticket_for(LCCF_FACT_SOURCE_KQUEUE, 150U);
@@ -1124,12 +1261,12 @@ static int test_abort_releases_every_owned_reference(void) {
     bool won = false;
     size_t kind;
 
-    CHECK(lccf_fact_cell_init(&cell, 150U,
-                              LCCF_FACT_LAYOUT_SPLIT96_64, 1U,
-                              NULL) == 0,
+    CHECK(test_cell_init_representation(
+              &cell, 150U, LCCF_FACT_LAYOUT_SPLIT96_64, 1U,
+              representation, &storage) == 0,
           "abort cell initialization");
-    CHECK(lccf_fact_try_publish(&cell, &ticket, true, &counters,
-                                &won) == 0 && won,
+    CHECK(lccf_fact_try_publish_configured(
+              &cell, &ticket, &counters, &won) == 0 && won,
           "abort fact publication");
     CHECK(lccf_fact_consume(&cell, 150U, 3U, LCCF_FACT_CONSUMER_DIRECT,
                             &guard, &counters, &decision, &fact) == 0 &&
@@ -1151,8 +1288,23 @@ static int test_abort_releases_every_owned_reference(void) {
     return 0;
 }
 
+static int test_abort_releases_every_owned_reference(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_abort_for_representation(TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation abort matrix");
+    }
+    return 0;
+}
+
 typedef struct acquire_rearm_race {
     lccf_fact_cell_t *cell;
+    lccf_representation_t representation;
+    lccf_fact_counters_t observer_counters;
     _Atomic uint64_t generation;
     _Atomic bool stop;
     _Atomic unsigned failures;
@@ -1165,8 +1317,13 @@ static int run_acquire_rearm_race(void *opaque) {
         const uint64_t generation = atomic_load_explicit(
             &race->generation, memory_order_acquire);
         lccf_fact_core_t fact;
-        const int rc = lccf_fact_acquire(
-            race->cell, generation, &fact);
+        const int rc = race->representation ==
+                               LCCF_REP_CANONICAL_HELPER
+                           ? lccf_fact_materialize(
+                                 race->cell, generation, 3U,
+                                 &race->observer_counters, &fact)
+                           : lccf_fact_acquire(
+                                 race->cell, generation, &fact);
 
         if (rc == 0) {
             if (fact.generation != generation ||
@@ -1184,20 +1341,22 @@ static int run_acquire_rearm_race(void *opaque) {
     return 0;
 }
 
-static int test_acquire_finish_rearm_race(void) {
+static int test_acquire_rearm_race_for_representation(
+    lccf_representation_t representation) {
     enum { GENERATIONS = 2000 };
     lccf_fact_cell_t cell;
-    lccf_fact_core_t external_fact;
+    test_representation_storage_t storage;
     acquire_rearm_race_t race;
     lccf_platform_thread_t *thread = NULL;
     uint64_t generation;
 
     memset(&race, 0, sizeof(race));
-    CHECK(lccf_fact_cell_init(&cell, 1U,
-                              LCCF_FACT_LAYOUT_SPLIT64_64, 1U,
-                              &external_fact) == 0,
+    CHECK(test_cell_init_representation(
+              &cell, 1U, LCCF_FACT_LAYOUT_SPLIT64_64, 1U,
+              representation, &storage) == 0,
           "acquire/rearm race initialization");
     race.cell = &cell;
+    race.representation = representation;
     atomic_init(&race.generation, 1U);
     atomic_init(&race.stop, false);
     atomic_init(&race.failures, 0U);
@@ -1214,8 +1373,8 @@ static int test_acquire_finish_rearm_race(void) {
         lccf_fact_core_t fact;
         bool won = false;
 
-        CHECK(lccf_fact_try_publish(&cell, &ticket, true, &counters,
-                                    &won) == 0 && won,
+        CHECK(lccf_fact_try_publish_configured(
+                  &cell, &ticket, &counters, &won) == 0 && won,
               "acquire/rearm race publication");
         atomic_store_explicit(&race.generation, generation,
                               memory_order_release);
@@ -1247,18 +1406,28 @@ static int test_acquire_finish_rearm_race(void) {
     return 0;
 }
 
+static int test_acquire_finish_rearm_race(void) {
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
+         ++index) {
+        CHECK(test_acquire_rearm_race_for_representation(
+                  TEST_REPRESENTATIONS[index]) == 0,
+              "configured representation acquire/rearm race matrix");
+    }
+    return 0;
+}
+
 static int test_configured_representations_share_protocol(void) {
-    static const lccf_representation_t representations[] = {
-        LCCF_REP_CANONICAL_HELPER,
-        LCCF_REP_SHARED_EVENT,
-        LCCF_REP_FULL_FACT,
-    };
     static const uint64_t expected_normalizations[] = {4U, 1U, 1U};
     static const uint64_t expected_lookups[] = {4U, 4U, 2U};
     size_t index;
 
     for (index = 0U;
-         index < sizeof(representations) / sizeof(representations[0]);
+         index < sizeof(TEST_REPRESENTATIONS) /
+                     sizeof(TEST_REPRESENTATIONS[0]);
          ++index) {
         union {
             lccf_event_core_t event;
@@ -1274,18 +1443,18 @@ static int test_configured_representations_share_protocol(void) {
         lccf_fact_decision_t decision;
         lccf_fact_guard_t guard = direct_guard(2U);
         void *storage_pointer =
-            representations[index] == LCCF_REP_CANONICAL_HELPER
+            TEST_REPRESENTATIONS[index] == LCCF_REP_CANONICAL_HELPER
                 ? NULL
                 : (void *)&storage;
         const size_t sidecar_bytes = lccf_representation_sidecar_bytes(
-            representations[index]);
+            TEST_REPRESENTATIONS[index]);
         bool won = false;
 
         memset(&storage, 0xa5, sizeof(storage));
         CHECK(lccf_fact_cell_init_representation(
                   &cell, ticket.generation,
                   LCCF_FACT_LAYOUT_SPLIT64_64, 1U,
-                  representations[index], storage_pointer) == 0,
+                  TEST_REPRESENTATIONS[index], storage_pointer) == 0,
               "configured representation initialization");
         CHECK(lccf_fact_try_publish_configured(
                   &cell, &ticket, &counters, &won) == 0 && won,
@@ -1293,7 +1462,8 @@ static int test_configured_representations_share_protocol(void) {
         if (sidecar_bytes != 0U) {
             memcpy(published, &storage, sidecar_bytes);
         }
-        if (representations[index] == LCCF_REP_CANONICAL_HELPER) {
+        if (TEST_REPRESENTATIONS[index] ==
+            LCCF_REP_CANONICAL_HELPER) {
             CHECK(lccf_fact_acquire(
                       &cell, ticket.generation, &acquired) == ENODATA,
                   "canonical helper has no persistent acquisition");

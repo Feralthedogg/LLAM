@@ -18,6 +18,18 @@ from typing import Any, Iterable, Sequence
 
 
 SCHEMA_VERSION = 1
+MINIMUM_EVIDENCE_WINDOW_MS = 25
+RUN_CONFIGURATION_FIELDS = frozenset({
+    "seed",
+    "resamples",
+    "samples",
+    "blocks",
+    "minimum_window_ms",
+    "instances",
+    "chain",
+    "frame_bytes",
+    "warmup_rounds",
+})
 REPRESENTATION_BYTES = {"A": 0, "B": 48, "C": 64}
 CONTRAST_REPRESENTATIONS = {
     "A/B": ("A", "B"),
@@ -285,6 +297,46 @@ def _integer(value: Any, label: str, *, positive: bool = False) -> int:
         qualifier = "positive" if positive else "non-negative"
         raise ValueError(f"{label} must be a {qualifier} integer")
     return value
+
+
+def _validate_configuration(value: Any) -> dict[str, Any]:
+    _exact_fields(value, RUN_CONFIGURATION_FIELDS, "run configuration")
+    seed = _integer(value["seed"], "seed")
+    resamples = _integer(value["resamples"], "resamples", positive=True)
+    samples = _integer(value["samples"], "samples", positive=True)
+    blocks = _integer(value["blocks"], "blocks", positive=True)
+    minimum_window_ms = _integer(
+        value["minimum_window_ms"], "minimum_window_ms", positive=True
+    )
+    instances = _integer(value["instances"], "instances", positive=True)
+    chain = _integer(value["chain"], "chain", positive=True)
+    warmup_rounds = _integer(value["warmup_rounds"], "warmup_rounds")
+    frame_bytes = value["frame_bytes"]
+
+    if seed > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("seed must fit uint64")
+    if samples != 5 or blocks != 4:
+        raise ValueError(
+            "run configuration requires 5 samples and 4 blocks"
+        )
+    if minimum_window_ms < MINIMUM_EVIDENCE_WINDOW_MS:
+        raise ValueError("minimum_window_ms must be at least 25")
+    if type(frame_bytes) is not list or frame_bytes != [64, 256] or any(
+        type(frame_bytes_value) is not int
+        for frame_bytes_value in frame_bytes
+    ):
+        raise ValueError("run configuration requires frame bytes 64,256")
+    return {
+        "seed": seed,
+        "resamples": resamples,
+        "samples": samples,
+        "blocks": blocks,
+        "minimum_window_ms": minimum_window_ms,
+        "instances": instances,
+        "chain": chain,
+        "frame_bytes": frame_bytes,
+        "warmup_rounds": warmup_rounds,
+    }
 
 
 def _string(value: Any, label: str) -> str:
@@ -913,6 +965,35 @@ def _cell_slug(cell: Cell) -> str:
     )
 
 
+def _validate_rows_against_configuration(
+    rows: Sequence[RawPair], configuration: dict[str, Any]
+) -> None:
+    expected_minimum_window_ns = (
+        configuration["minimum_window_ms"] * 1_000_000
+    )
+    expected_frames = set(configuration["frame_bytes"])
+    for row in rows:
+        if row.minimum_window_ns != expected_minimum_window_ns:
+            raise ValueError(
+                "minimum_window_ns differs from run configuration"
+            )
+        if row.cell.instances != configuration["instances"] or \
+                row.cell.chain != configuration["chain"] or \
+                row.cell.sites != 8 or \
+                row.cell.frame_bytes not in expected_frames:
+            raise ValueError("cell differs from run configuration")
+        if row.process_id >= configuration["samples"]:
+            raise ValueError("process_id differs from run configuration")
+        if row.block >= configuration["blocks"]:
+            raise ValueError("block differs from run configuration")
+        expected_seed = derived_seed(
+            configuration["seed"],
+            f"{_cell_slug(row.cell)}|process={row.process_id}",
+        )
+        if row.seed != expected_seed:
+            raise ValueError("row seed differs from run configuration")
+
+
 def _binary_command(
     binary: Path,
     cell: Cell,
@@ -1031,6 +1112,17 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = args.output_dir.resolve()
     if not binary.is_file():
         raise FileNotFoundError(f"benchmark binary not found: {binary}")
+    configuration = _validate_configuration({
+        "seed": args.seed,
+        "resamples": args.resamples,
+        "samples": args.samples,
+        "blocks": args.blocks,
+        "minimum_window_ms": args.minimum_window_ms,
+        "instances": args.instances,
+        "chain": args.chain,
+        "frame_bytes": list(args.frame_bytes),
+        "warmup_rounds": args.warmup_rounds,
+    })
     raw_dir = output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     cells = [
@@ -1068,7 +1160,9 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
                 for line in lines:
                     row = parse_raw_row(line)
                     if row.process_id != process_id or row.cell != cell or \
-                            row.seed != process_seed:
+                            row.seed != process_seed or \
+                            row.minimum_window_ns != \
+                            args.minimum_window_ms * 1_000_000:
                         raise ValueError(
                             "binary row identity differs from requested cell"
                         )
@@ -1079,23 +1173,13 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
             f"[{cell_index + 1}/{len(cells)}] {_cell_slug(cell)} complete",
             flush=True,
         )
+    _validate_rows_against_configuration(all_rows, configuration)
     decision = classify_evidence(
         all_rows,
         seed=args.seed,
         resamples=args.resamples,
     )
     process_medians = collapse_process_medians(all_rows)
-    configuration = {
-        "seed": args.seed,
-        "resamples": args.resamples,
-        "samples": args.samples,
-        "blocks": args.blocks,
-        "minimum_window_ms": args.minimum_window_ms,
-        "instances": args.instances,
-        "chain": args.chain,
-        "frame_bytes": list(args.frame_bytes),
-        "warmup_rounds": args.warmup_rounds,
-    }
     payload = _summary_payload(
         decision,
         configuration=configuration,
@@ -1117,19 +1201,18 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
 
 def audit_evidence(output_dir: Path) -> dict[str, Any]:
     output_dir = output_dir.resolve()
-    configuration = json.loads(
+    configuration = _validate_configuration(json.loads(
         (output_dir / "run-config.json").read_text(encoding="utf-8"),
         object_pairs_hook=_unique_object,
         parse_constant=_reject_constant,
-    )
+    ))
     lines = _read_raw_lines(output_dir / "raw")
     rows = [parse_raw_row(line) for line in lines]
+    _validate_rows_against_configuration(rows, configuration)
     decision = classify_evidence(
         rows,
-        seed=_integer(configuration["seed"], "seed"),
-        resamples=_integer(
-            configuration["resamples"], "resamples", positive=True
-        ),
+        seed=configuration["seed"],
+        resamples=configuration["resamples"],
     )
     payload = _summary_payload(
         decision,
@@ -1195,9 +1278,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--binary is required unless --audit-only is set")
     if args.samples != 5 or args.blocks != 4:
         parser.error("the declared evidence contract requires 5 samples and 4 blocks")
-    for name in (
-        "minimum_window_ms", "instances", "chain", "resamples"
-    ):
+    if args.minimum_window_ms < MINIMUM_EVIDENCE_WINDOW_MS:
+        parser.error("--minimum-window-ms must be at least 25")
+    for name in ("instances", "chain", "resamples"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.warmup_rounds < 0 or args.timeout <= 0:

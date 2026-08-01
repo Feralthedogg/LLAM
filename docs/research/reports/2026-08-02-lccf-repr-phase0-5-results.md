@@ -48,9 +48,11 @@ summary.json
 summary.csv
 ```
 
-An independent `--audit-only` invocation reparsed every raw line, repeated
-all work and lifetime checks, recomputed every confidence interval, and
-reproduced `summary.json` and `summary.csv` byte for byte.
+An independent `--audit-only` invocation validated the exact run-config
+schema, bound every row's minimum window, cell dimensions, process, block,
+and derived seed to that configuration, reparsed every raw line, repeated all
+work and lifetime checks, recomputed every confidence interval, and reproduced
+`summary.json` and `summary.csv` byte for byte.
 
 | Evidence item | Count |
 |---|---:|
@@ -76,6 +78,7 @@ the fact representation. The following checks pass:
 |---|---:|
 | Existing A/C differential cases | 72 / 72 equivalent |
 | New A/B/C triple differential cases | 24 / 24 equivalent |
+| Configured failure/race/generation matrices | A / B / C pass |
 | Raw pair checksum mismatches | 0 / 2,880 |
 | Raw pair logical-metric mismatches | 0 / 2,880 |
 | Rows with an exact-work-equation error | 0 / 2,880 |
@@ -90,7 +93,7 @@ forced mixed-route escape, intrusive overflow fallback, and physical
 representation addresses. An invalid site is materialized as an immutable
 `FAIL/EPROTO` fact as required by the LCCF-CFS semantic contract.
 
-Two benchmark defects were found before the final run:
+Three benchmark defects were found before the final run:
 
 - a wall-clock-derived fairness p99 was incorrectly compared as a logical
   identity metric; it is now validated independently while deterministic

@@ -743,12 +743,12 @@ static int emit_side(const char *representation,
                      const window_sample_t *sample) {
     const lccf_model_metrics_t *metrics = &sample->metrics;
     const int written = printf(
-        "{\"representation\":\"%s\"," 
+        "{\"representation\":\"%s\","
         "\"wall_ns\":%" PRIu64 ","
         "\"cpu_ns\":%" PRIu64 ","
         "\"p50_ns\":%" PRIu64 ","
         "\"p99_ns\":%" PRIu64 ","
-        "\"checksum\":\"%016" PRIx64 "\"," 
+        "\"checksum\":\"%016" PRIx64 "\","
         "\"operations\":%" PRIu64 ","
         "\"callbacks\":%" PRIu64 ","
         "\"completions\":%" PRIu64 ","
@@ -841,7 +841,7 @@ static int emit_pair(const bench_options_t *options,
     written = printf(
         "{\"schema_version\":%u,"
         "\"process_id\":%" PRIu64 ","
-        "\"cell\":{\"workload\":\"%s\"," 
+        "\"cell\":{\"workload\":\"%s\","
         "\"route\":\"%s\","
         "\"frame_bytes\":%zu,"
         "\"instances\":%zu,"

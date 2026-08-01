@@ -8,13 +8,19 @@ import json
 import math
 import os
 import subprocess
+from contextlib import redirect_stderr
 from copy import deepcopy
+from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from bench_lccf_repr import (
+    audit_evidence,
     bootstrap_median_ci,
     classify_lines,
     collapse_process_medians,
+    derived_seed,
+    parse_args,
     parse_raw_row,
 )
 
@@ -279,6 +285,89 @@ def evidence_rows(
     return rows
 
 
+def _configuration(*, minimum_window_ms: int = 25) -> dict[str, object]:
+    return {
+        "seed": 0x6C6363662D726570,
+        "resamples": 40,
+        "samples": 5,
+        "blocks": 4,
+        "minimum_window_ms": minimum_window_ms,
+        "instances": 17,
+        "chain": 8,
+        "frame_bytes": [64, 256],
+        "warmup_rounds": 4,
+    }
+
+
+def _cell_slug_from_row(row: dict[str, object]) -> str:
+    cell = row["cell"]
+    assert isinstance(cell, dict)
+    return (
+        f"{cell['workload']}__{cell['route']}__f{cell['frame_bytes']}"
+        f"__i{cell['instances']}__s{cell['sites']}__c{cell['chain']}"
+    )
+
+
+def _write_raw_matrix(output_dir: Path) -> None:
+    raw_dir = output_dir / "raw"
+    raw_dir.mkdir()
+    grouped: dict[str, list[str]] = {}
+    seed = 0x6C6363662D726570
+    for row in evidence_rows():
+        slug = _cell_slug_from_row(row)
+        process_id = row["process_id"]
+        assert isinstance(process_id, int)
+        row["seed"] = derived_seed(seed, f"{slug}|process={process_id}")
+        grouped.setdefault(slug, []).append(encoded(row))
+    assert len(grouped) == 24
+    for slug, lines in grouped.items():
+        (raw_dir / f"{slug}.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+
+def test_official_window_and_audit_configuration_contract() -> None:
+    try:
+        with redirect_stderr(StringIO()):
+            parse_args([
+                "--binary", "/tmp/bench_lccf_repr",
+                "--output-dir", "/tmp/lccf-repr-evidence",
+                "--minimum-window-ms", "24",
+            ])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("accepted a sub-25 ms official evidence window")
+
+    with TemporaryDirectory() as directory:
+        output_dir = Path(directory)
+        (output_dir / "run-config.json").write_text(
+            json.dumps(_configuration(minimum_window_ms=24)),
+            encoding="utf-8",
+        )
+        try:
+            audit_evidence(output_dir)
+        except ValueError as exc:
+            assert str(exc) == "minimum_window_ms must be at least 25"
+        else:
+            raise AssertionError("audit accepted a sub-contract run config")
+
+    with TemporaryDirectory() as directory:
+        output_dir = Path(directory)
+        (output_dir / "run-config.json").write_text(
+            json.dumps(_configuration()), encoding="utf-8"
+        )
+        _write_raw_matrix(output_dir)
+        try:
+            audit_evidence(output_dir)
+        except ValueError as exc:
+            assert str(exc) == (
+                "minimum_window_ns differs from run configuration"
+            )
+        else:
+            raise AssertionError("audit trusted the raw declared minimum")
+
+
 def test_strict_raw_parser() -> None:
     row = raw_row()
     parsed = parse_raw_row(encoded(row))
@@ -517,6 +606,7 @@ def test_binary_fairness_latency_is_not_logical_identity() -> None:
 
 
 def main() -> int:
+    test_official_window_and_audit_configuration_contract()
     test_strict_raw_parser()
     test_process_median_and_order_balance()
     test_bootstrap_contract()
