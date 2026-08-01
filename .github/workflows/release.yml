@@ -561,7 +561,9 @@ jobs:
       - name: Build checksum manifest
         run: |
           cd release-artifacts
+          sed -i 's/\r$//' ./*.sha256
           cat ./*.sha256 | LC_ALL=C sort -k2 > SHA256SUMS
+          sha256sum --check SHA256SUMS
 
       - name: Build release notes
         env:
