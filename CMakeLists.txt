@@ -530,6 +530,25 @@ foreach(LLAM_LCWE_MODEL_TARGET test_lcwe_model bench_lcwe_model)
     endif()
 endforeach()
 
+set(LLAM_LCRS_MODEL_SOURCES
+    experiments/lcrs/lcrs_topology.c
+    experiments/lcrs/lcrs_simulator.c
+)
+
+add_executable(test_lcrs_topology
+    ${LLAM_LCRS_MODEL_SOURCES}
+    experiments/lcrs/test_lcrs_topology.c
+)
+add_executable(bench_lcrs_model
+    ${LLAM_LCRS_MODEL_SOURCES}
+    experiments/lcrs/bench_lcrs_model.c
+)
+foreach(LLAM_LCRS_MODEL_TARGET test_lcrs_topology bench_lcrs_model)
+    target_include_directories(${LLAM_LCRS_MODEL_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lcrs
+    )
+endforeach()
+
 add_executable(test_abi_contract
     tests/test_abi_contract.c
 )
@@ -728,6 +747,7 @@ add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
+add_test(NAME test_lcrs_topology COMMAND test_lcrs_topology)
 if(Python3_FOUND)
     add_test(
         NAME test_bench_lcwe_model
@@ -735,6 +755,13 @@ if(Python3_FOUND)
                 "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"
                 ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcwe_model.py
+    )
+    add_test(
+        NAME test_bench_lcrs_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LCRS_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcrs_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcrs_model.py
     )
 endif()
 add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)
