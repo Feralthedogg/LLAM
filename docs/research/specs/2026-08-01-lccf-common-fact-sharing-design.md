@@ -1,6 +1,6 @@
 # LCCF-CFS — Common-Fact Sharing for Causal Completion Fusion
 
-Status: accepted extension design for isolated Phase 0 implementation  
+Status: Phase 0 implemented; performance advancement withheld pending stable evidence
 Primary goal: normalize, claim, and pin a winning completion once, then share only immutable facts between direct and queued consumption paths
 
 ## 1. Problem statement
@@ -181,8 +181,8 @@ ARMED(g)
      -> RUNNING_DIRECT(g)
      -> QUEUED(g)
         -> RUNNING_QUEUED(g)
-  -> ARMED(g+1)
-  -> TERMINAL(g)
+  -> TERMINAL(g)          cleanup complete; generation g remains visible
+     -> ARMED(g+1)        explicit rearm after every prior owner retires
 ```
 
 Losing timeout, cancellation, and backend tickets observe that `ARMED(g)` was already claimed and only retire their retained ownership.
@@ -243,9 +243,9 @@ runtime stop
 
 No direct or queued consumer sees raw backend conventions.
 
-### Step 5: resolve site once
+### Step 5: resolve the initial site once
 
-Resolve the site descriptor from the instance's next-site index and retained module descriptor. Validate:
+Resolve the initial resume-site descriptor from the instance's next-site index and retained module descriptor. Validate:
 
 - site index;
 - callback presence;
@@ -253,6 +253,13 @@ Resolve the site descriptor from the instance's next-site index and retained mod
 - event compatibility;
 - module generation/registration;
 - immutable capability flags.
+
+If the callback returns `CONTINUE` with a different next-site index, resolve
+that continuation site separately. The immutable fact may share the canonical
+event and retained module lifetime, but it must never reuse the initial site's
+function pointer for another logical site. Phase 0 uses distinct function
+addresses for all eight modeled sites so homogeneous callbacks cannot hide
+this class of error.
 
 ### Step 6: publish
 
@@ -291,7 +298,9 @@ If the guard rejects direct execution:
 6. claim `RUNNING_QUEUED(g)`;
 7. call the same `consume_fact()` routine.
 
-The queue path does not redo backend decode, winning-generation CAS, event normalization, or site lookup.
+The queue path does not redo backend decode, winning-generation CAS, event
+normalization, or the initial resume-site lookup. A later `CONTINUE` command
+still resolves its own next site in both direct and queued paths.
 
 ## 9. Common consume function
 
@@ -310,6 +319,8 @@ Responsibilities:
 - verify state/generation correspondence;
 - initialize command storage to `FAIL/EPROTO`;
 - invoke the retained site callback;
+- verify that the selected function pointer belongs to the current logical
+  site before invocation;
 - convert callback panic/exception through the language adapter;
 - validate command fields and reserved zeros;
 - apply lane-local failure semantics;
@@ -326,7 +337,7 @@ Direct and queued modes differ only in admission and guard evaluation.
 - raw backend result decode;
 - errno/result normalization;
 - event construction;
-- module/site descriptor lookup;
+- initial resume-site descriptor lookup;
 - immutable capability validation;
 - payload ownership pin;
 - fact ID and trace classification.
@@ -343,6 +354,7 @@ Direct and queued modes differ only in admission and guard evaluation.
 - shard pause/offline;
 - callback-active bit;
 - current backend command support.
+- continuation-site dispatch after a callback changes `next_site`.
 
 This split is the central correctness rule.
 
@@ -353,7 +365,9 @@ This split is the central correctness rule.
 - fact-ready publication: release;
 - direct/queue consumer state load: acquire;
 - queue link publication: release/acquire;
-- terminal or next-generation transition: release;
+- terminal publication and later explicit rearm: release;
+- lifecycle admission uses one atomic closed-bit plus in-flight count, so a
+  closer and a new entrant cannot miss each other on weak memory models;
 - fact storage reuse only after:
   - callback inactive;
   - previous generation no longer runnable/queued;
@@ -537,7 +551,9 @@ CFS must pass correctness first, then:
 - queued path throughput at least 98% of recompute baseline;
 - direct path does not regress more than 2%;
 - mixed direct/queue workloads reduce instructions or process CPU by at least 5%;
-- result normalization and site lookup counts fall to exactly one per winning generation;
+- result normalization and initial site lookup fall to exactly one per winning
+  generation; continuation-site lookups remain explicit and are never charged
+  as eliminated work;
 - fact layout does not cause more than 5% p99 latency regression;
 - spread of gate-driving paired ratios is within the existing research threshold.
 

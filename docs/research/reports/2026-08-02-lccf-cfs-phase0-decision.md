@@ -7,80 +7,75 @@ SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 ## Decision
 
-Advance Common-Fact Sharing to a narrow, internal Executor prototype.
+Do not advance the persistent Common-Fact sidecar into the Executor yet.
 
-The Phase 0 verdict is `PASS`: all 72 independent model cells passed, shared
-paths normalized and resolved exactly once per generation, no canonical output
-changed, and all lifetime references balanced. The smallest observed wall
-speedup was 1.779x and the largest median CPU ratio was 0.562 across all cells.
+Phase 0 is `INCONCLUSIVE`, not rejected. Correctness and lifetime evidence is
+strong, and the heterogeneous eight-site model still shows a favorable median
+signal. However, 71 of 72 cells in the controlled repeat exceed the declared
+ratio-spread limit. The result cannot authorize production work until the
+measurement is stable.
 
-This does not reverse the earlier LCCF decision. The rejected design replaced a
-conventional waker with a richer per-completion scheduling object and failed to
-repay that representation cost. CFS keeps the ordinary scheduling boundary and
-removes duplicated backend adaptation, site lookup, and pin work. It is a
-narrower hypothesis with different evidence.
+The earlier provisional `PASS` and split-64+64 selection are withdrawn. That
+result allowed one resolved callback address to stand in for multiple logical
+sites and therefore overstated the transferable work reduction.
 
-## Selected prototype shape
+## Contracts worth keeping
 
-Use the split 64 + 64 layout:
-
-```text
-64-byte hot causal cell
-64-byte immutable fact/event sidecar already owned by the Executor instance
-```
-
-The three layouts were performance-equivalent in the model. Split 64 + 64 is
-selected because it does not enlarge the hot cell and requires no allocation
-after instance creation.
-
-The prototype must preserve these contracts:
+The following results are independent of the performance verdict and should
+remain the semantic basis for later Executor work:
 
 1. `ARMED(g) -> FACT_BUILDING(g)` has one acquire-release winner.
-2. Only the winner normalizes the backend result, resolves the site, and pins
-   module/payload lifetime.
-3. Ordinary fact writes become visible only through release publication to
-   `FACT_READY(g)`.
-4. Direct and queued paths call one common fact consumer.
-5. Migration, stop, policy, fairness, tracing, pressure, callback-active, and
-   shard state are fresh guards, never cached fact truth.
-6. Losing tickets retire only references for their exact generation.
-7. Queue, callback, backend, external, payload, and module references must all
-   retire before the sidecar can be reused.
-8. Queue forwarding must defer before targeting an offline destination.
+2. Ticket ownership is indexed and generation-tagged; an old ticket cannot
+   retire a new generation's backend reference.
+3. Fact publication is release/acquire and the published record is immutable.
+4. Lifecycle close and in-flight admission share one atomic gate.
+5. Finishing publishes `TERMINAL(g)` first; only an explicit, strictly newer
+   rearm may expose `ARMED(g+1)`.
+6. Direct and queued paths use one consume/callback transaction and one abort
+   cleanup path.
+7. Mutable stop, migration, fairness, tracing, pressure, callback-active, and
+   shard state are rechecked at consumption.
+8. The initial resume descriptor may be retained, but every changed
+   continuation site must resolve and validate its own function pointer.
+9. Queue saturation falls back to an intrusive owned list and never drops a
+   cell.
+10. Callback, queue, backend, external, payload, module, and ticket ownership
+    must all retire before storage reuse.
 
-## Phase 1 boundary
+## Next experiment
 
-The next change may add a test-only/internal Executor prototype, but must not:
+Run a narrower Phase 0.5 representation comparison before touching `src/`:
 
-- expose the fact record in a public header or stable ABI;
-- allocate a fact or queue node on completion;
-- replace the existing production path by default;
-- change version metadata or publish 3.0.0;
-- combine platform-specific CQE savings with generic CFS gains in one number.
+```text
+A. canonical event normalization helper only
+B. immutable event + retained module lifetime
+C. full fact with retained initial resume descriptor
+```
 
-Start with Linux `io_uring`, because it gives the clearest opportunity to
-measure raw CQE decode removal and connected-operation traffic separately. Add
-kqueue and IOCP adapter conformance only after the common contract is stable.
+Use heterogeneous sites in every performance cell. Measure each option with
+long-lived in-process paired windows, randomized ABBA blocks, a minimum window
+duration, and a predeclared confidence or spread rule. Keep raw samples and
+continue to classify correctness before performance.
 
-## Required Phase 1 evidence
+This comparison answers the remaining architectural question: whether the
+roughly 23% median eight-site model signal requires a persistent 64-byte fact,
+or whether a smaller canonical-event helper captures most of it with less
+lifetime machinery.
 
-The Executor prototype advances only if it preserves:
+## Executor boundary
 
-- literal event, errno, payload, command, and final-frame equality;
-- exactly one normalization and site lookup per winning generation;
-- zero hot allocation and balanced module/payload references;
-- direct-path throughput of at least 98% of recompute;
-- mixed CPU or instruction improvement of at least 5%;
-- no more than 5% p99 regression;
-- LRPA race coverage for publication, double consume, migration, stop,
-  unregister, callback failure, queue overflow, and generation reuse.
+Only after Phase 0.5 produces stable evidence may a test-only Executor
+prototype begin. If it does, start with Linux `io_uring` and report two numbers
+separately:
 
-Report generic CFS results independently from Linux-only linked-SQE or CQE
-traffic reductions. If the real Executor makes normalization/site work too
-small to produce measurable benefit, remove the persistent sidecar and retain
-only the canonical platform normalization helper.
+- generic normalization/lifetime sharing;
+- Linux-only linked-operation and CQE traffic reduction.
+
+The prototype must remain internal, allocation-free after instance creation,
+and outside the stable ABI. kqueue and IOCP adapter conformance follow only
+after the generic contract is stable.
 
 ## Release status
 
-No release is authorized. Version 3.0.0 remains held until the internal
-Executor prototype passes real backend, race, lifetime, and workload evidence.
+No release or version change is authorized. Version 3.0.0 remains held until
+real backend, race, lifetime, and workload evidence passes its declared gates.
