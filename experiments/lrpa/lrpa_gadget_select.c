@@ -50,6 +50,28 @@ worker_outcome(uint32_t worker_id)
     return LRPA_OUTCOME_SEND;
 }
 
+#if defined(LRPA_ENABLE_FAULTS)
+static bool
+calibration_window_is_active(const lrpa_context_t *context)
+{
+    uint64_t value = context->manifest.seed ^
+                     ((uint64_t)context->manifest.fault_id *
+                      UINT64_C(0x9e3779b97f4a7c15));
+    uint64_t threshold = (uint64_t)context->manifest.lane_count *
+                         context->manifest.lane_count;
+
+    value ^= value >> 30U;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27U;
+    value *= UINT64_C(0x94d049bb133111eb);
+    value ^= value >> 31U;
+    if (threshold > 64U) {
+        threshold = 64U;
+    }
+    return value % 64U < threshold;
+}
+#endif
+
 void
 lrpa_select_prepare_round(lrpa_context_t *context, uint32_t round)
 {
@@ -103,7 +125,8 @@ lrpa_select_try_complete(lrpa_context_t *context, lrpa_actor_t *actor,
         generation) {
 #if defined(LRPA_ENABLE_FAULTS)
         if (context->manifest.fault_id ==
-            LRPA_FAULT_STALE_GENERATION_REUSE) {
+                LRPA_FAULT_STALE_GENERATION_REUSE &&
+            calibration_window_is_active(context)) {
             atomic_store_explicit(&cell->stale_completion, 1U,
                                   memory_order_release);
         } else
@@ -215,7 +238,7 @@ lrpa_select_actor_step(lrpa_actor_t *actor, uint32_t round)
     }
 #if defined(LRPA_ENABLE_FAULTS)
     if (context->manifest.fault_id == LRPA_FAULT_SELECT_SKIP_WINNER_CAS &&
-        actor->actor_id == 0U) {
+        actor->actor_id == 0U && calibration_window_is_active(context)) {
         atomic_fetch_add_explicit(&cell->winner_count, 1U,
                                   memory_order_relaxed);
         atomic_fetch_add_explicit(&cell->terminal_count, 1U,
@@ -227,7 +250,8 @@ lrpa_select_actor_step(lrpa_actor_t *actor, uint32_t round)
             memory_order_relaxed);
     }
     if (context->manifest.fault_id == LRPA_FAULT_STALE_GENERATION_REUSE &&
-        actor->actor_id == 0U && round != 0U) {
+        actor->actor_id == 0U && round != 0U &&
+        calibration_window_is_active(context)) {
         generation = (uint64_t)round;
     }
 #endif

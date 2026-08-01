@@ -37,7 +37,7 @@ fault_manifest(lrpa_fault_t fault)
     manifest.queue_capacity = 4096U;
     manifest.fault_id = fault;
     manifest.allowed_outcomes = LRPA_ALLOW_ALL;
-    manifest.seed = UINT64_C(0xdecafbad12345678);
+    manifest.seed = 3U;
     manifest.timeout_ns = UINT64_C(2000000000);
     for (lane = 0U; lane < manifest.lane_count; ++lane) {
         manifest.object_ids[lane] = 100U + lane;
@@ -98,6 +98,25 @@ test_stale_generation_reuse_is_detected(void)
         UINT64_C(0xd06fdee7a97ed974));
 }
 
+static bool
+test_non_window_seed_remains_clean(void)
+{
+    lrpa_manifest_t manifest =
+        fault_manifest(LRPA_FAULT_SELECT_SKIP_WINNER_CAS);
+    lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_result_t result;
+
+    manifest.seed = 1U;
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_context_run(&context, &result) == LRPA_STATUS_OK);
+    TEST_CHECK(result.failures == 0U);
+    TEST_CHECK(result.cleanup_complete);
+    lrpa_context_destroy(&context);
+    return true;
+}
+
 int
 main(void)
 {
@@ -109,6 +128,10 @@ main(void)
         return 1;
     }
     printf("PASS stale_generation_reuse_is_detected\n");
-    printf("LRPA fault calibration tests passed (2 cases)\n");
+    if (!test_non_window_seed_remains_clean()) {
+        return 1;
+    }
+    printf("PASS non_window_seed_remains_clean\n");
+    printf("LRPA fault calibration tests passed (3 cases)\n");
     return 0;
 }
