@@ -49,13 +49,43 @@ static int fail_message(const char *message) {
 }
 
 static bool fact_mode(lccf_model_mode_t mode) {
-    return mode >= LCCF_MODEL_RECOMPUTE_QUEUE &&
-           mode <= LCCF_MODEL_MIXED_SHARED_FACT;
+    switch (mode) {
+    case LCCF_MODEL_RECOMPUTE_QUEUE:
+    case LCCF_MODEL_SHARED_EVENT_QUEUE:
+    case LCCF_MODEL_SHARED_FACT_QUEUE:
+    case LCCF_MODEL_RECOMPUTE_FUSED:
+    case LCCF_MODEL_SHARED_EVENT_FUSED:
+    case LCCF_MODEL_SHARED_FACT_FUSED:
+    case LCCF_MODEL_MIXED_RECOMPUTE:
+    case LCCF_MODEL_MIXED_SHARED_EVENT:
+    case LCCF_MODEL_MIXED_SHARED_FACT:
+        return true;
+    default:
+        return false;
+    }
 }
 
-static bool shared_mode(lccf_model_mode_t mode) {
+static bool shared_event_mode(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_SHARED_EVENT_QUEUE ||
+           mode == LCCF_MODEL_SHARED_EVENT_FUSED ||
+           mode == LCCF_MODEL_MIXED_SHARED_EVENT;
+}
+
+static bool shared_fact_mode(lccf_model_mode_t mode) {
     return mode == LCCF_MODEL_SHARED_FACT_QUEUE ||
            mode == LCCF_MODEL_SHARED_FACT_FUSED ||
+           mode == LCCF_MODEL_MIXED_SHARED_FACT;
+}
+
+static bool queue_mode(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_RECOMPUTE_QUEUE ||
+           mode == LCCF_MODEL_SHARED_EVENT_QUEUE ||
+           mode == LCCF_MODEL_SHARED_FACT_QUEUE;
+}
+
+static bool mixed_mode(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_MIXED_RECOMPUTE ||
+           mode == LCCF_MODEL_MIXED_SHARED_EVENT ||
            mode == LCCF_MODEL_MIXED_SHARED_FACT;
 }
 
@@ -258,20 +288,26 @@ static int verify_metrics(const bench_options_t *options,
              UINT64_C(3) : UINT64_C(1));
     const uint64_t recompute_work =
         callbacks +
-        (options->mode == LCCF_MODEL_RECOMPUTE_QUEUE ||
-                 options->mode == LCCF_MODEL_SHARED_FACT_QUEUE
+        (queue_mode(options->mode)
              ? completions
-             : (options->mode == LCCF_MODEL_MIXED_RECOMPUTE ||
-                        options->mode == LCCF_MODEL_MIXED_SHARED_FACT
+             : (mixed_mode(options->mode)
                     ? metrics->forced_escapes
                     : 0U));
     const uint64_t expected_normalizations =
-        shared_mode(options->mode) ? completions : recompute_work;
+        shared_event_mode(options->mode) ||
+                shared_fact_mode(options->mode)
+            ? completions
+            : recompute_work;
     const bool site_work_valid =
-        shared_mode(options->mode)
+        shared_fact_mode(options->mode)
             ? metrics->fact_site_lookups >= completions &&
                   metrics->fact_site_lookups <= callbacks
             : metrics->fact_site_lookups == recompute_work;
+    const uint64_t expected_sidecar_bytes =
+        shared_fact_mode(options->mode)
+            ? UINT64_C(64)
+            : (shared_event_mode(options->mode) ? UINT64_C(48)
+                                                : UINT64_C(0));
 
     if (metrics->completions != completions ||
         metrics->claims != completions ||
@@ -291,7 +327,8 @@ static int verify_metrics(const bench_options_t *options,
         metrics->fact_reuse_delays != 0U ||
         metrics->fact_queue_forwards != 0U ||
         metrics->hot_allocations != 0U ||
-        metrics->fact_hot_bytes == 0U ||
+        metrics->fact_hot_bytes != UINT64_C(64) ||
+        metrics->fact_sidecar_bytes != expected_sidecar_bytes ||
         metrics->fact_overflow_pushes != metrics->fact_overflow_pops) {
         return EPROTO;
     }

@@ -22,7 +22,14 @@ PAIR_BASELINES = {
     "shared_fact_fused": "recompute_fused",
     "mixed_shared_fact": "mixed_recompute",
 }
-ALL_MODES = frozenset(PAIR_BASELINES) | frozenset(PAIR_BASELINES.values())
+SHARED_EVENT_MODES = frozenset({
+    "shared_event_queue",
+    "shared_event_fused",
+    "mixed_shared_event",
+})
+SHARED_FACT_MODES = frozenset(PAIR_BASELINES)
+RECOMPUTE_MODES = frozenset(PAIR_BASELINES.values())
+ALL_MODES = SHARED_EVENT_MODES | SHARED_FACT_MODES | RECOMPUTE_MODES
 ALL_WORKLOADS = (
     "completion_io_pipeline",
     "completion_rpc_state",
@@ -182,23 +189,36 @@ def _validate_sample(sample: FactSample) -> None:
         raise ValueError("latency quantiles are inconsistent")
     if sample.instructions_supported != (sample.instructions > 0):
         raise ValueError("instruction support/value mismatch")
-    if "shared_fact" in sample.mode and (
+    expected_materializations = sample.callbacks
+    if sample.mode.endswith("queue"):
+        expected_materializations += sample.completions
+    elif sample.mode.startswith("mixed"):
+        expected_materializations += sample.forced_escapes
+    if sample.mode in SHARED_FACT_MODES and (
         sample.fact_normalizations != expected_completions
         or sample.fact_site_lookups < expected_completions
         or sample.fact_site_lookups > expected_callbacks
     ):
         raise ValueError("shared mode fact/site work is inconsistent")
-    expected_recompute_work = sample.callbacks
-    if sample.mode.endswith("queue"):
-        expected_recompute_work += sample.completions
-    elif sample.mode.startswith("mixed"):
-        expected_recompute_work += sample.forced_escapes
-    if "shared_fact" not in sample.mode and (
-        sample.fact_normalizations != expected_recompute_work
-        or sample.fact_site_lookups != expected_recompute_work
+    if sample.mode in SHARED_EVENT_MODES and (
+        sample.fact_normalizations != expected_completions
+        or sample.fact_site_lookups != expected_materializations
+    ):
+        raise ValueError("shared-event work count mismatch")
+    if sample.mode in RECOMPUTE_MODES and (
+        sample.fact_normalizations != expected_materializations
+        or sample.fact_site_lookups != expected_materializations
     ):
         raise ValueError("recompute mode work count mismatch")
-    if sample.fact_guard_rechecks != expected_recompute_work:
+    expected_sidecar_bytes = (
+        64 if sample.mode in SHARED_FACT_MODES
+        else 48 if sample.mode in SHARED_EVENT_MODES
+        else 0
+    )
+    if sample.fact_hot_bytes != 64 or \
+            sample.fact_sidecar_bytes != expected_sidecar_bytes:
+        raise ValueError("representation storage byte count mismatch")
+    if sample.fact_guard_rechecks != expected_materializations:
         raise ValueError("guard recheck count mismatch")
     if sample.fact_overflow_pushes != sample.fact_overflow_pops:
         raise ValueError("intrusive overflow ownership is unbalanced")
@@ -261,7 +281,7 @@ def classify_pair(baseline: FactSample, candidate: FactSample) -> PairResult:
         "fact_module_pins", "fact_payload_pins", "fact_stale_losers",
         "fact_guard_rechecks", "fact_queue_forwards",
         "fact_generation_mismatches", "fact_reuse_delays",
-        "fact_hot_bytes", "fact_sidecar_bytes",
+        "fact_hot_bytes",
         "fact_overflow_pushes", "fact_overflow_pops",
     )
     if any(getattr(baseline, field) != getattr(candidate, field)

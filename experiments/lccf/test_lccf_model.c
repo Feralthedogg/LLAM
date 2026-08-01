@@ -51,6 +51,9 @@ static int test_names_and_parsers(void) {
         "shared_fact_fused",
         "mixed_recompute",
         "mixed_shared_fact",
+        "shared_event_queue",
+        "shared_event_fused",
+        "mixed_shared_event",
     };
     static const char *const workload_names[] = {
         "completion_io_pipeline",
@@ -119,6 +122,12 @@ static int test_candidate_baseline_mapping(void) {
         {LCCF_MODEL_SHARED_FACT_FUSED,
          LCCF_MODEL_RECOMPUTE_FUSED},
         {LCCF_MODEL_MIXED_SHARED_FACT,
+         LCCF_MODEL_MIXED_RECOMPUTE},
+        {LCCF_MODEL_SHARED_EVENT_QUEUE,
+         LCCF_MODEL_RECOMPUTE_QUEUE},
+        {LCCF_MODEL_SHARED_EVENT_FUSED,
+         LCCF_MODEL_RECOMPUTE_FUSED},
+        {LCCF_MODEL_MIXED_SHARED_EVENT,
          LCCF_MODEL_MIXED_RECOMPUTE},
     };
     size_t index;
@@ -1379,8 +1388,6 @@ static bool fact_pair_routing_metrics_equal(
                candidate->fact_generation_mismatches &&
            baseline->fact_reuse_delays == candidate->fact_reuse_delays &&
            baseline->fact_hot_bytes == candidate->fact_hot_bytes &&
-           baseline->fact_sidecar_bytes ==
-               candidate->fact_sidecar_bytes &&
            baseline->fact_overflow_pushes ==
                candidate->fact_overflow_pushes &&
            baseline->fact_overflow_pops ==
@@ -1501,6 +1508,10 @@ static int run_fact_differential_case(
         baseline_metrics.fact_reuse_delays != 0U ||
         baseline_metrics.fact_queue_forwards != 0U ||
         baseline_metrics.hot_allocations != 0U ||
+        baseline_metrics.fact_hot_bytes != 64U ||
+        candidate_metrics.fact_hot_bytes != 64U ||
+        baseline_metrics.fact_sidecar_bytes != 0U ||
+        candidate_metrics.fact_sidecar_bytes != 64U ||
         candidate_metrics.fact_normalizations != completions ||
         candidate_metrics.fact_site_lookups < completions ||
         candidate_metrics.fact_site_lookups > callbacks ||
@@ -1553,6 +1564,246 @@ out:
     lccf_model_batch_destroy(candidate);
     lccf_model_batch_destroy(baseline);
     return rc;
+}
+
+static uint64_t changed_continuation_sites(
+    const lccf_model_trace_row_t *trace,
+    size_t count,
+    size_t instance_count) {
+    uint64_t *generations;
+    uint32_t *initial_sites;
+    bool *seen;
+    uint64_t changed = 0U;
+    size_t index;
+
+    if (trace == NULL || instance_count == 0U) {
+        return UINT64_MAX;
+    }
+    generations = calloc(instance_count, sizeof(*generations));
+    initial_sites = calloc(instance_count, sizeof(*initial_sites));
+    seen = calloc(instance_count, sizeof(*seen));
+    if (generations == NULL || initial_sites == NULL || seen == NULL) {
+        changed = UINT64_MAX;
+        goto out;
+    }
+    for (index = 0U; index < count; ++index) {
+        const size_t instance = trace[index].instance_index;
+
+        if (instance >= instance_count) {
+            changed = UINT64_MAX;
+            goto out;
+        }
+        if (!seen[instance] ||
+            generations[instance] != trace[index].generation) {
+            seen[instance] = true;
+            generations[instance] = trace[index].generation;
+            initial_sites[instance] = trace[index].site_index;
+        } else if (trace[index].site_index != initial_sites[instance]) {
+            changed += UINT64_C(1);
+        }
+    }
+out:
+    free(seen);
+    free(initial_sites);
+    free(generations);
+    return changed;
+}
+
+static int run_representation_triple_case(
+    lccf_model_workload_t workload,
+    const lccf_model_mode_t modes[3],
+    size_t frame_bytes,
+    uint64_t seed) {
+    enum {
+        REPRESENTATION_COUNT = 3,
+        INSTANCE_COUNT = 11,
+        CHAIN_LENGTH = 8,
+        ROUND_COUNT = 3,
+    };
+    static const uint64_t sidecar_bytes[REPRESENTATION_COUNT] = {
+        0U, 48U, 64U,
+    };
+    lccf_model_batch_t *batches[REPRESENTATION_COUNT] = {NULL};
+    lccf_model_metrics_t metrics[REPRESENTATION_COUNT] = {{0}};
+    lccf_model_trace_row_t *traces[REPRESENTATION_COUNT] = {NULL};
+    lccf_model_config_t config = base_config();
+    const uint64_t completions =
+        (uint64_t)INSTANCE_COUNT * (uint64_t)ROUND_COUNT;
+    const uint64_t callbacks = completions * (uint64_t)CHAIN_LENGTH;
+    uint64_t materializations;
+    uint64_t changed_sites;
+    size_t mode_index;
+    unsigned round;
+    int result = 1;
+
+    config.workload = workload;
+    config.instance_count = INSTANCE_COUNT;
+    config.frame_bytes = frame_bytes;
+    config.cell_bytes = 64U;
+    config.site_count = 8U;
+    config.chain_length = CHAIN_LENGTH;
+    config.seed = seed;
+
+    for (mode_index = 0U;
+         mode_index < REPRESENTATION_COUNT;
+         ++mode_index) {
+        config.mode = modes[mode_index];
+        traces[mode_index] = calloc(
+            (size_t)callbacks, sizeof(*traces[mode_index]));
+        if (traces[mode_index] == NULL ||
+            lccf_model_batch_create(&config, &batches[mode_index]) != 0 ||
+            lccf_model_set_trace_buffer(
+                batches[mode_index], traces[mode_index],
+                (size_t)callbacks) != 0) {
+            fail("representation triple create");
+            goto out;
+        }
+        if (mode_index != 0U &&
+            !lccf_model_batch_equal(batches[0], batches[mode_index])) {
+            fail("representation triple initial state");
+            goto out;
+        }
+    }
+    for (round = 0U; round < ROUND_COUNT; ++round) {
+        const size_t trace_count =
+            (size_t)(round + 1U) * INSTANCE_COUNT * CHAIN_LENGTH;
+
+        for (mode_index = 0U;
+             mode_index < REPRESENTATION_COUNT;
+             ++mode_index) {
+            if (lccf_model_run_round(
+                    batches[mode_index], &metrics[mode_index]) != 0) {
+                fail("representation triple round");
+                goto out;
+            }
+        }
+        for (mode_index = 1U;
+             mode_index < REPRESENTATION_COUNT;
+             ++mode_index) {
+            if (!lccf_model_batch_equal(
+                    batches[0], batches[mode_index]) ||
+                lccf_model_checksum(batches[0]) !=
+                    lccf_model_checksum(batches[mode_index]) ||
+                lccf_model_trace_count(batches[mode_index]) !=
+                    trace_count ||
+                memcmp(traces[0], traces[mode_index],
+                       trace_count * sizeof(*traces[0])) != 0) {
+                fail("representation triple semantic equivalence");
+                goto out;
+            }
+        }
+    }
+    materializations = callbacks;
+    if (modes[0] == LCCF_MODEL_RECOMPUTE_QUEUE) {
+        materializations += completions;
+    } else if (modes[0] == LCCF_MODEL_MIXED_RECOMPUTE) {
+        materializations += metrics[0].forced_escapes;
+    }
+    changed_sites = changed_continuation_sites(
+        traces[0], (size_t)callbacks, INSTANCE_COUNT);
+    if (changed_sites == UINT64_MAX ||
+        metrics[0].fact_normalizations != materializations ||
+        metrics[0].fact_site_lookups != materializations ||
+        metrics[1].fact_normalizations != completions ||
+        metrics[1].fact_site_lookups != materializations ||
+        metrics[2].fact_normalizations != completions ||
+        metrics[2].fact_site_lookups != completions + changed_sites) {
+        fprintf(stderr,
+                "[test_lccf_model] representation work mode=%s "
+                "workload=%s frame=%zu materializations=%" PRIu64
+                " changed=%" PRIu64 " A=%" PRIu64 "/%" PRIu64
+                " B=%" PRIu64 "/%" PRIu64
+                " C=%" PRIu64 "/%" PRIu64 "\n",
+                lccf_model_mode_name(modes[0]),
+                lccf_model_workload_name(workload), frame_bytes,
+                materializations, changed_sites,
+                metrics[0].fact_normalizations,
+                metrics[0].fact_site_lookups,
+                metrics[1].fact_normalizations,
+                metrics[1].fact_site_lookups,
+                metrics[2].fact_normalizations,
+                metrics[2].fact_site_lookups);
+        fail("representation triple exact work equations");
+        goto out;
+    }
+    for (mode_index = 0U;
+         mode_index < REPRESENTATION_COUNT;
+         ++mode_index) {
+        if (!fact_pair_routing_metrics_equal(
+                &metrics[0], &metrics[mode_index]) ||
+            metrics[mode_index].fact_guard_rechecks != materializations ||
+            metrics[mode_index].fact_hot_bytes != 64U ||
+            metrics[mode_index].fact_sidecar_bytes !=
+                sidecar_bytes[mode_index] ||
+            !lccf_model_fact_references_balanced(batches[mode_index])) {
+            fail("representation triple routing/lifetime equivalence");
+            goto out;
+        }
+    }
+    result = 0;
+
+out:
+    for (mode_index = 0U;
+         mode_index < REPRESENTATION_COUNT;
+         ++mode_index) {
+        lccf_model_batch_destroy(batches[mode_index]);
+        free(traces[mode_index]);
+    }
+    return result;
+}
+
+static int test_representation_triple_matrix(void) {
+    static const lccf_model_workload_t workloads[] = {
+        LCCF_MODEL_COMPLETION_IO_PIPELINE,
+        LCCF_MODEL_COMPLETION_RPC_STATE,
+        LCCF_MODEL_COMPLETION_TIMER_CANCEL,
+        LCCF_MODEL_COMPLETION_MIXED_FAIRNESS,
+    };
+    static const lccf_model_mode_t routes[][3] = {
+        {
+            LCCF_MODEL_RECOMPUTE_QUEUE,
+            LCCF_MODEL_SHARED_EVENT_QUEUE,
+            LCCF_MODEL_SHARED_FACT_QUEUE,
+        },
+        {
+            LCCF_MODEL_RECOMPUTE_FUSED,
+            LCCF_MODEL_SHARED_EVENT_FUSED,
+            LCCF_MODEL_SHARED_FACT_FUSED,
+        },
+        {
+            LCCF_MODEL_MIXED_RECOMPUTE,
+            LCCF_MODEL_MIXED_SHARED_EVENT,
+            LCCF_MODEL_MIXED_SHARED_FACT,
+        },
+    };
+    static const size_t frame_bytes[] = {64U, 256U};
+    size_t workload_index;
+    size_t route_index;
+    size_t frame_index;
+
+    for (workload_index = 0U;
+         workload_index < sizeof(workloads) / sizeof(workloads[0]);
+         ++workload_index) {
+        for (route_index = 0U;
+             route_index < sizeof(routes) / sizeof(routes[0]);
+             ++route_index) {
+            for (frame_index = 0U;
+                 frame_index <
+                     sizeof(frame_bytes) / sizeof(frame_bytes[0]);
+                 ++frame_index) {
+                if (run_representation_triple_case(
+                        workloads[workload_index], routes[route_index],
+                        frame_bytes[frame_index],
+                        UINT64_C(0x6c6363662d726570) ^
+                            (uint64_t)(workload_index * 101U +
+                                       route_index * 17U + frame_index)) !=
+                    0) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 static int test_fact_differential_matrix(void) {
@@ -1611,108 +1862,178 @@ static int test_fact_differential_matrix(void) {
     return 0;
 }
 
-static int test_fact_layouts_use_declared_storage(void) {
+static int test_fact_representations_use_declared_storage(void) {
+    static const struct {
+        lccf_model_mode_t mode;
+        lccf_representation_t representation;
+        size_t sidecar_bytes;
+    } representations[] = {
+        {
+            LCCF_MODEL_RECOMPUTE_FUSED,
+            LCCF_REP_CANONICAL_HELPER,
+            0U,
+        },
+        {
+            LCCF_MODEL_SHARED_EVENT_FUSED,
+            LCCF_REP_SHARED_EVENT,
+            48U,
+        },
+        {
+            LCCF_MODEL_SHARED_FACT_FUSED,
+            LCCF_REP_FULL_FACT,
+            64U,
+        },
+    };
     static const size_t layouts[] = {64U, 96U, 128U};
+    size_t representation_index;
     size_t layout_index;
 
-    for (layout_index = 0U;
-         layout_index < sizeof(layouts) / sizeof(layouts[0]);
-         ++layout_index) {
-        lccf_model_config_t config = base_config();
-        lccf_model_batch_t *batch = NULL;
-        lccf_model_metrics_t metrics = {0};
-        size_t instance_index;
+    for (representation_index = 0U;
+         representation_index <
+             sizeof(representations) / sizeof(representations[0]);
+         ++representation_index) {
+        for (layout_index = 0U;
+             layout_index < sizeof(layouts) / sizeof(layouts[0]);
+             ++layout_index) {
+            lccf_model_config_t config = base_config();
+            lccf_model_batch_t *batch = NULL;
+            lccf_model_metrics_t metrics = {0};
+            size_t instance_index;
 
-        config.mode = LCCF_MODEL_SHARED_FACT_FUSED;
-        config.instance_count = 3U;
-        config.cell_bytes = layouts[layout_index];
-        config.site_count = 8U;
-        config.chain_length = 3U;
-        if (lccf_model_batch_create(&config, &batch) != 0) {
-            return fail("fact physical layout create");
-        }
-        if ((config.cell_bytes < 128U) !=
-            (batch->fact_sidecar_storage != NULL)) {
-            lccf_model_batch_destroy(batch);
-            return fail("fact sidecar allocation contract");
-        }
-        for (instance_index = 0U;
-             instance_index < config.instance_count;
-             ++instance_index) {
-            lccf_fact_core_t *expected =
-                config.cell_bytes == 128U
-                    ? (lccf_fact_core_t *)(void *)(
-                          batch->cell_storage + instance_index * 128U + 64U)
-                    : &batch->fact_sidecar_storage[instance_index];
-
-            if (lccf_fact_storage(batch->instances[instance_index].fact_cell) !=
-                expected) {
-                lccf_model_batch_destroy(batch);
-                return fail("fact storage address does not match layout");
+            config.mode = representations[representation_index].mode;
+            config.instance_count = 3U;
+            config.cell_bytes = layouts[layout_index];
+            config.site_count = 8U;
+            config.chain_length = 3U;
+            if (lccf_model_batch_create(&config, &batch) != 0) {
+                return fail("fact physical representation create");
             }
-        }
-        if (lccf_model_run_round(batch, &metrics) != 0 ||
-            !lccf_model_fact_references_balanced(batch)) {
+            if ((representations[representation_index].sidecar_bytes != 0U) !=
+                (batch->fact_sidecar_storage != NULL)) {
+                lccf_model_batch_destroy(batch);
+                return fail("fact representation allocation contract");
+            }
+            for (instance_index = 0U;
+                 instance_index < config.instance_count;
+                 ++instance_index) {
+                lccf_fact_cell_t *cell =
+                    batch->instances[instance_index].fact_cell;
+                void *expected =
+                    representations[representation_index].sidecar_bytes == 0U
+                        ? NULL
+                        : (void *)((unsigned char *)
+                                      batch->fact_sidecar_storage +
+                                  instance_index *
+                                      representations[representation_index]
+                                          .sidecar_bytes);
+                const lccf_fact_core_t *expected_fact =
+                    representations[representation_index].representation ==
+                            LCCF_REP_FULL_FACT
+                        ? expected
+                        : NULL;
+
+                if (cell == NULL ||
+                    atomic_load_explicit(
+                        &cell->representation, memory_order_acquire) !=
+                        representations[representation_index]
+                            .representation ||
+                    cell->representation_storage != expected ||
+                    lccf_fact_storage(cell) != expected_fact) {
+                    lccf_model_batch_destroy(batch);
+                    return fail(
+                        "fact storage address does not match representation");
+                }
+            }
+            if (lccf_model_run_round(batch, &metrics) != 0 ||
+                metrics.fact_hot_bytes != 64U ||
+                metrics.fact_sidecar_bytes !=
+                    representations[representation_index].sidecar_bytes ||
+                !lccf_model_fact_references_balanced(batch)) {
+                lccf_model_batch_destroy(batch);
+                return fail("fact physical representation execution");
+            }
             lccf_model_batch_destroy(batch);
-            return fail("fact physical layout execution");
         }
-        lccf_model_batch_destroy(batch);
     }
     return 0;
 }
 
 static int test_fact_callback_failure_retires_lifetime(void) {
-    lccf_model_config_t config = base_config();
-    lccf_model_batch_t *batch = NULL;
-    lccf_model_metrics_t metrics = {0};
-    size_t kind;
+    static const lccf_model_mode_t modes[] = {
+        LCCF_MODEL_RECOMPUTE_FUSED,
+        LCCF_MODEL_SHARED_EVENT_FUSED,
+        LCCF_MODEL_SHARED_FACT_FUSED,
+    };
+    size_t mode_index;
 
-    config.mode = LCCF_MODEL_SHARED_FACT_FUSED;
-    config.instance_count = 1U;
-    config.chain_length = 3U;
-    config.callback_failure_step = 1U;
-    if (lccf_model_batch_create(&config, &batch) != 0) {
-        return fail("fact callback failure create");
-    }
-    if (lccf_model_run_round(batch, &metrics) != EIO ||
-        !lccf_model_fact_references_balanced(batch) ||
-        lccf_fact_module_unregister(batch->instances[0].fact_cell) != 0) {
-        lccf_model_batch_destroy(batch);
-        return fail("fact callback failure teardown");
-    }
-    for (kind = 0U; kind < LCCF_FACT_REF_COUNT; ++kind) {
-        if (atomic_load_explicit(
-                &batch->instances[0].fact_cell->references[kind],
-                memory_order_acquire) != 0U) {
-            lccf_model_batch_destroy(batch);
-            return fail("fact callback failure leaked a reference");
+    for (mode_index = 0U;
+         mode_index < sizeof(modes) / sizeof(modes[0]);
+         ++mode_index) {
+        lccf_model_config_t config = base_config();
+        lccf_model_batch_t *batch = NULL;
+        lccf_model_metrics_t metrics = {0};
+        size_t kind;
+
+        config.mode = modes[mode_index];
+        config.instance_count = 1U;
+        config.chain_length = 3U;
+        config.callback_failure_step = 1U;
+        if (lccf_model_batch_create(&config, &batch) != 0) {
+            return fail("fact callback failure create");
         }
+        if (lccf_model_run_round(batch, &metrics) != EIO ||
+            !lccf_model_fact_references_balanced(batch) ||
+            lccf_fact_module_unregister(
+                batch->instances[0].fact_cell) != 0) {
+            lccf_model_batch_destroy(batch);
+            return fail("fact callback failure teardown");
+        }
+        for (kind = 0U; kind < LCCF_FACT_REF_COUNT; ++kind) {
+            if (atomic_load_explicit(
+                    &batch->instances[0].fact_cell->references[kind],
+                    memory_order_acquire) != 0U) {
+                lccf_model_batch_destroy(batch);
+                return fail("fact callback failure leaked a reference");
+            }
+        }
+        lccf_model_batch_destroy(batch);
     }
-    lccf_model_batch_destroy(batch);
     return 0;
 }
 
 static int test_fact_queue_overflow_uses_intrusive_fallback(void) {
-    lccf_model_config_t config = base_config();
-    lccf_model_batch_t *batch = NULL;
-    lccf_model_metrics_t metrics = {0};
+    static const lccf_model_mode_t modes[] = {
+        LCCF_MODEL_RECOMPUTE_QUEUE,
+        LCCF_MODEL_SHARED_EVENT_QUEUE,
+        LCCF_MODEL_SHARED_FACT_QUEUE,
+    };
+    size_t mode_index;
 
-    config.mode = LCCF_MODEL_SHARED_FACT_QUEUE;
-    config.instance_count = 17U;
-    config.chain_length = 3U;
-    config.fact_queue_capacity = 2U;
-    if (lccf_model_batch_create(&config, &batch) != 0) {
-        return fail("fact overflow create");
-    }
-    if (lccf_model_run_round(batch, &metrics) != 0 ||
-        metrics.fact_overflow_pushes == 0U ||
-        metrics.fact_overflow_pushes != metrics.fact_overflow_pops ||
-        metrics.queue_pushes != metrics.queue_pops ||
-        !lccf_model_fact_references_balanced(batch)) {
+    for (mode_index = 0U;
+         mode_index < sizeof(modes) / sizeof(modes[0]);
+         ++mode_index) {
+        lccf_model_config_t config = base_config();
+        lccf_model_batch_t *batch = NULL;
+        lccf_model_metrics_t metrics = {0};
+
+        config.mode = modes[mode_index];
+        config.instance_count = 17U;
+        config.chain_length = 3U;
+        config.fact_queue_capacity = 2U;
+        if (lccf_model_batch_create(&config, &batch) != 0) {
+            return fail("fact overflow create");
+        }
+        if (lccf_model_run_round(batch, &metrics) != 0 ||
+            metrics.fact_overflow_pushes == 0U ||
+            metrics.fact_overflow_pushes !=
+                metrics.fact_overflow_pops ||
+            metrics.queue_pushes != metrics.queue_pops ||
+            !lccf_model_fact_references_balanced(batch)) {
+            lccf_model_batch_destroy(batch);
+            return fail("fact intrusive overflow fallback");
+        }
         lccf_model_batch_destroy(batch);
-        return fail("fact intrusive overflow fallback");
     }
-    lccf_model_batch_destroy(batch);
     return 0;
 }
 
@@ -1732,7 +2053,8 @@ int main(void) {
         test_remote_differential() != 0 ||
         test_remote_destroy_after_error() != 0 ||
         test_fact_differential_matrix() != 0 ||
-        test_fact_layouts_use_declared_storage() != 0 ||
+        test_representation_triple_matrix() != 0 ||
+        test_fact_representations_use_declared_storage() != 0 ||
         test_fact_callback_failure_retires_lifetime() != 0 ||
         test_fact_queue_overflow_uses_intrusive_fallback() != 0) {
         return 1;

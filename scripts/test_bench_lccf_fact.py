@@ -22,7 +22,9 @@ from bench_lccf_fact import (  # noqa: E402
 
 
 def sample(mode: str, **updates: object) -> FactSample:
-    shared = "shared_fact" in mode
+    shared_fact = "shared_fact" in mode
+    shared_event = "shared_event" in mode
+    persistent = shared_fact or shared_event
     queued = mode.endswith("queue")
     mixed = mode.startswith("mixed")
     completions = 68
@@ -30,8 +32,10 @@ def sample(mode: str, **updates: object) -> FactSample:
     forced = 17 if mixed else 0
     queue_pops = callbacks if queued else (85 if mixed else 0)
     direct_calls = callbacks - queue_pops
-    work = completions if shared else callbacks + (completions if queued else forced)
-    site_work = callbacks if shared else work
+    materializations = callbacks + (completions if queued else forced)
+    work = completions if persistent else materializations
+    site_work = callbacks if shared_fact else materializations
+    sidecar_bytes = 64 if shared_fact else (48 if shared_event else 0)
     value = FactSample(
         version=2,
         workload="completion_io_pipeline",
@@ -73,7 +77,7 @@ def sample(mode: str, **updates: object) -> FactSample:
         fact_generation_mismatches=0,
         fact_reuse_delays=0,
         fact_hot_bytes=64,
-        fact_sidecar_bytes=64,
+        fact_sidecar_bytes=sidecar_bytes,
         fact_overflow_pushes=0,
         fact_overflow_pops=0,
         refs_balanced=True,
@@ -88,6 +92,8 @@ def encoded(value: FactSample) -> str:
 def test_strict_parser() -> None:
     value = sample("shared_fact_queue")
     assert parse_sample_output(encoded(value)) == value
+    event_value = sample("shared_event_queue")
+    assert parse_sample_output(encoded(event_value)) == event_value
 
     bad_rows = [
         "noise\n" + encoded(value),
