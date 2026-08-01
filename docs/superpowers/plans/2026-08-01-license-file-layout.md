@@ -246,6 +246,8 @@ git commit -m "ci: enforce the current license on new files"
 ### Task 3: Package and install only active license metadata
 
 **Files:**
+- Create: `scripts/test_package_license_layout.py`
+- Create: `scripts/test_package_license_layout_windows.ps1`
 - Modify: `scripts/test_license_policy.py`
 - Modify: `scripts/check_license_policy.py`
 - Modify: `scripts/package_release.sh`
@@ -254,26 +256,44 @@ git commit -m "ci: enforce the current license on new files"
 - Modify: `scripts/install.ps1`
 - Modify: `CMakeLists.txt`
 - Modify: `Makefile`
+- Modify: `.github/workflows/stress.yml`
+- Modify: `.github/workflows/release.yml`
 
 **Interfaces:**
 - Consumes: root `LICENSE` and `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`.
 - Produces: archives and installations with `LICENSE` plus `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`, and without `OLD-LICENSES/`.
 
-- [ ] **Step 1: Strengthen failing package-policy tests**
+- [ ] **Step 1: Write failing package behavior tests**
 
-Replace the existing single packaging-marker assertion with platform-specific requirements for both root and active license paths. Add a test that injects `OLD-LICENSES` into a packager and expects:
+Create `scripts/test_package_license_layout.py`. It must build a temporary repository with the real POSIX packager and metadata generator, minimal safe build artifacts for the current host, distinct literal contents for the current and historical license files, and then execute the packager. Inspect the real `.tar.xz` with Python `tarfile` and assert:
 
-```text
-scripts/package_release.sh: historical licenses must not be packaged as current terms
+```python
+self.assertEqual(b"current license\n", archive.extractfile(f"{package}/LICENSE").read())
+self.assertEqual(
+    b"current license\n",
+    archive.extractfile(
+        f"{package}/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
+    ).read(),
+)
+self.assertFalse(any("/OLD-LICENSES/" in name for name in archive.getnames()))
 ```
 
-The valid fixture scripts must mention `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt` and must not mention `OLD-LICENSES`.
+Extract the controlled archive, run its real `install.sh`, and assert the same two current texts exist under `share/llam/`, while `share/llam/OLD-LICENSES` does not.
 
-- [ ] **Step 2: Run the focused package-policy tests and verify failure**
+Create `scripts/test_package_license_layout_windows.ps1`. It must create a temporary repository and stub Windows build tree, run the real copied PowerShell packager, expand the resulting ZIP, and throw unless root `LICENSE` and the active `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt` have the literal current text and `OLD-LICENSES` is absent.
 
-Run: `python3 -m unittest -v scripts.test_license_policy.LicensePolicyTest.test_rejects_release_packager_that_omits_license scripts.test_license_policy.LicensePolicyTest.test_rejects_release_packager_that_includes_historical_license`
+- [ ] **Step 2: Run the package tests and verify failure**
 
-Expected: at least the active-license requirement fails before packager changes.
+Run:
+
+```bash
+python3 -m unittest -v scripts.test_package_license_layout
+docker run --rm -v "$PWD:/workspace" -w /workspace \
+  mcr.microsoft.com/powershell:7.5-ubuntu-24.04 \
+  pwsh -NoProfile -File scripts/test_package_license_layout_windows.ps1
+```
+
+Expected: both tests fail because the active `LICENSES/` text is absent from their archives.
 
 - [ ] **Step 3: Update POSIX and Windows packagers**
 
@@ -287,13 +307,17 @@ Archive installers copy `LICENSES/` to `share/llam/LICENSES/`. CMake installs th
 
 Every temporary repository in `Makefile` that creates a root `LICENSE` before invoking `scripts/package_release.sh` must also create `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`. Preserve each fixture's original expected failure and do not weaken symlink, hard-link, mode, or path-safety assertions.
 
-- [ ] **Step 6: Run package and installer tests**
+- [ ] **Step 6: Wire package behavior tests into normal validation**
+
+Run the POSIX integration test from `test-license-policy`. In the Windows stress job, build `llam_runtime` and `llam_runtime_shared`, then run `scripts/test_package_license_layout_windows.ps1` so the hosted Windows runner verifies real ZIP behavior. Extend the release workflow's existing archive assertions to require the active text and reject `OLD-LICENSES`.
+
+- [ ] **Step 7: Run package and installer tests**
 
 Run: `make -j4 all test CC=clang`
 
 Expected: existing runtime, installer, and package security tests pass.
 
-- [ ] **Step 7: Build and inspect a real local archive**
+- [ ] **Step 8: Build and inspect a real local archive**
 
 Run:
 
@@ -304,10 +328,10 @@ tar -tf target/dist/llam-3.0.0-macos-aarch64.tar.xz | rg 'LICENSE|OLD-LICENSES'
 
 Expected: output contains the root `LICENSE` and active `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`, with no `OLD-LICENSES` entry. Extract both current texts and verify them with `cmp` against the repository copies.
 
-- [ ] **Step 8: Commit packaging support**
+- [ ] **Step 9: Commit packaging support**
 
 ```bash
-git add CMakeLists.txt Makefile scripts/check_license_policy.py scripts/test_license_policy.py scripts/package_release.sh scripts/package_release_windows.ps1 scripts/install.sh scripts/install.ps1
+git add CMakeLists.txt Makefile .github/workflows/stress.yml .github/workflows/release.yml scripts/check_license_policy.py scripts/test_license_policy.py scripts/test_package_license_layout.py scripts/test_package_license_layout_windows.ps1 scripts/package_release.sh scripts/package_release_windows.ps1 scripts/install.sh scripts/install.ps1
 git commit -m "build: ship active license metadata"
 ```
 
