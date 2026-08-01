@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import shrink_lrpa
+import run_lrpa
 
 
 TARGET_SIGNATURE = "deadbeefcafefeed"
@@ -32,16 +34,15 @@ args = parser.parse_args()
 manifest = json.loads(args.manifest.read_text())
 
 if manifest["lane_count"] == 1:
-    time.sleep(0.2)
+    time.sleep(1.0)
 
-step_ids = {step["id"] for step in manifest["perturbations"]}
+step_ids = {step["value"] for step in manifest["perturbations"]}
 fails = (
     manifest["lane_count"] >= 2
     and {2, 5}.issubset(step_ids)
     and manifest["rounds"] >= 3
     and manifest["worker_count"] >= 2
     and (manifest["allowed_outcomes"] & 2) != 0
-    and manifest["payload_size"] >= 4
     and manifest["queue_capacity"] >= 8
 )
 executions = manifest["lane_count"] * manifest["worker_count"] * manifest["rounds"]
@@ -68,7 +69,7 @@ document = {
     "rounds_requested": manifest["rounds"],
     "rounds_completed": manifest["rounds"],
     "coupling": manifest["coupling"],
-    "fault": "select_skip_winner_cas" if fails else "none",
+    "fault": manifest["fault"],
     "signature": signature,
     "lane_executions": executions,
     "elapsed_ns": 1,
@@ -92,15 +93,28 @@ raise SystemExit(returncode)
 class ShrinkerTests(unittest.TestCase):
     def test_semantic_shrinker_preserves_literal_signature(self) -> None:
         original = {
-            "schema_version": 1,
+            "version": 1,
+            "gadget": "select",
             "seed": 99,
             "lane_count": 16,
             "worker_count": 4,
             "rounds": 32,
             "coupling": "colored_graph",
-            "perturbations": [{"id": index, "kind": "yield"} for index in range(8)],
+            "timeout_ns": 2_000_000_000,
+            "fault": "select_skip_winner_cas",
+            "generate_perturbations": False,
+            "perturbations": [
+                {
+                    "kind": 0,
+                    "lane_mask": 1,
+                    "sequence": index,
+                    "value": index,
+                }
+                for index in range(8)
+            ],
+            "perturbation_count": 8,
+            "perturbation_hash": "0000000000000000",
             "allowed_outcomes": 30,
-            "payload_size": 128,
             "queue_capacity": 1024,
         }
         with tempfile.TemporaryDirectory() as directory_text:
@@ -110,19 +124,22 @@ class ShrinkerTests(unittest.TestCase):
             output = directory / "shrink"
             minimized = shrink_lrpa.shrink_manifest(
                 [sys.executable, str(fake)], original, TARGET_SIGNATURE,
-                output, timeout=0.05,
+                output, timeout=0.2,
             )
 
             self.assertEqual(minimized["lane_count"], 2)
             self.assertEqual(
-                [step["id"] for step in minimized["perturbations"]], [2, 5]
+                [step["value"] for step in minimized["perturbations"]], [2, 5]
             )
             self.assertEqual(minimized["rounds"], 3)
             self.assertEqual(minimized["coupling"], "independent")
             self.assertEqual(minimized["worker_count"], 2)
             self.assertEqual(minimized["allowed_outcomes"], 2)
-            self.assertEqual(minimized["payload_size"], 4)
             self.assertEqual(minimized["queue_capacity"], 8)
+            self.assertEqual(minimized["perturbation_count"], 2)
+            self.assertNotEqual(
+                minimized["perturbation_hash"], "0000000000000000"
+            )
 
             minimized_path = output / "minimized-manifest.json"
             log_path = output / "shrink-log.jsonl"
@@ -141,6 +158,36 @@ class ShrinkerTests(unittest.TestCase):
         )
         self.assertFalse(document.matched)
         self.assertEqual(document.reason, "invalid_result")
+
+    def test_real_fault_manifest_is_shrinkable(self) -> None:
+        binary = os.environ.get("LRPA_FAULT_BENCH_BINARY")
+        if not binary:
+            self.skipTest("LRPA_FAULT_BENCH_BINARY is not configured")
+        config = run_lrpa.RunConfig(
+            seed=3, lanes=8, workers=4, rounds=4,
+            coupling="independent", queue_capacity=4096,
+            timeout_ms=2000, fault="select_skip_winner_cas",
+            allowed_outcomes=30, generate_perturbations=True,
+        )
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = pathlib.Path(directory_text)
+            sample = run_lrpa.run_sample(
+                pathlib.Path(binary), config, directory / "sample",
+                process_timeout=5.0, replay_failures=True,
+            )
+            original = json.loads(
+                (sample.artifact_dir / "manifest.json").read_text()
+            )
+            minimized = shrink_lrpa.shrink_manifest(
+                [binary], original, sample.document["signature"],
+                directory / "shrink", timeout=5.0,
+            )
+            evaluation = shrink_lrpa.candidate_matches_signature(
+                [binary], minimized, sample.document["signature"],
+                timeout=5.0,
+            )
+            self.assertTrue(evaluation.matched)
+            self.assertLessEqual(minimized["lane_count"], 8)
 
 
 if __name__ == "__main__":

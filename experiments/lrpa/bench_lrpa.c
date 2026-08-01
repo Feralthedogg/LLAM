@@ -28,6 +28,8 @@ typedef struct driver_options {
     bool have_timeout;
     bool have_fault;
     bool have_allowed;
+    bool verify_generated_perturbation_hash;
+    uint64_t expected_perturbation_hash;
 } driver_options_t;
 
 static bool
@@ -57,6 +59,30 @@ parse_u32(const char *text, uint32_t *value_out)
         return false;
     }
     *value_out = (uint32_t)value;
+    return true;
+}
+
+static bool
+parse_hex_u64(const char *text, uint64_t *value_out)
+{
+    uint64_t value = 0U;
+    size_t index;
+
+    if (text == NULL || value_out == NULL || strlen(text) != 16U)
+        return false;
+    for (index = 0U; index < 16U; ++index) {
+        uint8_t digit;
+
+        if (text[index] >= '0' && text[index] <= '9') {
+            digit = (uint8_t)(text[index] - '0');
+        } else if (text[index] >= 'a' && text[index] <= 'f') {
+            digit = (uint8_t)(text[index] - 'a' + 10);
+        } else {
+            return false;
+        }
+        value = (value << 4U) | digit;
+    }
+    *value_out = value;
     return true;
 }
 
@@ -232,17 +258,44 @@ find_json_value(const char *document, const char *key)
 }
 
 static bool
+json_token_is_finished(const char *position)
+{
+    while (*position == ' ' || *position == '\t' || *position == '\n' ||
+           *position == '\r') {
+        position += 1;
+    }
+    return *position == ',' || *position == '}' || *position == ']';
+}
+
+static bool
 json_u64(const char *document, const char *key, uint64_t *value_out)
 {
     const char *value = find_json_value(document, key);
     char *end = NULL;
     unsigned long long parsed;
 
-    if (value == NULL || *value == '-') return false;
+    if (value == NULL || *value == '-' || *value == '+') return false;
     errno = 0;
     parsed = strtoull(value, &end, 10);
-    if (errno != 0 || end == value) return false;
+    if (errno != 0 || end == value || !json_token_is_finished(end))
+        return false;
     *value_out = (uint64_t)parsed;
+    return true;
+}
+
+static bool
+json_i64(const char *document, const char *key, int64_t *value_out)
+{
+    const char *value = find_json_value(document, key);
+    char *end = NULL;
+    long long parsed;
+
+    if (value == NULL || *value == '+') return false;
+    errno = 0;
+    parsed = strtoll(value, &end, 10);
+    if (errno != 0 || end == value || !json_token_is_finished(end))
+        return false;
+    *value_out = (int64_t)parsed;
     return true;
 }
 
@@ -269,7 +322,8 @@ json_string(const char *document, const char *key, char *buffer,
     end = strchr(value, '"');
     if (end == NULL) return false;
     length = (size_t)(end - value);
-    if (length + 1U > capacity) return false;
+    if (length + 1U > capacity || memchr(value, '\\', length) != NULL ||
+        !json_token_is_finished(end + 1)) return false;
     memcpy(buffer, value, length);
     buffer[length] = '\0';
     return true;
@@ -281,15 +335,79 @@ json_bool(const char *document, const char *key, bool *value_out)
     const char *value = find_json_value(document, key);
 
     if (value == NULL) return false;
-    if (strncmp(value, "true", 4U) == 0) {
+    if (strncmp(value, "true", 4U) == 0 &&
+        json_token_is_finished(value + 4U)) {
         *value_out = true;
         return true;
     }
-    if (strncmp(value, "false", 5U) == 0) {
+    if (strncmp(value, "false", 5U) == 0 &&
+        json_token_is_finished(value + 5U)) {
         *value_out = false;
         return true;
     }
     return false;
+}
+
+static bool
+json_perturbations(const char *document, lrpa_manifest_t *manifest,
+                   bool *present_out)
+{
+    const char *position = find_json_value(document, "perturbations");
+    uint32_t count = 0U;
+
+    *present_out = position != NULL;
+    if (position == NULL) return true;
+    if (*position != '[') return false;
+    position += 1;
+    for (;;) {
+        const char *end;
+        char object[512];
+        size_t length;
+        uint32_t kind;
+        lrpa_perturbation_t *step;
+
+        while (*position == ' ' || *position == '\t' ||
+               *position == '\n' || *position == '\r') {
+            position += 1;
+        }
+        if (*position == ']') {
+            if (!json_token_is_finished(position + 1)) return false;
+            break;
+        }
+        if (*position != '{' || count >= LRPA_MAX_PERTURBATIONS)
+            return false;
+        end = strchr(position, '}');
+        if (end == NULL) return false;
+        length = (size_t)(end - position) + 1U;
+        if (length >= sizeof(object)) return false;
+        memcpy(object, position, length);
+        object[length] = '\0';
+        step = &manifest->perturbations[count];
+        if (!json_u32(object, "kind", &kind) ||
+            kind >= (uint32_t)LRPA_STEP_KIND_COUNT ||
+            !json_u64(object, "lane_mask", &step->lane_mask) ||
+            !json_u32(object, "sequence", &step->sequence) ||
+            !json_i64(object, "value", &step->value)) {
+            return false;
+        }
+        step->kind = (lrpa_step_kind_t)kind;
+        count += 1U;
+        position = end + 1;
+        while (*position == ' ' || *position == '\t' ||
+               *position == '\n' || *position == '\r') {
+            position += 1;
+        }
+        if (*position == ',') {
+            position += 1;
+            continue;
+        }
+        if (*position != ']') return false;
+    }
+    manifest->perturbation_count = count;
+    manifest->perturbation_hash = count == 0U
+        ? 0U
+        : lrpa_perturbation_hash(manifest->perturbations, count);
+    return true;
 }
 
 static bool
@@ -298,8 +416,12 @@ load_manifest(const char *path, driver_options_t *options)
     char coupling[64];
     char fault[64];
     char gadget[32];
+    char perturbation_hash_text[17];
     char *document = read_text_file(path);
     bool generate = false;
+    bool explicit_perturbations = false;
+    uint32_t declared_perturbation_count = 0U;
+    uint64_t declared_perturbation_hash = 0U;
     bool ok;
 
     if (document == NULL) return false;
@@ -319,7 +441,32 @@ load_manifest(const char *path, driver_options_t *options)
          parse_fault(fault, &options->manifest.fault_id) &&
          json_u32(document, "allowed_outcomes",
                   &options->manifest.allowed_outcomes) &&
-         json_bool(document, "generate_perturbations", &generate);
+         json_bool(document, "generate_perturbations", &generate) &&
+         json_u32(document, "perturbation_count",
+                  &declared_perturbation_count) &&
+         json_string(document, "perturbation_hash",
+                     perturbation_hash_text,
+                     sizeof(perturbation_hash_text)) &&
+         parse_hex_u64(perturbation_hash_text,
+                       &declared_perturbation_hash) &&
+         json_perturbations(document, &options->manifest,
+                            &explicit_perturbations) &&
+         !(generate && explicit_perturbations);
+    if (ok && explicit_perturbations) {
+        ok = options->manifest.perturbation_count ==
+                 declared_perturbation_count &&
+             options->manifest.perturbation_hash ==
+                 declared_perturbation_hash;
+    } else if (ok && generate) {
+        options->manifest.perturbation_count =
+            declared_perturbation_count;
+        options->verify_generated_perturbation_hash = true;
+        options->expected_perturbation_hash =
+            declared_perturbation_hash;
+    } else if (ok) {
+        ok = declared_perturbation_count == 0U &&
+             declared_perturbation_hash == 0U;
+    }
     free(document);
     options->generate_perturbations = generate;
     return ok;
@@ -350,6 +497,7 @@ write_manifest_file(const driver_options_t *options)
 {
     char path[LRPA_PATH_BUFFER_SIZE];
     FILE *file;
+    uint32_t index;
 
     if (options->artifact_dir == NULL) return true;
     if (!artifact_path(path, sizeof(path), options->artifact_dir,
@@ -363,9 +511,10 @@ write_manifest_file(const driver_options_t *options)
             "\"queue_capacity\":%u,\"seed\":%" PRIu64 ","
             "\"timeout_ns\":%" PRIu64 ",\"fault\":\"%s\","
             "\"allowed_outcomes\":%u,"
-            "\"generate_perturbations\":%s,"
+            "\"generate_perturbations\":false,"
             "\"perturbation_count\":%u,"
-            "\"perturbation_hash\":\"%016" PRIx64 "\"}\n",
+            "\"perturbation_hash\":\"%016" PRIx64 "\","
+            "\"perturbations\":[",
             options->manifest.version,
             lrpa_coupling_name(options->manifest.coupling),
             options->manifest.lane_count, options->manifest.worker_count,
@@ -373,9 +522,20 @@ write_manifest_file(const driver_options_t *options)
             options->manifest.seed, options->manifest.timeout_ns,
             lrpa_fault_name(options->manifest.fault_id),
             options->manifest.allowed_outcomes,
-            options->generate_perturbations ? "true" : "false",
             options->manifest.perturbation_count,
             options->manifest.perturbation_hash);
+    for (index = 0U; index < options->manifest.perturbation_count; ++index) {
+        const lrpa_perturbation_t *step =
+            &options->manifest.perturbations[index];
+
+        if (index != 0U) fputc(',', file);
+        fprintf(file,
+                "{\"kind\":%u,\"lane_mask\":%" PRIu64
+                ",\"sequence\":%u,\"value\":%" PRId64 "}",
+                (unsigned int)step->kind, step->lane_mask,
+                step->sequence, step->value);
+    }
+    fputs("]}\n", file);
     return fclose(file) == 0;
 }
 
@@ -521,6 +681,12 @@ main(int argc, char **argv)
         lrpa_manifest_generate_perturbations(&options.manifest) !=
             LRPA_STATUS_OK) {
         fputs("failed to generate perturbations\n", stderr);
+        return 2;
+    }
+    if (options.verify_generated_perturbation_hash &&
+        options.manifest.perturbation_hash !=
+            options.expected_perturbation_hash) {
+        fputs("generated perturbation hash mismatch\n", stderr);
         return 2;
     }
     status = lrpa_manifest_validate(&options.manifest);

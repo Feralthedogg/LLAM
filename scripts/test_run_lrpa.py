@@ -105,6 +105,19 @@ class ResultSchemaTests(unittest.TestCase):
 
 
 class RunnerIntegrationTests(unittest.TestCase):
+    def test_clean_equal_cost_matrix_is_not_material_improvement(self) -> None:
+        binary = os.environ.get("LRPA_BENCH_BINARY")
+        if not binary:
+            self.skipTest("LRPA_BENCH_BINARY is not configured")
+        with tempfile.TemporaryDirectory() as directory:
+            summary = run_lrpa.compare_equal_cost(
+                pathlib.Path(binary), pathlib.Path(directory), fault="none",
+                lane_budget=8, workers=4, rounds=1,
+                coupling="independent", queue_capacity=4096,
+                timeout_ms=2000, process_timeout=5.0,
+            )
+            self.assertFalse(summary["material_improvement"])
+
     def test_real_driver_preserves_manifest_and_result(self) -> None:
         binary = os.environ.get("LRPA_BENCH_BINARY")
         if not binary:
@@ -138,12 +151,38 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(replay_document["status"], "ok")
 
+    def test_driver_rejects_tampered_explicit_perturbations(self) -> None:
+        binary = os.environ.get("LRPA_BENCH_BINARY")
+        if not binary:
+            self.skipTest("LRPA_BENCH_BINARY is not configured")
+        config = run_lrpa.RunConfig(
+            seed=17, lanes=2, workers=4, rounds=1, coupling="independent",
+            queue_capacity=2048, timeout_ms=2000, fault="none",
+            allowed_outcomes=30, generate_perturbations=True,
+        )
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = pathlib.Path(directory_text)
+            sample = run_lrpa.run_sample(
+                pathlib.Path(binary), config, directory / "sample",
+                process_timeout=5.0, replay_failures=False,
+            )
+            manifest = json.loads(
+                (sample.artifact_dir / "manifest.json").read_text()
+            )
+            manifest["perturbations"][0]["value"] += 1
+            tampered = directory / "tampered.json"
+            tampered.write_text(json.dumps(manifest) + "\n")
+            with self.assertRaises(run_lrpa.ResultSchemaError):
+                run_lrpa.execute_result_document(
+                    [binary, "--manifest", str(tampered)], timeout=5.0,
+                )
+
     def test_fault_driver_replays_same_signature(self) -> None:
         binary = os.environ.get("LRPA_FAULT_BENCH_BINARY")
         if not binary:
             self.skipTest("LRPA_FAULT_BENCH_BINARY is not configured")
         config = run_lrpa.RunConfig(
-            seed=29,
+            seed=3,
             lanes=4,
             workers=4,
             rounds=4,
@@ -162,6 +201,29 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(sample.document["status"], "oracle_failure")
             self.assertTrue(sample.replayed)
             self.assertTrue((sample.artifact_dir / "replay" / "result.json").is_file())
+
+    def test_equal_cost_matrix_detects_calibrated_amplification(self) -> None:
+        binary = os.environ.get("LRPA_FAULT_BENCH_BINARY")
+        if not binary:
+            self.skipTest("LRPA_FAULT_BENCH_BINARY is not configured")
+        with tempfile.TemporaryDirectory() as directory:
+            summary = run_lrpa.compare_equal_cost(
+                pathlib.Path(binary), pathlib.Path(directory),
+                fault="select_skip_winner_cas", lane_budget=16,
+                workers=4, rounds=4, coupling="independent",
+                queue_capacity=4096, timeout_ms=2000,
+                process_timeout=5.0,
+            )
+            profiles = {row["lanes"]: row for row in summary["profiles"]}
+            totals = {
+                row["budgeted_lane_executions"] for row in profiles.values()
+            }
+            self.assertEqual(len(totals), 1)
+            self.assertEqual(totals.pop(), 16 * 4 * 4)
+            self.assertGreater(profiles[8]["failures"], profiles[1]["failures"])
+            self.assertTrue(summary["material_improvement"])
+            self.assertTrue((pathlib.Path(directory) / "comparison.json").is_file())
+            self.assertTrue((pathlib.Path(directory) / "comparison.csv").is_file())
 
 
 if __name__ == "__main__":

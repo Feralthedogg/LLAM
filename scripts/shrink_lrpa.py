@@ -21,6 +21,15 @@ from run_lrpa import (
 )
 
 
+_MASK64 = (1 << 64) - 1
+_MANIFEST_FIELDS = {
+    "version", "gadget", "coupling", "lane_count", "worker_count",
+    "rounds", "queue_capacity", "seed", "timeout_ns", "fault",
+    "allowed_outcomes", "generate_perturbations", "perturbation_count",
+    "perturbation_hash", "perturbations",
+}
+
+
 @dataclass(frozen=True)
 class CandidateEvaluation:
     matched: bool
@@ -38,7 +47,11 @@ def candidate_matches_signature(
         manifest_path.write_text(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
         )
-        command = [*map(str, command_prefix), "--manifest", str(manifest_path)]
+        prefix = [str(part) for part in command_prefix]
+        executable = pathlib.Path(prefix[0])
+        if executable.exists():
+            prefix[0] = str(executable.resolve())
+        command = [*prefix, "--manifest", str(manifest_path)]
         try:
             document, _, _ = execute_result_document(command, timeout=timeout)
         except SampleTimeout:
@@ -69,6 +82,9 @@ class ShrinkSession:
         output_dir: pathlib.Path, timeout: float,
     ) -> None:
         self.command_prefix = [str(part) for part in command_prefix]
+        executable = pathlib.Path(self.command_prefix[0])
+        if executable.exists():
+            self.command_prefix[0] = str(executable.resolve())
         self.target_signature = target_signature
         self.output_dir = output_dir
         self.timeout = timeout
@@ -98,7 +114,6 @@ class ShrinkSession:
                 "coupling": candidate.get("coupling"),
                 "worker_count": candidate.get("worker_count"),
                 "allowed_outcomes": candidate.get("allowed_outcomes"),
-                "payload_size": candidate.get("payload_size"),
                 "queue_capacity": candidate.get("queue_capacity"),
             },
         }
@@ -118,6 +133,7 @@ def _minimize_integer(
         middle = low + (high - low) // 2
         candidate = copy.deepcopy(best)
         candidate[field] = middle
+        candidate = _normalize_manifest(candidate)
         if session.evaluate(phase, candidate):
             best = candidate
             high = middle
@@ -126,6 +142,7 @@ def _minimize_integer(
     if int(best[field]) != low:
         candidate = copy.deepcopy(best)
         candidate[field] = low
+        candidate = _normalize_manifest(candidate)
         if session.evaluate(phase, candidate):
             best = candidate
     return best
@@ -143,6 +160,7 @@ def _minimize_perturbations(
             candidate_steps = steps[:begin] + steps[begin + chunk_size:]
             candidate = copy.deepcopy(current)
             candidate["perturbations"] = candidate_steps
+            candidate = _normalize_manifest(candidate)
             if session.evaluate("perturbations", candidate):
                 current = candidate
                 steps = candidate_steps
@@ -154,6 +172,12 @@ def _minimize_perturbations(
         if granularity >= len(steps):
             break
         granularity = min(len(steps), granularity * 2)
+    if steps:
+        candidate = copy.deepcopy(current)
+        candidate["perturbations"] = []
+        candidate = _normalize_manifest(candidate)
+        if session.evaluate("perturbations", candidate):
+            current = candidate
     return current
 
 
@@ -168,6 +192,7 @@ def _simplify_coupling(
     for simpler in order[start + 1:]:
         candidate = copy.deepcopy(current)
         candidate["coupling"] = simpler
+        candidate = _normalize_manifest(candidate)
         if session.evaluate("coupling", candidate):
             current = candidate
     return current
@@ -182,40 +207,133 @@ def _minimize_allowed_outcomes(
             continue
         candidate = copy.deepcopy(current)
         candidate["allowed_outcomes"] = allowed & ~bit
+        candidate = _normalize_manifest(candidate)
         if session.evaluate("allowed_outcomes", candidate):
             current = candidate
     return current
 
 
+def _hash_u64(hash_value: int, value: int) -> int:
+    for _ in range(8):
+        hash_value ^= value & 0xff
+        hash_value = (hash_value * 1099511628211) & _MASK64
+        value >>= 8
+    return hash_value
+
+
+def _perturbation_hash(steps: list[dict[str, int]]) -> str:
+    hash_value = 1469598103934665603
+    hash_value = _hash_u64(hash_value, 0x4C52504150525401)
+    hash_value = _hash_u64(hash_value, len(steps))
+    for step in steps:
+        hash_value = _hash_u64(hash_value, step["kind"])
+        hash_value = _hash_u64(hash_value, step["lane_mask"])
+        hash_value = _hash_u64(hash_value, step["sequence"])
+        hash_value = _hash_u64(hash_value, step["value"] & _MASK64)
+    return f"{hash_value:016x}"
+
+
+def _splitmix64_next(state: int) -> tuple[int, int]:
+    state = (state + 0x9E3779B97F4A7C15) & _MASK64
+    value = state
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return state, value ^ (value >> 31)
+
+
+def _generated_perturbations(manifest: dict[str, Any]) -> list[dict[str, int]]:
+    lanes = int(manifest["lane_count"])
+    count = int(manifest.get("perturbation_count", 0))
+    if count == 0:
+        count = min(64, lanes * 2)
+    state = int(manifest["seed"]) & _MASK64
+    steps: list[dict[str, int]] = []
+    for sequence in range(count):
+        state, value = _splitmix64_next(state)
+        kind = value % 7
+        lane = value % lanes
+        lane_mask = ((1 << lanes) - 1) if kind == 2 else (1 << lane)
+        step_value = (value >> 16) % 1024 if kind == 1 else (value >> 24) & 0xffff
+        steps.append({
+            "kind": kind,
+            "lane_mask": lane_mask,
+            "sequence": sequence,
+            "value": step_value,
+        })
+    return steps
+
+
+def _canonicalize_input_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    canonical = copy.deepcopy(manifest)
+    if "perturbations" not in canonical:
+        if not canonical.get("generate_perturbations"):
+            canonical["perturbations"] = []
+        else:
+            canonical["perturbations"] = _generated_perturbations(canonical)
+    canonical["generate_perturbations"] = False
+    return _normalize_manifest(canonical)
+
+
+def _normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(manifest)
+    lanes = int(normalized["lane_count"])
+    valid_mask = _MASK64 if lanes == 64 else (1 << lanes) - 1
+    steps: list[dict[str, int]] = []
+    for source in normalized.get("perturbations", []):
+        step = copy.deepcopy(source)
+        kind = int(step["kind"])
+        lane_mask = int(step["lane_mask"]) & valid_mask
+        if kind == 2:
+            lane_mask = valid_mask
+        if lane_mask == 0:
+            continue
+        step["kind"] = kind
+        step["lane_mask"] = lane_mask
+        step["sequence"] = len(steps)
+        step["value"] = int(step["value"])
+        steps.append(step)
+    normalized["generate_perturbations"] = False
+    normalized["perturbations"] = steps
+    normalized["perturbation_count"] = len(steps)
+    normalized["perturbation_hash"] = (
+        _perturbation_hash(steps) if steps else "0000000000000000"
+    )
+    return normalized
+
+
 def _validate_input_manifest(manifest: dict[str, Any]) -> None:
-    required = {
-        "schema_version", "seed", "lane_count", "worker_count", "rounds",
-        "coupling", "perturbations", "allowed_outcomes", "payload_size",
-        "queue_capacity",
-    }
-    if set(manifest) != required:
+    if set(manifest) != _MANIFEST_FIELDS:
         raise ValueError(
-            f"manifest fields mismatch missing={sorted(required - set(manifest))} "
-            f"unknown={sorted(set(manifest) - required)}"
+            f"manifest fields mismatch missing={sorted(_MANIFEST_FIELDS - set(manifest))} "
+            f"unknown={sorted(set(manifest) - _MANIFEST_FIELDS)}"
         )
-    if manifest["schema_version"] != 1:
-        raise ValueError("unsupported manifest schema")
+    if manifest["version"] != 1 or manifest["gadget"] != "select":
+        raise ValueError("unsupported manifest version or gadget")
     for field in (
         "seed", "lane_count", "worker_count", "rounds", "allowed_outcomes",
-        "payload_size", "queue_capacity",
+        "queue_capacity", "timeout_ns", "perturbation_count",
     ):
         if type(manifest[field]) is not int or manifest[field] < 0:
             raise ValueError(f"{field} must be a non-negative integer")
     if type(manifest["perturbations"]) is not list:
         raise ValueError("perturbations must be a list")
+    if manifest["generate_perturbations"] is not False:
+        raise ValueError("shrink manifests must carry explicit perturbations")
+    if manifest["perturbation_count"] != len(manifest["perturbations"]):
+        raise ValueError("perturbation_count mismatch")
+    for sequence, step in enumerate(manifest["perturbations"]):
+        if set(step) != {"kind", "lane_mask", "sequence", "value"}:
+            raise ValueError("invalid perturbation fields")
+        if step["sequence"] != sequence:
+            raise ValueError("perturbation sequence mismatch")
 
 
 def shrink_manifest(
     command_prefix: Sequence[str], original: dict[str, Any],
     target_signature: str, output_dir: pathlib.Path, *, timeout: float,
 ) -> dict[str, Any]:
-    _validate_input_manifest(original)
-    current = copy.deepcopy(original)
+    current = _canonicalize_input_manifest(original)
+    _validate_input_manifest(current)
     session = ShrinkSession(command_prefix, target_signature, output_dir,
                             timeout)
     if not session.evaluate("baseline", current):
@@ -227,7 +345,6 @@ def shrink_manifest(
     current = _simplify_coupling(session, current)
     current = _minimize_integer(session, current, "worker_count", 1, "workers")
     current = _minimize_allowed_outcomes(session, current)
-    current = _minimize_integer(session, current, "payload_size", 1, "payload")
     current = _minimize_integer(session, current, "queue_capacity", 1,
                                 "queue_capacity")
 

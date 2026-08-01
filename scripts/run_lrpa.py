@@ -7,12 +7,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import pathlib
 import platform
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
@@ -63,7 +65,8 @@ class RunConfig:
 
     def command(self, binary: pathlib.Path, artifact_dir: pathlib.Path) -> list[str]:
         command = [
-            str(binary), "--seed", str(self.seed), "--lanes", str(self.lanes),
+            str(binary.resolve()), "--seed", str(self.seed),
+            "--lanes", str(self.lanes),
             "--workers", str(self.workers), "--rounds", str(self.rounds),
             "--coupling", self.coupling, "--queue-capacity",
             str(self.queue_capacity), "--timeout-ms", str(self.timeout_ms),
@@ -81,6 +84,7 @@ class SampleResult:
     document: dict[str, Any]
     artifact_dir: pathlib.Path
     replayed: bool
+    wall_time_ns: int
 
 
 def _reject_constant(value: str) -> None:
@@ -249,7 +253,9 @@ def run_sample(
     staging_parent.mkdir(exist_ok=True)
     staging = pathlib.Path(tempfile.mkdtemp(prefix="sample-", dir=staging_parent))
     shutil.rmtree(staging)
+    wall_start = time.monotonic_ns()
     document = _run_once(binary, config, staging, process_timeout)
+    wall_time_ns = time.monotonic_ns() - wall_start
     signature = document["signature"]
     if document["status"] == "oracle_failure":
         destination = artifact_root / "failures" / signature / str(config.seed)
@@ -259,7 +265,16 @@ def run_sample(
             f"{config.coupling}-l{config.lanes}" / str(config.seed)
         )
     if destination.exists():
-        shutil.rmtree(destination)
+        collision = destination.with_name(
+            f"{destination.name}-{config.coupling}-l{config.lanes}"
+        )
+        suffix = 2
+        while collision.exists():
+            collision = destination.with_name(
+                f"{destination.name}-{config.coupling}-l{config.lanes}-{suffix}"
+            )
+            suffix += 1
+        destination = collision
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(staging), str(destination))
 
@@ -273,7 +288,158 @@ def run_sample(
         if replay_document["status"] != "oracle_failure":
             raise ResultSchemaError("failure replay unexpectedly passed")
         replayed = True
-    return SampleResult(config, document, destination, replayed)
+    return SampleResult(config, document, destination, replayed, wall_time_ns)
+
+
+def _percentile_99(values: list[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    index = max(0, math.ceil(len(ordered) * 0.99) - 1)
+    return ordered[index]
+
+
+def compare_equal_cost(
+    binary: pathlib.Path, artifact_root: pathlib.Path, *, fault: str,
+    lane_budget: int, workers: int, rounds: int, coupling: str,
+    queue_capacity: int, timeout_ms: int, process_timeout: float,
+    seed_base: int = 1, lane_counts: Sequence[int] = (1, 2, 4, 8),
+) -> dict[str, Any]:
+    if lane_budget <= 0 or any(lanes <= 0 or lane_budget % lanes != 0
+                               for lanes in lane_counts):
+        raise ValueError("lane_budget must be positive and divisible by lane counts")
+    samples_by_lane: dict[int, list[SampleResult]] = {
+        lanes: [] for lanes in lane_counts
+    }
+    counts = {lanes: lane_budget // lanes for lanes in lane_counts}
+    max_samples = max(counts.values())
+    for sample_index in range(max_samples):
+        order = list(lane_counts)
+        if sample_index % 2:
+            order.reverse()
+        for lanes in order:
+            if sample_index >= counts[lanes]:
+                continue
+            config = RunConfig(
+                seed=seed_base + sample_index,
+                lanes=lanes,
+                workers=workers,
+                rounds=rounds,
+                coupling=coupling,
+                queue_capacity=queue_capacity,
+                timeout_ms=timeout_ms,
+                fault=fault,
+                allowed_outcomes=30,
+                generate_perturbations=True,
+            )
+            samples_by_lane[lanes].append(run_sample(
+                binary, config, artifact_root,
+                process_timeout=process_timeout, replay_failures=True,
+            ))
+
+    profiles: list[dict[str, Any]] = []
+    for lanes in lane_counts:
+        samples = sorted(samples_by_lane[lanes], key=lambda item: item.config.seed)
+        failures = [sample for sample in samples
+                    if sample.document["status"] == "oracle_failure"]
+        cumulative_budgeted_executions = 0
+        cumulative_actual_executions = 0
+        cumulative_wall = 0
+        budgeted_executions_to_first: int | None = None
+        actual_executions_to_first: int | None = None
+        wall_to_first: int | None = None
+        for sample in samples:
+            cumulative_budgeted_executions += lanes * workers * rounds
+            cumulative_actual_executions += int(
+                sample.document["lane_executions"]
+            )
+            cumulative_wall += sample.wall_time_ns
+            if sample.document["status"] == "oracle_failure":
+                budgeted_executions_to_first = cumulative_budgeted_executions
+                actual_executions_to_first = cumulative_actual_executions
+                wall_to_first = cumulative_wall
+                break
+        budgeted_executions = len(samples) * lanes * workers * rounds
+        actual_executions = sum(
+            int(sample.document["lane_executions"]) for sample in samples
+        )
+        signatures = [str(sample.document["signature"]) for sample in failures]
+        signature_counts = {
+            signature: signatures.count(signature) for signature in sorted(set(signatures))
+        }
+        profile = {
+            "lanes": lanes,
+            "processes": len(samples),
+            "failures": len(failures),
+            "process_failure_rate": len(failures) / len(samples),
+            "budgeted_lane_executions": budgeted_executions,
+            "actual_lane_executions": actual_executions,
+            "detections_per_million_lane_executions": (
+                len(failures) * 1_000_000.0 / budgeted_executions
+            ),
+            "budgeted_executions_to_first_detection":
+                budgeted_executions_to_first,
+            "actual_executions_to_first_detection": actual_executions_to_first,
+            "wall_ns_to_first_detection": wall_to_first,
+            "replay_rate": (
+                sum(sample.replayed for sample in failures) / len(failures)
+                if failures else None
+            ),
+            "signature_counts": signature_counts,
+            "signature_stability": (
+                max(signature_counts.values()) / len(failures)
+                if failures else None
+            ),
+            "cleanup_failures": sum(
+                not bool(sample.document["cleanup_complete"]) for sample in samples
+            ),
+            "mean_process_elapsed_ns": (
+                sum(int(sample.document["elapsed_ns"]) for sample in samples) // len(samples)
+            ),
+            "p99_process_elapsed_ns": _percentile_99(
+                [int(sample.document["elapsed_ns"]) for sample in samples]
+            ),
+        }
+        profiles.append(profile)
+
+    ordinary = profiles[0]
+    best = max(profiles[1:], key=lambda row: row["failures"])
+    material_improvement = (
+        best["failures"] >= max(2, ordinary["failures"] * 2)
+        and best["detections_per_million_lane_executions"] >
+            ordinary["detections_per_million_lane_executions"]
+    )
+    summary = {
+        "schema_version": 1,
+        "fault": fault,
+        "coupling": coupling,
+        "lane_budget_per_profile": lane_budget,
+        "workers": workers,
+        "rounds": rounds,
+        "profiles": profiles,
+        "material_improvement": material_improvement,
+        "independence_assumed": False,
+    }
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    (artifact_root / "comparison.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    )
+    with (artifact_root / "comparison.csv").open("w", newline="") as stream:
+        fieldnames = [
+            "lanes", "processes", "failures", "process_failure_rate",
+            "budgeted_lane_executions", "actual_lane_executions",
+            "detections_per_million_lane_executions",
+            "budgeted_executions_to_first_detection",
+            "actual_executions_to_first_detection",
+            "wall_ns_to_first_detection",
+            "replay_rate", "signature_stability", "cleanup_failures",
+            "mean_process_elapsed_ns", "p99_process_elapsed_ns",
+        ]
+        writer = csv.DictWriter(stream, fieldnames=fieldnames,
+                                extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(profiles)
+    return summary
 
 
 def _positive_int(text: str) -> int:
@@ -298,7 +464,20 @@ def main() -> int:
     parser.add_argument("--timeout-ms", type=_positive_int, default=2000)
     parser.add_argument("--process-timeout", type=float, default=10.0)
     parser.add_argument("--fault", choices=sorted(FAULTS), default="none")
+    parser.add_argument("--compare-equal-cost", action="store_true")
+    parser.add_argument("--lane-budget", type=_positive_int, default=64)
     args = parser.parse_args()
+
+    if args.compare_equal_cost:
+        summary = compare_equal_cost(
+            args.binary, args.artifact_root, fault=args.fault,
+            lane_budget=args.lane_budget, workers=args.workers,
+            rounds=args.rounds, coupling=args.coupling,
+            queue_capacity=args.queue_capacity, timeout_ms=args.timeout_ms,
+            process_timeout=args.process_timeout, seed_base=args.seed_base,
+        )
+        print(json.dumps(summary, sort_keys=True))
+        return 0
 
     samples: list[SampleResult] = []
     for offset in range(args.seeds):
