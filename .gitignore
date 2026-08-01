@@ -17,6 +17,9 @@ compile_commands.json
 /bench_lcwe_model
 /bench_srem_model
 /bench_leir_phase0
+/bench_leir_aot_connect
+/bench_leir_native_pipeline
+/bench_leir_native_segment
 /demo
 /llam_broker
 /stress
@@ -29,6 +32,17 @@ test_connect_io
 test_io_buffers
 /test_lccf_model
 /test_leir_phase0
+/test_leir_connect
+/test_leir_aot_plan
+/test_leir_aot_module
+/test_leir_aot_c_consumer
+/test_leir_aot_integration
+/test_leir_aot_linux_unit
+/test_leir_aot_ownership
+/test_leir_aot_ring_profile
+/test_leir_native_plan
+/test_leir_native_segment
+/test_leir_native_linux
 test_lcwe_model
 /test_srem_model
 test_multi_runtime_core

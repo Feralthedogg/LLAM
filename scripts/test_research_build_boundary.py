@@ -126,6 +126,29 @@ class BuildProvenanceSourceHygieneTests(unittest.TestCase):
         ).read_text(encoding="utf-8").splitlines()
         self.assertIn("*.llam-build-provenance", ignore_patterns)
 
+    def test_research_executables_do_not_dirty_source_evidence(self) -> None:
+        ignore_patterns = (
+            self.source / ".gitignore"
+        ).read_text(encoding="utf-8").splitlines()
+        for executable in (
+            "bench_leir_aot_connect",
+            "bench_leir_native_pipeline",
+            "bench_leir_native_segment",
+            "test_leir_aot_c_consumer",
+            "test_leir_aot_integration",
+            "test_leir_aot_linux_unit",
+            "test_leir_aot_module",
+            "test_leir_aot_ownership",
+            "test_leir_aot_plan",
+            "test_leir_aot_ring_profile",
+            "test_leir_connect",
+            "test_leir_native_linux",
+            "test_leir_native_plan",
+            "test_leir_native_segment",
+        ):
+            with self.subTest(executable=executable):
+                self.assertIn(f"/{executable}", ignore_patterns)
+
 
 class AotRingProfileBoundaryTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
