@@ -19,8 +19,8 @@ GitHub Actions, GitHub repository security settings.
 ### Task 1: Record the transition contract
 
 **Files:**
-- Create: `docs/superpowers/specs/2026-08-01-license-transition-design.md`
-- Create: `docs/superpowers/plans/2026-08-01-license-transition.md`
+- Create: `docs/research/specs/2026-08-01-license-transition-design.md`
+- Create: `docs/research/plans/2026-08-01-license-transition.md`
 
 - [x] Confirm the baseline `make -j4 all test CC=clang` run exits successfully.
 - [x] Record the version boundary, unchanged ABI, policy files, automated
