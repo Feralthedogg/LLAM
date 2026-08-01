@@ -127,6 +127,60 @@ class BuildProvenanceSourceHygieneTests(unittest.TestCase):
         self.assertIn("*.llam-build-provenance", ignore_patterns)
 
 
+class AotRingProfileBoundaryTests(unittest.TestCase):
+    source = Path(__file__).resolve().parents[1]
+
+    def test_selector_is_declared_only_in_research_projections(self) -> None:
+        manifest = json.loads(
+            (self.source / "config/llam-sources.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        selector_source = "src/io/linux/research_ring_profile.c"
+        selector_header = (
+            "src/io/linux/runtime_io_ring_profile_linux_internal.h"
+        )
+        research = manifest["research"]
+        self.assertIn(
+            selector_source,
+            research["runtime_platform_sources"]["linux"],
+        )
+        self.assertIn(selector_header, research["private_headers"])
+        stable_projection = json.dumps(
+            {
+                key: value
+                for key, value in manifest.items()
+                if key != "research"
+            },
+            sort_keys=True,
+        )
+        self.assertNotIn(selector_source, stable_projection)
+        self.assertNotIn(selector_header, stable_projection)
+
+    def test_workflow_runs_explicit_profile_smoke_before_full_screen(
+        self,
+    ) -> None:
+        workflow = (
+            self.source / ".github/workflows/leir-aot-research.yml"
+        ).read_text(encoding="utf-8")
+        profile_list = (
+            "--profiles submit_all,coop_taskrun,defer_taskrun"
+        )
+        smoke_name = "      - name: Collect ring profile smoke evidence\n"
+        full_name = "      - name: Collect specialized mechanism evidence\n"
+
+        self.assertIn("test_leir_aot_ring_profile", workflow)
+        self.assertGreaterEqual(workflow.count(profile_list), 2)
+        self.assertIn(smoke_name, workflow)
+        self.assertIn(full_name, workflow)
+        self.assertLess(workflow.index(smoke_name), workflow.index(full_name))
+        self.assertIn('assert verdict["schema_version"] == 2', workflow)
+        self.assertIn(
+            'assert verdict["control_profile"] == "submit_all"',
+            workflow,
+        )
+
+
 class ResearchBoundaryTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
     requested_work: Path | None = None
@@ -1174,6 +1228,9 @@ class ResearchBoundaryTests(unittest.TestCase):
         self.assertIn(
             "test_leir_aot_ownership", self.research_cmake_targets
         )
+        self.assertIn(
+            "test_leir_aot_ring_profile", self.research_cmake_targets
+        )
         self.assertIn("test_leir_connect", self.research_cmake_targets)
         self.assertIn(
             "experiments/leir/bench_leir_aot_connect.c",
@@ -1352,6 +1409,7 @@ class ResearchBoundaryTests(unittest.TestCase):
         off_compile_commands = self._combined_output(off_make)
         on_compile_commands = self._combined_output(on_make)
         for source in (
+            "research_ring_profile.c",
             "linux_segment.c",
             "linux_segment_cancel.c",
             "linux_segment_resources.c",
@@ -1370,12 +1428,14 @@ class ResearchBoundaryTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertTrue(
-            all(
-                "linux_segment.c" not in entry["file"].replace("\\", "/")
-                for entry in off_cmake_commands
-            )
-        )
+        for source in ("research_ring_profile.c", "linux_segment.c"):
+            with self.subTest(source=source):
+                self.assertTrue(
+                    all(
+                        source not in entry["file"].replace("\\", "/")
+                        for entry in off_cmake_commands
+                    )
+                )
         for mode, commands, suffixes in (
             (
                 0,
@@ -1455,6 +1515,14 @@ class ResearchBoundaryTests(unittest.TestCase):
         self.assertEqual(on_headers, off_headers)
         for mode in ("off", "on"):
             install_dir = self.work / f"install-{mode}"
+            self.assertEqual(
+                list(
+                    install_dir.rglob(
+                        "runtime_io_ring_profile_linux_internal.h"
+                    )
+                ),
+                [],
+            )
             metadata = "\n".join(
                 path.read_text(encoding="utf-8")
                 for path in sorted(install_dir.rglob("*"))

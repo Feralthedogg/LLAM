@@ -191,15 +191,39 @@ make LLAM_BUILD_RESEARCH=1 -j4 bench_leir_aot_connect
 python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
 python3 scripts/bench_leir_aot_connect.py \
   --binary ./bench_leir_aot_connect \
-  --output-dir .artifacts/leir-aot-connect/local-screen
+  --output-dir .artifacts/leir-aot-connect/local-screen \
+  --profiles submit_all,coop_taskrun,defer_taskrun
 ```
 
-The default matrix covers TCP and Unix stream sockets, concurrency 1 and 16,
-payloads 64 and 4096, 256 activations, and five fresh-process samples per
-candidate in ABBA order. A constrained container that cannot submit io_uring
-operations returns the explicit skip code; it does not emit a synthetic
-performance sample. Local Docker validation therefore needs an io_uring-capable
-security profile.
+The default matrix covers all three strict profiles, TCP and Unix stream
+sockets, concurrency 1 and 16, payloads 64 and 4096, 256 activations, and five
+fresh-process samples per candidate in ABBA order. Each generated-native sample
+is paired only with a portable sample using the same profile. A constrained
+container that cannot submit io_uring operations returns the explicit skip
+code; it does not emit a synthetic performance sample. Local Docker validation
+therefore needs an io_uring-capable security profile.
+
+For a quick capability check before the full matrix, run:
+
+```sh
+python3 scripts/bench_leir_aot_connect.py \
+  --binary ./bench_leir_aot_connect \
+  --output-dir .artifacts/leir-aot-connect/profile-smoke \
+  --profiles submit_all,coop_taskrun,defer_taskrun \
+  --families unix \
+  --concurrency 1 \
+  --payloads 64 \
+  --activations 8 \
+  --samples 1
+```
+
+The current LLAM topology creates each ring on the runtime initialization task
+and submits it from a dedicated I/O worker. Current Linux kernels bind a
+non-disabled `SINGLE_ISSUER` ring to its setup task, so `defer_taskrun` is
+reported as `UNAVAILABLE` before ring creation. This is a topology result, not
+a performance loss. Measuring that profile requires a separate worker-owned
+ring-construction experiment. No profile is silently downgraded to fewer setup
+flags.
 
 The bundle contains `raw.csv`, `summary.csv`, `metadata.json`, `verdict.json`,
 and `summary.md`. Metadata distinguishes `SPECIALIZED` Linux evidence from a
@@ -207,6 +231,19 @@ portable performance claim and records source/tree/binary digests plus the
 kernel and toolchain. Successful native samples must report exactly two SQEs,
 one visible CQE, one suppressed successful CQE, one park, one wake, and zero
 hot allocations per activation.
+
+Schema-2 samples also record diagnostic cost attribution:
+
+- `bind_ns`: slot binding before portable or generated execution;
+- `execute_ns`: the outer portable run or generated ticket run;
+- `aot_prepare_ns`: generated module preparation;
+- `aot_ring_ns`: native segment issue through terminal completion and task
+  resumption;
+- `aot_resume_ns`: generated continuation resume and output copy.
+
+Portable samples require all three `aot_*` counters to remain zero. Native
+samples require them to be positive and their overflow-safe sum not to exceed
+`execute_ns`.
 
 The checked-in generated C and header use
 `LicenseRef-LLAM-Commercial-Reciprocity-1.0`. Before running the screen, the
@@ -222,6 +259,15 @@ The mechanism verdict has three outcomes:
   wall-regression evidence fails;
 - `INCOMPLETE`: required samples or platform support are missing, or the wall
   confidence interval crosses the 1.05 boundary.
+
+That top-level verdict belongs only to the `submit_all` control profile. Each
+profile independently reports `CONTINUE`, `REJECT`, `INCOMPLETE`, or
+`UNAVAILABLE`, plus capability and same-profile CPU, p99, and wall ratios. An
+optional profile cannot rewrite a successful control verdict. Among profiles
+whose complete cells all continue, `recommended_profile` ranks median CPU
+ratio first, then p99 ratio, then wall ratio. The recommendation is
+Linux/io_uring research evidence only; it is not a portable default, public API
+promise, or release authorization.
 
 `CONTINUE` only permits broader research. The separate 3.0.0 classifier still
 requires a 1.50x wall win, CPU ratio at most 0.70, p99 ratio at most 1.10,

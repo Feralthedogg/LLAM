@@ -416,13 +416,13 @@ git commit -m "research: classify ring profiles independently"
 - CI runs a smoke profile matrix and uploads schema-2 evidence.
 - Default builds and packages contain no selector source/header or target.
 
-- [ ] **Step 1: Write boundary and workflow RED tests**
+- [x] **Step 1: Write boundary and workflow RED tests**
 
 Extend the research-boundary fixture to require the selector only in Linux
 research projections and forbid it from stable package artifacts. Extend
 manifest/workflow assertions so CI passes an explicit profile list.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -434,20 +434,20 @@ python3 scripts/audit_build_manifests.py --root . --check
 Expected: failure until the workflow and audited projections include the new
 target/profile arguments.
 
-- [ ] **Step 3: Update CI and operator documentation**
+- [x] **Step 3: Update CI and operator documentation**
 
 The research workflow first runs a one-cell smoke for all profiles, then runs
 the frozen full matrix. Document exact CLI examples, `UNAVAILABLE` semantics,
 cost-field meaning, and that profile recommendation is Linux-only research.
 Do not change release jobs.
 
-- [ ] **Step 4: Regenerate the audited recipe digest if required**
+- [x] **Step 4: Regenerate the audited recipe digest if required**
 
 Use the audit helper's reported exact digest and update only its expected
 constant. Re-run until the full manifest audit passes without warnings about
 missing or shadowed targets.
 
-- [ ] **Step 5: Commit CI and docs**
+- [x] **Step 5: Commit CI and docs**
 
 ```bash
 git add .github/workflows/leir-aot-research.yml \

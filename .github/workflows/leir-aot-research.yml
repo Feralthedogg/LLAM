@@ -11,7 +11,9 @@ on:
     paths:
       - ".github/workflows/leir-aot-research.yml"
       - "experiments/leir/**"
+      - "src/core/lifecycle/init.c"
       - "src/io/api/issue.c"
+      - "src/io/engine/io_engine.c"
       - "src/io/linux/**"
       - "config/llam-sources.json"
       - "scripts/audit_build_manifests.py"
@@ -106,6 +108,7 @@ jobs:
             test_leir_aot_integration \
             test_leir_aot_linux_unit \
             test_leir_aot_ownership \
+            test_leir_aot_ring_profile \
             test_leir_native_linux \
             bench_leir_aot_connect \
             CC=gcc 2>&1 | tee "$OUT_DIR/gcc-build.log"
@@ -122,15 +125,23 @@ jobs:
           ./test_leir_native_linux --unit-only \
             2>&1 | tee "$OUT_DIR/native-linux-unit.log"
           set +e
+          ./test_leir_aot_ring_profile \
+            2>&1 | tee "$OUT_DIR/aot-ring-profile.log"
+          ring_profile_rc=${PIPESTATUS[0]}
           ./test_leir_aot_integration \
             2>&1 | tee "$OUT_DIR/aot-integration.log"
           integration_rc=${PIPESTATUS[0]}
           set -e
+          if [ "$ring_profile_rc" -ne 0 ] && [ "$ring_profile_rc" -ne 77 ]; then
+            exit "$ring_profile_rc"
+          fi
           if [ "$integration_rc" -ne 0 ] && [ "$integration_rc" -ne 77 ]; then
             exit "$integration_rc"
           fi
           echo "integration_rc=$integration_rc" \
             > "$OUT_DIR/integration-status.txt"
+          echo "ring_profile_rc=$ring_profile_rc" \
+            > "$OUT_DIR/ring-profile-status.txt"
 
       - name: Clang CMake contract gate
         run: |
@@ -146,6 +157,7 @@ jobs:
             test_leir_aot_integration \
             test_leir_aot_linux_unit \
             test_leir_aot_ownership \
+            test_leir_aot_ring_profile \
             test_leir_connect \
             bench_leir_aot_connect \
             -j2
@@ -170,6 +182,7 @@ jobs:
             test_leir_aot_integration \
             test_leir_aot_linux_unit \
             test_leir_aot_ownership \
+            test_leir_aot_ring_profile \
             test_leir_connect \
             -j2
           env \
@@ -201,6 +214,31 @@ jobs:
           python3 -m unittest \
             scripts/test_research_build_boundary.py -v
 
+      - name: Collect ring profile smoke evidence
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/bench_leir_aot_connect.py \
+            --binary ./bench_leir_aot_connect \
+            --output-dir "$OUT_DIR/profile-smoke" \
+            --profiles submit_all,coop_taskrun,defer_taskrun \
+            --families unix \
+            --concurrency 1 \
+            --payloads 64 \
+            --activations 8 \
+            --samples 1 \
+            2> >(tee "$OUT_DIR/profile-smoke-stderr.log" >&2) |
+            tee "$OUT_DIR/profile-smoke-stdout.log"
+          smoke_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$smoke_rc" -ne 0 ] && [ "$smoke_rc" -ne 3 ]; then
+            exit "$smoke_rc"
+          fi
+          echo "smoke_rc=$smoke_rc" > "$OUT_DIR/profile-smoke-status.txt"
+          test -f "$OUT_DIR/profile-smoke/raw.csv"
+          test -f "$OUT_DIR/profile-smoke/metadata.json"
+          test -f "$OUT_DIR/profile-smoke/verdict.json"
+
       - name: Collect specialized mechanism evidence
         shell: bash
         run: |
@@ -208,6 +246,7 @@ jobs:
           python3 scripts/bench_leir_aot_connect.py \
             --binary ./bench_leir_aot_connect \
             --output-dir "$OUT_DIR/screen" \
+            --profiles submit_all,coop_taskrun,defer_taskrun \
             --families tcp,unix \
             --concurrency 1,16 \
             --payloads 64,4096 \
@@ -235,7 +274,17 @@ jobs:
               (Path(os.environ["OUT_DIR"]) / "screen/verdict.json")
               .read_text(encoding="utf-8")
           )
+          assert verdict["schema_version"] == 2
           assert verdict["scope"] == "SPECIALIZED"
+          assert verdict["control_profile"] == "submit_all"
+          assert set(verdict["profiles"]) == {
+              "submit_all",
+              "coop_taskrun",
+              "defer_taskrun",
+          }
+          assert verdict["profiles"]["defer_taskrun"]["verdict"] == (
+              "UNAVAILABLE"
+          )
           assert verdict["release_authorized"] is False
           assert verdict["release_gate"]["verdict"] == "BLOCKED"
           PY
