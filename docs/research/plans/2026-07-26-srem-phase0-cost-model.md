@@ -21,7 +21,7 @@ ASan/UBSan, TSan where supported, and compiler vectorization remarks.
 ## Global Constraints
 
 - Follow
-  `docs/superpowers/specs/2026-07-26-llam-site-resident-effect-machine-design.md`.
+  `docs/research/specs/2026-07-26-llam-site-resident-effect-machine-design.md`.
 - Keep Phase 0 standalone. Do not modify `src/`, public headers under
   `include/llam/`, the current stackful task representation, or ABI version.
 - Preserve the user's root-worktree changes in
@@ -197,8 +197,8 @@ matrix verdict.
 - `object/srem-phase0-gate/srem_phase0_summary.csv`
 - `object/srem-phase0-gate/srem_phase0_metadata.json`
 - `object/srem-phase0-gate/srem_phase0_report.md`
-- `docs/superpowers/reports/2026-07-26-srem-phase0-results.md`
-- `docs/superpowers/reports/2026-07-26-srem-phase0-decision.md`
+- `docs/research/reports/2026-07-26-srem-phase0-results.md`
+- `docs/research/reports/2026-07-26-srem-phase0-decision.md`
 
 Raw `object/` evidence remains ignored. A tracked report must be generated
 from the same in-memory rows and remain byte-identical to its raw copy.

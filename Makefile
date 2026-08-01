@@ -2028,7 +2028,7 @@ lccf-model-report: test-lccf-model
 		--cc "$(CC)" \
 		--out-dir object/lccf-phase0 \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+			docs/research/reports/2026-07-26-lccf-phase0-results.md
 
 srem-model-screen: test-srem-model
 	python3 scripts/bench_srem_model.py \
@@ -2040,7 +2040,7 @@ srem-model-screen: test-srem-model
 		--warmup-rounds 7 \
 		--output-dir object/srem-phase0-screen \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-srem-phase0-results.md
+			docs/research/reports/2026-07-26-srem-phase0-results.md
 
 SREM_SELECTED_WIDTH ?=
 SREM_SELECTED_THRESHOLD ?=
@@ -2065,7 +2065,7 @@ srem-model-report: test-srem-model
 		--correctness "$(SREM_CORRECTNESS)" \
 		--output-dir object/srem-phase0-gate \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-srem-phase0-results.md
+			docs/research/reports/2026-07-26-srem-phase0-results.md
 
 test-process-utils:
 	python3 scripts/test_process_utils.py

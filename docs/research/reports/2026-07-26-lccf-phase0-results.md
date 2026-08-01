@@ -558,5 +558,5 @@ This is a standalone synthetic cost model, not production validation. It does no
 - verdict: `"INCONCLUSIVE"`
 
 ```sh
-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 scripts/bench_lccf_model.py --binary ./bench_lccf_model --samples 9 --instances 65536 --min-mode-ms 250 --budget 8 --chain 18 --producers 2 --cc cc --out-dir object/lccf-phase0 --tracked-report docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 scripts/bench_lccf_model.py --binary ./bench_lccf_model --samples 9 --instances 65536 --min-mode-ms 250 --budget 8 --chain 18 --producers 2 --cc cc --out-dir object/lccf-phase0 --tracked-report docs/research/reports/2026-07-26-lccf-phase0-results.md
 ```
