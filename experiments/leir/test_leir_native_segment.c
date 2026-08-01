@@ -3,6 +3,7 @@
 
 #include "leir_native_segment.h"
 #include "leir_test_support.h"
+#include "runtime_internal.h"
 #include "test_leir_native_fixture.h"
 
 #include <errno.h>
@@ -19,7 +20,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
-
 #define INTEGRATION_FD_SLOT 0U
 #define INTEGRATION_LENGTH_SLOT 1U
 #define INTEGRATION_FIRST_BUFFER_SLOT 2U
