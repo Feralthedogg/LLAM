@@ -190,6 +190,33 @@ static int resolve_event_fact(const lccf_fact_ticket_t *ticket,
     return 0;
 }
 
+int lccf_fact_normalize(const lccf_fact_ticket_t *ticket,
+                        uint64_t fact_id,
+                        lccf_fact_core_t *out_fact) {
+    lccf_event_core_t event;
+    int rc;
+
+    if (ticket == NULL || out_fact == NULL ||
+        ticket->site_count > UINT16_MAX) {
+        return EINVAL;
+    }
+    rc = normalize_event(ticket, &event);
+    if (rc != 0) {
+        return rc;
+    }
+    if (ticket->site_index > UINT16_MAX) {
+        fact_site_failure(ticket, &event, ticket->site_index, out_fact);
+        out_fact->fact_id = fact_id;
+        return 0;
+    }
+    rc = resolve_event_fact(
+        ticket, &event, ticket->site_index, out_fact);
+    if (rc == 0) {
+        out_fact->fact_id = fact_id;
+    }
+    return rc;
+}
+
 size_t lccf_representation_sidecar_bytes(
     lccf_representation_t representation) {
     switch (representation) {

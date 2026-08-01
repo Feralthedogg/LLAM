@@ -1247,6 +1247,135 @@ static int test_acquire_finish_rearm_race(void) {
     return 0;
 }
 
+static int test_configured_representations_share_protocol(void) {
+    static const lccf_representation_t representations[] = {
+        LCCF_REP_CANONICAL_HELPER,
+        LCCF_REP_SHARED_EVENT,
+        LCCF_REP_FULL_FACT,
+    };
+    static const uint64_t expected_normalizations[] = {4U, 1U, 1U};
+    static const uint64_t expected_lookups[] = {4U, 4U, 2U};
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(representations) / sizeof(representations[0]);
+         ++index) {
+        union {
+            lccf_event_core_t event;
+            lccf_fact_core_t fact;
+        } storage;
+        unsigned char published[sizeof(storage)];
+        lccf_fact_cell_t cell;
+        lccf_fact_ticket_t ticket = ticket_for(
+            LCCF_FACT_SOURCE_LINUX_CQE, 201U + index);
+        lccf_fact_counters_t counters = {0};
+        lccf_fact_core_t materialized;
+        lccf_fact_core_t acquired;
+        lccf_fact_decision_t decision;
+        lccf_fact_guard_t guard = direct_guard(2U);
+        void *storage_pointer =
+            representations[index] == LCCF_REP_CANONICAL_HELPER
+                ? NULL
+                : (void *)&storage;
+        const size_t sidecar_bytes = lccf_representation_sidecar_bytes(
+            representations[index]);
+        bool won = false;
+
+        memset(&storage, 0xa5, sizeof(storage));
+        CHECK(lccf_fact_cell_init_representation(
+                  &cell, ticket.generation,
+                  LCCF_FACT_LAYOUT_SPLIT64_64, 1U,
+                  representations[index], storage_pointer) == 0,
+              "configured representation initialization");
+        CHECK(lccf_fact_try_publish_configured(
+                  &cell, &ticket, &counters, &won) == 0 && won,
+              "configured representation publication");
+        if (sidecar_bytes != 0U) {
+            memcpy(published, &storage, sidecar_bytes);
+        }
+        if (representations[index] == LCCF_REP_CANONICAL_HELPER) {
+            CHECK(lccf_fact_acquire(
+                      &cell, ticket.generation, &acquired) == ENODATA,
+                  "canonical helper has no persistent acquisition");
+        } else {
+            CHECK(lccf_fact_acquire(
+                      &cell, ticket.generation, &acquired) == 0 &&
+                      acquired.resolved_site == TEST_SITE_TABLE[3],
+                  "persistent representation acquisition");
+        }
+        CHECK(lccf_fact_materialize(
+                  &cell, ticket.generation, 3U, &counters,
+                  &materialized) == 0 &&
+                  materialized.resolved_site == TEST_SITE_TABLE[3],
+              "first initial-site materialization");
+        CHECK(lccf_fact_materialize(
+                  &cell, ticket.generation, 3U, &counters,
+                  &materialized) == 0 &&
+                  materialized.resolved_site == TEST_SITE_TABLE[3],
+              "second initial-site materialization");
+        CHECK(lccf_fact_materialize(
+                  &cell, ticket.generation, 5U, &counters,
+                  &materialized) == 0 &&
+                  materialized.resolved_site == TEST_SITE_TABLE[5],
+              "changed-site materialization");
+        CHECK(lccf_fact_consume(
+                  &cell, ticket.generation, 3U,
+                  LCCF_FACT_CONSUMER_DIRECT, &guard, &counters,
+                  &decision, &materialized) == 0 &&
+                  decision.route == LCCF_FACT_ROUTE_DIRECT &&
+                  materialized.resolved_site == TEST_SITE_TABLE[3],
+              "configured representation direct consume");
+        CHECK(counters.normalization_calls ==
+                  expected_normalizations[index] &&
+                  counters.site_lookups == expected_lookups[index],
+              "configured representation work equation");
+        if (sidecar_bytes != 0U) {
+            CHECK(memcmp(published, &storage, sidecar_bytes) == 0,
+                  "configured representation storage is immutable");
+        }
+        CHECK(lccf_fact_finish(
+                  &cell, ticket.generation, &counters) == 0,
+              "configured representation finish");
+        CHECK(lccf_fact_can_reuse(&cell),
+              "configured representation retires every reference");
+    }
+    return 0;
+}
+
+static int test_loser_cannot_reconfigure_winner_representation(void) {
+    lccf_fact_cell_t cell;
+    lccf_fact_counters_t counters = {0};
+    lccf_fact_ticket_t winner = ticket_for(
+        LCCF_FACT_SOURCE_LINUX_CQE, 211U);
+    lccf_fact_ticket_t loser = ticket_for(
+        LCCF_FACT_SOURCE_KQUEUE, 211U);
+    lccf_fact_core_t before;
+    lccf_fact_core_t after;
+    bool won = false;
+
+    loser.owner_index = 1U;
+    CHECK(lccf_fact_cell_init(
+              &cell, 211U, LCCF_FACT_LAYOUT_SPLIT64_64, 2U, NULL) == 0,
+          "loser reconfiguration cell initialization");
+    CHECK(lccf_fact_try_publish(
+              &cell, &winner, true, &counters, &won) == 0 && won,
+          "persistent representation winner publication");
+    CHECK(lccf_fact_acquire(&cell, 211U, &before) == 0,
+          "winner representation acquisition");
+    won = true;
+    CHECK(lccf_fact_try_publish(
+              &cell, &loser, false, &counters, &won) == 0 && !won,
+          "canonical-helper loser retirement");
+    CHECK(atomic_load_explicit(
+              &cell.representation, memory_order_acquire) ==
+              LCCF_REP_FULL_FACT,
+          "loser cannot replace winner representation");
+    CHECK(lccf_fact_acquire(&cell, 211U, &after) == 0 &&
+              memcmp(&before, &after, sizeof(before)) == 0,
+          "loser cannot invalidate winner storage");
+    return 0;
+}
+
 int main(void) {
     static const struct {
         const char *name;
@@ -1286,6 +1415,10 @@ int main(void) {
          test_abort_releases_every_owned_reference},
         {"acquire/finish/rearm race",
          test_acquire_finish_rearm_race},
+        {"configured representation protocol",
+         test_configured_representations_share_protocol},
+        {"winner representation isolation",
+         test_loser_cannot_reconfigure_winner_representation},
     };
     size_t index;
 

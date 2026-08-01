@@ -219,13 +219,15 @@ typedef struct lccf_fact_cell {
     _Atomic uint32_t references[LCCF_FACT_REF_COUNT];
     _Atomic uint64_t ticket_owners[LCCF_FACT_MAX_TICKETS];
     _Atomic uint64_t lifecycle_gate;
-    _Atomic bool shared;
+    _Atomic uint32_t representation;
     _Atomic bool published;
+    void *representation_storage;
     lccf_fact_core_t *fact_storage;
     lccf_fact_core_t fallback_fact;
     lccf_fact_ticket_t raw_ticket;
     lccf_fact_layout_t layout;
     uint32_t ticket_count;
+    bool legacy_configurable;
 } lccf_fact_cell_t;
 
 uint64_t lccf_fact_pack_state(uint64_t generation,
@@ -237,6 +239,11 @@ int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
                         lccf_fact_layout_t layout,
                         uint32_t ticket_count,
                         lccf_fact_core_t *fact_storage);
+int lccf_fact_cell_init_representation(
+    lccf_fact_cell_t *cell, uint64_t generation,
+    lccf_fact_layout_t layout, uint32_t ticket_count,
+    lccf_representation_t representation,
+    void *representation_storage);
 size_t lccf_fact_layout_hot_bytes(lccf_fact_layout_t layout);
 size_t lccf_fact_layout_sidecar_bytes(lccf_fact_layout_t layout);
 int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
@@ -258,6 +265,11 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
                           bool shared,
                           lccf_fact_counters_t *counters,
                           bool *out_won);
+int lccf_fact_try_publish_configured(
+    lccf_fact_cell_t *cell,
+    const lccf_fact_ticket_t *ticket,
+    lccf_fact_counters_t *counters,
+    bool *out_won);
 int lccf_fact_acquire(const lccf_fact_cell_t *cell,
                       uint64_t generation,
                       lccf_fact_core_t *out_fact);

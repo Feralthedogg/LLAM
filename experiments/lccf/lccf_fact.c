@@ -42,6 +42,42 @@ static bool layout_is_valid(lccf_fact_layout_t layout) {
            layout < LCCF_FACT_LAYOUT_COUNT;
 }
 
+static bool representation_is_valid(
+    lccf_representation_t representation) {
+    return representation >= LCCF_REP_CANONICAL_HELPER &&
+           representation < LCCF_REP_COUNT;
+}
+
+static bool representation_storage_is_valid(
+    lccf_representation_t representation,
+    const void *storage) {
+    if (representation == LCCF_REP_CANONICAL_HELPER) {
+        return storage == NULL;
+    }
+    if (storage == NULL) {
+        return false;
+    }
+    if (representation == LCCF_REP_SHARED_EVENT) {
+        return (uintptr_t)storage % _Alignof(lccf_event_core_t) == 0U;
+    }
+    if (representation == LCCF_REP_FULL_FACT) {
+        return (uintptr_t)storage % _Alignof(lccf_fact_core_t) == 0U;
+    }
+    return false;
+}
+
+static void clear_representation_storage(lccf_fact_cell_t *cell) {
+    const lccf_representation_t representation =
+        (lccf_representation_t)atomic_load_explicit(
+            &cell->representation, memory_order_relaxed);
+    const size_t bytes =
+        lccf_representation_sidecar_bytes(representation);
+
+    if (bytes != 0U && cell->representation_storage != NULL) {
+        memset(cell->representation_storage, 0, bytes);
+    }
+}
+
 static int retire_backend_reference(lccf_fact_cell_t *cell);
 
 static void counter_increment(uint64_t *counter) {
@@ -148,13 +184,6 @@ static void retire_stale_ticket_token(lccf_fact_cell_t *cell,
     }
 }
 
-static int64_t bits_to_i64(uint64_t value) {
-    int64_t result;
-
-    memcpy(&result, &value, sizeof(result));
-    return result;
-}
-
 static uint64_t i64_to_bits(int64_t value) {
     uint64_t result;
 
@@ -239,22 +268,6 @@ static int retire_backend_reference(lccf_fact_cell_t *cell) {
     return reference_subtract(cell, LCCF_FACT_REF_BACKEND, 1U);
 }
 
-static void make_failure_fact(const lccf_fact_ticket_t *ticket,
-                              uint64_t fact_id,
-                              lccf_fact_core_t *fact) {
-    memset(fact, 0, sizeof(*fact));
-    fact->generation = ticket->generation;
-    fact->fact_id = fact_id;
-    fact->stable_flags = ticket->stable_flags;
-    fact->result = -1;
-    fact->error_code = EPROTO;
-    fact->event_kind = LCCF_FACT_EVENT_FAIL;
-    fact->source_kind = ticket->source_kind;
-    fact->captured_home_shard = ticket->captured_home_shard;
-    fact->source_node = ticket->source_node;
-    fact->site_index = (uint16_t)ticket->site_index;
-}
-
 uint64_t lccf_fact_pack_state(uint64_t generation,
                               lccf_fact_state_t state) {
     if (generation > LCCF_FACT_MAX_GENERATION ||
@@ -272,15 +285,20 @@ lccf_fact_state_t lccf_fact_unpack_state(uint64_t word) {
     return (lccf_fact_state_t)(word & LCCF_FACT_STATE_MASK);
 }
 
-int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
-                        lccf_fact_layout_t layout,
-                        uint32_t ticket_count,
-                        lccf_fact_core_t *fact_storage) {
+static int cell_init(lccf_fact_cell_t *cell, uint64_t generation,
+                     lccf_fact_layout_t layout,
+                     uint32_t ticket_count,
+                     lccf_representation_t representation,
+                     void *representation_storage,
+                     bool legacy_configurable) {
     size_t index;
 
     if (cell == NULL || generation > LCCF_FACT_MAX_GENERATION ||
         !layout_is_valid(layout) || ticket_count == 0U ||
-        ticket_count > LCCF_FACT_MAX_TICKETS) {
+        ticket_count > LCCF_FACT_MAX_TICKETS ||
+        !representation_is_valid(representation) ||
+        (!legacy_configurable && !representation_storage_is_valid(
+             representation, representation_storage))) {
         return EINVAL;
     }
     memset(cell, 0, sizeof(*cell));
@@ -294,27 +312,68 @@ int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
                     index < ticket_count ? generation : 0U);
     }
     atomic_init(&cell->lifecycle_gate, 0U);
-    atomic_init(&cell->shared, false);
+    atomic_init(&cell->representation, (uint32_t)representation);
     atomic_init(&cell->published, false);
     atomic_store_explicit(&cell->references[LCCF_FACT_REF_BACKEND],
                           ticket_count, memory_order_relaxed);
-    cell->fact_storage =
-        fact_storage == NULL ? &cell->fallback_fact : fact_storage;
-    memset(cell->fact_storage, 0, sizeof(*cell->fact_storage));
+    cell->representation_storage = representation_storage;
+    cell->fact_storage = representation == LCCF_REP_FULL_FACT
+                             ? representation_storage
+                             : NULL;
+    clear_representation_storage(cell);
     cell->layout = layout;
     cell->ticket_count = ticket_count;
+    cell->legacy_configurable = legacy_configurable;
     return 0;
+}
+
+int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
+                        lccf_fact_layout_t layout,
+                        uint32_t ticket_count,
+                        lccf_fact_core_t *fact_storage) {
+    lccf_fact_core_t *storage;
+    int rc;
+
+    if (cell == NULL) {
+        return EINVAL;
+    }
+    storage = fact_storage == NULL ? &cell->fallback_fact : fact_storage;
+    rc = cell_init(cell, generation, layout, ticket_count,
+                   LCCF_REP_CANONICAL_HELPER, NULL, true);
+    if (rc != 0) {
+        return rc;
+    }
+    cell->representation_storage = storage;
+    cell->fact_storage = storage;
+    memset(storage, 0, sizeof(*storage));
+    return 0;
+}
+
+int lccf_fact_cell_init_representation(
+    lccf_fact_cell_t *cell, uint64_t generation,
+    lccf_fact_layout_t layout, uint32_t ticket_count,
+    lccf_representation_t representation,
+    void *representation_storage) {
+    return cell_init(cell, generation, layout, ticket_count,
+                     representation, representation_storage, false);
 }
 
 int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
                        uint32_t ticket_count) {
+    lccf_representation_t representation;
     uint64_t current;
     uint64_t exclusive;
     size_t index;
 
     if (cell == NULL || generation > LCCF_FACT_MAX_GENERATION ||
-        ticket_count == 0U || ticket_count > LCCF_FACT_MAX_TICKETS ||
-        cell->fact_storage == NULL) {
+        ticket_count == 0U || ticket_count > LCCF_FACT_MAX_TICKETS) {
+        return EINVAL;
+    }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    if (!representation_is_valid(representation) ||
+        (!cell->legacy_configurable && !representation_storage_is_valid(
+             representation, cell->representation_storage))) {
         return EINVAL;
     }
     current = atomic_load_explicit(&cell->state_generation,
@@ -339,7 +398,7 @@ int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
             &cell->state_generation, current, memory_order_release);
         return EBUSY;
     }
-    memset(cell->fact_storage, 0, sizeof(*cell->fact_storage));
+    clear_representation_storage(cell);
     memset(&cell->raw_ticket, 0, sizeof(cell->raw_ticket));
     for (index = 0U; index < LCCF_FACT_REF_COUNT; ++index) {
         atomic_store_explicit(&cell->references[index], 0U,
@@ -349,7 +408,6 @@ int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
                           ticket_count, memory_order_relaxed);
     initialize_ticket_owners(cell, generation, ticket_count);
     cell->ticket_count = ticket_count;
-    atomic_store_explicit(&cell->shared, false, memory_order_relaxed);
     atomic_store_explicit(&cell->published, false, memory_order_relaxed);
     open_lifecycle(cell);
     atomic_store_explicit(
@@ -422,112 +480,26 @@ int lccf_fact_ticket_from_logical(
     return 0;
 }
 
-int lccf_fact_normalize(const lccf_fact_ticket_t *ticket,
-                        uint64_t fact_id,
-                        lccf_fact_core_t *out_fact) {
-    const lccf_fact_site_descriptor_t *resolved_site = NULL;
-    int64_t result;
-    int32_t error_code;
-    bool malformed;
-
-    if (ticket == NULL || out_fact == NULL ||
-        ticket->generation > LCCF_FACT_MAX_GENERATION ||
-        !source_is_valid((lccf_fact_source_t)ticket->source_kind) ||
-        !event_is_valid((lccf_fact_event_kind_t)ticket->event_kind) ||
-        ticket->site_count > UINT16_MAX) {
-        return EINVAL;
+static bool published_representation_failed(
+    const lccf_fact_cell_t *cell,
+    lccf_representation_t representation) {
+    if (representation == LCCF_REP_SHARED_EVENT) {
+        return ((const lccf_event_core_t *)cell->representation_storage)
+                   ->event_kind == LCCF_FACT_EVENT_FAIL;
     }
-    malformed = (ticket->raw_flags & LCCF_FACT_TICKET_MALFORMED) != 0U ||
-                (ticket->raw_flags & LCCF_FACT_TICKET_INVALID_SITE) != 0U ||
-                (ticket->raw_flags &
-                 LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN) != 0U ||
-                ticket->site_table == NULL ||
-                ticket->site_count == 0U ||
-                ticket->site_index >= ticket->site_count;
-    if (!malformed) {
-        resolved_site = ticket->site_table[ticket->site_index];
-        malformed = resolved_site == NULL ||
-                    resolved_site->invoke == NULL ||
-                    resolved_site->logical_index != ticket->site_index;
+    if (representation == LCCF_REP_FULL_FACT) {
+        return ((const lccf_fact_core_t *)cell->representation_storage)
+                   ->event_kind == LCCF_FACT_EVENT_FAIL;
     }
-    result = ticket->raw_result;
-    error_code = ticket->raw_error;
-
-    switch ((lccf_fact_source_t)ticket->source_kind) {
-    case LCCF_FACT_SOURCE_LINUX_CQE:
-        if (ticket->raw_result < 0) {
-            int64_t decoded_error;
-
-            if (ticket->raw_result == INT64_MIN) {
-                malformed = true;
-            } else {
-                decoded_error = -ticket->raw_result;
-                if (decoded_error > INT32_MAX) {
-                    malformed = true;
-                } else {
-                    error_code = (int32_t)decoded_error;
-                    result = bits_to_i64(ticket->raw_aux);
-                }
-            }
-        } else if (ticket->raw_error != 0) {
-            malformed = true;
-        }
-        break;
-    case LCCF_FACT_SOURCE_KQUEUE:
-        if ((ticket->raw_flags & LCCF_FACT_RAW_KQUEUE_ERROR) != 0U) {
-            if (ticket->raw_error <= 0) {
-                malformed = true;
-            }
-        } else if (ticket->raw_error != 0) {
-            malformed = true;
-        }
-        break;
-    case LCCF_FACT_SOURCE_IOCP:
-        if ((ticket->raw_flags & LCCF_FACT_RAW_IOCP_SUCCESS) != 0U) {
-            if (ticket->raw_error != 0) {
-                malformed = true;
-            }
-        } else if (ticket->raw_error <= 0) {
-            malformed = true;
-        }
-        break;
-    case LCCF_FACT_SOURCE_TIMER:
-    case LCCF_FACT_SOURCE_CANCEL:
-    case LCCF_FACT_SOURCE_EXTERNAL:
-    case LCCF_FACT_SOURCE_STOP:
-        if (ticket->raw_error < 0) {
-            malformed = true;
-        }
-        break;
-    default:
-        return EINVAL;
-    }
-
-    if (malformed) {
-        make_failure_fact(ticket, fact_id, out_fact);
-        return 0;
-    }
-    memset(out_fact, 0, sizeof(*out_fact));
-    out_fact->generation = ticket->generation;
-    out_fact->fact_id = fact_id;
-    out_fact->stable_flags = ticket->stable_flags;
-    out_fact->result = result;
-    out_fact->payload_word = ticket->payload_word;
-    out_fact->resolved_site = resolved_site;
-    out_fact->error_code = error_code;
-    out_fact->event_kind = (uint8_t)ticket->event_kind;
-    out_fact->source_kind = (uint8_t)ticket->source_kind;
-    out_fact->captured_home_shard = ticket->captured_home_shard;
-    out_fact->source_node = ticket->source_node;
-    out_fact->site_index = (uint16_t)ticket->site_index;
-    return 0;
+    return false;
 }
 
-int lccf_fact_try_publish(lccf_fact_cell_t *cell,
-                          const lccf_fact_ticket_t *ticket,
-                          bool shared,
-                          lccf_fact_counters_t *counters,
-                          bool *out_won) {
+static int try_publish_representation(
+    lccf_fact_cell_t *cell,
+    const lccf_fact_ticket_t *ticket,
+    lccf_representation_t representation,
+    lccf_fact_counters_t *counters,
+    bool *out_won) {
     uint64_t observed;
     uint64_t building;
     uint64_t ready;
@@ -535,7 +507,10 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
     int rc;
 
     if (cell == NULL || ticket == NULL || counters == NULL ||
-        out_won == NULL || ticket->generation > LCCF_FACT_MAX_GENERATION) {
+        out_won == NULL || ticket->generation > LCCF_FACT_MAX_GENERATION ||
+        !representation_is_valid(representation) ||
+        (representation != LCCF_REP_CANONICAL_HELPER &&
+         cell->representation_storage == NULL)) {
         return EINVAL;
     }
     *out_won = false;
@@ -573,12 +548,13 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
         operation_leave(cell);
         return rc;
     }
+    atomic_store_explicit(&cell->representation,
+                          (uint32_t)representation,
+                          memory_order_relaxed);
 
     if ((ticket->raw_flags & LCCF_FACT_TICKET_FAIL_MODULE_PIN) != 0U) {
         counter_increment(&counters->fact_build_failures);
         atomic_store_explicit(&cell->published, false,
-                              memory_order_relaxed);
-        atomic_store_explicit(&cell->shared, false,
                               memory_order_relaxed);
         atomic_store_explicit(
             &cell->state_generation,
@@ -614,37 +590,27 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
     }
 
     cell->raw_ticket = *ticket;
-    atomic_store_explicit(&cell->shared, shared, memory_order_relaxed);
     atomic_store_explicit(&cell->published, false, memory_order_relaxed);
-    if (shared) {
-        counter_increment(&counters->normalization_calls);
-        counter_increment(&counters->site_lookups);
-        rc = lccf_fact_normalize(ticket, 0U, cell->fact_storage);
-        if (rc != 0) {
-            counter_increment(&counters->fact_build_failures);
-            if (ticket->payload_word != 0U &&
-                (ticket->raw_flags &
-                 LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN) == 0U) {
-                (void)reference_subtract(
-                    cell, LCCF_FACT_REF_PAYLOAD, 1U);
-            }
-            (void)reference_subtract(cell, LCCF_FACT_REF_MODULE, 1U);
-            atomic_store_explicit(
-                &cell->state_generation,
-                lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
-                memory_order_release);
-            operation_leave(cell);
-            return rc;
+    rc = lccf_representation_publish(
+        representation, ticket, cell->representation_storage, counters);
+    if (rc != 0) {
+        counter_increment(&counters->fact_build_failures);
+        if (ticket->payload_word != 0U &&
+            (ticket->raw_flags &
+             LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN) == 0U) {
+            (void)reference_subtract(
+                cell, LCCF_FACT_REF_PAYLOAD, 1U);
         }
-        cell->fact_storage->fact_id =
-            lccf_fact_compute_id(cell->fact_storage);
-        if (cell->fact_storage->event_kind == LCCF_FACT_EVENT_FAIL) {
-            counter_increment(&counters->fact_build_failures);
-            if ((ticket->raw_flags &
-                 LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN) != 0U) {
-                cell->fact_storage->payload_word = 0U;
-            }
-        }
+        (void)reference_subtract(cell, LCCF_FACT_REF_MODULE, 1U);
+        atomic_store_explicit(
+            &cell->state_generation,
+            lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+            memory_order_release);
+        operation_leave(cell);
+        return rc;
+    }
+    if (published_representation_failed(cell, representation)) {
+        counter_increment(&counters->fact_build_failures);
     }
     counter_increment(&counters->fact_builds);
     atomic_store_explicit(&cell->published, true, memory_order_relaxed);
@@ -656,69 +622,50 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
     return 0;
 }
 
-static int snapshot_fact(const lccf_fact_cell_t *cell,
-                         uint64_t generation,
-                         bool require_shared,
-                         lccf_fact_core_t *out_fact) {
-    lccf_fact_cell_t *mutable_cell = (lccf_fact_cell_t *)(uintptr_t)cell;
-    uint64_t before;
-    uint64_t after;
-    int rc;
+int lccf_fact_try_publish_configured(
+    lccf_fact_cell_t *cell,
+    const lccf_fact_ticket_t *ticket,
+    lccf_fact_counters_t *counters,
+    bool *out_won) {
+    lccf_representation_t representation;
 
-    if (cell == NULL || out_fact == NULL) {
+    if (cell == NULL || cell->legacy_configurable) {
         return EINVAL;
     }
-    if (!operation_enter(mutable_cell)) {
-        return EBUSY;
-    }
-    before = atomic_load_explicit(&cell->state_generation,
-                                  memory_order_acquire);
-    if (lccf_fact_unpack_generation(before) != generation) {
-        operation_leave(mutable_cell);
-        return LCCF_FACT_ESTALE;
-    }
-    if (!state_is_visible(lccf_fact_unpack_state(before))) {
-        operation_leave(mutable_cell);
-        return EAGAIN;
-    }
-    if (require_shared &&
-        !atomic_load_explicit(&cell->shared, memory_order_relaxed)) {
-        operation_leave(mutable_cell);
-        return ENODATA;
-    }
-    rc = reference_add(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
-    if (rc != 0) {
-        operation_leave(mutable_cell);
-        return rc;
-    }
-    after = atomic_load_explicit(&cell->state_generation,
-                                 memory_order_acquire);
-    if (lccf_fact_unpack_generation(after) != generation ||
-        !state_is_visible(lccf_fact_unpack_state(after)) ||
-        !atomic_load_explicit(&cell->published, memory_order_relaxed)) {
-        (void)reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
-        operation_leave(mutable_cell);
-        return LCCF_FACT_ESTALE;
-    }
-    *out_fact = *cell->fact_storage;
-    rc = reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
-    operation_leave(mutable_cell);
-    return rc;
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    return try_publish_representation(
+        cell, ticket, representation, counters, out_won);
 }
 
-int lccf_fact_acquire(const lccf_fact_cell_t *cell,
-                      uint64_t generation,
-                      lccf_fact_core_t *out_fact) {
-    return snapshot_fact(cell, generation, true, out_fact);
-}
-
-int lccf_fact_materialize(const lccf_fact_cell_t *cell,
-                          uint64_t generation,
-                          uint32_t site_index,
+int lccf_fact_try_publish(lccf_fact_cell_t *cell,
+                          const lccf_fact_ticket_t *ticket,
+                          bool shared,
                           lccf_fact_counters_t *counters,
-                          lccf_fact_core_t *out_fact) {
+                          bool *out_won) {
+    lccf_representation_t representation;
+
+    if (cell == NULL || !cell->legacy_configurable) {
+        return EINVAL;
+    }
+    representation = shared ? LCCF_REP_FULL_FACT
+                            : LCCF_REP_CANONICAL_HELPER;
+    return try_publish_representation(
+        cell, ticket, representation, counters, out_won);
+}
+
+static int materialize_visible_fact(
+    const lccf_fact_cell_t *cell,
+    uint64_t generation,
+    uint32_t site_index,
+    bool use_initial_site,
+    bool require_persistent,
+    lccf_fact_counters_t *counters,
+    lccf_fact_core_t *out_fact) {
     lccf_fact_cell_t *mutable_cell = (lccf_fact_cell_t *)(uintptr_t)cell;
     lccf_fact_ticket_t ticket;
+    lccf_representation_t representation;
+    const void *storage;
     uint64_t before;
     uint64_t after;
     int rc;
@@ -739,30 +686,16 @@ int lccf_fact_materialize(const lccf_fact_cell_t *cell,
         operation_leave(mutable_cell);
         return EAGAIN;
     }
-    if (atomic_load_explicit(&cell->shared, memory_order_relaxed)) {
-        rc = snapshot_fact(cell, generation, true, out_fact);
-        if (rc == 0 && out_fact->site_index != site_index) {
-            const lccf_fact_site_descriptor_t *resolved_site;
-
-            if (site_index >= cell->raw_ticket.site_count ||
-                site_index > UINT16_MAX ||
-                cell->raw_ticket.site_table == NULL) {
-                rc = EPROTO;
-            } else {
-                resolved_site = cell->raw_ticket.site_table[site_index];
-                if (resolved_site == NULL || resolved_site->invoke == NULL ||
-                    resolved_site->logical_index != site_index) {
-                    rc = EPROTO;
-                } else {
-                    counter_increment(&counters->site_lookups);
-                    out_fact->resolved_site = resolved_site;
-                    out_fact->site_index = (uint16_t)site_index;
-                    out_fact->fact_id = lccf_fact_compute_id(out_fact);
-                }
-            }
-        }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    if (!representation_is_valid(representation)) {
         operation_leave(mutable_cell);
-        return rc;
+        return EPROTO;
+    }
+    if (require_persistent &&
+        representation == LCCF_REP_CANONICAL_HELPER) {
+        operation_leave(mutable_cell);
+        return ENODATA;
     }
     rc = reference_add(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
     if (rc != 0) {
@@ -778,20 +711,37 @@ int lccf_fact_materialize(const lccf_fact_cell_t *cell,
         operation_leave(mutable_cell);
         return LCCF_FACT_ESTALE;
     }
-    counter_increment(&counters->normalization_calls);
-    counter_increment(&counters->site_lookups);
     ticket = cell->raw_ticket;
-    ticket.site_index = site_index;
-    rc = lccf_fact_normalize(&ticket, 0U, out_fact);
-    if (rc == 0) {
-        out_fact->fact_id = lccf_fact_compute_id(out_fact);
+    storage = cell->representation_storage;
+    if (use_initial_site) {
+        site_index = ticket.site_index;
     }
+    rc = lccf_representation_materialize(
+        representation, &ticket, storage, site_index, counters, out_fact);
     if (reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U) != 0 &&
         rc == 0) {
         rc = EPROTO;
     }
     operation_leave(mutable_cell);
     return rc;
+}
+
+int lccf_fact_acquire(const lccf_fact_cell_t *cell,
+                      uint64_t generation,
+                      lccf_fact_core_t *out_fact) {
+    lccf_fact_counters_t ignored_counters = {0};
+
+    return materialize_visible_fact(
+        cell, generation, 0U, true, true, &ignored_counters, out_fact);
+}
+
+int lccf_fact_materialize(const lccf_fact_cell_t *cell,
+                          uint64_t generation,
+                          uint32_t site_index,
+                          lccf_fact_counters_t *counters,
+                          lccf_fact_core_t *out_fact) {
+    return materialize_visible_fact(
+        cell, generation, site_index, false, false, counters, out_fact);
 }
 
 static uint64_t guard_escape_reasons(const lccf_fact_guard_t *guard) {
@@ -1091,7 +1041,6 @@ int lccf_fact_finish(lccf_fact_cell_t *cell, uint64_t generation,
         }
     }
     atomic_store_explicit(&cell->published, false, memory_order_relaxed);
-    atomic_store_explicit(&cell->shared, false, memory_order_relaxed);
     atomic_store_explicit(&cell->references[LCCF_FACT_REF_PAYLOAD], 0U,
                           memory_order_relaxed);
     atomic_store_explicit(&cell->references[LCCF_FACT_REF_MODULE], 0U,
@@ -1146,7 +1095,6 @@ int lccf_fact_abort(lccf_fact_cell_t *cell, uint64_t generation) {
                               memory_order_relaxed);
     }
     atomic_store_explicit(&cell->published, false, memory_order_relaxed);
-    atomic_store_explicit(&cell->shared, false, memory_order_relaxed);
     atomic_store_explicit(
         &cell->state_generation,
         lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
@@ -1224,5 +1172,17 @@ int lccf_fact_module_unregister(const lccf_fact_cell_t *cell) {
 
 const lccf_fact_core_t *lccf_fact_storage(
     const lccf_fact_cell_t *cell) {
-    return cell == NULL ? NULL : cell->fact_storage;
+    lccf_representation_t representation;
+
+    if (cell == NULL) {
+        return NULL;
+    }
+    if (cell->legacy_configurable) {
+        return cell->fact_storage;
+    }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    return representation == LCCF_REP_FULL_FACT
+               ? cell->representation_storage
+               : NULL;
 }
