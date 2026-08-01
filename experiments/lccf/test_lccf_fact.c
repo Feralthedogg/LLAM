@@ -4,10 +4,9 @@
  */
 
 #include "lccf_fact.h"
+#include "lccf_platform.h"
 
 #include <errno.h>
-#include <pthread.h>
-#include <sched.h>
 #include <stdalign.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -498,16 +497,16 @@ typedef struct publication_race_case {
     bool won;
 } publication_race_case_t;
 
-static void *run_publication_race(void *opaque) {
+static int run_publication_race(void *opaque) {
     publication_race_case_t *race = opaque;
 
     atomic_fetch_add_explicit(race->ready, 1U, memory_order_release);
     while (!atomic_load_explicit(race->go, memory_order_acquire)) {
-        sched_yield();
+        atomic_signal_fence(memory_order_seq_cst);
     }
     race->rc = lccf_fact_try_publish(race->cell, &race->ticket, true,
                                      &race->counters, &race->won);
-    return NULL;
+    return 0;
 }
 
 static int test_publication_race_has_one_winner(void) {
@@ -518,7 +517,8 @@ static int test_publication_race_has_one_winner(void) {
     };
     lccf_fact_cell_t cell;
     publication_race_case_t cases[sizeof(sources) / sizeof(sources[0])];
-    pthread_t threads[sizeof(sources) / sizeof(sources[0])];
+    lccf_platform_thread_t
+        *threads[sizeof(sources) / sizeof(sources[0])] = {NULL};
     _Atomic unsigned ready;
     _Atomic bool go;
     uint64_t builds = 0U;
@@ -538,17 +538,21 @@ static int test_publication_race_has_one_winner(void) {
         cases[index].ticket = ticket_for(sources[index], 51U);
         cases[index].ready = &ready;
         cases[index].go = &go;
-        CHECK(pthread_create(&threads[index], NULL, run_publication_race,
-                             &cases[index]) == 0,
+        CHECK(lccf_platform_thread_start(&threads[index],
+                                         run_publication_race,
+                                         &cases[index]) == 0,
               "publication race thread creation");
     }
     while (atomic_load_explicit(&ready, memory_order_acquire) !=
            sizeof(cases) / sizeof(cases[0])) {
-        sched_yield();
+        atomic_signal_fence(memory_order_seq_cst);
     }
     atomic_store_explicit(&go, true, memory_order_release);
     for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
-        CHECK(pthread_join(threads[index], NULL) == 0,
+        int thread_result = -1;
+
+        CHECK(lccf_platform_thread_join(threads[index], &thread_result) == 0 &&
+                  thread_result == 0,
               "publication race thread join");
         CHECK(cases[index].rc == 0, "publication race result");
         winners += cases[index].won ? 1U : 0U;
@@ -575,17 +579,17 @@ typedef struct consume_race_case {
     int rc;
 } consume_race_case_t;
 
-static void *run_consume_race(void *opaque) {
+static int run_consume_race(void *opaque) {
     consume_race_case_t *race = opaque;
 
     atomic_fetch_add_explicit(race->ready, 1U, memory_order_release);
     while (!atomic_load_explicit(race->go, memory_order_acquire)) {
-        sched_yield();
+        atomic_signal_fence(memory_order_seq_cst);
     }
     race->rc = lccf_fact_consume(
         race->cell, 52U, LCCF_FACT_CONSUMER_DIRECT, &race->guard,
         &race->counters, &race->decision, &race->fact);
-    return NULL;
+    return 0;
 }
 
 static int test_double_consume_race_has_one_callback(void) {
@@ -593,7 +597,7 @@ static int test_double_consume_race_has_one_callback(void) {
     lccf_fact_ticket_t ticket = ticket_for(LCCF_FACT_SOURCE_LINUX_CQE, 52U);
     lccf_fact_counters_t publish_counters;
     consume_race_case_t cases[2];
-    pthread_t threads[2];
+    lccf_platform_thread_t *threads[2] = {NULL};
     _Atomic unsigned ready;
     _Atomic bool go;
     unsigned successes = 0U;
@@ -616,16 +620,19 @@ static int test_double_consume_race_has_one_callback(void) {
         cases[index].guard = direct_guard(2U);
         cases[index].ready = &ready;
         cases[index].go = &go;
-        CHECK(pthread_create(&threads[index], NULL, run_consume_race,
-                             &cases[index]) == 0,
+        CHECK(lccf_platform_thread_start(&threads[index], run_consume_race,
+                                         &cases[index]) == 0,
               "consume race thread creation");
     }
     while (atomic_load_explicit(&ready, memory_order_acquire) != 2U) {
-        sched_yield();
+        atomic_signal_fence(memory_order_seq_cst);
     }
     atomic_store_explicit(&go, true, memory_order_release);
     for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
-        CHECK(pthread_join(threads[index], NULL) == 0,
+        int thread_result = -1;
+
+        CHECK(lccf_platform_thread_join(threads[index], &thread_result) == 0 &&
+                  thread_result == 0,
               "consume race thread join");
         successes += cases[index].rc == 0 ? 1U : 0U;
         busy += cases[index].rc == EBUSY || cases[index].rc == EPROTO

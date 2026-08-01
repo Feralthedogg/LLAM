@@ -530,12 +530,22 @@ foreach(LLAM_LCWE_MODEL_TARGET test_lcwe_model bench_lcwe_model)
     endif()
 endforeach()
 
+set(LLAM_LCCF_FACT_SOURCES
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_fact_layout.c
+)
 set(LLAM_LCCF_MODEL_SOURCES
+    ${LLAM_LCCF_FACT_SOURCES}
     experiments/lccf/lccf_platform.c
     experiments/lccf/lccf_model.c
     experiments/lccf/lccf_workloads.c
 )
 
+add_executable(test_lccf_fact
+    ${LLAM_LCCF_FACT_SOURCES}
+    experiments/lccf/lccf_platform.c
+    experiments/lccf/test_lccf_fact.c
+)
 add_executable(test_lccf_model
     ${LLAM_LCCF_MODEL_SOURCES}
     experiments/lccf/test_lccf_model.c
@@ -544,7 +554,15 @@ add_executable(bench_lccf_model
     ${LLAM_LCCF_MODEL_SOURCES}
     experiments/lccf/bench_lccf_model.c
 )
-foreach(LLAM_LCCF_MODEL_TARGET test_lccf_model bench_lccf_model)
+add_executable(bench_lccf_fact
+    ${LLAM_LCCF_MODEL_SOURCES}
+    experiments/lccf/bench_lccf_fact.c
+)
+foreach(LLAM_LCCF_MODEL_TARGET
+        test_lccf_fact
+        test_lccf_model
+        bench_lccf_model
+        bench_lccf_fact)
     target_include_directories(${LLAM_LCCF_MODEL_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
     )
@@ -769,6 +787,7 @@ add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
 add_test(NAME test_lccf_model COMMAND test_lccf_model)
+add_test(NAME test_lccf_fact COMMAND test_lccf_fact)
 if(Python3_FOUND)
     add_test(
         NAME test_bench_lcwe_model
@@ -783,6 +802,11 @@ if(Python3_FOUND)
                 "LCCF_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lccf_model>"
                 ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_model.py
+    )
+    add_test(
+        NAME test_bench_lccf_fact
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_fact.py
     )
 endif()
 add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)

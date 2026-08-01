@@ -542,7 +542,11 @@ LCWE_MODEL_TEST_OBJS = \
 	$(OBJDIR)/experiments/lcwe/test_lcwe_model.o
 LCWE_MODEL_BENCH_OBJS = \
 	$(OBJDIR)/experiments/lcwe/bench_lcwe_model.o
+LCCF_FACT_CORE_OBJS = \
+	$(OBJDIR)/experiments/lccf/lccf_fact.o \
+	$(OBJDIR)/experiments/lccf/lccf_fact_layout.o
 LCCF_MODEL_CORE_OBJS = \
+	$(LCCF_FACT_CORE_OBJS) \
 	$(OBJDIR)/experiments/lccf/lccf_platform.o \
 	$(OBJDIR)/experiments/lccf/lccf_model.o \
 	$(OBJDIR)/experiments/lccf/lccf_workloads.o
@@ -550,6 +554,11 @@ LCCF_MODEL_TEST_OBJS = \
 	$(OBJDIR)/experiments/lccf/test_lccf_model.o
 LCCF_MODEL_BENCH_OBJS = \
 	$(OBJDIR)/experiments/lccf/bench_lccf_model.o
+LCCF_FACT_TEST_OBJS = \
+	$(OBJDIR)/experiments/lccf/lccf_platform.o \
+	$(OBJDIR)/experiments/lccf/test_lccf_fact.o
+LCCF_FACT_BENCH_OBJS = \
+	$(OBJDIR)/experiments/lccf/bench_lccf_fact.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 BUILD_OBJS = \
@@ -587,7 +596,9 @@ BUILD_OBJS = \
 	$(LCWE_MODEL_BENCH_OBJS) \
 	$(LCCF_MODEL_CORE_OBJS) \
 	$(LCCF_MODEL_TEST_OBJS) \
-	$(LCCF_MODEL_BENCH_OBJS)
+	$(LCCF_MODEL_BENCH_OBJS) \
+	$(LCCF_FACT_TEST_OBJS) \
+	$(LCCF_FACT_BENCH_OBJS)
 LINK_TARGETS = \
 	demo \
 	stress \
@@ -598,6 +609,8 @@ LINK_TARGETS = \
 	server_flood \
 	test_lccf_model \
 	bench_lccf_model \
+	test_lccf_fact \
+	bench_lccf_fact \
 	test_lcwe_model \
 	bench_lcwe_model \
 	test_abi_contract \
@@ -625,7 +638,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-lccf-fact lccf-fact-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -640,7 +653,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_lccf_fact|test_bench_lccf_fact|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -651,6 +664,8 @@ WINDOWS_CMAKE_TARGETS = \
 	server_flood \
 	test_lccf_model \
 	bench_lccf_model \
+	test_lccf_fact \
+	bench_lccf_fact \
 	test_lcwe_model \
 	bench_lcwe_model \
 	test_abi_contract \
@@ -697,6 +712,10 @@ test-lccf-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lccf_model bench_lccf_model
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_lccf_model|test_bench_lccf_model" $(WINDOWS_CTEST_ARGS)
 
+test-lccf-fact: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lccf_fact bench_lccf_fact
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_lccf_fact|test_bench_lccf_fact" $(WINDOWS_CTEST_ARGS)
+
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
 
@@ -706,7 +725,7 @@ package: windows-cmake-build
 bench-matrix: bench
 	python scripts/bench_matrix.py
 
-audit-shared-exports audit-production-test-hooks lcwe-model-report lccf-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+audit-shared-exports audit-production-test-hooks lcwe-model-report lccf-model-report lccf-fact-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -1979,6 +1998,10 @@ test-lccf-model: test_lccf_model bench_lccf_model
 	./test_lccf_model
 	LCCF_MODEL_TEST_BINARY=./bench_lccf_model python3 scripts/test_bench_lccf_model.py
 
+test-lccf-fact: test_lccf_fact bench_lccf_fact
+	./test_lccf_fact
+	python3 scripts/test_bench_lccf_fact.py
+
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
 		--binary ./bench_lcwe_model \
@@ -1997,7 +2020,17 @@ lccf-model-report: test-lccf-model
 		--cc "$(CC)" \
 		--out-dir object/lccf-phase0 \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+			docs/research/reports/2026-07-26-lccf-phase0-results.md
+
+lccf-fact-report: test-lccf-fact
+	python3 scripts/bench_lccf_fact.py \
+		--binary ./bench_lccf_fact \
+		--output-dir object/lccf-cfs-phase0 \
+		--samples 5 \
+		--rounds 256 \
+		--warmup-rounds 16 \
+		--instances 257 \
+		--chain 8
 
 test-process-utils:
 	python3 scripts/test_process_utils.py
@@ -2071,6 +2104,12 @@ test_lccf_model: $(LCCF_MODEL_CORE_OBJS) $(LCCF_MODEL_TEST_OBJS)
 
 bench_lccf_model: $(LCCF_MODEL_CORE_OBJS) $(LCCF_MODEL_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCCF_MODEL_CORE_OBJS) $(LCCF_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+test_lccf_fact: $(LCCF_FACT_CORE_OBJS) $(LCCF_FACT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LCCF_FACT_CORE_OBJS) $(LCCF_FACT_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+bench_lccf_fact: $(LCCF_MODEL_CORE_OBJS) $(LCCF_FACT_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LCCF_MODEL_CORE_OBJS) $(LCCF_FACT_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
 
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
@@ -2174,6 +2213,7 @@ $(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
 $(OBJDIR)/experiments/lccf/%.o: experiments/lccf/%.c \
 		experiments/lccf/lccf_model.h \
 		experiments/lccf/lccf_model_internal.h \
+		experiments/lccf/lccf_fact.h \
 		experiments/lccf/lccf_platform.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lccf -c -o $@ $<
