@@ -126,6 +126,7 @@ static int test_remote_rows_respect_locality(void) {
     };
     lcrs_model_config_t config;
     lcrs_model_topology_t *topology = NULL;
+    lcrs_model_topology_info_t info;
     uint32_t epoch;
     uint32_t thief;
 
@@ -181,6 +182,11 @@ static int test_remote_rows_respect_locality(void) {
                 }
             }
         }
+    }
+    if (lcrs_model_topology_info(topology, &info) != 0 ||
+        info.max_remote_indegree != 3U) {
+        lcrs_model_topology_destroy(topology);
+        return fail("uneven remote indegree bound changed");
     }
     lcrs_model_topology_destroy(topology);
     return 0;

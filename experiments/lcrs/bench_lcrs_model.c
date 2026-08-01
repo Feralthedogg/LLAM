@@ -286,11 +286,14 @@ static uint64_t wall_now_ns(void) {
 
 static uint64_t cpu_now_ns(void) {
     const clock_t now = clock();
+    const uint64_t ticks = now == (clock_t)-1 ? 0U : (uint64_t)now;
 
     if (now == (clock_t)-1) {
         return 0U;
     }
-    return ((uint64_t)now * UINT64_C(1000000000)) / (uint64_t)CLOCKS_PER_SEC;
+    return (ticks / (uint64_t)CLOCKS_PER_SEC) * UINT64_C(1000000000) +
+           ((ticks % (uint64_t)CLOCKS_PER_SEC) * UINT64_C(1000000000)) /
+               (uint64_t)CLOCKS_PER_SEC;
 }
 
 static int run_benchmark(const lcrs_bench_options_t *options) {
@@ -304,6 +307,8 @@ static int run_benchmark(const lcrs_bench_options_t *options) {
     uint64_t fan_in_samples = 0U;
     uint64_t wall_start;
     uint64_t cpu_start;
+    uint64_t wall_end;
+    uint64_t cpu_end;
     uint64_t wall_elapsed;
     uint64_t cpu_elapsed;
     uint32_t iteration;
@@ -397,14 +402,10 @@ static int run_benchmark(const lcrs_bench_options_t *options) {
             totals.productive_units += possible < depth ? possible : depth;
         }
     }
-    wall_elapsed = wall_now_ns() - wall_start;
-    cpu_elapsed = cpu_now_ns() - cpu_start;
-    if (wall_elapsed == 0U) {
-        wall_elapsed = 1U;
-    }
-    if (cpu_elapsed == 0U) {
-        cpu_elapsed = 1U;
-    }
+    wall_end = wall_now_ns();
+    cpu_end = cpu_now_ns();
+    wall_elapsed = wall_end > wall_start ? wall_end - wall_start : 1U;
+    cpu_elapsed = cpu_end > cpu_start ? cpu_end - cpu_start : 1U;
     printf("LCRS_SAMPLE version=1 workload=%s policy=%s shards=%u nodes=%u "
            "iterations=%u thief_attempts=%" PRIu64 " selections=%" PRIu64
            " probes=%" PRIu64 " candidate_tries=%" PRIu64

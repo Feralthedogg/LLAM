@@ -616,6 +616,10 @@ uint32_t lcrs_model_topology_node(const lcrs_model_topology_t *topology,
 }
 
 int lcrs_model_topology_validate(const lcrs_model_topology_t *topology) {
+    uint32_t *local_indegree;
+    uint32_t *remote_indegree;
+    uint32_t max_local = 0U;
+    uint32_t max_remote = 0U;
     uint32_t epoch;
 
     if (topology == NULL || topology->info.version != 1U ||
@@ -623,9 +627,24 @@ int lcrs_model_topology_validate(const lcrs_model_topology_t *topology) {
         topology->info.epoch_count == 0U) {
         return EINVAL;
     }
+    local_indegree =
+        calloc(topology->info.shard_count, sizeof(*local_indegree));
+    remote_indegree =
+        calloc(topology->info.shard_count, sizeof(*remote_indegree));
+    if (local_indegree == NULL || remote_indegree == NULL) {
+        free(remote_indegree);
+        free(local_indegree);
+        return ENOMEM;
+    }
     for (epoch = 0U; epoch < topology->info.epoch_count; ++epoch) {
         uint32_t thief;
 
+        memset(local_indegree,
+               0,
+               (size_t)topology->info.shard_count * sizeof(*local_indegree));
+        memset(remote_indegree,
+               0,
+               (size_t)topology->info.shard_count * sizeof(*remote_indegree));
         for (thief = 0U; thief < topology->info.shard_count; ++thief) {
             const lcrs_model_row_t *row =
                 lcrs_model_topology_row(topology, thief, epoch);
@@ -634,7 +653,7 @@ int lcrs_model_topology_validate(const lcrs_model_topology_t *topology) {
             uint32_t index;
 
             if (total > LCRS_MODEL_MAX_CANDIDATES) {
-                return EINVAL;
+                goto invalid;
             }
             for (index = 0U; index < total; ++index) {
                 const uint32_t candidate = row->candidate_ids[index];
@@ -642,26 +661,47 @@ int lcrs_model_topology_validate(const lcrs_model_topology_t *topology) {
 
                 if (candidate >= topology->info.shard_count ||
                     candidate == thief) {
-                    return EINVAL;
+                    goto invalid;
                 }
                 if (index < (uint32_t)row->local_count) {
                     if (topology->node_index[candidate] !=
                         topology->node_index[thief]) {
-                        return EINVAL;
+                        goto invalid;
+                    }
+                    local_indegree[candidate] += 1U;
+                    if (local_indegree[candidate] > max_local) {
+                        max_local = local_indegree[candidate];
                     }
                 } else if (topology->node_index[candidate] ==
                            topology->node_index[thief]) {
-                    return EINVAL;
+                    goto invalid;
+                } else {
+                    remote_indegree[candidate] += 1U;
+                    if (remote_indegree[candidate] > max_remote) {
+                        max_remote = remote_indegree[candidate];
+                    }
                 }
                 for (other = index + 1U; other < total; ++other) {
                     if (candidate == row->candidate_ids[other]) {
-                        return EINVAL;
+                        goto invalid;
                     }
                 }
             }
         }
     }
+    if (max_local != topology->info.max_local_indegree ||
+        max_remote != topology->info.max_remote_indegree ||
+        max_local > (uint32_t)topology->config.local_width) {
+        goto invalid;
+    }
+    free(remote_indegree);
+    free(local_indegree);
     return 0;
+
+invalid:
+    free(remote_indegree);
+    free(local_indegree);
+    return EINVAL;
 }
 
 const char *lcrs_model_policy_name(lcrs_model_policy_t policy) {
