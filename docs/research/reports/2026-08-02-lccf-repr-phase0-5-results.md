@@ -97,6 +97,9 @@ Two benchmark defects were found before the final run:
   fairness sample counts remain equal;
 - one transiently slow calibration window could approve too few rounds; the
   same round count must now satisfy the minimum duration twice consecutively.
+- a sub-millisecond Windows calibration probe could observe zero elapsed
+  `GetProcessTimes` ticks; calibration now treats that as insufficient rounds,
+  while every emitted measurement still requires a positive CPU delta.
 
 Linux UBSan also exposed a representation test that read event storage after
 an intentionally failed publication. The test now publishes a valid event
@@ -216,7 +219,7 @@ absolute bytes per instance.
 |---|---|
 | macOS arm64, Apple M4, Apple Clang 21 | fresh CMake build, 30/30 CTest, focused Make tests, ASan+UBSan representation/model tests, Clang static analyzer |
 | Linux arm64 container, GCC 15.3 | representation/model normal, ASan+LeakSanitizer, UBSan, and TSan execution |
-| Windows x86_64, MinGW GCC 15.2 + Wine 11 | representation/model PE compile and execution |
+| Windows x86_64, MinGW GCC 15.2 + Wine 11 | representation/model PE compile and execution, plus strict benchmark binary contract |
 
 Apple's sanitizer runtime does not support LeakSanitizer, so macOS leak
 detection is not counted as a pass; Linux ASan ran with leak detection. The

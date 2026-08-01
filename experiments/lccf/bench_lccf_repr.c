@@ -347,6 +347,7 @@ static int run_rounds(lccf_model_batch_t *batch,
 static int capture_window(lccf_model_batch_t *batch,
                           uint64_t rounds,
                           uint64_t *latencies,
+                          bool allow_zero_cpu,
                           window_sample_t *out) {
     uint64_t wall_start;
     uint64_t wall_end;
@@ -384,7 +385,8 @@ static int capture_window(lccf_model_batch_t *batch,
     }
     cpu_end = lccf_platform_process_cpu_ns();
     wall_end = lccf_platform_monotonic_ns();
-    if (cpu_end <= cpu_start || wall_end <= wall_start) {
+    if (cpu_end < cpu_start || wall_end <= wall_start ||
+        (!allow_zero_cpu && cpu_end == cpu_start)) {
         return EIO;
     }
     out->wall_ns = wall_end - wall_start;
@@ -462,7 +464,8 @@ static int validate_window(const bench_options_t *options,
     }
     if ((require_minimum &&
          sample->wall_ns < options->minimum_window_ns) ||
-        sample->wall_ns == 0U || sample->cpu_ns == 0U ||
+        sample->wall_ns == 0U ||
+        (require_minimum && sample->cpu_ns == 0U) ||
         sample->p50_ns == 0U || sample->p99_ns == 0U ||
         sample->p50_ns > sample->p99_ns ||
         sample->p99_ns > sample->wall_ns ||
@@ -654,11 +657,11 @@ static int calibrate_contrast(const bench_options_t *options,
 
         if (rc == 0) {
             rc = capture_window(contrast->left_batch, rounds,
-                                contrast->latencies, &left);
+                                contrast->latencies, true, &left);
         }
         if (rc == 0) {
             rc = capture_window(contrast->right_batch, rounds,
-                                contrast->latencies, &right);
+                                contrast->latencies, true, &right);
         }
         if (rc == 0) {
             rc = validate_pair(options, contrast, &left, &right, false);
@@ -671,7 +674,8 @@ static int calibrate_contrast(const bench_options_t *options,
             return EPROTO;
         }
         if (left.wall_ns >= options->minimum_window_ns &&
-            right.wall_ns >= options->minimum_window_ns) {
+            right.wall_ns >= options->minimum_window_ns &&
+            left.cpu_ns != 0U && right.cpu_ns != 0U) {
             if (duration_confirmed) {
                 return 0;
             }
@@ -888,17 +892,17 @@ static int capture_pair(const bench_options_t *options,
 
     if (left_first) {
         rc = capture_window(contrast->left_batch, contrast->rounds,
-                            contrast->latencies, &left);
+                            contrast->latencies, false, &left);
         if (rc == 0) {
             rc = capture_window(contrast->right_batch, contrast->rounds,
-                                contrast->latencies, &right);
+                                contrast->latencies, false, &right);
         }
     } else {
         rc = capture_window(contrast->right_batch, contrast->rounds,
-                            contrast->latencies, &right);
+                            contrast->latencies, false, &right);
         if (rc == 0) {
             rc = capture_window(contrast->left_batch, contrast->rounds,
-                                contrast->latencies, &left);
+                                contrast->latencies, false, &left);
         }
     }
     if (rc == 0) {
