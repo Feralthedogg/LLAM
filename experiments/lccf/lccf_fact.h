@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
+#include <errno.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +18,11 @@ extern "C" {
 
 #define LCCF_FACT_VERSION 1U
 #define LCCF_FACT_MAX_GENERATION (UINT64_MAX >> 4U)
+#ifdef ESTALE
+#define LCCF_FACT_ESTALE ESTALE
+#else
+#define LCCF_FACT_ESTALE 2001
+#endif
 
 typedef enum lccf_fact_layout {
     LCCF_FACT_LAYOUT_SPLIT64_64 = 0,

@@ -208,7 +208,7 @@ int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
                                    memory_order_acquire);
     if (lccf_fact_unpack_generation(current) != generation &&
         lccf_fact_unpack_state(current) != LCCF_FACT_STATE_TERMINAL) {
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     exclusive = lccf_fact_pack_state(
         lccf_fact_unpack_generation(current), LCCF_FACT_STATE_BUILDING);
@@ -406,7 +406,7 @@ int lccf_fact_try_publish(lccf_fact_cell_t *cell,
     if (ticket->generation != generation) {
         counter_increment(&counters->generation_mismatches);
         counter_increment(&counters->stale_losers);
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     building = lccf_fact_pack_state(generation, LCCF_FACT_STATE_BUILDING);
     if (lccf_fact_unpack_state(observed) != LCCF_FACT_STATE_ARMED ||
@@ -515,7 +515,7 @@ static int snapshot_fact(const lccf_fact_cell_t *cell,
     before = atomic_load_explicit(&cell->state_generation,
                                   memory_order_acquire);
     if (lccf_fact_unpack_generation(before) != generation) {
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     if (!state_is_visible(lccf_fact_unpack_state(before))) {
         return EAGAIN;
@@ -533,7 +533,7 @@ static int snapshot_fact(const lccf_fact_cell_t *cell,
         !state_is_visible(lccf_fact_unpack_state(after)) ||
         !cell->published) {
         (void)reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     *out_fact = cell->fact;
     rc = reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
@@ -561,7 +561,7 @@ int lccf_fact_materialize(const lccf_fact_cell_t *cell,
     before = atomic_load_explicit(&cell->state_generation,
                                   memory_order_acquire);
     if (lccf_fact_unpack_generation(before) != generation) {
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     if (!state_is_visible(lccf_fact_unpack_state(before))) {
         return EAGAIN;
@@ -579,7 +579,7 @@ int lccf_fact_materialize(const lccf_fact_cell_t *cell,
         !state_is_visible(lccf_fact_unpack_state(after)) ||
         !cell->published) {
         (void)reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     counter_increment(&counters->normalization_calls);
     counter_increment(&counters->site_lookups);
@@ -683,7 +683,7 @@ int lccf_fact_consume(lccf_fact_cell_t *cell, uint64_t generation,
     observed = atomic_load_explicit(&cell->state_generation,
                                     memory_order_acquire);
     if (lccf_fact_unpack_generation(observed) != generation) {
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     state = lccf_fact_unpack_state(observed);
     if ((consumer == LCCF_FACT_CONSUMER_DIRECT &&
@@ -784,7 +784,7 @@ int lccf_fact_yield_to_queue(lccf_fact_cell_t *cell,
     observed = atomic_load_explicit(&cell->state_generation,
                                     memory_order_acquire);
     if (lccf_fact_unpack_generation(observed) != generation) {
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     if (!state_is_running(lccf_fact_unpack_state(observed))) {
         return EPROTO;
@@ -823,7 +823,7 @@ int lccf_fact_finish(lccf_fact_cell_t *cell, uint64_t generation,
     observed = atomic_load_explicit(&cell->state_generation,
                                     memory_order_acquire);
     if (lccf_fact_unpack_generation(observed) != generation) {
-        return ESTALE;
+        return LCCF_FACT_ESTALE;
     }
     state = lccf_fact_unpack_state(observed);
     if (!state_is_running(state)) {

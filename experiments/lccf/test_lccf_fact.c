@@ -316,7 +316,7 @@ static int test_one_winner_publishes_one_immutable_fact(void) {
 
         stale.event_kind = LCCF_FACT_EVENT_STOP;
         CHECK(lccf_fact_try_publish(&cell, &stale, true, &counters,
-                                    &won) == ESTALE,
+                                    &won) == LCCF_FACT_ESTALE,
               "stale generation is rejected");
         CHECK(!won, "stale generation cannot win");
         CHECK(lccf_fact_acquire(&cell, 7U, &acquired) == 0,
@@ -338,7 +338,7 @@ static int test_stale_generation_cannot_retire_current_refs(void) {
                               1U) == 0,
           "cell initialization");
     CHECK(lccf_fact_try_publish(&cell, &stale, true, &counters, &won) ==
-              ESTALE,
+              LCCF_FACT_ESTALE,
           "stale publication result");
     CHECK(!won, "stale ticket cannot win");
     CHECK(counters.generation_mismatches == 1U,
@@ -475,7 +475,8 @@ static int test_invalid_transitions_do_not_mutate_visible_state(void) {
     CHECK(lccf_fact_yield_to_queue(&cell, 21U) == EPROTO,
           "ready cell cannot yield");
     CHECK(lccf_fact_consume(&cell, 20U, LCCF_FACT_CONSUMER_DIRECT,
-                            &guard, &counters, &decision, &after) == ESTALE,
+                            &guard, &counters, &decision, &after) ==
+              LCCF_FACT_ESTALE,
           "stale consumer rejected");
     CHECK(atomic_load_explicit(&cell.state_generation,
                                memory_order_acquire) == state_before,
