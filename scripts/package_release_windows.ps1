@@ -67,11 +67,11 @@ public static class LlamWin32FileInfo {
 }
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v2.2.0" }
+    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v2.2.1" }
 }
 $Version = $Version -replace '^v', ''
 if ([string]::IsNullOrWhiteSpace($LibraryVersion)) {
-    $LibraryVersion = "2.2.0"
+    $LibraryVersion = "2.2.1"
 }
 if ([string]::IsNullOrWhiteSpace($AbiMajor)) {
     $AbiMajor = "2"
@@ -376,5 +376,9 @@ Assert-SafeOutputPath $Archive
 Compress-Archive -LiteralPath $Stage -DestinationPath $Archive -Force
 $Hash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
 Assert-SafeOutputPath "$Archive.sha256"
-Set-Content -LiteralPath "$Archive.sha256" -Value "$Hash  $(Split-Path -Leaf $Archive)"
+[System.IO.File]::WriteAllText(
+    "$Archive.sha256",
+    "$Hash  $(Split-Path -Leaf $Archive)`n",
+    [System.Text.Encoding]::ASCII
+)
 Write-Host $Archive

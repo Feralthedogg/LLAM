@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(llam VERSION 2.2.0 LANGUAGES C ASM)
+project(llam VERSION 2.2.1 LANGUAGES C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 2)
 set(LLAM_ABI_VERSION_MINOR 0)

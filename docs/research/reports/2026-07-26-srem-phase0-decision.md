@@ -37,7 +37,7 @@ reverse that screening result without selecting for a preferred outcome.
   five-sample schedule
 - Minimum accumulated time: 100 ms per mode
 - Generated report:
-  `docs/superpowers/reports/2026-07-26-srem-phase0-results.md`
+  `docs/research/reports/2026-07-26-srem-phase0-results.md`
 
 The raw CSV, metadata, environment record, compiler optimization report, and
 byte-identical report remain in the workflow artifact. The tracked report's

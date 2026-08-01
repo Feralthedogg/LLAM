@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
 
 env:
-  LLAM_CI_VERSION: "2.2.0"
+  LLAM_CI_VERSION: "2.2.1"
 
 concurrency:
   group: bsd-${{ github.ref }}
@@ -194,7 +194,7 @@ jobs:
       - name: Build and run core tests
         run: |
           set -eu
-          LLAM_CI_VERSION="${LLAM_CI_VERSION:-2.2.0}"
+          LLAM_CI_VERSION="${LLAM_CI_VERSION:-2.2.1}"
           if [ -f .llam-bsd-infra-skip ]; then
             cat .llam-bsd-infra-skip
             exit 0
@@ -265,7 +265,7 @@ jobs:
       - name: Package smoke
         run: |
           set -eu
-          LLAM_CI_VERSION="${LLAM_CI_VERSION:-2.2.0}"
+          LLAM_CI_VERSION="${LLAM_CI_VERSION:-2.2.1}"
           if [ -f .llam-bsd-infra-skip ]; then
             cat .llam-bsd-infra-skip
             exit 0

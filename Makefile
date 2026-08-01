@@ -13,7 +13,7 @@ TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
 SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
 PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
-LLAM_VERSION ?= 2.2.0
+LLAM_VERSION ?= 2.2.1
 SANITIZER_TARGETS_ENABLED ?= 0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
@@ -1047,9 +1047,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) ln -s libllam_runtime.2.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib" ;; \
 		Linux) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
@@ -1069,9 +1069,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.999.dylib"; \
@@ -1100,20 +1100,20 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.2.dylib"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.0"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.1"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		FreeBSD|OpenBSD|NetBSD|DragonFly) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.0"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.1"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		*) echo "unsupported installer regular lib-link smoke host" >&2; exit 1 ;; \
@@ -1131,16 +1131,16 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.0-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.1-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
-	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.0"; \
-	ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
+	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.1"; \
+	ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 	ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 	sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; \
 	test -L "$$tmp_dir/prefix/lib/libllam_runtime.so"; \
-	grep '^2.2.0-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
-	grep '^2.2.0$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
+	grep '^2.2.1-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
+	grep '^2.2.1$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-package-output-symlink.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	case "$$(uname -s)-$$(uname -m)" in \
@@ -1178,10 +1178,10 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	ln -s "$$tmp_dir/outside" "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release output path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1207,7 +1207,7 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/repo/scripts"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted a non-directory release output path component" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1250,10 +1250,10 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	chmod 666 "$$tmp_dir/repo/README.md"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unsafe release stage mode" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1297,9 +1297,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	ln -s "$$tmp_dir/outside/README.md" "$$tmp_dir/repo/README.md"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release input path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1345,9 +1345,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	ln "$$tmp_dir/outside-runtime.h" "$$tmp_dir/repo/include/llam/runtime.h"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh copied a hard-linked release input file" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1390,9 +1390,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unexpected library symlink target" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1436,9 +1436,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; : > "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted non-symlink shared-library link artifacts" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -2057,7 +2057,7 @@ leir-phase0a-screen: test-leir-phase0
 		--min-mode-ms 100 \
 		--output-dir object/leir-phase0a-screen \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-27-leir-phase0a-results.md
+			docs/research/reports/2026-07-27-leir-phase0a-results.md
 
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
@@ -2077,7 +2077,7 @@ lccf-model-report: test-lccf-model
 		--cc "$(CC)" \
 		--out-dir object/lccf-phase0 \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+			docs/research/reports/2026-07-26-lccf-phase0-results.md
 
 srem-model-screen: test-srem-model
 	python3 scripts/bench_srem_model.py \
@@ -2089,7 +2089,7 @@ srem-model-screen: test-srem-model
 		--warmup-rounds 7 \
 		--output-dir object/srem-phase0-screen \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-srem-phase0-results.md
+			docs/research/reports/2026-07-26-srem-phase0-results.md
 
 SREM_SELECTED_WIDTH ?=
 SREM_SELECTED_THRESHOLD ?=
@@ -2114,7 +2114,7 @@ srem-model-report: test-srem-model
 		--correctness "$(SREM_CORRECTNESS)" \
 		--output-dir object/srem-phase0-gate \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-srem-phase0-results.md
+			docs/research/reports/2026-07-26-srem-phase0-results.md
 
 test-process-utils:
 	python3 scripts/test_process_utils.py

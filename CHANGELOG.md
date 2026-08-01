@@ -1,5 +1,36 @@
 # LLAM ChangeLog
 
+## 2.2.1 - 2026-08-01
+
+### Added
+
+* add the opt-in LCWE research harness, including scalar cohort and wave
+  layouts, configurable synthetic workloads, correctness coverage, benchmark
+  automation, and cost-model reporting for completion-fusion experiments.
+
+* document the causal wavefront execution and causal completion fusion designs,
+  their lifecycle constraints, staged validation plans, and the measured LCWE
+  phase-one evidence used to guide backend-native segment work.
+
+### Fixed
+
+* preserve nanosecond timestamp precision in `llam_stat_path_ex()` and use
+  no-follow metadata queries on POSIX so symbolic-link metadata is not silently
+  replaced by its target's metadata.
+
+* accept valid sub-pointer power-of-two alignments for owned I/O buffers while
+  normalizing the allocator's effective alignment, with coverage through both
+  allocation APIs.
+
+* make LCWE benchmark smoke coverage independent of filesystem timestamp
+  resolution.
+
+### Changed
+
+* refresh version, installer, packaging, workflow, shared-library, and
+  documentation metadata for the `2.2.1` patch release while retaining the
+  public ABI at `2.0`.
+
 ## 2.2.0 - 2026-07-12
 
 ### Security
