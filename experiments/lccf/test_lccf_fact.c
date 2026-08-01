@@ -765,6 +765,209 @@ static int test_yield_transfers_callback_reference_to_queue(void) {
     return 0;
 }
 
+static int test_direct_guard_escape_matrix(void) {
+    static const struct {
+        uint64_t clear_flags;
+        uint64_t set_flags;
+        bool zero_budget;
+        bool wrong_shard;
+        uint64_t expected_reason;
+    } cases[] = {
+        {LCCF_FACT_GUARD_DIRECT_ENABLED, 0U, false, false,
+         LCCF_FACT_ESCAPE_MODULE_POLICY},
+        {LCCF_FACT_GUARD_MODULE_ENABLED, 0U, false, false,
+         LCCF_FACT_ESCAPE_MODULE_POLICY},
+        {LCCF_FACT_GUARD_BACKEND_CAPABLE, 0U, false, false,
+         LCCF_FACT_ESCAPE_BACKEND_CAPABILITY},
+        {0U, LCCF_FACT_GUARD_STOP, false, false,
+         LCCF_FACT_ESCAPE_STOP},
+        {0U, LCCF_FACT_GUARD_FAIRNESS_DUE, false, false,
+         LCCF_FACT_ESCAPE_FAIRNESS},
+        {0U, LCCF_FACT_GUARD_TRACE, false, false,
+         LCCF_FACT_ESCAPE_TRACE},
+        {0U, LCCF_FACT_GUARD_SHARD_PAUSED, false, false,
+         LCCF_FACT_ESCAPE_SHARD_STATE},
+        {0U, LCCF_FACT_GUARD_SHARD_OFFLINE, false, false,
+         LCCF_FACT_ESCAPE_SHARD_STATE},
+        {0U, LCCF_FACT_GUARD_CALLBACK_ACTIVE, false, false,
+         LCCF_FACT_ESCAPE_CALLBACK_ACTIVE},
+        {0U, LCCF_FACT_GUARD_QUEUE_PRESSURE, false, false,
+         LCCF_FACT_ESCAPE_QUEUE_PRESSURE},
+        {0U, LCCF_FACT_GUARD_MIGRATING, false, false,
+         LCCF_FACT_ESCAPE_MIGRATION},
+        {0U, 0U, true, false, LCCF_FACT_ESCAPE_BUDGET},
+        {0U, 0U, false, true, LCCF_FACT_ESCAPE_WRONG_SHARD},
+    };
+    size_t index;
+
+    for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        const uint64_t generation = UINT64_C(80) + index;
+        lccf_fact_cell_t cell;
+        lccf_fact_counters_t counters;
+        lccf_fact_ticket_t ticket =
+            ticket_for(LCCF_FACT_SOURCE_LINUX_CQE, generation);
+        lccf_fact_guard_t guard = direct_guard(2U);
+        lccf_fact_decision_t decision;
+        lccf_fact_core_t before;
+        lccf_fact_core_t after;
+        bool won = false;
+
+        memset(&counters, 0, sizeof(counters));
+        CHECK(lccf_fact_cell_init(&cell, generation,
+                                  LCCF_FACT_LAYOUT_SPLIT64_64, 1U) == 0,
+              "guard matrix cell initialization");
+        CHECK(lccf_fact_try_publish(&cell, &ticket, true, &counters,
+                                    &won) == 0 && won,
+              "guard matrix publication");
+        CHECK(lccf_fact_acquire(&cell, generation, &before) == 0,
+              "guard matrix fact acquisition");
+        guard.flags &= ~cases[index].clear_flags;
+        guard.flags |= cases[index].set_flags;
+        if (cases[index].zero_budget) {
+            guard.budget_remaining = 0U;
+        }
+        if (cases[index].wrong_shard) {
+            guard.consuming_shard = 1U;
+        }
+        CHECK(lccf_fact_consume(&cell, generation,
+                                LCCF_FACT_CONSUMER_DIRECT, &guard,
+                                &counters, &decision, &after) == 0,
+              "guard matrix direct consumption");
+        CHECK(decision.route == LCCF_FACT_ROUTE_QUEUE &&
+                  decision.escape_reasons == cases[index].expected_reason,
+              "guard matrix exact escape reason");
+        CHECK(memcmp(&before, &after, sizeof(before)) == 0,
+              "guard matrix cannot rewrite fact");
+    }
+    return 0;
+}
+
+static int test_queued_guard_recheck_matrix(void) {
+    static const struct {
+        uint64_t clear_flags;
+        uint64_t set_flags;
+        bool zero_budget;
+        lccf_fact_route_t expected_route;
+        uint64_t expected_reason;
+    } cases[] = {
+        {LCCF_FACT_GUARD_MODULE_ENABLED, 0U, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_MODULE_POLICY},
+        {LCCF_FACT_GUARD_BACKEND_CAPABLE, 0U, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_BACKEND_CAPABILITY},
+        {0U, LCCF_FACT_GUARD_STOP, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_STOP},
+        {0U, LCCF_FACT_GUARD_MIGRATING, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_MIGRATION},
+        {0U, LCCF_FACT_GUARD_CALLBACK_ACTIVE, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_CALLBACK_ACTIVE},
+        {0U, LCCF_FACT_GUARD_SHARD_PAUSED, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_SHARD_STATE},
+        {0U, LCCF_FACT_GUARD_SHARD_OFFLINE, false,
+         LCCF_FACT_ROUTE_DEFER, LCCF_FACT_ESCAPE_SHARD_STATE},
+        {LCCF_FACT_GUARD_DIRECT_ENABLED, LCCF_FACT_GUARD_TRACE, false,
+         LCCF_FACT_ROUTE_QUEUE, 0U},
+        {0U, LCCF_FACT_GUARD_FAIRNESS_DUE, false,
+         LCCF_FACT_ROUTE_QUEUE, 0U},
+        {0U, LCCF_FACT_GUARD_QUEUE_PRESSURE, false,
+         LCCF_FACT_ROUTE_QUEUE, 0U},
+        {0U, 0U, true, LCCF_FACT_ROUTE_QUEUE, 0U},
+    };
+    size_t index;
+
+    for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        const uint64_t generation = UINT64_C(100) + index;
+        lccf_fact_cell_t cell;
+        lccf_fact_counters_t counters;
+        lccf_fact_ticket_t ticket =
+            ticket_for(LCCF_FACT_SOURCE_IOCP, generation);
+        lccf_fact_guard_t guard = direct_guard(2U);
+        lccf_fact_decision_t decision;
+        lccf_fact_core_t original;
+        lccf_fact_core_t observed;
+        bool won = false;
+
+        memset(&counters, 0, sizeof(counters));
+        CHECK(lccf_fact_cell_init(&cell, generation,
+                                  LCCF_FACT_LAYOUT_UNIFIED128, 1U) == 0,
+              "queued guard cell initialization");
+        CHECK(lccf_fact_try_publish(&cell, &ticket, true, &counters,
+                                    &won) == 0 && won,
+              "queued guard publication");
+        CHECK(lccf_fact_acquire(&cell, generation, &original) == 0,
+              "queued guard fact acquisition");
+        guard.flags |= LCCF_FACT_GUARD_TRACE;
+        CHECK(lccf_fact_consume(&cell, generation,
+                                LCCF_FACT_CONSUMER_DIRECT, &guard,
+                                &counters, &decision, &observed) == 0 &&
+                  decision.route == LCCF_FACT_ROUTE_QUEUE,
+              "queued guard setup");
+        guard = direct_guard(2U);
+        guard.flags &= ~cases[index].clear_flags;
+        guard.flags |= cases[index].set_flags;
+        if (cases[index].zero_budget) {
+            guard.budget_remaining = 0U;
+        }
+        CHECK(lccf_fact_consume(&cell, generation,
+                                LCCF_FACT_CONSUMER_QUEUE, &guard,
+                                &counters, &decision, &observed) == 0 &&
+                  decision.route == cases[index].expected_route &&
+                  decision.escape_reasons == cases[index].expected_reason,
+              "queued guard route and reason");
+        CHECK(memcmp(&original, &observed, sizeof(original)) == 0,
+              "queued guard cannot rewrite fact");
+        if (decision.route == LCCF_FACT_ROUTE_DEFER) {
+            guard = direct_guard(2U);
+            CHECK(lccf_fact_consume(&cell, generation,
+                                    LCCF_FACT_CONSUMER_QUEUE, &guard,
+                                    &counters, &decision, &observed) == 0 &&
+                      decision.route == LCCF_FACT_ROUTE_QUEUE,
+                  "deferred queued fact recovers when guard clears");
+        }
+        CHECK(lccf_fact_finish(&cell, generation, true, generation,
+                               &counters) == 0,
+              "queued guard callback retirement");
+    }
+    return 0;
+}
+
+static int test_offline_destination_defers_before_forward(void) {
+    lccf_fact_cell_t cell;
+    lccf_fact_counters_t counters;
+    lccf_fact_ticket_t ticket = ticket_for(LCCF_FACT_SOURCE_KQUEUE, 120U);
+    lccf_fact_guard_t guard = direct_guard(2U);
+    lccf_fact_decision_t decision;
+    lccf_fact_core_t fact;
+    bool won = false;
+
+    memset(&counters, 0, sizeof(counters));
+    CHECK(lccf_fact_cell_init(&cell, 120U, LCCF_FACT_LAYOUT_SPLIT96_64,
+                              1U) == 0,
+          "offline destination cell initialization");
+    CHECK(lccf_fact_try_publish(&cell, &ticket, true, &counters, &won) == 0 &&
+              won,
+          "offline destination publication");
+    guard.flags |= LCCF_FACT_GUARD_TRACE;
+    CHECK(lccf_fact_consume(&cell, 120U, LCCF_FACT_CONSUMER_DIRECT,
+                            &guard, &counters, &decision, &fact) == 0,
+          "offline destination queue setup");
+    guard = direct_guard(2U);
+    guard.consuming_shard = 1U;
+    guard.flags |= LCCF_FACT_GUARD_SHARD_OFFLINE;
+    CHECK(lccf_fact_consume(&cell, 120U, LCCF_FACT_CONSUMER_QUEUE,
+                            &guard, &counters, &decision, &fact) == 0 &&
+              decision.route == LCCF_FACT_ROUTE_DEFER &&
+              decision.escape_reasons == LCCF_FACT_ESCAPE_SHARD_STATE,
+          "offline destination must not receive forward");
+    guard = direct_guard(2U);
+    CHECK(lccf_fact_consume(&cell, 120U, LCCF_FACT_CONSUMER_QUEUE,
+                            &guard, &counters, &decision, &fact) == 0 &&
+              decision.route == LCCF_FACT_ROUTE_QUEUE,
+          "offline destination resumes when online");
+    CHECK(lccf_fact_finish(&cell, 120U, true, 120U, &counters) == 0,
+          "offline destination callback retirement");
+    return 0;
+}
+
 int main(void) {
     static const struct {
         const char *name;
@@ -792,6 +995,10 @@ int main(void) {
         {"migration routing", test_migration_forwards_then_defers_then_runs},
         {"yield ownership transfer",
          test_yield_transfers_callback_reference_to_queue},
+        {"direct guard escape matrix", test_direct_guard_escape_matrix},
+        {"queued guard recheck matrix", test_queued_guard_recheck_matrix},
+        {"offline destination ordering",
+         test_offline_destination_defers_before_forward},
     };
     size_t index;
 

@@ -734,13 +734,18 @@ int lccf_fact_consume(lccf_fact_cell_t *cell, uint64_t generation,
         return 0;
     }
 
+    reasons = queued_defer_reasons(guard);
+    if ((reasons & ~LCCF_FACT_ESCAPE_MIGRATION) != 0U) {
+        out_decision->route = LCCF_FACT_ROUTE_DEFER;
+        out_decision->escape_reasons = reasons;
+        return 0;
+    }
     if (guard->consuming_shard != guard->current_home_shard) {
         out_decision->route = LCCF_FACT_ROUTE_FORWARD;
         out_decision->escape_reasons |= LCCF_FACT_ESCAPE_WRONG_SHARD;
         counter_increment(&counters->queue_forwards);
         return 0;
     }
-    reasons = queued_defer_reasons(guard);
     if (reasons != 0U) {
         out_decision->route = LCCF_FACT_ROUTE_DEFER;
         out_decision->escape_reasons = reasons;
