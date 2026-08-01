@@ -371,6 +371,7 @@
   "research": {
     "runtime_platform_sources": {
       "linux": [
+        "src/io/linux/research_ring_profile.c",
         "src/io/linux/watch/linux_segment.c",
         "src/io/linux/watch/linux_segment_cancel.c",
         "src/io/linux/watch/linux_segment_complete.c",
@@ -381,7 +382,8 @@
       ]
     },
     "private_headers": [
-      "src/io/linux/runtime_io_segment_linux_internal.h"
+      "src/io/linux/runtime_io_segment_linux_internal.h",
+      "src/io/linux/runtime_io_ring_profile_linux_internal.h"
     ],
     "targets": [
       {
@@ -484,6 +486,15 @@
         "sources": [
           "experiments/leir/leir_native_test_fixture.c",
           "experiments/leir/test_leir_aot_ownership.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_ring_profile",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/test_leir_aot_ring_profile.c"
         ],
         "link_dependencies": ["llam_runtime"]
       },

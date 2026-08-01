@@ -74,6 +74,7 @@ CLEAN_FILES = \
 	test_leir_aot_integration \
 	test_leir_aot_linux_unit \
 	test_leir_aot_ownership \
+	test_leir_aot_ring_profile \
 	bench_leir_aot_connect \
 	test_leir_native_plan \
 	test_leir_native_segment \
@@ -142,6 +143,7 @@ CLEAN_FILES = \
 	test_leir_aot_integration.exe \
 	test_leir_aot_linux_unit.exe \
 	test_leir_aot_ownership.exe \
+	test_leir_aot_ring_profile.exe \
 	bench_leir_aot_connect.exe \
 	test_leir_native_plan.exe \
 	test_leir_native_segment.exe \
@@ -325,7 +327,8 @@ RUNTIME_PRIV_HDRS = \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
 RESEARCH_PRIVATE_HDRS = \
-	src/io/linux/runtime_io_segment_linux_internal.h
+	src/io/linux/runtime_io_segment_linux_internal.h \
+	src/io/linux/runtime_io_ring_profile_linux_internal.h
 ifeq ($(LLAM_BUILD_RESEARCH),1)
 RUNTIME_PRIV_HDRS += $(RESEARCH_PRIVATE_HDRS)
 endif
@@ -534,6 +537,7 @@ RUNTIME_WINDOWS_GNU_X86_64_OBJS = \
 RUNTIME_WINDOWS_MSVC_X86_64_OBJS = \
 	$(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
 RESEARCH_RUNTIME_LINUX_OBJS = \
+	$(OBJDIR)/src/io/linux/research_ring_profile.o \
 	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
 	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
 	$(OBJDIR)/src/io/linux/watch/linux_segment_complete.o \
@@ -770,6 +774,8 @@ LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
 LEIR_AOT_OWNERSHIP_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_native_test_fixture.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_ownership.o
+LEIR_AOT_RING_PROFILE_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/test_leir_aot_ring_profile.o
 LEIR_AOT_CONNECT_BENCH_OBJS = \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
@@ -843,6 +849,7 @@ RESEARCH_OBJS = \
 	$(LEIR_AOT_INTEGRATION_TEST_OBJS) \
 	$(LEIR_AOT_LINUX_UNIT_TEST_OBJS) \
 	$(LEIR_AOT_OWNERSHIP_TEST_OBJS) \
+	$(LEIR_AOT_RING_PROFILE_TEST_OBJS) \
 	$(LEIR_AOT_CONNECT_BENCH_OBJS) \
 	$(LEIR_NATIVE_PLAN_TEST_OBJS) \
 	$(LEIR_NATIVE_SEGMENT_TEST_OBJS) \
@@ -867,6 +874,7 @@ LEIR_RESEARCH_TARGETS = \
 	test_leir_aot_integration \
 	test_leir_aot_linux_unit \
 	test_leir_aot_ownership \
+	test_leir_aot_ring_profile \
 	bench_leir_aot_connect \
 	test_leir_native_plan \
 	test_leir_native_segment \
@@ -897,6 +905,7 @@ RESEARCH_ENTRY_TARGETS = \
 	test-leir-aot-module \
 	test-leir-aot-c-consumer \
 	test-leir-aot-integration \
+	test-leir-aot-ring-profile \
 	test-leir-aot-connect-screen \
 	test-leir-native \
 	test-leir-native-plan \
@@ -1001,7 +1010,7 @@ ALL_DEPFILES = \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
 -include $(ALL_DEPFILES)
 
-.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-ring-profile test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 audit-build-manifests:
@@ -1262,6 +1271,7 @@ research: $(RESEARCH_LINK_TARGETS)
 
 research-test: test-leir-phase0 test-leir-aot-plan test-leir-aot-module \
 	test-leir-aot-c-consumer test-leir-aot-integration \
+	test-leir-aot-ring-profile \
 	test-leir-aot-connect-screen \
 	test-leir-native test-leir-native-linux test-lcwe-model \
 	test-lccf-model test-srem-model
@@ -2536,6 +2546,9 @@ test-leir-aot-c-consumer: test_leir_aot_c_consumer
 test-leir-aot-integration: test_leir_aot_integration
 	./test_leir_aot_integration
 
+test-leir-aot-ring-profile: test_leir_aot_ring_profile
+	./test_leir_aot_ring_profile
+
 test-leir-aot-connect-screen: bench_leir_aot_connect
 	python3 scripts/test_bench_leir_aot_connect.py -v
 
@@ -2748,6 +2761,9 @@ test_leir_aot_linux_unit: $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS)
 
 test_leir_aot_ownership: $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_ring_profile: $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS) $(LDLIBS)
 
 bench_leir_aot_connect: $(RUNTIME_OBJS) $(LEIR_AOT_CONNECT_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_CONNECT_BENCH_OBJS) $(LDLIBS)

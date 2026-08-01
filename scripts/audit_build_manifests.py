@@ -138,6 +138,8 @@ ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
     "e7a4de19a165d1ade2d2df9725e6bd3173e7efabaf25fb9a49449ba1ea3db804",
     # Canonical LEIR AOT graph after splitting portable and ownership tests.
     "205dbdd06393328239f4640231970a8772ff7311f9f3780e2f2004609779ea92",
+    # Canonical LEIR AOT graph with the strict ring-profile contract test.
+    "22157f3d7bb1ca38f695a8fd14fa7b686b284e2ca72464bdcf9b4f2412e15584",
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }

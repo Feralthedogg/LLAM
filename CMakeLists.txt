@@ -350,6 +350,7 @@ set(LLAM_RUNTIME_WINDOWS_MSVC_X86_64_SOURCES
     src/asm/windows/x86_64/context_x86_64.asm
 )
 set(LLAM_RESEARCH_RUNTIME_LINUX_SOURCES
+    src/io/linux/research_ring_profile.c
     src/io/linux/watch/linux_segment.c
     src/io/linux/watch/linux_segment_cancel.c
     src/io/linux/watch/linux_segment_complete.c
@@ -780,6 +781,7 @@ set(LLAM_LEIR_RESEARCH_TARGETS
     test_leir_aot_integration
     test_leir_aot_linux_unit
     test_leir_aot_ownership
+    test_leir_aot_ring_profile
     bench_leir_aot_connect
     test_leir_native_plan
     test_leir_native_segment
@@ -860,6 +862,16 @@ target_include_directories(test_leir_aot_ownership PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 target_link_libraries(test_leir_aot_ownership PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_ring_profile
+    experiments/leir/test_leir_aot_ring_profile.c
+)
+target_include_directories(test_leir_aot_ring_profile PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_ring_profile PRIVATE llam_runtime)
 
 add_executable(bench_leir_aot_connect
     experiments/leir/generated/leir_aot_connect_write.c
@@ -991,6 +1003,9 @@ add_test(
 add_test(
     NAME test_leir_aot_ownership
     COMMAND test_leir_aot_ownership)
+add_test(
+    NAME test_leir_aot_ring_profile
+    COMMAND test_leir_aot_ring_profile)
 set_tests_properties(
     test_leir_aot_integration
     PROPERTIES SKIP_RETURN_CODE 77)
