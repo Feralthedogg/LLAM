@@ -69,6 +69,7 @@ add_edge(lswg_graph_t *graph, lswg_edge_desc_t desc)
     return lswg_graph_add_edge(graph, &desc) == LSWG_STATUS_OK;
 }
 
+#ifndef LSWG_GRAPH_ONLY
 static bool
 solve_graph(lswg_graph_t *graph, lswg_result_t *result)
 {
@@ -353,6 +354,133 @@ test_unstable_generation_between_snapshots(void)
     lswg_graph_destroy(&second_graph);
     return true;
 }
+#endif
+
+static bool
+test_generation_identity_and_raw_address_rules(void)
+{
+    lswg_graph_t graph;
+    lswg_node_desc_t first =
+        node(ref(LSWG_NODE_MUTEX, 7U, 1U, 0U), 0U, 0U, 0x1000U);
+    lswg_node_desc_t reused =
+        node(ref(LSWG_NODE_MUTEX, 7U, 2U, 0U), 0U, 0U, 0x1000U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 0U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, first));
+    TEST_CHECK(add_node(&graph, reused));
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_OK);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 0U, NULL) == LSWG_STATUS_OK);
+    first.raw_address = 0x2000U;
+    reused = first;
+    reused.raw_address = 0x3000U;
+    TEST_CHECK(add_node(&graph, first));
+    TEST_CHECK(add_node(&graph, reused));
+    TEST_CHECK(lswg_graph_finalize(&graph) ==
+               LSWG_STATUS_DUPLICATE_IDENTITY);
+    TEST_CHECK(!graph.finalized);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+static bool
+test_graph_rejects_malformed_input_transactionally(void)
+{
+    lswg_graph_t graph;
+    lswg_node_desc_t invalid =
+        node(ref(LSWG_NODE_KIND_COUNT, 1U, 1U, 1U), 0U, 0U, 0U);
+    const lswg_node_ref_t task = ref(LSWG_NODE_TASK, 1U, 1U, 1U);
+    const lswg_node_ref_t missing = ref(LSWG_NODE_MUTEX, 1U, 1U, 0U);
+    lswg_edge_desc_t missing_edge =
+        edge(task, missing, LSWG_EDGE_TASK_WAITS_MUTEX,
+             LSWG_EDGE_AND_REQUIRED);
+
+    TEST_CHECK(lswg_graph_init(&graph, 1U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_graph_add_node(&graph, &invalid) ==
+               LSWG_STATUS_INVALID_KIND);
+    TEST_CHECK(graph.node_count == 0U);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(lswg_graph_add_node(&graph, &invalid) ==
+               LSWG_STATUS_INVALID_KIND);
+    TEST_CHECK(graph.node_count == 1U);
+    TEST_CHECK(add_edge(&graph, missing_edge));
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_MISSING_ENDPOINT);
+    TEST_CHECK(!graph.finalized);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+static bool
+test_malformed_select_is_rejected(void)
+{
+    lswg_graph_t graph;
+    const lswg_node_ref_t task = ref(LSWG_NODE_TASK, 3U, 1U, 1U);
+    const lswg_node_ref_t select = ref(LSWG_NODE_SELECT, 3U, 8U, 0U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(select, 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task, select,
+                                     LSWG_EDGE_TASK_WAITS_SELECT,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_MALFORMED_SELECT);
+    TEST_CHECK(!graph.finalized);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+static bool
+test_finalized_order_is_deterministic(void)
+{
+    lswg_graph_t first;
+    lswg_graph_t second;
+    const lswg_node_ref_t task_1 = ref(LSWG_NODE_TASK, 1U, 2U, 1U);
+    const lswg_node_ref_t task_2 = ref(LSWG_NODE_TASK, 2U, 2U, 1U);
+    const lswg_node_ref_t mutex = ref(LSWG_NODE_MUTEX, 5U, 4U, 0U);
+    size_t index;
+
+    TEST_CHECK(lswg_graph_init(&first, 3U, 3U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_graph_init(&second, 3U, 3U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&first, node(mutex, 0U, 3U, 0x9000U)));
+    TEST_CHECK(add_node(&first, node(task_2, 0U, 2U, 0x8000U)));
+    TEST_CHECK(add_node(&first, node(task_1, 0U, 1U, 0x7000U)));
+    TEST_CHECK(add_node(&second, node(task_1, 0U, 1U, 0x17000U)));
+    TEST_CHECK(add_node(&second, node(mutex, 0U, 3U, 0x19000U)));
+    TEST_CHECK(add_node(&second, node(task_2, 0U, 2U, 0x18000U)));
+
+    TEST_CHECK(add_edge(&first, edge(mutex, task_1,
+                                     LSWG_EDGE_MUTEX_OWNED_BY_TASK, 1U)));
+    TEST_CHECK(add_edge(&first, edge(task_2, mutex,
+                                     LSWG_EDGE_TASK_WAITS_MUTEX, 2U)));
+    TEST_CHECK(add_edge(&first, edge(task_1, task_2,
+                                     LSWG_EDGE_TASK_WAITS_JOIN, 3U)));
+    TEST_CHECK(add_edge(&second, edge(task_1, task_2,
+                                      LSWG_EDGE_TASK_WAITS_JOIN, 3U)));
+    TEST_CHECK(add_edge(&second, edge(mutex, task_1,
+                                      LSWG_EDGE_MUTEX_OWNED_BY_TASK, 1U)));
+    TEST_CHECK(add_edge(&second, edge(task_2, mutex,
+                                      LSWG_EDGE_TASK_WAITS_MUTEX, 2U)));
+    TEST_CHECK(lswg_graph_finalize(&first) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_graph_finalize(&second) == LSWG_STATUS_OK);
+    for (index = 0U; index < first.node_count; ++index) {
+        TEST_CHECK(first.nodes[index].desc.ref.kind ==
+                   second.nodes[index].desc.ref.kind);
+        TEST_CHECK(first.nodes[index].desc.ref.identity.primary ==
+                   second.nodes[index].desc.ref.identity.primary);
+    }
+    for (index = 0U; index < first.edge_count; ++index) {
+        TEST_CHECK(first.edges[index].source_index ==
+                   second.edges[index].source_index);
+        TEST_CHECK(first.edges[index].target_index ==
+                   second.edges[index].target_index);
+        TEST_CHECK(first.edges[index].desc.kind ==
+                   second.edges[index].desc.kind);
+    }
+    lswg_graph_destroy(&first);
+    lswg_graph_destroy(&second);
+    return true;
+}
 
 typedef bool (*test_fn)(void);
 
@@ -365,6 +493,7 @@ int
 main(void)
 {
     static const test_case_t tests[] = {
+#ifndef LSWG_GRAPH_ONLY
         {"two_task_mutex_cycle", test_two_task_mutex_cycle},
         {"join_cycle", test_join_cycle},
         {"open_world_condition", test_open_world_condition},
@@ -376,6 +505,14 @@ main(void)
         {"expired_timer", test_expired_timer},
         {"unstable_generation_between_snapshots",
          test_unstable_generation_between_snapshots},
+#endif
+        {"generation_identity_and_raw_address_rules",
+         test_generation_identity_and_raw_address_rules},
+        {"graph_rejects_malformed_input_transactionally",
+         test_graph_rejects_malformed_input_transactionally},
+        {"malformed_select_is_rejected", test_malformed_select_is_rejected},
+        {"finalized_order_is_deterministic",
+         test_finalized_order_is_deterministic},
     };
     size_t index;
 
