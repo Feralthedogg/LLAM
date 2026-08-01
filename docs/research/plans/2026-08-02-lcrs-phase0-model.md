@@ -161,8 +161,8 @@ Commit: `build: integrate LCRS research harness`.
 **Files:**
 
 - Generate: `object/lcrs-phase0/*`
-- Create: `docs/superpowers/reports/2026-08-02-lcrs-phase0-results.md`
-- Create: `docs/superpowers/reports/2026-08-02-lcrs-phase0-decision.md`
+- Create: `docs/research/reports/2026-08-02-lcrs-phase0-results.md`
+- Create: `docs/research/reports/2026-08-02-lcrs-phase0-decision.md`
 
 Run quick local evidence first, then a release build on a Linux host with at least 32 logical shards when available. Record platform-specific and generic model results separately. A negative result is valid and must not be rewritten as success.
 

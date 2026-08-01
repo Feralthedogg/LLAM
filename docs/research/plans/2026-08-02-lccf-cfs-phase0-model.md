@@ -123,8 +123,8 @@ Commit: `build: integrate LCCF fact research`.
 **Files:**
 
 - Generate: `object/lccf-cfs-phase0/*`
-- Create: `docs/superpowers/reports/2026-08-02-lccf-cfs-phase0-results.md`
-- Create: `docs/superpowers/reports/2026-08-02-lccf-cfs-phase0-decision.md`
+- Create: `docs/research/reports/2026-08-02-lccf-cfs-phase0-results.md`
+- Create: `docs/research/reports/2026-08-02-lccf-cfs-phase0-decision.md`
 
 Separate generic model results from platform normalization and hardware counter results. If correctness passes but measurable work does not improve, remove the persistent sidecar and keep only the canonical normalization helper. Only a passing independent result may authorize an Executor prototype.
 
