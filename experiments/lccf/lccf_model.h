@@ -101,6 +101,8 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
 bool lccf_model_batch_equal(const lccf_model_batch_t *lhs,
                             const lccf_model_batch_t *rhs);
 uint64_t lccf_model_checksum(const lccf_model_batch_t *batch);
+bool lccf_model_fact_references_balanced(
+    const lccf_model_batch_t *batch);
 const char *lccf_model_mode_name(lccf_model_mode_t mode);
 const char *lccf_model_workload_name(lccf_model_workload_t workload);
 int lccf_model_parse_mode(const char *text, lccf_model_mode_t *out);

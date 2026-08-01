@@ -2644,6 +2644,44 @@ uint64_t lccf_model_checksum(const lccf_model_batch_t *batch) {
     return checksum == 0U ? UINT64_C(1) : checksum;
 }
 
+bool lccf_model_fact_references_balanced(
+    const lccf_model_batch_t *batch) {
+    size_t instance_index;
+
+    if (batch == NULL || !mode_uses_facts(batch->config.mode)) {
+        return false;
+    }
+    for (instance_index = 0U;
+         instance_index < batch->config.instance_count;
+         ++instance_index) {
+        const lccf_model_instance_t *instance =
+            &batch->instances[instance_index];
+        const lccf_fact_cell_t *cell = instance->fact_cell;
+        const uint64_t state_word = cell == NULL ? 0U :
+            atomic_load_explicit(&cell->state_generation,
+                                 memory_order_acquire);
+        size_t kind;
+
+        if (cell == NULL || cell->published ||
+            lccf_fact_unpack_generation(state_word) !=
+                instance->frame->generation ||
+            lccf_fact_unpack_state(state_word) != LCCF_FACT_STATE_ARMED ||
+            atomic_load_explicit(
+                &cell->references[LCCF_FACT_REF_BACKEND],
+                memory_order_acquire) != active_ticket_count(batch)) {
+            return false;
+        }
+        for (kind = 0U; kind < LCCF_FACT_REF_COUNT; ++kind) {
+            if (kind != LCCF_FACT_REF_BACKEND &&
+                atomic_load_explicit(&cell->references[kind],
+                                     memory_order_acquire) != 0U) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 const char *lccf_model_mode_name(lccf_model_mode_t mode) {
     if (!mode_valid(mode)) {
         return NULL;
