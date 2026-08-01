@@ -227,6 +227,117 @@ test_signature_is_semantic_and_stable(void)
     return true;
 }
 
+static bool
+test_coordination_releases_only_after_all_actors_arm(void)
+{
+    lrpa_manifest_t manifest = valid_manifest();
+    lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_result_t result;
+    uint32_t lane;
+
+    manifest.worker_count = 2U;
+    manifest.rounds = 3U;
+    manifest.queue_capacity = 1024U;
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_context_run_coordination_probe(&context, &result) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(result.status == LRPA_STATUS_OK);
+    TEST_CHECK(result.rounds_completed == manifest.rounds);
+    TEST_CHECK(result.cleanup_complete);
+    TEST_CHECK(atomic_load(&context.release_observed_armed) ==
+               context.actor_count);
+    for (lane = 0U; lane < manifest.lane_count; ++lane) {
+        TEST_CHECK(atomic_load(&context.lanes[lane].phase) ==
+                   LRPA_LANE_VERIFIED);
+    }
+
+    TEST_CHECK(lrpa_context_reset(&context) == LRPA_STATUS_OK);
+    TEST_CHECK(atomic_load(&context.trace.next) == 0U);
+    for (lane = 0U; lane < manifest.lane_count; ++lane) {
+        TEST_CHECK(atomic_load(&context.lanes[lane].phase) ==
+                   LRPA_LANE_ALLOCATED);
+        TEST_CHECK(atomic_load(&context.lanes[lane].winner_count) == 0U);
+        TEST_CHECK(atomic_load(&context.lanes[lane].terminal_count) == 0U);
+        TEST_CHECK(atomic_load(&context.lanes[lane].invariant_failures) ==
+                   0U);
+    }
+    TEST_CHECK(lrpa_context_run_coordination_probe(&context, &result) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(result.cleanup_complete);
+    lrpa_context_destroy(&context);
+    return true;
+}
+
+static bool
+test_setup_failure_aborts_and_joins_started_actors(void)
+{
+    lrpa_manifest_t manifest = valid_manifest();
+    lrpa_run_options_t options = {2U, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_result_t result;
+    uint32_t actor;
+
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_context_run_coordination_probe(&context, &result) ==
+               LRPA_STATUS_PLATFORM_ERROR);
+    TEST_CHECK(result.status == LRPA_STATUS_PLATFORM_ERROR);
+    TEST_CHECK(result.cleanup_complete);
+    for (actor = 0U; actor < context.actor_count; ++actor) {
+        TEST_CHECK(!context.actors[actor].started ||
+                   context.actors[actor].joined);
+    }
+    lrpa_context_destroy(&context);
+    return true;
+}
+
+static bool
+test_timeout_breaks_barriers_and_joins_every_actor(void)
+{
+    lrpa_manifest_t manifest = valid_manifest();
+    lrpa_run_options_t options = {UINT32_MAX, 0U};
+    lrpa_context_t context;
+    lrpa_result_t result;
+    uint32_t actor;
+
+    manifest.timeout_ns = UINT64_C(20000000);
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_context_run_coordination_probe(&context, &result) ==
+               LRPA_STATUS_TIMEOUT);
+    TEST_CHECK(result.status == LRPA_STATUS_TIMEOUT);
+    TEST_CHECK(result.cleanup_complete);
+    for (actor = 0U; actor < context.actor_count; ++actor) {
+        TEST_CHECK(!context.actors[actor].started ||
+                   context.actors[actor].joined);
+    }
+    lrpa_context_destroy(&context);
+    return true;
+}
+
+static bool
+test_coordination_trace_overflow_is_reported(void)
+{
+    lrpa_manifest_t manifest = valid_manifest();
+    lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_result_t result;
+
+    manifest.queue_capacity = 2U;
+    manifest.rounds = 2U;
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_context_run_coordination_probe(&context, &result) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(result.trace_entries == 2U);
+    TEST_CHECK(result.trace_truncated);
+    TEST_CHECK(result.cleanup_complete);
+    lrpa_context_destroy(&context);
+    return true;
+}
+
 typedef bool (*test_fn)(void);
 
 typedef struct test_case {
@@ -246,6 +357,14 @@ main(void)
         {"trace_is_bounded", test_trace_is_bounded},
         {"signature_is_semantic_and_stable",
          test_signature_is_semantic_and_stable},
+        {"coordination_releases_only_after_all_actors_arm",
+         test_coordination_releases_only_after_all_actors_arm},
+        {"setup_failure_aborts_and_joins_started_actors",
+         test_setup_failure_aborts_and_joins_started_actors},
+        {"timeout_breaks_barriers_and_joins_every_actor",
+         test_timeout_breaks_barriers_and_joins_every_actor},
+        {"coordination_trace_overflow_is_reported",
+         test_coordination_trace_overflow_is_reported},
     };
     size_t index;
 

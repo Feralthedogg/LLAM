@@ -96,6 +96,8 @@ lrpa_status_t lrpa_context_init(lrpa_context_t *context,
                                 const lrpa_run_options_t *options);
 lrpa_status_t lrpa_context_run(lrpa_context_t *context,
                                lrpa_result_t *result);
+lrpa_status_t lrpa_context_run_coordination_probe(lrpa_context_t *context,
+                                                  lrpa_result_t *result);
 lrpa_status_t lrpa_context_reset(lrpa_context_t *context);
 void lrpa_context_destroy(lrpa_context_t *context);
 
