@@ -14,6 +14,7 @@ compile_commands.json
 /*.plist
 /bench
 /bench_lcwe_model
+/test_lswg_solver
 /demo
 /llam_broker
 /stress
