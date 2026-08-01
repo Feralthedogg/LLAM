@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Follow `docs/superpowers/specs/2026-07-26-llam-causal-completion-fusion-design.md`.
+- Follow `docs/research/specs/2026-07-26-llam-causal-completion-fusion-design.md`.
 - Keep this phase standalone: do not modify any file under `src/` or `include/llam/`, do not install an Executor ABI, and do not change the existing stackful runtime.
 - Preserve the user's root-worktree changes in `docs/operations/benchmarks.md` and `scripts/bench_deep_compare.py`; never stage either file.
 - Add no third-party dependency and use only C11, platform system APIs, and Python standard-library or existing repository helpers.
@@ -83,7 +83,7 @@
 - `object/lccf-phase0/lccf_phase0_summary.csv`
 - `object/lccf-phase0/lccf_phase0_metadata.json`
 - `object/lccf-phase0/lccf_phase0_report.md`
-- `docs/superpowers/reports/2026-07-26-lccf-phase0-results.md`
+- `docs/research/reports/2026-07-26-lccf-phase0-results.md`
 
 The `object/` files remain untracked. The tracked report is generated from the
 same in-memory rows and records the exact command, full matrix, selected or
@@ -944,7 +944,7 @@ lccf-model-report: test-lccf-model
 		--cc "$(CC)" \
 		--out-dir object/lccf-phase0 \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+			docs/research/reports/2026-07-26-lccf-phase0-results.md
 ```
 
 - Add CTest names `test_lccf_model` and `test_bench_lccf_model`, passing the
@@ -1034,7 +1034,7 @@ git commit -m "build: integrate LCCF research harness"
 - Generate: `object/lccf-phase0/lccf_phase0_summary.csv`
 - Generate: `object/lccf-phase0/lccf_phase0_metadata.json`
 - Generate: `object/lccf-phase0/lccf_phase0_report.md`
-- Generate: `docs/superpowers/reports/2026-07-26-lccf-phase0-results.md`
+- Generate: `docs/research/reports/2026-07-26-lccf-phase0-results.md`
 - Modify only if evidence exposes a harness defect:
   `experiments/lccf/*`, `scripts/bench_lccf_model.py`,
   `scripts/test_bench_lccf_model.py`, `Makefile`, or `CMakeLists.txt`
@@ -1078,7 +1078,7 @@ python3 scripts/bench_lccf_model.py \
   --cc "${CC:-cc}" \
   --out-dir object/lccf-phase0 \
   --tracked-report \
-    docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+    docs/research/reports/2026-07-26-lccf-phase0-results.md
 ```
 
 Expected: complete raw and summary files plus one evidence-derived verdict.
@@ -1091,7 +1091,7 @@ Run:
 python3 scripts/test_bench_lccf_model.py
 rg -n 'PROMISING|NARROW|REJECT|INCONCLUSIVE|MISMATCH|hot_allocations|spread' \
   object/lccf-phase0/lccf_phase0_report.md \
-  docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+  docs/research/reports/2026-07-26-lccf-phase0-results.md
 git diff --check
 ```
 
@@ -1116,7 +1116,7 @@ runtime code.
 - [ ] **Step 5: Commit the evidence without changing its verdict**
 
 ```sh
-git add docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+git add docs/research/reports/2026-07-26-lccf-phase0-results.md
 git commit -m "docs: record LCCF phase zero evidence"
 ```
 
