@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import platform
 import statistics
 import subprocess
 import sys
@@ -395,6 +396,9 @@ def _aggregate_cell(cell: Cell, results: list[PairResult]) -> dict[str, Any]:
 
 def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = args.output_dir.resolve()
+    binary = args.binary.resolve()
+    if not binary.is_file():
+        raise FileNotFoundError(f"benchmark binary not found: {binary}")
     raw_dir = output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     summaries: list[dict[str, Any]] = []
@@ -414,7 +418,7 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
                 seed = args.seed ^ (cell_index * 0x9E3779B1) ^ repetition
                 for slot, mode in enumerate(order):
                     command = build_command(
-                        args.binary, cell, mode, args.instances, args.chain,
+                        binary, cell, mode, args.instances, args.chain,
                         args.rounds, args.warmup_rounds, seed,
                     )
                     value = run_sample(command, args.timeout)
@@ -450,6 +454,12 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "decision": decision,
         "sample_pairs_per_cell": args.samples * 2,
+        "environment": {
+            "binary": str(binary),
+            "machine": platform.machine(),
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+        },
         "cells": summaries,
     }
     (output_dir / "summary.json").write_text(
