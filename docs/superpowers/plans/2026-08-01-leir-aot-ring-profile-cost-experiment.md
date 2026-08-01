@@ -469,14 +469,14 @@ git commit -m "ci: record AOT ring profile evidence"
 - Produces a decision of `CONTINUE`, `NARROW`, or `STOP` for ring-profile
   tuning and explicitly selects the next compiler/runtime experiment.
 
-- [ ] **Step 1: Run focused local verification**
+- [x] **Step 1: Run focused local verification**
 
 Run stable and research builds on macOS, then focused Make/CMake tests and
 ASan/UBSan in Linux. Required checks include selector, generated module,
 integration, ownership, benchmark parser, license, structure, build manifests,
 shared exports, and production test-hook audits.
 
-- [ ] **Step 2: Run the frozen Linux profile matrix**
+- [x] **Step 2: Run the frozen Linux profile matrix**
 
 On each available Linux machine, run:
 
@@ -491,7 +491,7 @@ python3 scripts/bench_leir_aot_connect.py \
 
 Record unavailable profiles without weakening the control matrix.
 
-- [ ] **Step 3: Write the tracked decision report**
+- [x] **Step 3: Write the tracked decision report**
 
 The report contains environment identity, per-profile capability, medians and
 confidence intervals, cost shares, structural counters, recommendation, and
@@ -506,7 +506,7 @@ one of:
 Regardless of decision, state `3.0.0 release gate: BLOCKED` and
 `Release authorized: no`.
 
-- [ ] **Step 4: Run final repository verification**
+- [x] **Step 4: Run final repository verification**
 
 Run:
 
@@ -522,7 +522,7 @@ make -s -j4 LLAM_BUILD_RESEARCH=1 research-test
 Then repeat the relevant Linux CI commands in the Linux environment. Verify
 the worktree contains no generated binaries or evidence directories.
 
-- [ ] **Step 5: Commit the decision report**
+- [x] **Step 5: Commit the decision report**
 
 ```bash
 git add docs/superpowers/reports/2026-08-01-leir-aot-ring-profile-results.md

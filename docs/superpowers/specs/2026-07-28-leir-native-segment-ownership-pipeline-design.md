@@ -1,7 +1,8 @@
 # LEIR Native Segment Ownership, Pipeline, and Batch Design
 
-**Date:** 2026-07-28  
-**Status:** Approved for implementation by delegated maintainer judgment  
+**Date:** 2026-07-28
+
+**Status:** Approved for implementation by delegated maintainer judgment
 **Scope:** Experimental LEIR/Linux backend only; no public LLAM API or version
 promise
 
