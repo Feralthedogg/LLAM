@@ -376,5 +376,9 @@ Assert-SafeOutputPath $Archive
 Compress-Archive -LiteralPath $Stage -DestinationPath $Archive -Force
 $Hash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
 Assert-SafeOutputPath "$Archive.sha256"
-Set-Content -LiteralPath "$Archive.sha256" -Value "$Hash  $(Split-Path -Leaf $Archive)"
+[System.IO.File]::WriteAllText(
+    "$Archive.sha256",
+    "$Hash  $(Split-Path -Leaf $Archive)`n",
+    [System.Text.Encoding]::ASCII
+)
 Write-Host $Archive
