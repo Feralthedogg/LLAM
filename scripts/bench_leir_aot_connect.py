@@ -23,9 +23,13 @@ from typing import Final
 
 
 SAMPLE_PREFIX: Final = "LEIR_AOT_CONNECT_SAMPLE"
+RING_PROFILES: Final = frozenset(
+    {"submit_all", "coop_taskrun", "defer_taskrun"}
+)
 FIELD_ORDER: Final = (
     "version",
     "candidate",
+    "ring_profile",
     "family",
     "concurrency",
     "payload",
@@ -33,6 +37,11 @@ FIELD_ORDER: Final = (
     "wall_ns",
     "cpu_ns",
     "p99_ns",
+    "bind_ns",
+    "execute_ns",
+    "aot_prepare_ns",
+    "aot_ring_ns",
+    "aot_resume_ns",
     "correctness",
     "queue_publications",
     "prepared_sqes",
@@ -52,6 +61,11 @@ INTEGER_FIELDS: Final = frozenset(
         "wall_ns",
         "cpu_ns",
         "p99_ns",
+        "bind_ns",
+        "execute_ns",
+        "aot_prepare_ns",
+        "aot_ring_ns",
+        "aot_resume_ns",
         "correctness",
         "queue_publications",
         "prepared_sqes",
@@ -62,7 +76,13 @@ INTEGER_FIELDS: Final = frozenset(
         "hot_allocations",
     }
 )
-CELL_FIELDS: Final = ("family", "concurrency", "payload", "activations")
+CELL_FIELDS: Final = (
+    "ring_profile",
+    "family",
+    "concurrency",
+    "payload",
+    "activations",
+)
 CHECKSUM_PATTERN: Final = re.compile(r"[0-9a-f]{16}\Z")
 
 
@@ -90,12 +110,14 @@ def _validate_sample(
     for field in INTEGER_FIELDS:
         validated[field] = _integer(field, validated[field])
 
-    if validated["version"] != 1:
-        raise ValueError("version must be 1")
+    if validated["version"] != 2:
+        raise ValueError("version must be 2")
     if validated["candidate"] not in {"portable", "native"}:
         raise ValueError("candidate must be portable or native")
     if candidate is not None and validated["candidate"] != candidate:
         raise ValueError(f"expected {candidate} candidate")
+    if validated["ring_profile"] not in RING_PROFILES:
+        raise ValueError("ring_profile is not recognized")
     if validated["family"] not in {"tcp", "unix"}:
         raise ValueError("family must be tcp or unix")
     for field in (
@@ -105,6 +127,8 @@ def _validate_sample(
         "wall_ns",
         "cpu_ns",
         "p99_ns",
+        "bind_ns",
+        "execute_ns",
     ):
         if validated[field] <= 0:
             raise ValueError(f"{field} must be a positive integer")
@@ -118,9 +142,25 @@ def _validate_sample(
         "task_parks",
         "terminal_wakes",
         "hot_allocations",
+        "aot_prepare_ns",
+        "aot_ring_ns",
+        "aot_resume_ns",
     ):
         if validated[field] < 0:
             raise ValueError(f"{field} must be a non-negative integer")
+    aot_fields = ("aot_prepare_ns", "aot_ring_ns", "aot_resume_ns")
+    if validated["candidate"] == "portable":
+        if any(validated[field] != 0 for field in aot_fields):
+            raise ValueError("portable AOT timings must be zero")
+    else:
+        if any(validated[field] <= 0 for field in aot_fields):
+            raise ValueError("native AOT timings must be positive")
+        remaining = int(validated["execute_ns"])
+        for field in aot_fields:
+            value = int(validated[field])
+            if value > remaining:
+                raise ValueError("native AOT timings exceed execute_ns")
+            remaining -= value
     checksum = validated["checksum"]
     if not isinstance(checksum, str) or CHECKSUM_PATTERN.fullmatch(checksum) is None:
         raise ValueError("checksum must be 16 lowercase hexadecimal characters")
@@ -199,6 +239,7 @@ def benchmark_command(
     binary: Path,
     *,
     candidate: str,
+    ring_profile: str,
     family: str,
     concurrency: int,
     payload: int,
@@ -206,6 +247,8 @@ def benchmark_command(
 ) -> list[str]:
     if candidate not in {"portable", "native"}:
         raise ValueError("invalid benchmark candidate")
+    if ring_profile not in RING_PROFILES:
+        raise ValueError("invalid ring profile")
     if family not in {"tcp", "unix"}:
         raise ValueError("invalid benchmark family")
     for name, value in (
@@ -223,6 +266,8 @@ def benchmark_command(
         str(binary.resolve()),
         "--candidate",
         candidate,
+        "--ring-profile",
+        ring_profile,
         "--family",
         family,
         "--concurrency",
@@ -466,7 +511,7 @@ def _metadata(binary: Path, root: Path) -> dict[str, object]:
         else bool(status_result.stdout)
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "SPECIALIZED",
         "portable_performance_claim": False,
         "release_authorized": False,
@@ -566,10 +611,67 @@ def _parse_csv_integers(value: str, *, name: str) -> list[int]:
     return values
 
 
+def _skip_class(error: str) -> str | None:
+    if not error.startswith("skip:"):
+        return None
+    detail = error.removeprefix("skip:").strip().lower()
+    if any(
+        marker in detail
+        for marker in (
+            "not supported",
+            "unavailable",
+            "enotsup",
+            "enosys",
+            "not implemented",
+        )
+    ):
+        return "unsupported"
+    if any(
+        marker in detail
+        for marker in ("permission denied", "not permitted", "eperm", "eacces")
+    ):
+        return "permission"
+    if any(marker in detail for marker in ("temporarily unavailable", "eagain")):
+        return "transient"
+    return "platform"
+
+
+def _profile_ratios(
+    pairs: Sequence[tuple[Mapping[str, object], Mapping[str, object]]],
+) -> dict[str, float | None]:
+    if not pairs:
+        return {
+            "wall_ratio": None,
+            "cpu_ratio": None,
+            "p99_ratio": None,
+        }
+    return {
+        "wall_ratio": float(
+            statistics.median(
+                int(native["wall_ns"]) / int(portable["wall_ns"])
+                for portable, native in pairs
+            )
+        ),
+        "cpu_ratio": float(
+            statistics.median(
+                int(native["cpu_ns"]) / int(portable["cpu_ns"])
+                for portable, native in pairs
+            )
+        ),
+        "p99_ratio": float(
+            statistics.median(
+                int(native["p99_ns"]) / int(portable["p99_ns"])
+                for portable, native in pairs
+            )
+        ),
+    }
+
+
 def run_screen(
     *,
     binary: Path,
     output_dir: Path,
+    profiles: Sequence[str],
     families: Sequence[str],
     concurrencies: Sequence[int],
     payloads: Sequence[int],
@@ -579,133 +681,268 @@ def run_screen(
 ) -> dict[str, object]:
     if not binary.is_file():
         raise ValueError("benchmark binary does not exist")
+    if (
+        not profiles
+        or len(set(profiles)) != len(profiles)
+        or any(profile not in RING_PROFILES for profile in profiles)
+    ):
+        raise ValueError("invalid ring profile list")
+    if "submit_all" not in profiles:
+        raise ValueError("submit_all control profile is required")
     output_dir.mkdir(parents=True, exist_ok=False)
     root = Path(__file__).resolve().parents[1]
     raw_rows: list[dict[str, object]] = []
     summary_rows: list[dict[str, object]] = []
-    cell_verdicts: list[dict[str, object]] = []
-    release_pairs: list[
-        tuple[Mapping[str, object], Mapping[str, object]]
-    ] = []
-    incomplete_reasons: list[str] = []
+    profile_results: dict[str, dict[str, object]] = {}
+    pairs_by_profile: dict[
+        str,
+        list[tuple[Mapping[str, object], Mapping[str, object]]],
+    ] = {}
     execution_index = 0
 
-    for family in families:
-        for concurrency in concurrencies:
-            for payload in payloads:
-                by_candidate: dict[str, list[dict[str, object]]] = {
-                    "portable": [],
-                    "native": [],
-                }
-                cell_errors: list[str] = []
-                for candidate in balanced_order(samples):
-                    command = benchmark_command(
-                        binary,
-                        candidate=candidate,
-                        family=family,
-                        concurrency=concurrency,
-                        payload=payload,
-                        activations=activations,
-                    )
-                    record, error = _run_sample(
-                        command, timeout_seconds=timeout_seconds
-                    )
-                    if error is not None:
-                        cell_errors.append(f"{candidate}: {error}")
-                        continue
-                    assert record is not None
-                    expected_cell = (
-                        family,
-                        concurrency,
-                        payload,
-                        activations,
-                    )
-                    if record["candidate"] != candidate or (
-                        record["family"],
-                        record["concurrency"],
-                        record["payload"],
-                        record["activations"],
-                    ) != expected_cell:
-                        cell_errors.append(
-                            f"{candidate}: sample identity mismatch"
-                        )
-                        continue
-                    by_candidate[candidate].append(record)
-                    raw_rows.append(
-                        {
-                            "execution_index": execution_index,
-                            **record,
-                        }
-                    )
-                    execution_index += 1
+    for profile in profiles:
+        cell_verdicts: list[dict[str, object]] = []
+        profile_pairs: list[
+            tuple[Mapping[str, object], Mapping[str, object]]
+        ] = []
+        profile_errors: list[str] = []
+        profile_skip_classes: list[str | None] = []
+        profile_attempts = 0
+        profile_sample_count = 0
 
-                cell_label = (
-                    f"{family}/c{concurrency}/p{payload}/a{activations}"
-                )
-                if cell_errors or any(
-                    len(by_candidate[candidate]) != samples
-                    for candidate in ("portable", "native")
-                ):
-                    reasons = cell_errors or ["incomplete sample count"]
-                    cell_result: dict[str, object] = {
-                        "cell": cell_label,
-                        "verdict": "INCOMPLETE",
-                        "reasons": reasons,
-                        "portable_samples": len(by_candidate["portable"]),
-                        "native_samples": len(by_candidate["native"]),
+        for family in families:
+            for concurrency in concurrencies:
+                for payload in payloads:
+                    by_candidate: dict[str, list[dict[str, object]]] = {
+                        "portable": [],
+                        "native": [],
                     }
-                    incomplete_reasons.extend(
-                        f"{cell_label}: {reason}" for reason in reasons
+                    cell_errors: list[str] = []
+                    cell_skip_classes: list[str | None] = []
+                    order = balanced_order(samples)
+                    for candidate in order:
+                        profile_attempts += 1
+                        command = benchmark_command(
+                            binary,
+                            candidate=candidate,
+                            ring_profile=profile,
+                            family=family,
+                            concurrency=concurrency,
+                            payload=payload,
+                            activations=activations,
+                        )
+                        record, error = _run_sample(
+                            command, timeout_seconds=timeout_seconds
+                        )
+                        if error is not None:
+                            labelled_error = f"{candidate}: {error}"
+                            skip_class = _skip_class(error)
+                            cell_errors.append(labelled_error)
+                            cell_skip_classes.append(skip_class)
+                            profile_errors.append(labelled_error)
+                            profile_skip_classes.append(skip_class)
+                            continue
+                        assert record is not None
+                        try:
+                            record = _validate_sample(
+                                record, candidate=candidate
+                            )
+                        except ValueError as validation_error:
+                            labelled_error = (
+                                f"{candidate}: invalid sample: "
+                                f"{validation_error}"
+                            )
+                            cell_errors.append(labelled_error)
+                            cell_skip_classes.append(None)
+                            profile_errors.append(labelled_error)
+                            profile_skip_classes.append(None)
+                            continue
+                        expected_cell = (
+                            profile,
+                            family,
+                            concurrency,
+                            payload,
+                            activations,
+                        )
+                        if _cell(record) != expected_cell:
+                            labelled_error = (
+                                f"{candidate}: sample identity mismatch"
+                            )
+                            cell_errors.append(labelled_error)
+                            cell_skip_classes.append(None)
+                            profile_errors.append(labelled_error)
+                            profile_skip_classes.append(None)
+                            continue
+                        by_candidate[candidate].append(record)
+                        profile_sample_count += 1
+                        raw_rows.append(
+                            {
+                                "execution_index": execution_index,
+                                **record,
+                            }
+                        )
+                        execution_index += 1
+
+                    cell_label = (
+                        f"{family}/c{concurrency}/p{payload}/a{activations}"
                     )
-                else:
-                    cell_result = classify_mechanism(
-                        by_candidate["portable"],
-                        by_candidate["native"],
+                    cell_sample_count = sum(
+                        len(records) for records in by_candidate.values()
                     )
-                    cell_result = {"cell": cell_label, **cell_result}
-                    release_pairs.extend(
-                        zip(
+                    cell_unavailable = (
+                        cell_sample_count == 0
+                        and len(cell_errors) == len(order)
+                        and all(
+                            skip_class is not None
+                            for skip_class in cell_skip_classes
+                        )
+                        and len(set(cell_skip_classes)) == 1
+                    )
+                    if cell_unavailable:
+                        reasons = sorted(set(cell_errors))
+                        cell_result: dict[str, object] = {
+                            "cell": cell_label,
+                            "verdict": "UNAVAILABLE",
+                            "reasons": reasons,
+                            "skip_class": cell_skip_classes[0],
+                            "portable_samples": 0,
+                            "native_samples": 0,
+                        }
+                    elif cell_errors or any(
+                        len(by_candidate[candidate]) != samples
+                        for candidate in ("portable", "native")
+                    ):
+                        reasons = sorted(set(cell_errors)) or [
+                            "incomplete sample count"
+                        ]
+                        cell_result = {
+                            "cell": cell_label,
+                            "verdict": "INCOMPLETE",
+                            "reasons": reasons,
+                            "portable_samples": len(
+                                by_candidate["portable"]
+                            ),
+                            "native_samples": len(by_candidate["native"]),
+                        }
+                    else:
+                        cell_result = classify_mechanism(
                             by_candidate["portable"],
                             by_candidate["native"],
                         )
+                        cell_result = {"cell": cell_label, **cell_result}
+                        profile_pairs.extend(
+                            zip(
+                                by_candidate["portable"],
+                                by_candidate["native"],
+                            )
+                        )
+                    cell_verdicts.append(cell_result)
+                    summary_rows.append(
+                        {
+                            "ring_profile": profile,
+                            "family": family,
+                            "concurrency": concurrency,
+                            "payload": payload,
+                            "activations": activations,
+                            "verdict": cell_result["verdict"],
+                            "reasons": ";".join(
+                                str(reason)
+                                for reason in cell_result["reasons"]
+                            ),
+                            "wall_ratio": cell_result.get(
+                                "wall_ratio", ""
+                            ),
+                            "wall_ratio_ci_low": cell_result.get(
+                                "wall_ratio_ci_low", ""
+                            ),
+                            "wall_ratio_ci_high": cell_result.get(
+                                "wall_ratio_ci_high", ""
+                            ),
+                            "portable_samples": len(
+                                by_candidate["portable"]
+                            ),
+                            "native_samples": len(
+                                by_candidate["native"]
+                            ),
+                        }
                     )
-                cell_verdicts.append(cell_result)
-                summary_rows.append(
-                    {
-                        "family": family,
-                        "concurrency": concurrency,
-                        "payload": payload,
-                        "activations": activations,
-                        "verdict": cell_result["verdict"],
-                        "reasons": ";".join(
-                            str(reason)
-                            for reason in cell_result["reasons"]
-                        ),
-                        "wall_ratio": cell_result.get("wall_ratio", ""),
-                        "wall_ratio_ci_low": cell_result.get(
-                            "wall_ratio_ci_low", ""
-                        ),
-                        "wall_ratio_ci_high": cell_result.get(
-                            "wall_ratio_ci_high", ""
-                        ),
-                        "portable_samples": len(
-                            by_candidate["portable"]
-                        ),
-                        "native_samples": len(by_candidate["native"]),
-                    }
-                )
 
-    verdict_names = {str(item["verdict"]) for item in cell_verdicts}
-    if "STOP" in verdict_names:
-        overall = "STOP"
-    elif "INCOMPLETE" in verdict_names:
-        overall = "INCOMPLETE"
-    else:
-        overall = "CONTINUE"
+        profile_unavailable = (
+            profile_sample_count == 0
+            and len(profile_errors) == profile_attempts
+            and all(
+                skip_class is not None
+                for skip_class in profile_skip_classes
+            )
+            and len(set(profile_skip_classes)) == 1
+        )
+        cell_verdict_names = {
+            str(item["verdict"]) for item in cell_verdicts
+        }
+        if "STOP" in cell_verdict_names:
+            profile_verdict = "REJECT"
+        elif profile_unavailable:
+            profile_verdict = "UNAVAILABLE"
+        elif cell_verdict_names == {"CONTINUE"}:
+            profile_verdict = "CONTINUE"
+        else:
+            profile_verdict = "INCOMPLETE"
+        capability = (
+            "UNAVAILABLE"
+            if profile_unavailable
+            else "AVAILABLE"
+            if not ({"INCOMPLETE", "UNAVAILABLE"} & cell_verdict_names)
+            else "PARTIAL"
+        )
+        profile_reasons = sorted(
+            {
+                str(reason)
+                for cell in cell_verdicts
+                for reason in cell["reasons"]
+            }
+        )
+        profile_results[profile] = {
+            "capability": capability,
+            "verdict": profile_verdict,
+            "reasons": profile_reasons,
+            "sample_count": len(profile_pairs),
+            **_profile_ratios(profile_pairs),
+            "cells": cell_verdicts,
+        }
+        pairs_by_profile[profile] = profile_pairs
+
+    control = profile_results["submit_all"]
+    control_verdict = str(control["verdict"])
+    overall = (
+        "CONTINUE"
+        if control_verdict == "CONTINUE"
+        else "STOP"
+        if control_verdict == "REJECT"
+        else "INCOMPLETE"
+    )
+    recommended_candidates = [
+        (
+            float(result["cpu_ratio"]),
+            float(result["p99_ratio"]),
+            float(result["wall_ratio"]),
+            profile,
+        )
+        for profile, result in profile_results.items()
+        if result["verdict"] == "CONTINUE"
+        and result["cpu_ratio"] is not None
+        and result["p99_ratio"] is not None
+        and result["wall_ratio"] is not None
+    ]
+    recommended_profile = (
+        min(recommended_candidates)[3]
+        if recommended_candidates
+        else None
+    )
     release_gate: dict[str, object]
-    if release_pairs and not incomplete_reasons:
+    control_pairs = pairs_by_profile["submit_all"]
+    if control_pairs and control["capability"] == "AVAILABLE":
         release_gate = classify_release_gate(
-            release_pairs, machine_count=1
+            control_pairs, machine_count=1
         )
     else:
         release_gate = {
@@ -714,15 +951,19 @@ def run_screen(
             "machine_count": 1,
         }
     verdict = {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "SPECIALIZED",
+        "control_profile": "submit_all",
         "mechanism_verdict": overall,
+        "recommended_profile": recommended_profile,
+        "profiles": profile_results,
         "release_gate": release_gate,
         "release_authorized": False,
-        "cells": cell_verdicts,
+        "cells": control["cells"],
     }
     metadata = _metadata(binary, root)
     metadata["parameters"] = {
+        "profiles": list(profiles),
         "families": list(families),
         "concurrencies": list(concurrencies),
         "payloads": list(payloads),
@@ -739,6 +980,7 @@ def run_screen(
         output_dir / "summary.csv",
         summary_rows,
         (
+            "ring_profile",
             "family",
             "concurrency",
             "payload",
@@ -757,21 +999,39 @@ def run_screen(
     report_lines = [
         "# LEIR AOT CONNECT mechanism screen",
         "",
-        f"- Specialized mechanism verdict: **{overall}**",
+        f"- `submit_all` control verdict: **{overall}**",
+        f"- Recommended profile: **{recommended_profile or 'none'}**",
         f"- 3.0.0 release gate: **{release_gate['verdict']}**",
         "- Scope: Linux-specialized; no portable performance claim",
         "- Release authorized: **no**",
         "",
-        "| Cell | Verdict | Median wall ratio | 95% bootstrap interval |",
-        "|---|---:|---:|---:|",
+        "| Profile | Capability | Verdict | CPU ratio | p99 ratio | Wall ratio |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
-    for cell in cell_verdicts:
+    for profile, profile_result in profile_results.items():
         report_lines.append(
-            f"| {cell['cell']} | {cell['verdict']} | "
-            f"{cell.get('wall_ratio', 'n/a')} | "
-            f"{cell.get('wall_ratio_ci_low', 'n/a')}–"
-            f"{cell.get('wall_ratio_ci_high', 'n/a')} |"
+            f"| {profile} | {profile_result['capability']} | "
+            f"{profile_result['verdict']} | "
+            f"{profile_result['cpu_ratio'] or 'n/a'} | "
+            f"{profile_result['p99_ratio'] or 'n/a'} | "
+            f"{profile_result['wall_ratio'] or 'n/a'} |"
         )
+    report_lines.extend(
+        [
+            "",
+            "| Profile | Cell | Verdict | Median wall ratio | "
+            "95% bootstrap interval |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    for profile, profile_result in profile_results.items():
+        for cell in profile_result["cells"]:
+            report_lines.append(
+                f"| {profile} | {cell['cell']} | {cell['verdict']} | "
+                f"{cell.get('wall_ratio', 'n/a')} | "
+                f"{cell.get('wall_ratio_ci_low', 'n/a')}–"
+                f"{cell.get('wall_ratio_ci_high', 'n/a')} |"
+            )
     report_lines.extend(
         [
             "",
@@ -792,6 +1052,10 @@ def _argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--profiles",
+        default="submit_all,coop_taskrun,defer_taskrun",
+    )
     parser.add_argument("--families", default="tcp,unix")
     parser.add_argument("--concurrency", default="1,16")
     parser.add_argument("--payloads", default="64,4096")
@@ -804,6 +1068,11 @@ def _argument_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _argument_parser().parse_args(argv)
     try:
+        profiles = _parse_csv_choices(
+            args.profiles,
+            allowed=set(RING_PROFILES),
+            name="ring profile",
+        )
         families = _parse_csv_choices(
             args.families, allowed={"tcp", "unix"}, name="family"
         )
@@ -818,6 +1087,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         verdict = run_screen(
             binary=args.binary,
             output_dir=args.output_dir,
+            profiles=profiles,
             families=families,
             concurrencies=concurrencies,
             payloads=payloads,

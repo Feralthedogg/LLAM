@@ -334,13 +334,13 @@ git commit -m "research: attribute AOT activation cost"
 - `run_screen(..., profiles: Sequence[str], ...)` returns per-profile
   capability, verdict, ratios, and recommendation.
 
-- [ ] **Step 1: Write parser and pairing RED tests**
+- [x] **Step 1: Write parser and pairing RED tests**
 
 Update the sample fixture to schema 2 and add all six fields. Assert that
 schema 1, an unknown profile, missing timing fields, portable nonzero AOT
 subphases, native zero subphases, and a profile-mismatched pair are rejected.
 
-- [ ] **Step 2: Write profile-isolation RED tests**
+- [x] **Step 2: Write profile-isolation RED tests**
 
 Use a fake executable fixture or patched `_run_sample()` to model:
 
@@ -352,7 +352,7 @@ Use a fake executable fixture or patched `_run_sample()` to model:
 5. recommendation ranking by median same-profile native CPU ratio, then p99,
    then wall ratio.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run:
 
@@ -363,13 +363,13 @@ python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
 Expected: failures identify the absent schema-2 fields, profile key, and
 per-profile verdict layer.
 
-- [ ] **Step 4: Implement schema-2 validation**
+- [x] **Step 4: Implement schema-2 validation**
 
 Add `ring_profile` and timing fields to `FIELD_ORDER`; include the profile in
 `CELL_FIELDS`; validate profile spelling; validate nonnegative clocks and the
 portable/native subphase invariants; and make the formatter deterministic.
 
-- [ ] **Step 5: Implement isolated collection and verdicts**
+- [x] **Step 5: Implement isolated collection and verdicts**
 
 Nest matrix collection by profile. Record skip reasons separately from failed
 samples. A profile is `UNAVAILABLE` only when every candidate/cell attempt
@@ -380,20 +380,20 @@ Keep `submit_all` as the control mechanism verdict. Optional profile results
 appear under `profiles` and cannot turn a successful control into a release
 authorization.
 
-- [ ] **Step 6: Implement recommendation and projections**
+- [x] **Step 6: Implement recommendation and projections**
 
 Among profiles whose cells all `CONTINUE`, compute median native/portable CPU,
 p99, and wall ratios. Sort by `(cpu_ratio, p99_ratio, wall_ratio, name)` and
 write the first profile as `recommended_profile`. Include profile in raw CSV,
 summary CSV, metadata parameters, verdict JSON, and Markdown rows.
 
-- [ ] **Step 7: Verify GREEN**
+- [x] **Step 7: Verify GREEN**
 
 Run the Python test module and a one-cell, one-sample Linux screen for all
 profiles. Expected: deterministic artifacts, unavailable optional profiles
 isolated, `release_authorized: false`, and no output directory reuse.
 
-- [ ] **Step 8: Commit the classifier**
+- [x] **Step 8: Commit the classifier**
 
 ```bash
 git add scripts/bench_leir_aot_connect.py \
