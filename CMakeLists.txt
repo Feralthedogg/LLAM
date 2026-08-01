@@ -530,6 +530,15 @@ foreach(LLAM_LCWE_MODEL_TARGET test_lcwe_model bench_lcwe_model)
     endif()
 endforeach()
 
+add_executable(test_lswg_solver
+    experiments/lswg/lswg_synthetic.c
+    experiments/lswg/lswg_solver.c
+    experiments/lswg/test_lswg_solver.c
+)
+target_include_directories(test_lswg_solver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lswg
+)
+
 add_executable(test_abi_contract
     tests/test_abi_contract.c
 )
@@ -728,6 +737,8 @@ add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
+add_test(NAME test_lswg_solver COMMAND test_lswg_solver)
+add_test(NAME test_lswg_solver_scale COMMAND test_lswg_solver --scale)
 if(Python3_FOUND)
     add_test(
         NAME test_bench_lcwe_model
