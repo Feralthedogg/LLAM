@@ -58,9 +58,11 @@ static bool alignment_is_valid(size_t alignment) {
            (alignment & (alignment - 1U)) == 0U;
 }
 
+#if LLAM_RUNTIME_BACKEND_LINUX
 static uint64_t elapsed_ns(uint64_t start, uint64_t finish) {
     return finish > start ? finish - start : 1U;
 }
+#endif
 
 static bool module_is_valid(
     const leir_aot_module_v1_t *module) {

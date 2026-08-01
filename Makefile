@@ -2553,7 +2553,7 @@ test-leir-aot-ring-profile: test_leir_aot_ring_profile
 	if test "$$rc" -ne 0 && test "$$rc" -ne 77; then exit "$$rc"; fi
 
 test-leir-aot-connect-screen: bench_leir_aot_connect
-	python3 scripts/test_bench_leir_aot_connect.py -v
+	python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
 
 test-leir-native-plan: test_leir_native_plan
 	./test_leir_native_plan
