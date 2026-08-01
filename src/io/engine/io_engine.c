@@ -30,6 +30,10 @@
 
 #include "runtime_internal.h"
 
+#if defined(__linux__) && LLAM_BUILD_RESEARCH
+#include "io/linux/runtime_io_ring_profile_linux_internal.h"
+#endif
+
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 #include "runtime_windows_iocp.h"
 #endif
@@ -203,6 +207,41 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->linux_ring_features = 0U;
     node->linux_submit_all = false;
     memset(&params, 0, sizeof(params));
+#if LLAM_BUILD_RESEARCH
+    {
+        const char *requested_profile =
+            llam_linux_research_ring_profile_request();
+
+        if (requested_profile != NULL) {
+            llam_linux_research_ring_profile_config_t profile;
+
+            if (llam_linux_research_ring_profile_select(
+                    requested_profile,
+                    rt->experimental_sqpoll_requested != 0U,
+                    llam_linux_research_ring_profile_compiled_capabilities(),
+                    &profile) != 0) {
+                return -1;
+            }
+            params.flags = profile.setup_flags;
+            rc = io_uring_queue_init_params(
+                LLAM_IO_RING_DEPTH, &node->ring, &params);
+            if (rc != 0) {
+                llam_node_disable_cq_eventfd(node);
+                llam_node_disable_sqpoll(node);
+                node->linux_ring_features = 0U;
+                node->linux_submit_all = false;
+                errno = llam_linux_research_ring_profile_setup_errno(rc);
+                return -1;
+            }
+            llam_node_disable_cq_eventfd(node);
+            llam_node_disable_sqpoll(node);
+            node->ring_ready = true;
+            node->linux_ring_features = params.features;
+            node->linux_submit_all = true;
+            return 0;
+        }
+    }
+#endif
     if (rt->experimental_sqpoll_requested != 0U && rt->experimental_shard_rings == 0U) {
         unsigned sqpoll_cpu = rt->sqpoll_cpu >= 0 ? (unsigned)rt->sqpoll_cpu : llam_node_default_sqpoll_cpu(rt, node->index);
 

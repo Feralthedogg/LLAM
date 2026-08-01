@@ -9,6 +9,7 @@
 #include "io/linux/runtime_io_ring_profile_linux_internal.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 uint32_t llam_linux_research_ring_profile_compiled_capabilities(void) {
@@ -27,6 +28,15 @@ uint32_t llam_linux_research_ring_profile_compiled_capabilities(void) {
     capabilities |= LLAM_LINUX_RING_CAP_DEFER_TASKRUN;
 #endif
     return capabilities;
+}
+
+const char *llam_linux_research_ring_profile_request(void) {
+    const char *requested =
+        getenv(LLAM_LINUX_RESEARCH_RING_PROFILE_ENV);
+
+    return requested != NULL && requested[0] != '\0'
+        ? requested
+        : NULL;
 }
 
 static unsigned llam_linux_research_ring_profile_flag_submit_all(void) {

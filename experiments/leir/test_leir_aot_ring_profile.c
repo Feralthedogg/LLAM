@@ -19,10 +19,16 @@ int main(void) {
 
 #include "io/linux/runtime_io_ring_profile_linux_internal.h"
 
+#include <llam/runtime.h>
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 typedef struct selector_case {
     const char *requested;
@@ -208,12 +214,194 @@ static int test_normalizes_setup_errors(void) {
     return 0;
 }
 
+static int child_runtime_init(
+    const char *profile,
+    bool expect_invalid,
+    bool sqpoll_requested) {
+    llam_runtime_opts_t options;
+    int init_errno;
+    int init_result;
+
+    if ((profile == NULL
+             ? unsetenv(LLAM_LINUX_RESEARCH_RING_PROFILE_ENV)
+             : setenv(
+                   LLAM_LINUX_RESEARCH_RING_PROFILE_ENV,
+                   profile,
+                   1)) != 0) {
+        return 1;
+    }
+    if (llam_runtime_opts_init(
+            &options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return 1;
+    }
+    options.worker_min = 1U;
+    options.worker_count = 1U;
+    options.worker_max = 1U;
+    if (sqpoll_requested) {
+        options.experimental_flags |=
+            LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL;
+    }
+
+    errno = 0;
+    init_result = llam_runtime_init_ex(
+        &options, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+    init_errno = errno;
+    if (init_result == 0) {
+        llam_runtime_shutdown();
+        return expect_invalid ? 1 : 0;
+    }
+    llam_runtime_shutdown();
+    if (expect_invalid) {
+        return init_errno == EINVAL ? 0 : 1;
+    }
+    if (init_errno == ENOTSUP ||
+        init_errno == EPERM ||
+        init_errno == EACCES) {
+        return 77;
+    }
+    return 1;
+}
+
+static int run_runtime_init_child(
+    const char *profile,
+    bool expect_invalid,
+    bool sqpoll_requested) {
+    pid_t child;
+    pid_t waited;
+    int status;
+
+    child = fork();
+    if (child < 0) {
+        perror("fork ring-profile runtime probe");
+        return -1;
+    }
+    if (child == 0) {
+        int result = child_runtime_init(
+            profile, expect_invalid, sqpoll_requested);
+
+        fflush(NULL);
+        _exit(result);
+    }
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != child || !WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+
+static int test_runtime_rejects_invalid_profile(void) {
+    int status = run_runtime_init_child("invalid", true, false);
+
+    if (status != 0) {
+        fputs(
+            "runtime did not reject an invalid explicit ring profile\n",
+            stderr);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_runtime_rejects_profile_with_sqpoll(void) {
+    int status = run_runtime_init_child("submit_all", true, true);
+
+    if (status != 0) {
+        fputs(
+            "runtime accepted an explicit ring profile with SQPOLL\n",
+            stderr);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_default_runtime_control(void) {
+    int status = run_runtime_init_child(NULL, false, false);
+
+    if (status == 77) {
+        fputs(
+            "SKIP: default io_uring runtime unavailable on this host\n",
+            stderr);
+        return 77;
+    }
+    if (status != 0) {
+        fputs("default runtime control failed\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_compiled_profile_setup(void) {
+    static const struct {
+        const char *name;
+        uint32_t required_capabilities;
+    } profiles[] = {
+        {"submit_all", LLAM_LINUX_RING_CAP_SUBMIT_ALL},
+        {
+            "coop_taskrun",
+            LLAM_LINUX_RING_CAP_SUBMIT_ALL |
+                LLAM_LINUX_RING_CAP_COOP_TASKRUN,
+        },
+        {
+            "defer_taskrun",
+            LLAM_LINUX_RING_CAP_SUBMIT_ALL |
+                LLAM_LINUX_RING_CAP_SINGLE_ISSUER |
+                LLAM_LINUX_RING_CAP_DEFER_TASKRUN,
+        },
+    };
+    uint32_t compiled_capabilities =
+        llam_linux_research_ring_profile_compiled_capabilities();
+    size_t i;
+
+    for (i = 0U; i < sizeof(profiles) / sizeof(profiles[0]); i += 1U) {
+        int status;
+
+        if ((compiled_capabilities &
+             profiles[i].required_capabilities) !=
+            profiles[i].required_capabilities) {
+            fprintf(
+                stderr,
+                "SKIP: %s is absent from the build headers\n",
+                profiles[i].name);
+            continue;
+        }
+        status = run_runtime_init_child(
+            profiles[i].name, false, false);
+        if (status == 77) {
+            fprintf(
+                stderr,
+                "SKIP: %s is unavailable on this host\n",
+                profiles[i].name);
+            continue;
+        }
+        if (status != 0) {
+            fprintf(
+                stderr,
+                "runtime setup failed for %s\n",
+                profiles[i].name);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
+    int control_result;
+
     if (test_exact_profiles() != 0 ||
         test_rejects_invalid_requests() != 0 ||
         test_requires_every_capability() != 0 ||
         test_rejects_explicit_sqpoll() != 0 ||
-        test_normalizes_setup_errors() != 0) {
+        test_normalizes_setup_errors() != 0 ||
+        test_runtime_rejects_invalid_profile() != 0 ||
+        test_runtime_rejects_profile_with_sqpoll() != 0) {
+        return 1;
+    }
+    control_result = test_default_runtime_control();
+    if (control_result != 0) {
+        return control_result;
+    }
+    if (test_compiled_profile_setup() != 0) {
         return 1;
     }
     puts("LEIR AOT ring-profile selector tests passed");

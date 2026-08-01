@@ -1007,6 +1007,9 @@ add_test(
     NAME test_leir_aot_ring_profile
     COMMAND test_leir_aot_ring_profile)
 set_tests_properties(
+    test_leir_aot_ring_profile
+    PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(
     test_leir_aot_integration
     PROPERTIES SKIP_RETURN_CODE 77)
 add_test(

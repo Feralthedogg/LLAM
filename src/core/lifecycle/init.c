@@ -33,6 +33,10 @@
 
 #include "runtime_internal.h"
 
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+#include "io/linux/runtime_io_ring_profile_linux_internal.h"
+#endif
+
 /**
  * @brief Initialize per-shard diagnostic counters after runtime storage reset.
  *
@@ -1395,7 +1399,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         }
         rt->nodes[i].native_resource_lock_initialized = true;
 #endif
-        if (llam_node_init_ring(rt, &rt->nodes[i]) == 0) {
+        rc = llam_node_init_ring(rt, &rt->nodes[i]);
+        if (rc == 0) {
             rt->nodes[i].ring_ready = true;
             llam_probe_ring_support(&rt->nodes[i]);
             (void)llam_node_setup_recv_buf_ring(&rt->nodes[i]);
@@ -1425,6 +1430,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 #endif
 #endif
             }
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+        } else if (llam_linux_research_ring_profile_request() != NULL) {
+            int saved_errno = errno != 0 ? errno : EIO;
+
+            llam_runtime_shutdown_rt(rt);
+            errno = saved_errno;
+            return -1;
+#endif
         }
     }
 

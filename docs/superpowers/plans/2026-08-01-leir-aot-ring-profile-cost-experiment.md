@@ -148,6 +148,7 @@ git commit -m "research: select strict io_uring profiles"
 ### Task 2: Exact research ring initialization
 
 **Files:**
+- Modify: `src/core/lifecycle/init.c`
 - Modify: `src/io/engine/io_engine.c`
 - Modify: `experiments/leir/test_leir_aot_ring_profile.c`
 

@@ -38,6 +38,8 @@ typedef struct llam_linux_research_ring_profile_config {
 
 uint32_t llam_linux_research_ring_profile_compiled_capabilities(void);
 
+const char *llam_linux_research_ring_profile_request(void);
+
 int llam_linux_research_ring_profile_select(
     const char *requested,
     bool sqpoll_requested,
