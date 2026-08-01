@@ -916,6 +916,9 @@ test_finalized_order_is_deterministic(void)
     const lswg_node_ref_t mutex = ref(LSWG_NODE_MUTEX, 5U, 4U, 0U);
     uint64_t first_fingerprint;
     uint64_t second_fingerprint;
+    lswg_workspace_t workspace;
+    lswg_result_t first_result;
+    lswg_result_t second_result;
     size_t index;
 
     TEST_CHECK(lswg_graph_init(&first, 3U, 3U, NULL) == LSWG_STATUS_OK);
@@ -960,6 +963,23 @@ test_finalized_order_is_deterministic(void)
     TEST_CHECK(lswg_fingerprint(&second, &second_fingerprint) ==
                LSWG_STATUS_OK);
     TEST_CHECK(first_fingerprint == second_fingerprint);
+    TEST_CHECK(lswg_workspace_init(&workspace, first.node_count,
+                                   first.edge_count, NULL) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(lswg_solve(&first, &workspace, &first_result) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(lswg_solve(&second, &workspace, &second_result) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(first_result.verdict == LSWG_VERDICT_PROVEN_CYCLE);
+    TEST_CHECK(second_result.verdict == LSWG_VERDICT_PROVEN_CYCLE);
+    TEST_CHECK(first_result.member_count == second_result.member_count);
+    for (index = 0U; index < first_result.member_count; ++index) {
+        TEST_CHECK(first_result.members[index].kind ==
+                   second_result.members[index].kind);
+        TEST_CHECK(first_result.members[index].identity.primary ==
+                   second_result.members[index].identity.primary);
+    }
+    lswg_workspace_destroy(&workspace);
     lswg_graph_destroy(&first);
     lswg_graph_destroy(&second);
     return true;
