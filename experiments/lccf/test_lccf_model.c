@@ -5,6 +5,7 @@
 #include "lccf_platform.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,6 +44,12 @@ static int test_names_and_parsers(void) {
         "budgeted_fused_chain",
         "remote_waker_queue",
         "remote_causal_cell",
+        "recompute_queue",
+        "shared_fact_queue",
+        "recompute_fused",
+        "shared_fact_fused",
+        "mixed_recompute",
+        "mixed_shared_fact",
     };
     static const char *const workload_names[] = {
         "completion_io_pipeline",
@@ -106,6 +113,12 @@ static int test_candidate_baseline_mapping(void) {
          LCCF_MODEL_WAKER_QUEUE},
         {LCCF_MODEL_REMOTE_CAUSAL_CELL,
          LCCF_MODEL_REMOTE_WAKER_QUEUE},
+        {LCCF_MODEL_SHARED_FACT_QUEUE,
+         LCCF_MODEL_RECOMPUTE_QUEUE},
+        {LCCF_MODEL_SHARED_FACT_FUSED,
+         LCCF_MODEL_RECOMPUTE_FUSED},
+        {LCCF_MODEL_MIXED_SHARED_FACT,
+         LCCF_MODEL_MIXED_RECOMPUTE},
     };
     size_t index;
 
@@ -126,6 +139,15 @@ static int test_candidate_baseline_mapping(void) {
             &(lccf_model_mode_t){0}) != EINVAL ||
         lccf_model_candidate_baseline(
             LCCF_MODEL_REMOTE_WAKER_QUEUE,
+            &(lccf_model_mode_t){0}) != EINVAL ||
+        lccf_model_candidate_baseline(
+            LCCF_MODEL_RECOMPUTE_QUEUE,
+            &(lccf_model_mode_t){0}) != EINVAL ||
+        lccf_model_candidate_baseline(
+            LCCF_MODEL_RECOMPUTE_FUSED,
+            &(lccf_model_mode_t){0}) != EINVAL ||
+        lccf_model_candidate_baseline(
+            LCCF_MODEL_MIXED_RECOMPUTE,
             &(lccf_model_mode_t){0}) != EINVAL ||
         lccf_model_candidate_baseline(
             (lccf_model_mode_t)99,
@@ -1327,6 +1349,234 @@ static int test_remote_destroy_after_error(void) {
     return 0;
 }
 
+static bool fact_pair_routing_metrics_equal(
+    const lccf_model_metrics_t *baseline,
+    const lccf_model_metrics_t *candidate) {
+    return baseline->completions == candidate->completions &&
+           baseline->claims == candidate->claims &&
+           baseline->stale_tickets == candidate->stale_tickets &&
+           baseline->queue_pushes == candidate->queue_pushes &&
+           baseline->queue_pops == candidate->queue_pops &&
+           baseline->resume_calls == candidate->resume_calls &&
+           baseline->direct_calls == candidate->direct_calls &&
+           baseline->forced_escapes == candidate->forced_escapes &&
+           baseline->fairness_samples == candidate->fairness_samples &&
+           baseline->hot_allocations == candidate->hot_allocations &&
+           baseline->facts_attempted == candidate->facts_attempted &&
+           baseline->facts_built == candidate->facts_built &&
+           baseline->facts_build_failed ==
+               candidate->facts_build_failed &&
+           baseline->fact_module_pins == candidate->fact_module_pins &&
+           baseline->fact_payload_pins == candidate->fact_payload_pins &&
+           baseline->fact_stale_losers ==
+               candidate->fact_stale_losers &&
+           baseline->fact_guard_rechecks ==
+               candidate->fact_guard_rechecks &&
+           baseline->fact_queue_forwards ==
+               candidate->fact_queue_forwards &&
+           baseline->fact_generation_mismatches ==
+               candidate->fact_generation_mismatches &&
+           baseline->fact_reuse_delays == candidate->fact_reuse_delays &&
+           baseline->fact_hot_bytes == candidate->fact_hot_bytes &&
+           baseline->fact_sidecar_bytes ==
+               candidate->fact_sidecar_bytes;
+}
+
+static int run_fact_differential_case(
+    lccf_model_workload_t workload,
+    lccf_model_mode_t baseline_mode,
+    lccf_model_mode_t candidate_mode,
+    size_t frame_bytes,
+    size_t cell_bytes,
+    unsigned site_count,
+    uint64_t seed) {
+    lccf_model_config_t baseline_config = base_config();
+    lccf_model_config_t candidate_config;
+    lccf_model_batch_t *baseline = NULL;
+    lccf_model_batch_t *candidate = NULL;
+    lccf_model_metrics_t baseline_metrics = {0};
+    lccf_model_metrics_t candidate_metrics = {0};
+    const uint64_t rounds = UINT64_C(5);
+    const uint64_t instances = UINT64_C(17);
+    const uint64_t chain = UINT64_C(5);
+    const uint64_t completions = rounds * instances;
+    const uint64_t callbacks = completions * chain;
+    const uint64_t ticket_count =
+        workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
+            UINT64_C(3) : UINT64_C(1);
+    uint64_t baseline_expected_work;
+    size_t index;
+    uint64_t round;
+    int rc = 1;
+
+    baseline_config.workload = workload;
+    baseline_config.mode = baseline_mode;
+    baseline_config.instance_count = (size_t)instances;
+    baseline_config.frame_bytes = frame_bytes;
+    baseline_config.cell_bytes = cell_bytes;
+    baseline_config.site_count = site_count;
+    baseline_config.chain_length = (unsigned)chain;
+    baseline_config.direct_budget = 8U;
+    baseline_config.seed = seed;
+    candidate_config = baseline_config;
+    candidate_config.mode = candidate_mode;
+
+    if (lccf_model_batch_create(&baseline_config, &baseline) != 0 ||
+        lccf_model_batch_create(&candidate_config, &candidate) != 0 ||
+        !lccf_model_batch_equal(baseline, candidate)) {
+        fail("fact differential create");
+        goto out;
+    }
+    for (round = 0U; round < rounds; ++round) {
+        if (lccf_model_run_round(baseline, &baseline_metrics) != 0 ||
+            lccf_model_run_round(candidate, &candidate_metrics) != 0 ||
+            !lccf_model_batch_equal(baseline, candidate) ||
+            lccf_model_checksum(baseline) !=
+                lccf_model_checksum(candidate)) {
+            fprintf(stderr,
+                    "[test_lccf_model] fact differential round=%" PRIu64
+                    " workload=%s pair=%s/%s frame=%zu cell=%zu sites=%u\n",
+                    round, lccf_model_workload_name(workload),
+                    lccf_model_mode_name(baseline_mode),
+                    lccf_model_mode_name(candidate_mode), frame_bytes,
+                    cell_bytes, site_count);
+            goto out;
+        }
+    }
+    for (index = 0U; index < (size_t)instances; ++index) {
+        const lccf_model_instance_t *left = &baseline->instances[index];
+        const lccf_model_instance_t *right = &candidate->instances[index];
+
+        if (left->event_sequence_hash != right->event_sequence_hash ||
+            left->command_sequence_hash != right->command_sequence_hash ||
+            left->callback_sequence_count != callbacks / instances ||
+            right->callback_sequence_count != callbacks / instances ||
+            lccf_fact_module_unregister(left->fact_cell) != 0 ||
+            lccf_fact_module_unregister(right->fact_cell) != 0) {
+            fail("fact event/command sequence equivalence");
+            goto out;
+        }
+    }
+    if (!fact_pair_routing_metrics_equal(&baseline_metrics,
+                                         &candidate_metrics) ||
+        baseline_metrics.completions != completions ||
+        baseline_metrics.resume_calls != callbacks ||
+        baseline_metrics.facts_attempted != completions * ticket_count ||
+        baseline_metrics.facts_built != completions ||
+        baseline_metrics.fact_stale_losers !=
+            completions * (ticket_count - UINT64_C(1)) ||
+        baseline_metrics.fact_module_pins != completions ||
+        baseline_metrics.facts_build_failed != 0U ||
+        baseline_metrics.fact_generation_mismatches != 0U ||
+        baseline_metrics.fact_reuse_delays != 0U ||
+        baseline_metrics.fact_queue_forwards != 0U ||
+        baseline_metrics.hot_allocations != 0U ||
+        candidate_metrics.fact_normalizations != completions ||
+        candidate_metrics.fact_site_lookups != completions) {
+        fail("fact differential accounting");
+        goto out;
+    }
+    if (baseline_mode == LCCF_MODEL_RECOMPUTE_QUEUE) {
+        baseline_expected_work = callbacks + completions;
+        if (baseline_metrics.direct_calls != 0U ||
+            baseline_metrics.queue_pops != callbacks ||
+            baseline_metrics.forced_escapes != 0U) {
+            fail("fact queue routing");
+            goto out;
+        }
+    } else if (baseline_mode == LCCF_MODEL_RECOMPUTE_FUSED) {
+        baseline_expected_work = callbacks;
+        if (baseline_metrics.direct_calls != callbacks ||
+            baseline_metrics.queue_pops != 0U ||
+            baseline_metrics.forced_escapes != 0U) {
+            fail("fact fused routing");
+            goto out;
+        }
+    } else {
+        baseline_expected_work =
+            callbacks + baseline_metrics.forced_escapes;
+        if (baseline_metrics.forced_escapes == 0U ||
+            baseline_metrics.forced_escapes >= completions ||
+            baseline_metrics.queue_pops !=
+                baseline_metrics.forced_escapes * chain ||
+            baseline_metrics.direct_calls +
+                    baseline_metrics.queue_pops !=
+                callbacks) {
+            fail("fact mixed routing");
+            goto out;
+        }
+    }
+    if (baseline_metrics.fact_normalizations != baseline_expected_work ||
+        baseline_metrics.fact_site_lookups != baseline_expected_work ||
+        baseline_metrics.fact_guard_rechecks != baseline_expected_work ||
+        candidate_metrics.fact_guard_rechecks != baseline_expected_work) {
+        fail("fact recompute/shared work separation");
+        goto out;
+    }
+    rc = 0;
+
+out:
+    lccf_model_batch_destroy(candidate);
+    lccf_model_batch_destroy(baseline);
+    return rc;
+}
+
+static int test_fact_differential_matrix(void) {
+    static const lccf_model_workload_t workloads[] = {
+        LCCF_MODEL_COMPLETION_IO_PIPELINE,
+        LCCF_MODEL_COMPLETION_RPC_STATE,
+        LCCF_MODEL_COMPLETION_TIMER_CANCEL,
+        LCCF_MODEL_COMPLETION_MIXED_FAIRNESS,
+    };
+    static const struct {
+        lccf_model_mode_t baseline;
+        lccf_model_mode_t candidate;
+    } pairs[] = {
+        {LCCF_MODEL_RECOMPUTE_QUEUE, LCCF_MODEL_SHARED_FACT_QUEUE},
+        {LCCF_MODEL_RECOMPUTE_FUSED, LCCF_MODEL_SHARED_FACT_FUSED},
+        {LCCF_MODEL_MIXED_RECOMPUTE, LCCF_MODEL_MIXED_SHARED_FACT},
+    };
+    static const size_t frames[] = {64U, 128U, 256U};
+    static const size_t cells[] = {64U, 96U, 128U};
+    static const unsigned sites[] = {1U, 8U};
+    size_t workload_index;
+    size_t pair_index;
+    size_t layout_index;
+    size_t site_index;
+
+    for (workload_index = 0U;
+         workload_index < sizeof(workloads) / sizeof(workloads[0]);
+         ++workload_index) {
+        for (pair_index = 0U;
+             pair_index < sizeof(pairs) / sizeof(pairs[0]);
+             ++pair_index) {
+            for (layout_index = 0U;
+                 layout_index < sizeof(cells) / sizeof(cells[0]);
+                 ++layout_index) {
+                for (site_index = 0U;
+                     site_index < sizeof(sites) / sizeof(sites[0]);
+                     ++site_index) {
+                    if (run_fact_differential_case(
+                            workloads[workload_index],
+                            pairs[pair_index].baseline,
+                            pairs[pair_index].candidate,
+                            frames[(workload_index + layout_index) %
+                                   (sizeof(frames) / sizeof(frames[0]))],
+                            cells[layout_index], sites[site_index],
+                            UINT64_C(0x6c6363662d636673) ^
+                                (uint64_t)(workload_index * 101U +
+                                           pair_index * 17U +
+                                           layout_index * 5U + site_index)) !=
+                        0) {
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_names_and_parsers() != 0 ||
         test_candidate_baseline_mapping() != 0 ||
@@ -1341,7 +1591,8 @@ int main(void) {
         test_platform_contract() != 0 ||
         test_three_way_ticket_race() != 0 ||
         test_remote_differential() != 0 ||
-        test_remote_destroy_after_error() != 0) {
+        test_remote_destroy_after_error() != 0 ||
+        test_fact_differential_matrix() != 0) {
         return 1;
     }
     printf("[test_lccf_model] all checks passed\n");

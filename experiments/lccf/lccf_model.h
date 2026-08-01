@@ -23,6 +23,13 @@ typedef enum lccf_model_mode {
     LCCF_MODEL_BUDGETED_FUSED_CHAIN = 3,
     LCCF_MODEL_REMOTE_WAKER_QUEUE = 4,
     LCCF_MODEL_REMOTE_CAUSAL_CELL = 5,
+    LCCF_MODEL_RECOMPUTE_QUEUE = 6,
+    LCCF_MODEL_SHARED_FACT_QUEUE = 7,
+    LCCF_MODEL_RECOMPUTE_FUSED = 8,
+    LCCF_MODEL_SHARED_FACT_FUSED = 9,
+    LCCF_MODEL_MIXED_RECOMPUTE = 10,
+    LCCF_MODEL_MIXED_SHARED_FACT = 11,
+    LCCF_MODEL_MODE_COUNT,
 } lccf_model_mode_t;
 
 typedef enum lccf_model_workload {
@@ -67,6 +74,20 @@ typedef struct lccf_model_metrics {
     uint64_t fairness_samples;
     uint64_t fairness_p99_ns;
     uint64_t hot_allocations;
+    uint64_t facts_attempted;
+    uint64_t facts_built;
+    uint64_t facts_build_failed;
+    uint64_t fact_normalizations;
+    uint64_t fact_site_lookups;
+    uint64_t fact_module_pins;
+    uint64_t fact_payload_pins;
+    uint64_t fact_stale_losers;
+    uint64_t fact_guard_rechecks;
+    uint64_t fact_queue_forwards;
+    uint64_t fact_generation_mismatches;
+    uint64_t fact_reuse_delays;
+    uint64_t fact_hot_bytes;
+    uint64_t fact_sidecar_bytes;
 } lccf_model_metrics_t;
 
 typedef struct lccf_model_batch lccf_model_batch_t;

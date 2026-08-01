@@ -20,6 +20,12 @@ static const char *const MODE_NAMES[] = {
     "budgeted_fused_chain",
     "remote_waker_queue",
     "remote_causal_cell",
+    "recompute_queue",
+    "shared_fact_queue",
+    "recompute_fused",
+    "shared_fact_fused",
+    "mixed_recompute",
+    "mixed_shared_fact",
 };
 
 static const char *const WORKLOAD_NAMES[] = {
@@ -34,7 +40,7 @@ static void remote_team_destroy(lccf_model_batch_t *batch);
 
 static bool mode_valid(lccf_model_mode_t mode) {
     return mode >= LCCF_MODEL_WAKER_QUEUE &&
-           mode <= LCCF_MODEL_REMOTE_CAUSAL_CELL;
+           mode < LCCF_MODEL_MODE_COUNT;
 }
 
 static bool workload_valid(lccf_model_workload_t workload) {
@@ -51,7 +57,39 @@ static bool mode_uses_cells(lccf_model_mode_t mode) {
     return mode == LCCF_MODEL_CAUSAL_CELL_QUEUE ||
            mode == LCCF_MODEL_FUSED_CAUSAL_CELL ||
            mode == LCCF_MODEL_BUDGETED_FUSED_CHAIN ||
-           mode == LCCF_MODEL_REMOTE_CAUSAL_CELL;
+           mode == LCCF_MODEL_REMOTE_CAUSAL_CELL ||
+           mode == LCCF_MODEL_RECOMPUTE_QUEUE ||
+           mode == LCCF_MODEL_SHARED_FACT_QUEUE ||
+           mode == LCCF_MODEL_RECOMPUTE_FUSED ||
+           mode == LCCF_MODEL_SHARED_FACT_FUSED ||
+           mode == LCCF_MODEL_MIXED_RECOMPUTE ||
+           mode == LCCF_MODEL_MIXED_SHARED_FACT;
+}
+
+static bool mode_uses_facts(lccf_model_mode_t mode) {
+    return mode >= LCCF_MODEL_RECOMPUTE_QUEUE &&
+           mode <= LCCF_MODEL_MIXED_SHARED_FACT;
+}
+
+static bool mode_shares_facts(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_SHARED_FACT_QUEUE ||
+           mode == LCCF_MODEL_SHARED_FACT_FUSED ||
+           mode == LCCF_MODEL_MIXED_SHARED_FACT;
+}
+
+static bool mode_is_fact_queue(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_RECOMPUTE_QUEUE ||
+           mode == LCCF_MODEL_SHARED_FACT_QUEUE;
+}
+
+static bool mode_is_fact_fused(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_RECOMPUTE_FUSED ||
+           mode == LCCF_MODEL_SHARED_FACT_FUSED;
+}
+
+static bool mode_is_fact_mixed(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_MIXED_RECOMPUTE ||
+           mode == LCCF_MODEL_MIXED_SHARED_FACT;
 }
 
 static bool mode_is_remote(lccf_model_mode_t mode) {
@@ -125,6 +163,29 @@ lccf_model_cell_hot_t *lccf_model_cell_at(
     }
     return (lccf_model_cell_hot_t *)(void *)(
         batch->cell_storage + index * batch->config.cell_bytes);
+}
+
+static lccf_fact_cell_t *fact_cell_at(
+    const lccf_model_batch_t *batch,
+    size_t index) {
+    if (batch == NULL || batch->fact_cells == NULL ||
+        index >= batch->config.instance_count) {
+        return NULL;
+    }
+    return &batch->fact_cells[index];
+}
+
+static lccf_fact_layout_t fact_layout_for_cell_bytes(size_t cell_bytes) {
+    switch (cell_bytes) {
+    case 64U:
+        return LCCF_FACT_LAYOUT_SPLIT64_64;
+    case 96U:
+        return LCCF_FACT_LAYOUT_SPLIT96_64;
+    case 128U:
+        return LCCF_FACT_LAYOUT_UNIFIED128;
+    default:
+        return LCCF_FACT_LAYOUT_COUNT;
+    }
 }
 
 lccf_model_ticket_t *lccf_model_ticket_at(
@@ -216,7 +277,9 @@ static int prepare_causal_generation(lccf_model_batch_t *batch,
     }
     cell->next_site = instance->frame->site;
     atomic_store_explicit(
-        &cell->backend_refs, count, memory_order_release);
+        &cell->backend_refs,
+        mode_uses_facts(batch->config.mode) ? 0U : count,
+        memory_order_release);
     atomic_store_explicit(
         &cell->state_generation,
         lccf_model_pack_state(instance->frame->generation,
@@ -234,6 +297,7 @@ static int initialize_instance(lccf_model_batch_t *batch,
         batch->wakers == NULL ? NULL : &batch->wakers[index];
     lccf_model_cell_hot_t *cell =
         lccf_model_cell_at(batch, index);
+    lccf_fact_cell_t *fact_cell = fact_cell_at(batch, index);
     const uint64_t identity =
         batch->config.seed ^ ((uint64_t)(uint32_t)index << 32U) ^
         (uint64_t)index;
@@ -259,8 +323,12 @@ static int initialize_instance(lccf_model_batch_t *batch,
     instance->frame = frame;
     instance->waker = waker;
     instance->cell = cell;
+    instance->fact_cell = fact_cell;
     memset(&instance->event, 0, sizeof(instance->event));
     memset(&instance->command, 0, sizeof(instance->command));
+    instance->event_sequence_hash = UINT64_C(0x4556454e54534551);
+    instance->command_sequence_hash = UINT64_C(0x434f4d4d414e4453);
+    instance->callback_sequence_count = 0U;
     instance->index = (uint32_t)index;
     instance->reserved = 0U;
 
@@ -302,6 +370,13 @@ static int initialize_instance(lccf_model_batch_t *batch,
         if (prepare_causal_generation(batch, instance, false) != 0) {
             return EPROTO;
         }
+    }
+    if (fact_cell != NULL &&
+        lccf_fact_cell_init(
+            fact_cell, frame->generation,
+            fact_layout_for_cell_bytes(batch->config.cell_bytes),
+            active_ticket_count(batch)) != 0) {
+        return EPROTO;
     }
     return 0;
 }
@@ -397,6 +472,9 @@ static bool config_valid(const lccf_model_config_t *config) {
                 sizeof(lccf_model_ticket_t)) ||
         !allocation_size_valid(config->instance_count,
                                config->cell_bytes) ||
+        (mode_uses_facts(config->mode) &&
+         !allocation_size_valid(config->instance_count,
+                                sizeof(lccf_fact_cell_t))) ||
         config->instance_count >
             SIZE_MAX / (size_t)config->chain_length) {
         return false;
@@ -453,6 +531,10 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
                 LCCF_MODEL_TICKETS_PER_INSTANCE,
             sizeof(*batch->tickets));
     }
+    if (mode_uses_facts(config->mode)) {
+        batch->fact_cells =
+            calloc(config->instance_count, sizeof(*batch->fact_cells));
+    }
     batch->local_queue.slots =
         calloc(queue_capacity, sizeof(*batch->local_queue.slots));
     if (mode_is_remote(config->mode)) {
@@ -466,7 +548,8 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
         (mode_uses_wakers(config->mode) &&
          batch->wakers == NULL) ||
         (mode_uses_cells(config->mode) &&
-         (batch->cell_storage == NULL || batch->tickets == NULL))) {
+         (batch->cell_storage == NULL || batch->tickets == NULL)) ||
+        (mode_uses_facts(config->mode) && batch->fact_cells == NULL)) {
         lccf_model_batch_destroy(batch);
         return ENOMEM;
     }
@@ -514,6 +597,7 @@ void lccf_model_batch_destroy(lccf_model_batch_t *batch) {
     free(batch->local_queue.slots);
     free(batch->tickets);
     free(batch->wakers);
+    free(batch->fact_cells);
     free(batch->cell_storage);
     free(batch->instances);
     free(batch->frame_storage);
@@ -582,6 +666,24 @@ static int validate_metrics(const lccf_model_batch_t *batch,
         !metric_room(metrics->forced_escapes, callback_count) ||
         !metric_room(metrics->remote_pushes, instances) ||
         !metric_room(metrics->fairness_samples, callback_count) ||
+        (mode_uses_facts(batch->config.mode) &&
+         (!metric_room(metrics->facts_attempted,
+                       instances * LCCF_MODEL_TICKETS_PER_INSTANCE) ||
+          !metric_room(metrics->facts_built, instances) ||
+          !metric_room(metrics->facts_build_failed, instances) ||
+          !metric_room(metrics->fact_normalizations,
+                       callback_count + instances) ||
+          !metric_room(metrics->fact_site_lookups,
+                       callback_count + instances) ||
+          !metric_room(metrics->fact_module_pins, instances) ||
+          !metric_room(metrics->fact_payload_pins, instances) ||
+          !metric_room(metrics->fact_stale_losers,
+                       instances * UINT64_C(2)) ||
+          !metric_room(metrics->fact_guard_rechecks,
+                       callback_count + instances) ||
+          !metric_room(metrics->fact_queue_forwards, callback_count) ||
+          !metric_room(metrics->fact_generation_mismatches, instances) ||
+          !metric_room(metrics->fact_reuse_delays, instances))) ||
         !metric_room(batch->fairness_tick, callback_count) ||
         !metric_room(batch->fairness_services, callback_count) ||
         (mode_uses_cells(batch->config.mode) &&
@@ -638,6 +740,8 @@ static int validate_instances(const lccf_model_batch_t *batch) {
             const lccf_model_cell_hot_t *cell =
                 lccf_model_cell_at(batch, i);
             const unsigned refs = active_ticket_count(batch);
+            const unsigned cell_refs =
+                mode_uses_facts(batch->config.mode) ? 0U : refs;
             uint64_t word;
             unsigned ticket_index;
 
@@ -658,7 +762,27 @@ static int validate_instances(const lccf_model_batch_t *batch) {
                 atomic_load_explicit(&cell->queue_owned,
                                      memory_order_acquire) != 0U ||
                 atomic_load_explicit(&cell->backend_refs,
-                                     memory_order_acquire) != refs) {
+                                     memory_order_acquire) != cell_refs) {
+                return EPROTO;
+            }
+            if (mode_uses_facts(batch->config.mode)) {
+                const lccf_fact_cell_t *fact_cell = fact_cell_at(batch, i);
+                const uint64_t fact_word =
+                    fact_cell == NULL ? 0U : atomic_load_explicit(
+                        &fact_cell->state_generation,
+                        memory_order_acquire);
+
+                if (instance->fact_cell != fact_cell ||
+                    lccf_fact_unpack_generation(fact_word) !=
+                        instance->frame->generation ||
+                    lccf_fact_unpack_state(fact_word) !=
+                        LCCF_FACT_STATE_ARMED ||
+                    atomic_load_explicit(
+                        &fact_cell->references[LCCF_FACT_REF_BACKEND],
+                        memory_order_acquire) != refs) {
+                    return EPROTO;
+                }
+            } else if (instance->fact_cell != NULL) {
                 return EPROTO;
             }
             for (ticket_index = 0U;
@@ -799,6 +923,15 @@ static int execute_resume_callback(
            &batch->config,
            site);
     batch->callback_depth -= 1U;
+    instance->event_sequence_hash = lccf_model_mix64(
+        instance->event_sequence_hash ^ event->word0 ^
+        lccf_model_mix64(event->word1) ^
+        ((uint64_t)event->kind << 32U) ^ (uint64_t)site);
+    instance->command_sequence_hash = lccf_model_mix64(
+        instance->command_sequence_hash ^ instance->command.output ^
+        ((uint64_t)instance->command.next_site << 32U) ^
+        (uint64_t)instance->command.kind);
+    instance->callback_sequence_count += UINT64_C(1);
     metrics->resume_calls += UINT64_C(1);
     if (direct) {
         metrics->direct_calls += UINT64_C(1);
@@ -1006,6 +1139,163 @@ static int retire_backend_reference(lccf_model_cell_hot_t *cell) {
         }
     }
     return EPROTO;
+}
+
+static int64_t event_result_word(uint64_t word) {
+    return (int64_t)(word & (uint64_t)INT64_MAX);
+}
+
+static lccf_fact_event_kind_t fact_event_kind(uint32_t event_kind) {
+    switch ((lccf_model_event_kind_t)event_kind) {
+    case LCCF_MODEL_EVENT_IO:
+        return LCCF_FACT_EVENT_IO;
+    case LCCF_MODEL_EVENT_TIMEOUT:
+    case LCCF_MODEL_EVENT_TIMER:
+        return LCCF_FACT_EVENT_TIMER;
+    case LCCF_MODEL_EVENT_CANCEL:
+        return LCCF_FACT_EVENT_CANCEL;
+    case LCCF_MODEL_EVENT_INTERNAL:
+    default:
+        return LCCF_FACT_EVENT_EXTERNAL;
+    }
+}
+
+static lccf_fact_source_t fact_source_kind(
+    const lccf_model_instance_t *instance,
+    const lccf_model_event_t *event) {
+    if (event->kind == LCCF_MODEL_EVENT_TIMEOUT ||
+        event->kind == LCCF_MODEL_EVENT_TIMER) {
+        return LCCF_FACT_SOURCE_TIMER;
+    }
+    if (event->kind == LCCF_MODEL_EVENT_CANCEL) {
+        return LCCF_FACT_SOURCE_CANCEL;
+    }
+    if (event->kind == LCCF_MODEL_EVENT_INTERNAL) {
+        return LCCF_FACT_SOURCE_EXTERNAL;
+    }
+    switch (instance->index % 3U) {
+    case 0U:
+        return LCCF_FACT_SOURCE_LINUX_CQE;
+    case 1U:
+        return LCCF_FACT_SOURCE_KQUEUE;
+    default:
+        return LCCF_FACT_SOURCE_IOCP;
+    }
+}
+
+static int make_fact_ticket(
+    const lccf_model_batch_t *batch,
+    const lccf_model_instance_t *instance,
+    const lccf_model_ticket_t *ticket,
+    lccf_fact_ticket_t *out_ticket) {
+    int rc;
+
+    rc = lccf_fact_ticket_from_logical(
+        fact_source_kind(instance, &ticket->event),
+        fact_event_kind(ticket->event.kind), ticket->generation,
+        event_result_word(ticket->event.word0), 0,
+        ticket->event.word1, instance->frame->site,
+        batch->config.site_count, instance->cell->home_shard,
+        ticket->ticket_index, out_ticket);
+    if (rc == 0) {
+        out_ticket->stable_flags =
+            (uint64_t)ticket->event.kind |
+            ((ticket->event.word0 >> 63U) << 32U);
+    }
+    return rc;
+}
+
+static int fact_to_model_event(const lccf_fact_core_t *fact,
+                               lccf_model_event_t *event) {
+    if (fact == NULL || event == NULL ||
+        fact->event_kind == LCCF_FACT_EVENT_FAIL ||
+        fact->result < 0) {
+        return EPROTO;
+    }
+    event->word0 = (uint64_t)fact->result |
+                   (((fact->stable_flags >> 32U) & UINT64_C(1)) << 63U);
+    event->word1 = fact->payload_word;
+    event->kind = (uint32_t)fact->stable_flags;
+    event->reserved = 0U;
+    return event->kind >= LCCF_MODEL_EVENT_IO &&
+                   event->kind <= LCCF_MODEL_EVENT_INTERNAL
+               ? 0
+               : EPROTO;
+}
+
+static void accumulate_fact_counters(
+    lccf_model_metrics_t *metrics,
+    const lccf_fact_counters_t *counters) {
+    metrics->facts_attempted += counters->claim_attempts;
+    metrics->facts_built += counters->fact_builds;
+    metrics->facts_build_failed += counters->fact_build_failures;
+    metrics->fact_normalizations += counters->normalization_calls;
+    metrics->fact_site_lookups += counters->site_lookups;
+    metrics->fact_module_pins += counters->module_pins;
+    metrics->fact_payload_pins += counters->payload_pins;
+    metrics->fact_stale_losers += counters->stale_losers;
+    metrics->fact_guard_rechecks += counters->guard_rechecks;
+    metrics->fact_queue_forwards += counters->queue_forwards;
+    metrics->fact_generation_mismatches +=
+        counters->generation_mismatches;
+    metrics->fact_reuse_delays += counters->reuse_delays;
+}
+
+static int claim_fact_tickets(lccf_model_batch_t *batch,
+                              lccf_model_instance_t *instance,
+                              lccf_model_metrics_t *metrics) {
+    const unsigned count = active_ticket_count(batch);
+    const unsigned first = causal_winner_ticket(batch, instance);
+    unsigned offset;
+    bool won = false;
+
+    for (offset = 0U; offset < count; ++offset) {
+        const unsigned ticket_index =
+            count == 1U ? 0U : (first + offset) % count;
+        const lccf_model_ticket_t *ticket = lccf_model_ticket_at(
+            batch, instance->index, ticket_index);
+        lccf_fact_ticket_t fact_ticket;
+        lccf_fact_counters_t counters = {0};
+        bool ticket_won = false;
+        int rc;
+
+        if (ticket == NULL || ticket->target != instance->cell ||
+            make_fact_ticket(batch, instance, ticket, &fact_ticket) != 0) {
+            return EPROTO;
+        }
+        rc = lccf_fact_try_publish(
+            instance->fact_cell, &fact_ticket,
+            mode_shares_facts(batch->config.mode), &counters,
+            &ticket_won);
+        accumulate_fact_counters(metrics, &counters);
+        if (rc != 0) {
+            return rc;
+        }
+        if (ticket_won) {
+            if (won) {
+                return EPROTO;
+            }
+            instance->cell->event = ticket->event;
+            instance->cell->next_site = instance->frame->site;
+            atomic_store_explicit(
+                &instance->cell->state_generation,
+                lccf_model_pack_state(instance->frame->generation,
+                                      LCCF_MODEL_STATE_CLAIMED),
+                memory_order_release);
+            metrics->completions += UINT64_C(1);
+            metrics->claims += UINT64_C(1);
+            won = true;
+        } else {
+            metrics->stale_tickets += UINT64_C(1);
+        }
+    }
+    if (!won ||
+        atomic_load_explicit(
+            &instance->fact_cell->references[LCCF_FACT_REF_BACKEND],
+            memory_order_acquire) != 0U) {
+        return EPROTO;
+    }
+    return 0;
 }
 
 int lccf_model_try_claim_ticket(
@@ -1383,6 +1673,285 @@ static int run_fused_cells(lccf_model_batch_t *batch,
     return 0;
 }
 
+static lccf_fact_guard_t make_consume_guard(
+    const lccf_model_instance_t *instance,
+    bool direct_enabled) {
+    lccf_fact_guard_t guard;
+
+    memset(&guard, 0, sizeof(guard));
+    guard.flags = LCCF_FACT_GUARD_MODULE_ENABLED |
+                  LCCF_FACT_GUARD_BACKEND_CAPABLE;
+    if (direct_enabled) {
+        guard.flags |= LCCF_FACT_GUARD_DIRECT_ENABLED;
+    }
+    guard.budget_remaining = instance->batch->config.direct_budget;
+    guard.current_home_shard = instance->cell->home_shard;
+    guard.consuming_shard = instance->cell->home_shard;
+    return guard;
+}
+
+static int consume_fact_event(
+    lccf_model_instance_t *instance,
+    lccf_fact_consumer_t consumer,
+    const lccf_fact_guard_t *guard,
+    lccf_model_metrics_t *metrics,
+    lccf_fact_decision_t *decision,
+    lccf_model_event_t *event) {
+    lccf_fact_counters_t counters = {0};
+    lccf_fact_core_t fact;
+    int rc;
+
+    rc = lccf_fact_consume(
+        instance->fact_cell, instance->frame->generation, consumer,
+        guard, &counters, decision, &fact);
+    accumulate_fact_counters(metrics, &counters);
+    if (rc == 0) {
+        rc = fact_to_model_event(&fact, event);
+    }
+    return rc;
+}
+
+static int materialize_fact_event(
+    lccf_model_instance_t *instance,
+    lccf_model_metrics_t *metrics,
+    lccf_model_event_t *event) {
+    lccf_fact_counters_t counters = {0};
+    lccf_fact_core_t fact;
+    int rc;
+
+    counters.guard_rechecks = 1U;
+    rc = lccf_fact_materialize(
+        instance->fact_cell, instance->frame->generation,
+        &counters, &fact);
+    accumulate_fact_counters(metrics, &counters);
+    if (rc == 0) {
+        rc = fact_to_model_event(&fact, event);
+    }
+    return rc;
+}
+
+static bool fact_event_matches(
+    const lccf_model_instance_t *instance,
+    const lccf_model_event_t *event) {
+    return memcmp(&instance->cell->event, event,
+                  sizeof(*event)) == 0;
+}
+
+static int finish_fact_generation(
+    lccf_model_batch_t *batch,
+    lccf_model_instance_t *instance,
+    lccf_model_metrics_t *metrics) {
+    lccf_fact_counters_t counters = {0};
+    const uint64_t generation = instance->frame->generation;
+    const uint64_t next_generation = generation + UINT64_C(1);
+    int rc;
+
+    rc = lccf_fact_finish(instance->fact_cell, generation, false,
+                          next_generation, &counters);
+    accumulate_fact_counters(metrics, &counters);
+    if (rc != 0) {
+        return rc;
+    }
+    instance->frame->generation = next_generation;
+    rc = prepare_causal_generation(batch, instance, true);
+    if (rc == 0) {
+        rc = lccf_fact_cell_arm(instance->fact_cell, next_generation,
+                                active_ticket_count(batch));
+    }
+    return rc;
+}
+
+static int publish_ready_fact_to_queue(
+    lccf_model_batch_t *batch,
+    lccf_model_instance_t *instance,
+    lccf_model_metrics_t *metrics,
+    bool forced_escape) {
+    const lccf_fact_guard_t guard = make_consume_guard(instance, false);
+    lccf_fact_decision_t decision;
+    lccf_model_event_t event;
+    int rc;
+
+    rc = consume_fact_event(instance, LCCF_FACT_CONSUMER_DIRECT,
+                            &guard, metrics, &decision, &event);
+    if (rc != 0 || decision.route != LCCF_FACT_ROUTE_QUEUE ||
+        !fact_event_matches(instance, &event)) {
+        return rc != 0 ? rc : EPROTO;
+    }
+    return enqueue_claimed_cell(batch, instance->cell, metrics,
+                                forced_escape);
+}
+
+static int yield_fact_to_queue(
+    lccf_model_batch_t *batch,
+    lccf_model_instance_t *instance,
+    lccf_model_metrics_t *metrics) {
+    int rc = lccf_fact_yield_to_queue(
+        instance->fact_cell, instance->frame->generation);
+
+    if (rc == 0) {
+        rc = enqueue_claimed_cell(batch, instance->cell, metrics, false);
+    }
+    return rc;
+}
+
+static int resume_one_fact_cell(
+    lccf_model_batch_t *batch,
+    lccf_model_cell_hot_t *cell,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_instance_t *instance;
+    lccf_fact_guard_t guard;
+    lccf_fact_decision_t decision;
+    lccf_model_event_t event;
+    uint64_t word;
+    int rc;
+
+    if (cell == NULL || cell->instance == NULL ||
+        cell->instance->batch != batch ||
+        cell->instance->cell != cell ||
+        cell->instance->fact_cell == NULL) {
+        return EPROTO;
+    }
+    instance = cell->instance;
+    word = atomic_load_explicit(&cell->state_generation,
+                                memory_order_acquire);
+    if (lccf_model_unpack_state(word) != LCCF_MODEL_STATE_QUEUED ||
+        lccf_model_unpack_generation(word) !=
+            instance->frame->generation ||
+        atomic_exchange_explicit(&cell->queue_owned, 0U,
+                                 memory_order_acq_rel) != 1U) {
+        return EPROTO;
+    }
+    guard = make_consume_guard(instance, true);
+    rc = consume_fact_event(instance, LCCF_FACT_CONSUMER_QUEUE,
+                            &guard, metrics, &decision, &event);
+    if (rc != 0 || decision.route != LCCF_FACT_ROUTE_QUEUE ||
+        !fact_event_matches(instance, &event) ||
+        mark_cell_running(instance, LCCF_MODEL_STATE_QUEUED) != 0) {
+        return rc != 0 ? rc : EPROTO;
+    }
+    rc = execute_resume_callback(batch, instance, &event,
+                                 cell->next_site, false, metrics);
+    if (rc != 0) {
+        return rc;
+    }
+    metrics->queue_pops += UINT64_C(1);
+    rc = fairness_service(batch, metrics);
+    if (rc != 0) {
+        return rc;
+    }
+    publish_cell_command(instance);
+    if (instance->command.kind == LCCF_MODEL_COMMAND_CONTINUE) {
+        return yield_fact_to_queue(batch, instance, metrics);
+    }
+    return finish_fact_generation(batch, instance, metrics);
+}
+
+static int resume_queued_fact_cells(
+    lccf_model_batch_t *batch,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_cell_hot_t *cell;
+
+    while ((cell = queue_pop(&batch->local_queue)) != NULL) {
+        const int rc = resume_one_fact_cell(batch, cell, metrics);
+
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+static int run_direct_fact_segment(
+    lccf_model_batch_t *batch,
+    lccf_model_instance_t *instance,
+    lccf_model_metrics_t *metrics) {
+    lccf_fact_guard_t guard = make_consume_guard(instance, true);
+    lccf_fact_decision_t decision;
+    lccf_model_event_t event;
+    bool first = true;
+
+    for (;;) {
+        int rc;
+
+        if (first) {
+            rc = consume_fact_event(
+                instance, LCCF_FACT_CONSUMER_DIRECT, &guard,
+                metrics, &decision, &event);
+            if (rc != 0 || decision.route != LCCF_FACT_ROUTE_DIRECT ||
+                mark_cell_running(instance,
+                                  LCCF_MODEL_STATE_CLAIMED) != 0) {
+                return rc != 0 ? rc : EPROTO;
+            }
+            first = false;
+        } else {
+            rc = materialize_fact_event(instance, metrics, &event);
+            if (rc != 0 || !fact_event_matches(instance, &event)) {
+                return rc != 0 ? rc : EPROTO;
+            }
+        }
+        if (!fact_event_matches(instance, &event)) {
+            return EPROTO;
+        }
+        rc = execute_resume_callback(
+            batch, instance, &event, instance->cell->next_site,
+            true, metrics);
+        if (rc != 0) {
+            return rc;
+        }
+        publish_cell_command(instance);
+        if (instance->command.kind != LCCF_MODEL_COMMAND_CONTINUE) {
+            rc = fairness_service(batch, metrics);
+            if (rc != 0) {
+                return rc;
+            }
+            return finish_fact_generation(batch, instance, metrics);
+        }
+        if (batch->fairness_due) {
+            rc = fairness_service(batch, metrics);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+    }
+}
+
+static bool mixed_instance_queues(
+    const lccf_model_batch_t *batch,
+    const lccf_model_instance_t *instance) {
+    return (((uint64_t)instance->index + batch->round) & UINT64_C(3)) == 0U;
+}
+
+static int run_fact_cells(lccf_model_batch_t *batch,
+                          lccf_model_metrics_t *metrics) {
+    size_t index;
+
+    for (index = 0U; index < batch->config.instance_count; ++index) {
+        lccf_model_instance_t *instance = &batch->instances[index];
+        int rc = claim_fact_tickets(batch, instance, metrics);
+
+        if (rc != 0) {
+            return rc;
+        }
+        if (mode_is_fact_queue(batch->config.mode) ||
+            (mode_is_fact_mixed(batch->config.mode) &&
+             mixed_instance_queues(batch, instance))) {
+            rc = publish_ready_fact_to_queue(
+                batch, instance, metrics,
+                mode_is_fact_mixed(batch->config.mode));
+        } else {
+            rc = run_direct_fact_segment(batch, instance, metrics);
+        }
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    if (mode_is_fact_queue(batch->config.mode) ||
+        mode_is_fact_mixed(batch->config.mode)) {
+        return resume_queued_fact_cells(batch, metrics);
+    }
+    return mode_is_fact_fused(batch->config.mode) ? 0 : EPROTO;
+}
+
 static int remote_queue_push(lccf_model_batch_t *batch, void *item) {
     lccf_model_remote_queue_t *queue = &batch->remote_queue;
     lccf_model_remote_slot_t *slot;
@@ -1712,6 +2281,25 @@ static void accumulate_metrics(
             source->fairness_p99_ns;
     }
     target->hot_allocations += source->hot_allocations;
+    target->facts_attempted += source->facts_attempted;
+    target->facts_built += source->facts_built;
+    target->facts_build_failed += source->facts_build_failed;
+    target->fact_normalizations += source->fact_normalizations;
+    target->fact_site_lookups += source->fact_site_lookups;
+    target->fact_module_pins += source->fact_module_pins;
+    target->fact_payload_pins += source->fact_payload_pins;
+    target->fact_stale_losers += source->fact_stale_losers;
+    target->fact_guard_rechecks += source->fact_guard_rechecks;
+    target->fact_queue_forwards += source->fact_queue_forwards;
+    target->fact_generation_mismatches +=
+        source->fact_generation_mismatches;
+    target->fact_reuse_delays += source->fact_reuse_delays;
+    if (source->fact_hot_bytes > target->fact_hot_bytes) {
+        target->fact_hot_bytes = source->fact_hot_bytes;
+    }
+    if (source->fact_sidecar_bytes > target->fact_sidecar_bytes) {
+        target->fact_sidecar_bytes = source->fact_sidecar_bytes;
+    }
 }
 
 static int discard_remote_items(lccf_model_batch_t *batch,
@@ -1880,6 +2468,14 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
     }
     batch->local_queue.head = 0U;
     batch->local_queue.tail = 0U;
+    if (mode_uses_facts(batch->config.mode)) {
+        const lccf_fact_layout_t layout =
+            fact_layout_for_cell_bytes(batch->config.cell_bytes);
+
+        metrics->fact_hot_bytes = lccf_fact_layout_hot_bytes(layout);
+        metrics->fact_sidecar_bytes =
+            lccf_fact_layout_sidecar_bytes(layout);
+    }
     switch (batch->config.mode) {
         case LCCF_MODEL_WAKER_QUEUE:
             rc = claim_and_publish_wakers(batch, metrics);
@@ -1904,6 +2500,14 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
             break;
         case LCCF_MODEL_REMOTE_CAUSAL_CELL:
             rc = run_remote_cells(batch, metrics);
+            break;
+        case LCCF_MODEL_RECOMPUTE_QUEUE:
+        case LCCF_MODEL_SHARED_FACT_QUEUE:
+        case LCCF_MODEL_RECOMPUTE_FUSED:
+        case LCCF_MODEL_SHARED_FACT_FUSED:
+        case LCCF_MODEL_MIXED_RECOMPUTE:
+        case LCCF_MODEL_MIXED_SHARED_FACT:
+            rc = run_fact_cells(batch, metrics);
             break;
         default:
             return ENOTSUP;
@@ -2126,8 +2730,21 @@ int lccf_model_candidate_baseline(
             *out_baseline =
                 LCCF_MODEL_REMOTE_WAKER_QUEUE;
             return 0;
+        case LCCF_MODEL_SHARED_FACT_QUEUE:
+            *out_baseline = LCCF_MODEL_RECOMPUTE_QUEUE;
+            return 0;
+        case LCCF_MODEL_SHARED_FACT_FUSED:
+            *out_baseline = LCCF_MODEL_RECOMPUTE_FUSED;
+            return 0;
+        case LCCF_MODEL_MIXED_SHARED_FACT:
+            *out_baseline = LCCF_MODEL_MIXED_RECOMPUTE;
+            return 0;
         case LCCF_MODEL_WAKER_QUEUE:
         case LCCF_MODEL_REMOTE_WAKER_QUEUE:
+        case LCCF_MODEL_RECOMPUTE_QUEUE:
+        case LCCF_MODEL_RECOMPUTE_FUSED:
+        case LCCF_MODEL_MIXED_RECOMPUTE:
+        case LCCF_MODEL_MODE_COUNT:
         default:
             return EINVAL;
     }

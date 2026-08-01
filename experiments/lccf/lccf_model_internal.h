@@ -5,6 +5,7 @@
 #define LLAM_EXPERIMENTS_LCCF_MODEL_INTERNAL_H
 
 #include "lccf_model.h"
+#include "lccf_fact.h"
 #include "lccf_platform.h"
 
 #include <stdatomic.h>
@@ -106,8 +107,12 @@ struct lccf_model_instance {
     lccf_model_frame_core_t *frame;
     lccf_model_waker_t *waker;
     lccf_model_cell_hot_t *cell;
+    lccf_fact_cell_t *fact_cell;
     lccf_model_event_t event;
     lccf_model_command_t command;
+    uint64_t event_sequence_hash;
+    uint64_t command_sequence_hash;
+    uint64_t callback_sequence_count;
     uint32_t index;
     uint32_t reserved;
 };
@@ -158,6 +163,7 @@ struct lccf_model_batch {
     uint64_t round;
     unsigned char *frame_storage;
     unsigned char *cell_storage;
+    lccf_fact_cell_t *fact_cells;
     lccf_model_instance_t *instances;
     lccf_model_waker_t *wakers;
     lccf_model_ticket_t *tickets;
