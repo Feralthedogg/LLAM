@@ -585,6 +585,15 @@ int lcrs_model_topology_info(const lcrs_model_topology_t *topology,
     return 0;
 }
 
+int lcrs_model_topology_config(const lcrs_model_topology_t *topology,
+                               lcrs_model_config_t *out) {
+    if (topology == NULL || out == NULL) {
+        return EINVAL;
+    }
+    *out = topology->config;
+    return 0;
+}
+
 const lcrs_model_row_t *lcrs_model_topology_row(
     const lcrs_model_topology_t *topology,
     uint32_t thief_shard,

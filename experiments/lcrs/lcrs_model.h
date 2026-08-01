@@ -95,6 +95,8 @@ void lcrs_model_topology_destroy(lcrs_model_topology_t *topology);
 
 int lcrs_model_topology_info(const lcrs_model_topology_t *topology,
                              lcrs_model_topology_info_t *out);
+int lcrs_model_topology_config(const lcrs_model_topology_t *topology,
+                               lcrs_model_config_t *out);
 int lcrs_model_topology_validate(const lcrs_model_topology_t *topology);
 const lcrs_model_row_t *lcrs_model_topology_row(
     const lcrs_model_topology_t *topology,
