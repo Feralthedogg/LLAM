@@ -134,7 +134,7 @@ No files under installed public headers are changed.
 ## 6. Repository-oriented file map
 
 ```text
-docs/superpowers/specs/
+docs/research/specs/
   2026-08-01-llam-coded-rotation-stealing-design.md
   2026-08-01-llam-structural-wait-graph-design.md
   2026-08-01-llam-parallel-race-amplifier-design.md

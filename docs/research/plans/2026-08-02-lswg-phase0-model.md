@@ -116,8 +116,8 @@ Run focused tests, ASan/UBSan, the 100,000-node scale case, and then the full CT
 
 **Files:**
 
-- Create: `docs/superpowers/reports/2026-08-02-lswg-phase0-results.md`
-- Create: `docs/superpowers/reports/2026-08-02-lswg-phase0-decision.md`
+- Create: `docs/research/reports/2026-08-02-lswg-phase0-results.md`
+- Create: `docs/research/reports/2026-08-02-lswg-phase0-decision.md`
 
 Record every fixture class, stable fingerprint result, allocation behavior, scale timing, sanitizer result, and platform. Phase 1 is authorized only if there are zero false proven verdicts, every closed fixture is confirmed, incomplete always dominates, and the 100,000-node model fits the measured diagnostic budget.
 
