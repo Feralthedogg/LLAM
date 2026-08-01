@@ -151,7 +151,10 @@ does not claim production Executor bytes per instance.
 ## 5. Internal API boundary
 
 `experiments/lccf/lccf_representation.h` owns representation-specific storage
-and conversion. It exposes:
+and conversion. It contains only standard integer/size includes and forward
+declarations for the tagged fact structs, so `lccf_fact.h` can include it
+without an include cycle. The implementation includes the complete fact
+definitions. It exposes:
 
 ```c
 typedef enum lccf_representation {
