@@ -186,10 +186,168 @@ static int test_remote_rows_respect_locality(void) {
     return 0;
 }
 
+static int verify_complete_coverage(const lcrs_model_topology_t *topology,
+                                    uint32_t shard_count,
+                                    int remote) {
+    lcrs_model_topology_info_t info;
+    uint32_t thief;
+
+    if (lcrs_model_topology_info(topology, &info) != 0) {
+        return fail("coverage metadata");
+    }
+    for (thief = 0U; thief < shard_count; ++thief) {
+        uint8_t seen[512];
+        uint32_t epoch;
+        uint32_t candidate;
+
+        memset(seen, 0, sizeof(seen));
+        for (epoch = 0U; epoch < info.epoch_count; ++epoch) {
+            const lcrs_model_row_t *row =
+                lcrs_model_topology_row(topology, thief, epoch);
+            const uint32_t start = remote ? (uint32_t)row->local_count : 0U;
+            const uint32_t count = remote ? (uint32_t)row->remote_count
+                                          : (uint32_t)row->local_count;
+            uint32_t slot;
+
+            for (slot = 0U; slot < count; ++slot) {
+                seen[row->candidate_ids[start + slot]] = 1U;
+            }
+        }
+        for (candidate = 0U; candidate < shard_count; ++candidate) {
+            const int same_node =
+                lcrs_model_topology_node(topology, candidate) ==
+                lcrs_model_topology_node(topology, thief);
+            const int expected = candidate != thief &&
+                                 ((remote != 0 && same_node == 0) ||
+                                  (remote == 0 && same_node != 0));
+
+            if ((seen[candidate] != 0U) != expected) {
+                return fail(remote ? "remote palette lost peer coverage"
+                                   : "local palette lost peer coverage");
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_local_properties_through_512(void) {
+    lcrs_model_shard_desc_t shards[512];
+    uint32_t shard_count;
+
+    for (shard_count = 1U; shard_count <= 512U; ++shard_count) {
+        lcrs_model_config_t config;
+        lcrs_model_topology_t *topology = NULL;
+        lcrs_model_topology_info_t info;
+        uint32_t shard;
+
+        for (shard = 0U; shard < shard_count; ++shard) {
+            shards[shard].shard_id = shard;
+            shards[shard].node_id = 3U;
+        }
+        lcrs_model_config_default(&config);
+        config.remote_width = 0U;
+        config.runtime_id = UINT64_C(0x1234);
+        if (lcrs_model_topology_create(shards,
+                                       shard_count,
+                                       &config,
+                                       &topology) != 0 ||
+            lcrs_model_topology_validate(topology) != 0 ||
+            verify_complete_coverage(topology, shard_count, 0) != 0 ||
+            lcrs_model_topology_info(topology, &info) != 0 ||
+            info.max_local_indegree > config.local_width) {
+            lcrs_model_topology_destroy(topology);
+            return fail("local exhaustive topology property");
+        }
+        lcrs_model_topology_destroy(topology);
+    }
+    return 0;
+}
+
+static int test_remote_coverage_representative_sizes(void) {
+    static const uint32_t sizes[] = {
+        2U, 3U, 4U, 5U, 7U, 8U, 16U, 31U, 32U,
+        33U, 63U, 64U, 127U, 128U, 255U, 256U, 511U, 512U,
+    };
+    lcrs_model_shard_desc_t shards[512];
+    size_t case_index;
+
+    for (case_index = 0U; case_index < sizeof(sizes) / sizeof(sizes[0]);
+         ++case_index) {
+        const uint32_t shard_count = sizes[case_index];
+        const uint32_t split = (shard_count + 2U) / 3U;
+        lcrs_model_config_t config;
+        lcrs_model_topology_t *topology = NULL;
+        uint32_t shard;
+
+        for (shard = 0U; shard < shard_count; ++shard) {
+            shards[shard].shard_id = shard;
+            shards[shard].node_id = shard < split ? 10U : 20U;
+        }
+        lcrs_model_config_default(&config);
+        config.local_width = 0U;
+        config.runtime_id = UINT64_C(0xfeedface);
+        if (lcrs_model_topology_create(shards,
+                                       shard_count,
+                                       &config,
+                                       &topology) != 0 ||
+            lcrs_model_topology_validate(topology) != 0 ||
+            verify_complete_coverage(topology, shard_count, 1) != 0) {
+            lcrs_model_topology_destroy(topology);
+            return fail("remote representative topology property");
+        }
+        lcrs_model_topology_destroy(topology);
+    }
+    return 0;
+}
+
+static int test_deterministic_construction(void) {
+    lcrs_model_shard_desc_t shards[17];
+    lcrs_model_config_t config;
+    lcrs_model_topology_t *left = NULL;
+    lcrs_model_topology_t *right = NULL;
+    lcrs_model_topology_info_t info;
+    uint32_t shard;
+    uint32_t epoch;
+
+    for (shard = 0U; shard < 17U; ++shard) {
+        shards[shard].shard_id = shard;
+        shards[shard].node_id = shard < 3U ? 1U : (shard < 11U ? 4U : 9U);
+    }
+    lcrs_model_config_default(&config);
+    config.runtime_id = UINT64_C(42);
+    if (lcrs_model_topology_create(shards, 17U, &config, &left) != 0 ||
+        lcrs_model_topology_create(shards, 17U, &config, &right) != 0 ||
+        lcrs_model_topology_info(left, &info) != 0) {
+        lcrs_model_topology_destroy(right);
+        lcrs_model_topology_destroy(left);
+        return fail("deterministic topology create");
+    }
+    for (epoch = 0U; epoch < info.epoch_count; ++epoch) {
+        for (shard = 0U; shard < info.shard_count; ++shard) {
+            const lcrs_model_row_t *left_row =
+                lcrs_model_topology_row(left, shard, epoch);
+            const lcrs_model_row_t *right_row =
+                lcrs_model_topology_row(right, shard, epoch);
+
+            if (memcmp(left_row, right_row, sizeof(*left_row)) != 0) {
+                lcrs_model_topology_destroy(right);
+                lcrs_model_topology_destroy(left);
+                return fail("topology construction is not deterministic");
+            }
+        }
+    }
+    lcrs_model_topology_destroy(right);
+    lcrs_model_topology_destroy(left);
+    return 0;
+}
+
 int main(void) {
     if (test_default_config() != 0 || test_invalid_create_contract() != 0 ||
         test_literal_local_rows() != 0 ||
-        test_remote_rows_respect_locality() != 0) {
+        test_remote_rows_respect_locality() != 0 ||
+        test_local_properties_through_512() != 0 ||
+        test_remote_coverage_representative_sizes() != 0 ||
+        test_deterministic_construction() != 0) {
         return 1;
     }
     puts("[test_lcrs_topology] all checks passed");
