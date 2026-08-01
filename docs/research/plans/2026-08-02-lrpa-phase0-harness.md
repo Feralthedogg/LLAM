@@ -120,8 +120,8 @@ Commit: `bench: shrink LRPA failure manifests`.
 
 - Modify: `scripts/run_lrpa.py`
 - Modify: `scripts/test_run_lrpa.py`
-- Create: `docs/superpowers/reports/2026-08-02-lrpa-phase0-results.md`
-- Create: `docs/superpowers/reports/2026-08-02-lrpa-phase0-decision.md`
+- Create: `docs/research/reports/2026-08-02-lrpa-phase0-results.md`
+- Create: `docs/research/reports/2026-08-02-lrpa-phase0-decision.md`
 
 Run paired campaigns using the same total lane-executions and process budget:
 
