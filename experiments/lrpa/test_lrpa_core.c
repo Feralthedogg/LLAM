@@ -338,6 +338,147 @@ test_coordination_trace_overflow_is_reported(void)
     return true;
 }
 
+static bool
+test_select_gadget_balances_all_couplings(void)
+{
+    static const lrpa_coupling_t couplings[] = {
+        LRPA_COUPLING_INDEPENDENT,
+        LRPA_COUPLING_SHARED_OBJECT,
+        LRPA_COUPLING_RING,
+        LRPA_COUPLING_COLORED_GRAPH,
+    };
+    size_t coupling_index;
+
+    for (coupling_index = 0U;
+         coupling_index < sizeof(couplings) / sizeof(couplings[0]);
+         ++coupling_index) {
+        lrpa_manifest_t manifest = valid_manifest();
+        lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+        lrpa_context_t context;
+        lrpa_result_t result;
+        uint64_t expected_armed;
+        uint32_t cell;
+
+        manifest.coupling = couplings[coupling_index];
+        manifest.lane_count = 8U;
+        manifest.worker_count = 4U;
+        manifest.rounds = 32U;
+        manifest.queue_capacity = 8192U;
+        for (cell = 0U; cell < manifest.lane_count; ++cell) {
+            manifest.object_ids[cell] = 1000U + cell;
+        }
+        TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+                   LRPA_STATUS_OK);
+        TEST_CHECK(lrpa_context_run(&context, &result) == LRPA_STATUS_OK);
+        expected_armed = (uint64_t)context.active_cell_count *
+                         manifest.rounds;
+        TEST_CHECK(result.status == LRPA_STATUS_OK);
+        TEST_CHECK(result.failures == 0U);
+        TEST_CHECK(result.armed_total == expected_armed);
+        TEST_CHECK(result.winner_total == expected_armed);
+        TEST_CHECK(result.cancel_total + result.timeout_total <=
+                   result.winner_total);
+        TEST_CHECK(result.discard_total ==
+                   result.lane_executions - result.winner_total);
+        TEST_CHECK(result.cleanup_complete);
+        for (cell = 0U; cell < context.active_cell_count; ++cell) {
+            TEST_CHECK(atomic_load(&context.cells[cell].live_nodes) == 0U);
+        }
+        lrpa_context_destroy(&context);
+    }
+    return true;
+}
+
+static void
+prepare_direct_oracle_context(lrpa_context_t *context)
+{
+    uint32_t lane;
+
+    for (lane = 0U; lane < context->manifest.lane_count; ++lane) {
+        atomic_store(&context->lanes[lane].phase, LRPA_LANE_RACING);
+    }
+    lrpa_select_prepare_round(context, 0U);
+    atomic_store(&context->cells[0].live_nodes, 0U);
+}
+
+static bool
+expect_direct_oracle_failure(lrpa_oracle_id_t expected_oracle,
+                             unsigned int winner_count,
+                             lrpa_outcome_t outcome,
+                             unsigned int payload_visible,
+                             unsigned int live_nodes,
+                             unsigned int stale_completion)
+{
+    lrpa_manifest_t manifest = valid_manifest();
+    lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_result_t result;
+    lrpa_failure_t failure;
+
+    manifest.coupling = LRPA_COUPLING_SHARED_OBJECT;
+    manifest.rounds = 1U;
+    manifest.allowed_outcomes = LRPA_ALLOW_SEND;
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    prepare_direct_oracle_context(&context);
+    atomic_store(&context.cells[0].winner_count, winner_count);
+    atomic_store(&context.cells[0].terminal_count,
+                 winner_count == 0U ? 0U : 1U);
+    atomic_store(&context.cells[0].outcome, (unsigned int)outcome);
+    atomic_store(&context.cells[0].payload_visible, payload_visible);
+    atomic_store(&context.cells[0].live_nodes, live_nodes);
+    atomic_store(&context.cells[0].stale_completion, stale_completion);
+    memset(&result, 0, sizeof(result));
+    memset(&failure, 0, sizeof(failure));
+    TEST_CHECK(lrpa_select_verify_round(&context, 0U, &failure, &result) ==
+               LRPA_STATUS_ORACLE_FAILURE);
+    TEST_CHECK(failure.oracle == expected_oracle);
+    lrpa_context_destroy(&context);
+    return true;
+}
+
+static bool
+test_select_oracle_reads_real_cell_state(void)
+{
+    TEST_CHECK(expect_direct_oracle_failure(
+        LRPA_ORACLE_EXACTLY_ONE_WINNER, 2U, LRPA_OUTCOME_SEND, 1U, 0U, 0U));
+    TEST_CHECK(expect_direct_oracle_failure(
+        LRPA_ORACLE_ALLOWED_OUTCOME, 1U, LRPA_OUTCOME_CLOSE, 0U, 0U, 0U));
+    TEST_CHECK(expect_direct_oracle_failure(
+        LRPA_ORACLE_PAYLOAD_OWNERSHIP, 1U, LRPA_OUTCOME_SEND, 0U, 0U, 0U));
+    TEST_CHECK(expect_direct_oracle_failure(
+        LRPA_ORACLE_LIVE_NODE_DRAIN, 1U, LRPA_OUTCOME_SEND, 1U, 1U, 0U));
+    TEST_CHECK(expect_direct_oracle_failure(
+        LRPA_ORACLE_STALE_GENERATION, 1U, LRPA_OUTCOME_SEND, 1U, 0U, 1U));
+    return true;
+}
+
+static bool
+test_stale_generation_cannot_complete_rearmed_cell(void)
+{
+    lrpa_manifest_t manifest = valid_manifest();
+    lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_actor_t *actor;
+
+    manifest.coupling = LRPA_COUPLING_INDEPENDENT;
+    manifest.rounds = 2U;
+    TEST_CHECK(lrpa_context_init(&context, &manifest, &options) ==
+               LRPA_STATUS_OK);
+    actor = &context.actors[0];
+    lrpa_select_prepare_round(&context, 0U);
+    lrpa_select_prepare_round(&context, 1U);
+    TEST_CHECK(!lrpa_select_try_complete(&context, actor, 0U, 1U,
+                                         LRPA_OUTCOME_SEND, true));
+    TEST_CHECK(atomic_load(&context.cells[0].outcome) == LRPA_OUTCOME_NONE);
+    TEST_CHECK(lrpa_select_try_complete(&context, actor, 0U, 2U,
+                                        LRPA_OUTCOME_SEND, true));
+    TEST_CHECK(atomic_load(&context.cells[0].winner_count) == 1U);
+    TEST_CHECK(atomic_load(&context.cells[0].payload_visible) == 1U);
+    lrpa_context_destroy(&context);
+    return true;
+}
+
 typedef bool (*test_fn)(void);
 
 typedef struct test_case {
@@ -365,6 +506,12 @@ main(void)
          test_timeout_breaks_barriers_and_joins_every_actor},
         {"coordination_trace_overflow_is_reported",
          test_coordination_trace_overflow_is_reported},
+        {"select_gadget_balances_all_couplings",
+         test_select_gadget_balances_all_couplings},
+        {"select_oracle_reads_real_cell_state",
+         test_select_oracle_reads_real_cell_state},
+        {"stale_generation_cannot_complete_rearmed_cell",
+         test_stale_generation_cannot_complete_rearmed_cell},
     };
     size_t index;
 

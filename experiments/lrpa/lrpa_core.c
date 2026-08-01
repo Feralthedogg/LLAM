@@ -351,6 +351,7 @@ initialize_cell(lrpa_completion_cell_t *cell, uint32_t object_id)
     atomic_init(&cell->winner_count, 0U);
     atomic_init(&cell->terminal_count, 0U);
     atomic_init(&cell->live_nodes, 0U);
+    atomic_init(&cell->discard_count, 0U);
     atomic_init(&cell->stale_completion, 0U);
     atomic_init(&cell->payload_visible, 0U);
     atomic_init(&cell->generation, 0U);
@@ -494,6 +495,9 @@ coordination_actor_main(void *argument)
                          context->manifest.object_ids[actor->lane_id], round,
                          LRPA_LANE_RELEASED, LRPA_LANE_RACING, 0,
                          (uintptr_t)actor);
+        if (context->execute_gadget) {
+            lrpa_select_actor_step(actor, round);
+        }
         if (!lrpa_platform_barrier_wait(&context->finish_barrier,
                                         context->manifest.timeout_ns)) {
             request_abort(context);
@@ -580,9 +584,9 @@ finalize_result_trace(lrpa_context_t *context, lrpa_result_t *result)
                                                    memory_order_relaxed);
 }
 
-lrpa_status_t
-lrpa_context_run_coordination_probe(lrpa_context_t *context,
-                                    lrpa_result_t *result)
+static lrpa_status_t
+run_context(lrpa_context_t *context, lrpa_result_t *result,
+            bool execute_gadget)
 {
     uint64_t start_ns;
     uint32_t actor;
@@ -597,6 +601,7 @@ lrpa_context_run_coordination_probe(lrpa_context_t *context,
     result->seed = context->manifest.seed;
     result->lane_count = context->manifest.lane_count;
     result->first_failure_round = UINT32_MAX;
+    context->execute_gadget = execute_gadget;
     start_ns = lrpa_platform_monotonic_ns();
 
     status = transition_lanes(context, LRPA_LANE_ALLOCATED,
@@ -641,6 +646,9 @@ lrpa_context_run_coordination_probe(lrpa_context_t *context,
         }
         status = transition_lanes(context, LRPA_LANE_SETUP,
                                   LRPA_LANE_ARMED);
+        if (status == LRPA_STATUS_OK && execute_gadget) {
+            lrpa_select_prepare_round(context, round);
+        }
         if (status != LRPA_STATUS_OK || !wait_for_all_armed(context)) {
             status = status == LRPA_STATUS_OK ? LRPA_STATUS_TIMEOUT : status;
             break;
@@ -669,6 +677,21 @@ lrpa_context_run_coordination_probe(lrpa_context_t *context,
             status = LRPA_STATUS_TIMEOUT;
             break;
         }
+        if (execute_gadget) {
+            lrpa_failure_t failure;
+
+            memset(&failure, 0, sizeof(failure));
+            status = lrpa_select_verify_round(context, round, &failure,
+                                              result);
+            lrpa_select_drain_round(context);
+            if (status != LRPA_STATUS_OK) {
+                result->failures += 1U;
+                result->first_failure_round = round;
+                result->first_failure = failure;
+                result->signature = lrpa_failure_signature(
+                    &context->manifest, &failure);
+            }
+        }
         status = transition_lanes(context, LRPA_LANE_RACING,
                                   LRPA_LANE_DRAINING);
         if (status == LRPA_STATUS_OK) {
@@ -679,7 +702,13 @@ lrpa_context_run_coordination_probe(lrpa_context_t *context,
             break;
         }
         result->rounds_completed = round + 1U;
-        result->armed_total += context->manifest.lane_count;
+        if (!execute_gadget) {
+            result->armed_total += context->manifest.lane_count;
+        }
+        if (result->failures != 0U) {
+            status = LRPA_STATUS_ORACLE_FAILURE;
+            break;
+        }
     }
 
     if (status != LRPA_STATUS_OK) {
@@ -698,9 +727,16 @@ lrpa_context_run_coordination_probe(lrpa_context_t *context,
 }
 
 lrpa_status_t
+lrpa_context_run_coordination_probe(lrpa_context_t *context,
+                                    lrpa_result_t *result)
+{
+    return run_context(context, result, false);
+}
+
+lrpa_status_t
 lrpa_context_run(lrpa_context_t *context, lrpa_result_t *result)
 {
-    return lrpa_context_run_coordination_probe(context, result);
+    return run_context(context, result, true);
 }
 
 lrpa_status_t

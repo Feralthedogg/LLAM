@@ -46,6 +46,7 @@ typedef struct lrpa_completion_cell {
     atomic_uint winner_count;
     atomic_uint terminal_count;
     atomic_uint live_nodes;
+    atomic_uint discard_count;
     atomic_uint stale_completion;
     atomic_uint payload_visible;
     atomic_ullong generation;
@@ -88,6 +89,7 @@ struct lrpa_context {
     bool launch_gate_initialized;
     bool start_barrier_initialized;
     bool finish_barrier_initialized;
+    bool execute_gadget;
     lrpa_run_options_t options;
 };
 
@@ -127,6 +129,9 @@ void lrpa_trace_event(lrpa_context_t *context, uint32_t lane,
 
 void lrpa_select_prepare_round(lrpa_context_t *context, uint32_t round);
 void lrpa_select_actor_step(lrpa_actor_t *actor, uint32_t round);
+bool lrpa_select_try_complete(lrpa_context_t *context, lrpa_actor_t *actor,
+                              uint32_t target_cell, uint64_t generation,
+                              lrpa_outcome_t outcome, bool publish_payload);
 lrpa_status_t lrpa_select_verify_round(lrpa_context_t *context,
                                        uint32_t round,
                                        lrpa_failure_t *failure,
