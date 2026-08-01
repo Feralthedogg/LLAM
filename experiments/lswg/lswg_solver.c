@@ -67,6 +67,71 @@ workspace_allocate_array(lswg_workspace_t *workspace, void **target,
     return *target != NULL;
 }
 
+static uint64_t
+fingerprint_byte(uint64_t hash, uint8_t byte)
+{
+    hash ^= (uint64_t)byte;
+    hash *= UINT64_C(1099511628211);
+    return hash;
+}
+
+static uint64_t
+fingerprint_u64(uint64_t hash, uint64_t value)
+{
+    unsigned int byte_index;
+
+    for (byte_index = 0U; byte_index < 8U; ++byte_index) {
+        hash = fingerprint_byte(hash, (uint8_t)(value & UINT64_C(0xff)));
+        value >>= 8U;
+    }
+    return hash;
+}
+
+static uint64_t
+fingerprint_ref(uint64_t hash, lswg_node_ref_t ref)
+{
+    hash = fingerprint_u64(hash, (uint64_t)ref.kind);
+    hash = fingerprint_u64(hash, ref.identity.primary);
+    hash = fingerprint_u64(hash, ref.identity.generation);
+    hash = fingerprint_u64(hash, ref.identity.auxiliary);
+    return hash;
+}
+
+lswg_status_t
+lswg_fingerprint(const lswg_graph_t *graph, uint64_t *fingerprint_out)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    size_t index;
+
+    if (graph == NULL || fingerprint_out == NULL) {
+        return LSWG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!graph->finalized) {
+        return LSWG_STATUS_NOT_FINALIZED;
+    }
+    hash = fingerprint_u64(hash, UINT64_C(0x4c53574700000001));
+    hash = fingerprint_u64(hash, (uint64_t)graph->node_count);
+    hash = fingerprint_u64(hash, (uint64_t)graph->edge_count);
+    hash = fingerprint_u64(hash, (uint64_t)graph->incomplete_reasons);
+    for (index = 0U; index < graph->node_count; ++index) {
+        const lswg_node_desc_t *node = &graph->nodes[index].desc;
+
+        hash = fingerprint_ref(hash, node->ref);
+        hash = fingerprint_u64(hash, (uint64_t)node->semantic_flags);
+        hash = fingerprint_u64(hash, node->semantic_value);
+    }
+    for (index = 0U; index < graph->edge_count; ++index) {
+        const lswg_edge_t *edge = &graph->edges[index];
+
+        hash = fingerprint_u64(hash, (uint64_t)edge->source_index);
+        hash = fingerprint_u64(hash, (uint64_t)edge->target_index);
+        hash = fingerprint_u64(hash, (uint64_t)edge->desc.kind);
+        hash = fingerprint_u64(hash, (uint64_t)edge->desc.flags);
+    }
+    *fingerprint_out = hash;
+    return LSWG_STATUS_OK;
+}
+
 lswg_status_t
 lswg_workspace_init(lswg_workspace_t *workspace, size_t node_capacity,
                     size_t edge_capacity, const lswg_allocator_t *allocator)
@@ -523,6 +588,9 @@ lswg_solve(const lswg_graph_t *graph, lswg_workspace_t *workspace,
     if (!graph->finalized) {
         return LSWG_STATUS_NOT_FINALIZED;
     }
+    if (lswg_fingerprint(graph, &result->fingerprint) != LSWG_STATUS_OK) {
+        return LSWG_STATUS_NOT_FINALIZED;
+    }
     incomplete_reasons = graph->incomplete_reasons;
     if (graph->node_count > workspace->node_capacity ||
         graph->edge_count > workspace->edge_capacity) {
@@ -584,5 +652,46 @@ lswg_solve(const lswg_graph_t *graph, lswg_workspace_t *workspace,
 
     result->verdict = LSWG_VERDICT_INCOMPLETE;
     result->incomplete_reasons = LSWG_INCOMPLETE_MALFORMED;
+    return LSWG_STATUS_OK;
+}
+
+lswg_status_t
+lswg_confirm(const lswg_result_t *first, uint64_t first_coarse_progress,
+             const lswg_result_t *second, uint64_t second_coarse_progress,
+             lswg_result_t *confirmed)
+{
+    if (first == NULL || second == NULL || confirmed == NULL) {
+        return LSWG_STATUS_INVALID_ARGUMENT;
+    }
+    memset(confirmed, 0, sizeof(*confirmed));
+    if (first->verdict == LSWG_VERDICT_INCOMPLETE ||
+        second->verdict == LSWG_VERDICT_INCOMPLETE) {
+        confirmed->verdict = LSWG_VERDICT_INCOMPLETE;
+        confirmed->incomplete_reasons =
+            first->incomplete_reasons | second->incomplete_reasons;
+        return LSWG_STATUS_OK;
+    }
+    if (first_coarse_progress != second_coarse_progress ||
+        first->fingerprint != second->fingerprint ||
+        first->verdict != second->verdict) {
+        confirmed->verdict = LSWG_VERDICT_PROGRESS_CHANGED;
+        return LSWG_STATUS_OK;
+    }
+
+    *confirmed = *second;
+    confirmed->confirmed = false;
+    switch (second->verdict) {
+    case LSWG_VERDICT_PROVEN_CYCLE:
+    case LSWG_VERDICT_PROVEN_ORPHAN:
+    case LSWG_VERDICT_MATCHABLE_LOST_WAKE:
+    case LSWG_VERDICT_OVERDUE_SOURCE:
+        confirmed->confirmed = true;
+        break;
+    case LSWG_VERDICT_NONE:
+    case LSWG_VERDICT_OPEN:
+    case LSWG_VERDICT_PROGRESS_CHANGED:
+    case LSWG_VERDICT_INCOMPLETE:
+        break;
+    }
     return LSWG_STATUS_OK;
 }

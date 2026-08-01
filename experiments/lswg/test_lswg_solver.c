@@ -462,6 +462,126 @@ test_channel_host_wake_and_incomplete_dominance(void)
 }
 
 #ifndef LSWG_NO_CONFIRMATION
+typedef struct fingerprint_variant {
+    uint64_t task_wait_generation;
+    uint64_t mutex_generation;
+    uint64_t io_generation;
+    uint64_t select_completion;
+    uint64_t mutex_owner_task;
+    bool include_extra_member;
+    uintptr_t raw_bias;
+    uint64_t capture_seq;
+} fingerprint_variant_t;
+
+static bool
+build_fingerprint_graph(lswg_graph_t *graph,
+                        const fingerprint_variant_t *variant)
+{
+    const lswg_node_ref_t waiter =
+        ref(LSWG_NODE_TASK, 401U, variant->task_wait_generation, 2U);
+    const lswg_node_ref_t owner_1 = ref(LSWG_NODE_TASK, 402U, 3U, 2U);
+    const lswg_node_ref_t owner_2 = ref(LSWG_NODE_TASK, 403U, 3U, 2U);
+    const lswg_node_ref_t mutex =
+        ref(LSWG_NODE_MUTEX, 51U, variant->mutex_generation, 0U);
+    const lswg_node_ref_t select = ref(LSWG_NODE_SELECT, 401U, 8U, 0U);
+    const lswg_node_ref_t channel = ref(LSWG_NODE_CHANNEL, 52U, 4U, 0U);
+    const lswg_node_ref_t io =
+        ref(LSWG_NODE_IO_REQ, 0x5000U, variant->io_generation, 9U);
+    const lswg_node_ref_t extra =
+        ref(LSWG_NODE_EXTERNAL_SOURCE, 99U, 1U, 0U);
+    const lswg_node_ref_t owner =
+        variant->mutex_owner_task == 402U ? owner_1 : owner_2;
+    const size_t node_count = variant->include_extra_member ? 8U : 7U;
+
+    TEST_CHECK(lswg_graph_init(graph, node_count, 3U, NULL) ==
+               LSWG_STATUS_OK);
+    graph->capture_seq = variant->capture_seq;
+    TEST_CHECK(add_node(graph,
+                        node(channel, 0U, 0U,
+                             variant->raw_bias + 0x600U)));
+    TEST_CHECK(add_node(graph,
+                        node(owner_2, LSWG_NODE_RUNNABLE, 0U,
+                             variant->raw_bias + 0x300U)));
+    TEST_CHECK(add_node(graph,
+                        node(waiter, 0U, 0U,
+                             variant->raw_bias + 0x100U)));
+    TEST_CHECK(add_node(graph,
+                        node(io, 0U, 0U,
+                             variant->raw_bias + 0x700U)));
+    TEST_CHECK(add_node(graph,
+                        node(mutex, 0U, 0U,
+                             variant->raw_bias + 0x400U)));
+    TEST_CHECK(add_node(graph,
+                        node(owner_1, LSWG_NODE_RUNNABLE, 0U,
+                             variant->raw_bias + 0x200U)));
+    TEST_CHECK(add_node(graph,
+                        node(select, 0U, variant->select_completion,
+                             variant->raw_bias + 0x500U)));
+    if (variant->include_extra_member) {
+        TEST_CHECK(add_node(graph,
+                            node(extra, LSWG_NODE_EXTERNAL_OPEN, 0U,
+                                 variant->raw_bias + 0x800U)));
+    }
+    TEST_CHECK(add_edge(graph, edge(select, channel,
+                                    LSWG_EDGE_SELECT_ALTERNATIVE,
+                                    LSWG_EDGE_OR_ALTERNATIVE |
+                                        LSWG_EDGE_GENERATION_STABLE)));
+    TEST_CHECK(add_edge(graph, edge(waiter, mutex,
+                                    LSWG_EDGE_TASK_WAITS_MUTEX,
+                                    LSWG_EDGE_AND_REQUIRED |
+                                        LSWG_EDGE_GENERATION_STABLE)));
+    TEST_CHECK(add_edge(graph, edge(mutex, owner,
+                                    LSWG_EDGE_MUTEX_OWNED_BY_TASK,
+                                    LSWG_EDGE_AND_REQUIRED |
+                                        LSWG_EDGE_GENERATION_STABLE)));
+    TEST_CHECK(lswg_graph_finalize(graph) == LSWG_STATUS_OK);
+    return true;
+}
+
+static bool
+test_fingerprint_covers_semantics_not_addresses(void)
+{
+    static const fingerprint_variant_t baseline = {
+        11U, 12U, 13U, 14U, 402U, false, 0x1000U, 1U};
+    lswg_graph_t first;
+    lswg_graph_t second;
+    fingerprint_variant_t variant;
+    uint64_t first_hash;
+    uint64_t second_hash;
+
+    TEST_CHECK(build_fingerprint_graph(&first, &baseline));
+    variant = baseline;
+    variant.raw_bias = 0x900000U;
+    variant.capture_seq = 999U;
+    TEST_CHECK(build_fingerprint_graph(&second, &variant));
+    TEST_CHECK(lswg_fingerprint(&first, &first_hash) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_fingerprint(&second, &second_hash) == LSWG_STATUS_OK);
+    TEST_CHECK(first_hash == second_hash);
+    lswg_graph_destroy(&second);
+
+#define EXPECT_FINGERPRINT_CHANGE(field, value)                                 \
+    do {                                                                        \
+        variant = baseline;                                                     \
+        variant.field = (value);                                                \
+        TEST_CHECK(build_fingerprint_graph(&second, &variant));                 \
+        TEST_CHECK(lswg_fingerprint(&second, &second_hash) ==                  \
+                   LSWG_STATUS_OK);                                             \
+        TEST_CHECK(first_hash != second_hash);                                  \
+        lswg_graph_destroy(&second);                                            \
+    } while (0)
+
+    EXPECT_FINGERPRINT_CHANGE(task_wait_generation, 21U);
+    EXPECT_FINGERPRINT_CHANGE(mutex_generation, 22U);
+    EXPECT_FINGERPRINT_CHANGE(io_generation, 23U);
+    EXPECT_FINGERPRINT_CHANGE(select_completion, 24U);
+    EXPECT_FINGERPRINT_CHANGE(mutex_owner_task, 403U);
+    EXPECT_FINGERPRINT_CHANGE(include_extra_member, true);
+#undef EXPECT_FINGERPRINT_CHANGE
+
+    lswg_graph_destroy(&first);
+    return true;
+}
+
 static bool
 build_generation_snapshot(lswg_graph_t *graph, uint64_t wait_generation)
 {
@@ -497,6 +617,88 @@ test_unstable_generation_between_snapshots(void)
                LSWG_STATUS_OK);
     TEST_CHECK(confirmed.verdict == LSWG_VERDICT_PROGRESS_CHANGED);
     TEST_CHECK(!confirmed.confirmed);
+    lswg_graph_destroy(&first_graph);
+    lswg_graph_destroy(&second_graph);
+    return true;
+}
+
+static bool
+test_confirmation_gates_progress_open_and_incomplete(void)
+{
+    lswg_graph_t first_graph;
+    lswg_graph_t second_graph;
+    lswg_result_t first;
+    lswg_result_t second;
+    lswg_result_t confirmed;
+    fingerprint_variant_t variant = {
+        11U, 12U, 13U, 14U, 402U, false, 0x1000U, 1U};
+
+    TEST_CHECK(build_fingerprint_graph(&first_graph, &variant));
+    variant.raw_bias = 0x500000U;
+    variant.capture_seq = 2U;
+    TEST_CHECK(build_fingerprint_graph(&second_graph, &variant));
+    {
+        lswg_workspace_t workspace;
+
+        TEST_CHECK(lswg_workspace_init(&workspace, first_graph.node_count,
+                                       first_graph.edge_count, NULL) ==
+                   LSWG_STATUS_OK);
+        TEST_CHECK(lswg_solve(&first_graph, &workspace, &first) ==
+                   LSWG_STATUS_OK);
+        TEST_CHECK(lswg_solve(&second_graph, &workspace, &second) ==
+                   LSWG_STATUS_OK);
+        lswg_workspace_destroy(&workspace);
+    }
+    TEST_CHECK(first.verdict == LSWG_VERDICT_OPEN);
+    TEST_CHECK(second.verdict == LSWG_VERDICT_OPEN);
+    TEST_CHECK(lswg_confirm(&first, 70U, &second, 70U, &confirmed) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(confirmed.verdict == LSWG_VERDICT_OPEN);
+    TEST_CHECK(!confirmed.confirmed);
+    TEST_CHECK(lswg_confirm(&first, 70U, &second, 71U, &confirmed) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(confirmed.verdict == LSWG_VERDICT_PROGRESS_CHANGED);
+    TEST_CHECK(!confirmed.confirmed);
+    lswg_graph_destroy(&first_graph);
+    lswg_graph_destroy(&second_graph);
+
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    first.verdict = LSWG_VERDICT_INCOMPLETE;
+    second.verdict = LSWG_VERDICT_INCOMPLETE;
+    first.incomplete_reasons = LSWG_INCOMPLETE_LOCK_BUSY;
+    second.incomplete_reasons = LSWG_INCOMPLETE_ALLOCATION;
+    TEST_CHECK(lswg_confirm(&first, 8U, &second, 8U, &confirmed) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(confirmed.verdict == LSWG_VERDICT_INCOMPLETE);
+    TEST_CHECK(confirmed.incomplete_reasons ==
+               (LSWG_INCOMPLETE_LOCK_BUSY | LSWG_INCOMPLETE_ALLOCATION));
+    TEST_CHECK(!confirmed.confirmed);
+    return true;
+}
+
+static bool
+test_stable_orphan_is_confirmed(void)
+{
+    lswg_graph_t first_graph;
+    lswg_graph_t second_graph;
+    lswg_result_t first;
+    lswg_result_t second;
+    lswg_result_t confirmed;
+
+    TEST_CHECK(build_generation_snapshot(&first_graph, 19U));
+    TEST_CHECK(build_generation_snapshot(&second_graph, 19U));
+    first_graph.capture_seq = 100U;
+    second_graph.capture_seq = 101U;
+    first_graph.nodes[0].desc.raw_address += 0x100000U;
+    second_graph.nodes[0].desc.raw_address += 0x900000U;
+    TEST_CHECK(solve_graph(&first_graph, &first));
+    TEST_CHECK(solve_graph(&second_graph, &second));
+    TEST_CHECK(first.fingerprint == second.fingerprint);
+    TEST_CHECK(lswg_confirm(&first, 90U, &second, 90U, &confirmed) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(confirmed.verdict == LSWG_VERDICT_PROVEN_ORPHAN);
+    TEST_CHECK(confirmed.confirmed);
     lswg_graph_destroy(&first_graph);
     lswg_graph_destroy(&second_graph);
     return true;
@@ -586,6 +788,8 @@ test_finalized_order_is_deterministic(void)
     const lswg_node_ref_t task_1 = ref(LSWG_NODE_TASK, 1U, 2U, 1U);
     const lswg_node_ref_t task_2 = ref(LSWG_NODE_TASK, 2U, 2U, 1U);
     const lswg_node_ref_t mutex = ref(LSWG_NODE_MUTEX, 5U, 4U, 0U);
+    uint64_t first_fingerprint;
+    uint64_t second_fingerprint;
     size_t index;
 
     TEST_CHECK(lswg_graph_init(&first, 3U, 3U, NULL) == LSWG_STATUS_OK);
@@ -625,6 +829,11 @@ test_finalized_order_is_deterministic(void)
         TEST_CHECK(first.edges[index].desc.kind ==
                    second.edges[index].desc.kind);
     }
+    TEST_CHECK(lswg_fingerprint(&first, &first_fingerprint) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(lswg_fingerprint(&second, &second_fingerprint) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(first_fingerprint == second_fingerprint);
     lswg_graph_destroy(&first);
     lswg_graph_destroy(&second);
     return true;
@@ -657,8 +866,13 @@ main(void)
         {"channel_host_wake_and_incomplete_dominance",
          test_channel_host_wake_and_incomplete_dominance},
 #ifndef LSWG_NO_CONFIRMATION
+        {"fingerprint_covers_semantics_not_addresses",
+         test_fingerprint_covers_semantics_not_addresses},
         {"unstable_generation_between_snapshots",
          test_unstable_generation_between_snapshots},
+        {"confirmation_gates_progress_open_and_incomplete",
+         test_confirmation_gates_progress_open_and_incomplete},
+        {"stable_orphan_is_confirmed", test_stable_orphan_is_confirmed},
 #endif
 #endif
         {"generation_identity_and_raw_address_rules",
