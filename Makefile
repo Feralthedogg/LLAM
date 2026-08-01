@@ -1997,7 +1997,7 @@ lccf-model-report: test-lccf-model
 		--cc "$(CC)" \
 		--out-dir object/lccf-phase0 \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-26-lccf-phase0-results.md
+			docs/research/reports/2026-07-26-lccf-phase0-results.md
 
 test-process-utils:
 	python3 scripts/test_process_utils.py
