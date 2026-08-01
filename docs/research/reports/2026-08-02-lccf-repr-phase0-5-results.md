@@ -102,7 +102,8 @@ Three benchmark defects were found before the final run:
   same round count must now satisfy the minimum duration twice consecutively.
 - a sub-millisecond Windows calibration probe could observe zero elapsed
   `GetProcessTimes` ticks; calibration now treats that as insufficient rounds,
-  while every emitted measurement still requires a positive CPU delta.
+  doubles once more after two qualifying Windows probes, reconfirms the wider
+  window, and still requires a positive CPU delta for every emitted sample.
 
 Linux UBSan also exposed a representation test that read event storage after
 an intentionally failed publication. The test now publishes a valid event

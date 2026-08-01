@@ -649,6 +649,9 @@ static int calibrate_contrast(const bench_options_t *options,
                               contrast_runner_t *contrast) {
     uint64_t rounds = UINT64_C(1);
     bool duration_confirmed = false;
+#if defined(_WIN32)
+    bool coarse_cpu_guard_applied = false;
+#endif
 
     for (;;) {
         window_sample_t left;
@@ -677,6 +680,17 @@ static int calibrate_contrast(const bench_options_t *options,
             right.wall_ns >= options->minimum_window_ns &&
             left.cpu_ns != 0U && right.cpu_ns != 0U) {
             if (duration_confirmed) {
+#if defined(_WIN32)
+                if (!coarse_cpu_guard_applied) {
+                    coarse_cpu_guard_applied = true;
+                    duration_confirmed = false;
+                    if (rounds > UINT64_MAX / UINT64_C(2)) {
+                        return EOVERFLOW;
+                    }
+                    rounds *= UINT64_C(2);
+                    continue;
+                }
+#endif
                 return 0;
             }
             duration_confirmed = true;
