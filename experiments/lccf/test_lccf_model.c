@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define LCCF_RACE_GENERATIONS 10000U
@@ -1379,7 +1380,11 @@ static bool fact_pair_routing_metrics_equal(
            baseline->fact_reuse_delays == candidate->fact_reuse_delays &&
            baseline->fact_hot_bytes == candidate->fact_hot_bytes &&
            baseline->fact_sidecar_bytes ==
-               candidate->fact_sidecar_bytes;
+               candidate->fact_sidecar_bytes &&
+           baseline->fact_overflow_pushes ==
+               candidate->fact_overflow_pushes &&
+           baseline->fact_overflow_pops ==
+               candidate->fact_overflow_pops;
 }
 
 static int run_fact_differential_case(
@@ -1396,6 +1401,8 @@ static int run_fact_differential_case(
     lccf_model_batch_t *candidate = NULL;
     lccf_model_metrics_t baseline_metrics = {0};
     lccf_model_metrics_t candidate_metrics = {0};
+    lccf_model_trace_row_t *baseline_trace = NULL;
+    lccf_model_trace_row_t *candidate_trace = NULL;
     const uint64_t rounds = UINT64_C(5);
     const uint64_t instances = UINT64_C(17);
     const uint64_t chain = UINT64_C(5);
@@ -1405,6 +1412,7 @@ static int run_fact_differential_case(
         workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
             UINT64_C(3) : UINT64_C(1);
     uint64_t baseline_expected_work;
+    uint64_t error_rows = 0U;
     size_t index;
     uint64_t round;
     int rc = 1;
@@ -1427,12 +1435,29 @@ static int run_fact_differential_case(
         fail("fact differential create");
         goto out;
     }
+    baseline_trace = calloc((size_t)callbacks, sizeof(*baseline_trace));
+    candidate_trace = calloc((size_t)callbacks, sizeof(*candidate_trace));
+    if (baseline_trace == NULL || candidate_trace == NULL ||
+        lccf_model_set_trace_buffer(
+            baseline, baseline_trace, (size_t)callbacks) != 0 ||
+        lccf_model_set_trace_buffer(
+            candidate, candidate_trace, (size_t)callbacks) != 0) {
+        fail("fact differential trace setup");
+        goto out;
+    }
     for (round = 0U; round < rounds; ++round) {
+        const size_t expected_trace_count =
+            (size_t)((round + UINT64_C(1)) * instances * chain);
+
         if (lccf_model_run_round(baseline, &baseline_metrics) != 0 ||
             lccf_model_run_round(candidate, &candidate_metrics) != 0 ||
             !lccf_model_batch_equal(baseline, candidate) ||
             lccf_model_checksum(baseline) !=
-                lccf_model_checksum(candidate)) {
+                lccf_model_checksum(candidate) ||
+            lccf_model_trace_count(baseline) != expected_trace_count ||
+            lccf_model_trace_count(candidate) != expected_trace_count ||
+            memcmp(baseline_trace, candidate_trace,
+                   expected_trace_count * sizeof(*baseline_trace)) != 0) {
             fprintf(stderr,
                     "[test_lccf_model] fact differential round=%" PRIu64
                     " workload=%s pair=%s/%s frame=%zu cell=%zu sites=%u\n",
@@ -1441,6 +1466,11 @@ static int run_fact_differential_case(
                     lccf_model_mode_name(candidate_mode), frame_bytes,
                     cell_bytes, site_count);
             goto out;
+        }
+    }
+    for (index = 0U; index < (size_t)callbacks; ++index) {
+        if (baseline_trace[index].error_code != 0) {
+            error_rows += UINT64_C(1);
         }
     }
     for (index = 0U; index < (size_t)instances; ++index) {
@@ -1472,7 +1502,9 @@ static int run_fact_differential_case(
         baseline_metrics.fact_queue_forwards != 0U ||
         baseline_metrics.hot_allocations != 0U ||
         candidate_metrics.fact_normalizations != completions ||
-        candidate_metrics.fact_site_lookups != completions) {
+        candidate_metrics.fact_site_lookups < completions ||
+        candidate_metrics.fact_site_lookups > callbacks ||
+        error_rows == 0U) {
         fail("fact differential accounting");
         goto out;
     }
@@ -1516,6 +1548,8 @@ static int run_fact_differential_case(
     rc = 0;
 
 out:
+    free(candidate_trace);
+    free(baseline_trace);
     lccf_model_batch_destroy(candidate);
     lccf_model_batch_destroy(baseline);
     return rc;
@@ -1577,6 +1611,111 @@ static int test_fact_differential_matrix(void) {
     return 0;
 }
 
+static int test_fact_layouts_use_declared_storage(void) {
+    static const size_t layouts[] = {64U, 96U, 128U};
+    size_t layout_index;
+
+    for (layout_index = 0U;
+         layout_index < sizeof(layouts) / sizeof(layouts[0]);
+         ++layout_index) {
+        lccf_model_config_t config = base_config();
+        lccf_model_batch_t *batch = NULL;
+        lccf_model_metrics_t metrics = {0};
+        size_t instance_index;
+
+        config.mode = LCCF_MODEL_SHARED_FACT_FUSED;
+        config.instance_count = 3U;
+        config.cell_bytes = layouts[layout_index];
+        config.site_count = 8U;
+        config.chain_length = 3U;
+        if (lccf_model_batch_create(&config, &batch) != 0) {
+            return fail("fact physical layout create");
+        }
+        if ((config.cell_bytes < 128U) !=
+            (batch->fact_sidecar_storage != NULL)) {
+            lccf_model_batch_destroy(batch);
+            return fail("fact sidecar allocation contract");
+        }
+        for (instance_index = 0U;
+             instance_index < config.instance_count;
+             ++instance_index) {
+            lccf_fact_core_t *expected =
+                config.cell_bytes == 128U
+                    ? (lccf_fact_core_t *)(void *)(
+                          batch->cell_storage + instance_index * 128U + 64U)
+                    : &batch->fact_sidecar_storage[instance_index];
+
+            if (lccf_fact_storage(batch->instances[instance_index].fact_cell) !=
+                expected) {
+                lccf_model_batch_destroy(batch);
+                return fail("fact storage address does not match layout");
+            }
+        }
+        if (lccf_model_run_round(batch, &metrics) != 0 ||
+            !lccf_model_fact_references_balanced(batch)) {
+            lccf_model_batch_destroy(batch);
+            return fail("fact physical layout execution");
+        }
+        lccf_model_batch_destroy(batch);
+    }
+    return 0;
+}
+
+static int test_fact_callback_failure_retires_lifetime(void) {
+    lccf_model_config_t config = base_config();
+    lccf_model_batch_t *batch = NULL;
+    lccf_model_metrics_t metrics = {0};
+    size_t kind;
+
+    config.mode = LCCF_MODEL_SHARED_FACT_FUSED;
+    config.instance_count = 1U;
+    config.chain_length = 3U;
+    config.callback_failure_step = 1U;
+    if (lccf_model_batch_create(&config, &batch) != 0) {
+        return fail("fact callback failure create");
+    }
+    if (lccf_model_run_round(batch, &metrics) != EIO ||
+        !lccf_model_fact_references_balanced(batch) ||
+        lccf_fact_module_unregister(batch->instances[0].fact_cell) != 0) {
+        lccf_model_batch_destroy(batch);
+        return fail("fact callback failure teardown");
+    }
+    for (kind = 0U; kind < LCCF_FACT_REF_COUNT; ++kind) {
+        if (atomic_load_explicit(
+                &batch->instances[0].fact_cell->references[kind],
+                memory_order_acquire) != 0U) {
+            lccf_model_batch_destroy(batch);
+            return fail("fact callback failure leaked a reference");
+        }
+    }
+    lccf_model_batch_destroy(batch);
+    return 0;
+}
+
+static int test_fact_queue_overflow_uses_intrusive_fallback(void) {
+    lccf_model_config_t config = base_config();
+    lccf_model_batch_t *batch = NULL;
+    lccf_model_metrics_t metrics = {0};
+
+    config.mode = LCCF_MODEL_SHARED_FACT_QUEUE;
+    config.instance_count = 17U;
+    config.chain_length = 3U;
+    config.fact_queue_capacity = 2U;
+    if (lccf_model_batch_create(&config, &batch) != 0) {
+        return fail("fact overflow create");
+    }
+    if (lccf_model_run_round(batch, &metrics) != 0 ||
+        metrics.fact_overflow_pushes == 0U ||
+        metrics.fact_overflow_pushes != metrics.fact_overflow_pops ||
+        metrics.queue_pushes != metrics.queue_pops ||
+        !lccf_model_fact_references_balanced(batch)) {
+        lccf_model_batch_destroy(batch);
+        return fail("fact intrusive overflow fallback");
+    }
+    lccf_model_batch_destroy(batch);
+    return 0;
+}
+
 int main(void) {
     if (test_names_and_parsers() != 0 ||
         test_candidate_baseline_mapping() != 0 ||
@@ -1592,7 +1731,10 @@ int main(void) {
         test_three_way_ticket_race() != 0 ||
         test_remote_differential() != 0 ||
         test_remote_destroy_after_error() != 0 ||
-        test_fact_differential_matrix() != 0) {
+        test_fact_differential_matrix() != 0 ||
+        test_fact_layouts_use_declared_storage() != 0 ||
+        test_fact_callback_failure_retires_lifetime() != 0 ||
+        test_fact_queue_overflow_uses_intrusive_fallback() != 0) {
         return 1;
     }
     printf("[test_lccf_model] all checks passed\n");

@@ -47,7 +47,7 @@ typedef struct lccf_model_event {
     uint64_t word0;
     uint64_t word1;
     uint32_t kind;
-    uint32_t reserved;
+    int32_t error_code;
 } lccf_model_event_t;
 
 typedef struct lccf_model_command {
@@ -102,6 +102,11 @@ typedef struct lccf_model_workload_ops {
     lccf_model_resume_fn resume_sites[LCCF_MODEL_MAX_SITES];
 } lccf_model_workload_ops_t;
 
+typedef struct lccf_model_fact_site {
+    lccf_fact_site_descriptor_t descriptor;
+    lccf_model_resume_fn resume;
+} lccf_model_fact_site_t;
+
 struct lccf_model_instance {
     struct lccf_model_batch *batch;
     lccf_model_frame_core_t *frame;
@@ -113,6 +118,7 @@ struct lccf_model_instance {
     uint64_t event_sequence_hash;
     uint64_t command_sequence_hash;
     uint64_t callback_sequence_count;
+    struct lccf_model_instance *overflow_next;
     uint32_t index;
     uint32_t reserved;
 };
@@ -163,6 +169,7 @@ struct lccf_model_batch {
     uint64_t round;
     unsigned char *frame_storage;
     unsigned char *cell_storage;
+    lccf_fact_core_t *fact_sidecar_storage;
     lccf_fact_cell_t *fact_cells;
     lccf_model_instance_t *instances;
     lccf_model_waker_t *wakers;
@@ -171,6 +178,14 @@ struct lccf_model_batch {
     lccf_model_remote_queue_t remote_queue;
     lccf_model_remote_team_t remote_team;
     const lccf_model_workload_ops_t *ops;
+    lccf_model_fact_site_t fact_sites[LCCF_MODEL_MAX_SITES];
+    const lccf_fact_site_descriptor_t
+        *fact_site_table[LCCF_MODEL_MAX_SITES];
+    lccf_model_instance_t *overflow_head;
+    lccf_model_instance_t *overflow_tail;
+    lccf_model_trace_row_t *trace_rows;
+    size_t trace_capacity;
+    size_t trace_count;
     unsigned callback_depth;
     unsigned maximum_callback_depth;
     uint64_t fairness_tick;

@@ -58,8 +58,24 @@ typedef struct lccf_model_config {
     unsigned direct_budget;
     unsigned chain_length;
     unsigned remote_producers;
+    unsigned callback_failure_step;
+    size_t fact_queue_capacity;
     uint64_t seed;
 } lccf_model_config_t;
+
+typedef struct lccf_model_trace_row {
+    uint64_t generation;
+    uint64_t callback_ordinal;
+    uint64_t event_word0;
+    uint64_t event_word1;
+    uint64_t command_output;
+    uint32_t instance_index;
+    uint32_t site_index;
+    uint32_t event_kind;
+    int32_t error_code;
+    uint32_t command_next_site;
+    uint32_t command_kind;
+} lccf_model_trace_row_t;
 
 typedef struct lccf_model_metrics {
     uint64_t completions;
@@ -88,6 +104,8 @@ typedef struct lccf_model_metrics {
     uint64_t fact_reuse_delays;
     uint64_t fact_hot_bytes;
     uint64_t fact_sidecar_bytes;
+    uint64_t fact_overflow_pushes;
+    uint64_t fact_overflow_pops;
 } lccf_model_metrics_t;
 
 typedef struct lccf_model_batch lccf_model_batch_t;
@@ -103,6 +121,10 @@ bool lccf_model_batch_equal(const lccf_model_batch_t *lhs,
 uint64_t lccf_model_checksum(const lccf_model_batch_t *batch);
 bool lccf_model_fact_references_balanced(
     const lccf_model_batch_t *batch);
+int lccf_model_set_trace_buffer(lccf_model_batch_t *batch,
+                                lccf_model_trace_row_t *rows,
+                                size_t capacity);
+size_t lccf_model_trace_count(const lccf_model_batch_t *batch);
 const char *lccf_model_mode_name(lccf_model_mode_t mode);
 const char *lccf_model_workload_name(lccf_model_workload_t workload);
 int lccf_model_parse_mode(const char *text, lccf_model_mode_t *out);

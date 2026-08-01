@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LCCF_FACT_SAMPLE_VERSION 1U
+#define LCCF_FACT_SAMPLE_VERSION 2U
 
 typedef enum option_id {
     OPTION_WORKLOAD = 0,
@@ -256,6 +256,22 @@ static int verify_metrics(const bench_options_t *options,
         completions *
         (options->workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
              UINT64_C(3) : UINT64_C(1));
+    const uint64_t recompute_work =
+        callbacks +
+        (options->mode == LCCF_MODEL_RECOMPUTE_QUEUE ||
+                 options->mode == LCCF_MODEL_SHARED_FACT_QUEUE
+             ? completions
+             : (options->mode == LCCF_MODEL_MIXED_RECOMPUTE ||
+                        options->mode == LCCF_MODEL_MIXED_SHARED_FACT
+                    ? metrics->forced_escapes
+                    : 0U));
+    const uint64_t expected_normalizations =
+        shared_mode(options->mode) ? completions : recompute_work;
+    const bool site_work_valid =
+        shared_mode(options->mode)
+            ? metrics->fact_site_lookups >= completions &&
+                  metrics->fact_site_lookups <= callbacks
+            : metrics->fact_site_lookups == recompute_work;
 
     if (metrics->completions != completions ||
         metrics->claims != completions ||
@@ -267,14 +283,16 @@ static int verify_metrics(const bench_options_t *options,
         metrics->facts_build_failed != 0U ||
         metrics->fact_stale_losers != metrics->stale_tickets ||
         metrics->fact_module_pins != completions ||
+        metrics->fact_payload_pins != completions ||
+        metrics->fact_normalizations != expected_normalizations ||
+        !site_work_valid ||
+        metrics->fact_guard_rechecks != recompute_work ||
         metrics->fact_generation_mismatches != 0U ||
         metrics->fact_reuse_delays != 0U ||
         metrics->fact_queue_forwards != 0U ||
         metrics->hot_allocations != 0U ||
         metrics->fact_hot_bytes == 0U ||
-        (shared_mode(options->mode) &&
-         (metrics->fact_normalizations != completions ||
-          metrics->fact_site_lookups != completions))) {
+        metrics->fact_overflow_pushes != metrics->fact_overflow_pops) {
         return EPROTO;
     }
     return 0;
@@ -333,6 +351,8 @@ static int emit_sample(const bench_options_t *options,
         "\"fact_reuse_delays\":%" PRIu64 ","
         "\"fact_hot_bytes\":%" PRIu64 ","
         "\"fact_sidecar_bytes\":%" PRIu64 ","
+        "\"fact_overflow_pushes\":%" PRIu64 ","
+        "\"fact_overflow_pops\":%" PRIu64 ","
         "\"refs_balanced\":%s}\n",
         LCCF_FACT_SAMPLE_VERSION,
         lccf_model_workload_name(options->workload),
@@ -353,6 +373,8 @@ static int emit_sample(const bench_options_t *options,
         metrics->fact_generation_mismatches,
         metrics->fact_reuse_delays, metrics->fact_hot_bytes,
         metrics->fact_sidecar_bytes,
+        metrics->fact_overflow_pushes,
+        metrics->fact_overflow_pops,
         references_balanced ? "true" : "false");
 
     return written < 0 ? EIO : 0;

@@ -43,6 +43,7 @@ INTEGER_FIELDS = frozenset({
     "fact_payload_pins", "fact_stale_losers", "fact_guard_rechecks",
     "fact_queue_forwards", "fact_generation_mismatches",
     "fact_reuse_delays", "fact_hot_bytes", "fact_sidecar_bytes",
+    "fact_overflow_pushes", "fact_overflow_pops",
 })
 EXPECTED_FIELDS = STRING_FIELDS | BOOL_FIELDS | INTEGER_FIELDS
 
@@ -90,6 +91,8 @@ class FactSample:
     fact_reuse_delays: int
     fact_hot_bytes: int
     fact_sidecar_bytes: int
+    fact_overflow_pushes: int
+    fact_overflow_pops: int
     refs_balanced: bool
 
     def as_dict(self) -> dict[str, Any]:
@@ -143,7 +146,7 @@ def _validate_sample(sample: FactSample) -> None:
         sample.completions, sample.claims, sample.resume_calls,
         sample.facts_attempted, sample.facts_built, sample.fact_hot_bytes,
     )
-    if sample.version != 1:
+    if sample.version != 2:
         raise ValueError("unsupported sample version")
     if sample.mode not in ALL_MODES:
         raise ValueError("unknown fact mode")
@@ -181,9 +184,24 @@ def _validate_sample(sample: FactSample) -> None:
         raise ValueError("instruction support/value mismatch")
     if "shared_fact" in sample.mode and (
         sample.fact_normalizations != expected_completions
-        or sample.fact_site_lookups != expected_completions
+        or sample.fact_site_lookups < expected_completions
+        or sample.fact_site_lookups > expected_callbacks
     ):
-        raise ValueError("shared mode did not materialize exactly once")
+        raise ValueError("shared mode fact/site work is inconsistent")
+    expected_recompute_work = sample.callbacks
+    if sample.mode.endswith("queue"):
+        expected_recompute_work += sample.completions
+    elif sample.mode.startswith("mixed"):
+        expected_recompute_work += sample.forced_escapes
+    if "shared_fact" not in sample.mode and (
+        sample.fact_normalizations != expected_recompute_work
+        or sample.fact_site_lookups != expected_recompute_work
+    ):
+        raise ValueError("recompute mode work count mismatch")
+    if sample.fact_guard_rechecks != expected_recompute_work:
+        raise ValueError("guard recheck count mismatch")
+    if sample.fact_overflow_pushes != sample.fact_overflow_pops:
+        raise ValueError("intrusive overflow ownership is unbalanced")
 
 
 def parse_sample_output(output: str) -> FactSample:
@@ -244,13 +262,23 @@ def classify_pair(baseline: FactSample, candidate: FactSample) -> PairResult:
         "fact_guard_rechecks", "fact_queue_forwards",
         "fact_generation_mismatches", "fact_reuse_delays",
         "fact_hot_bytes", "fact_sidecar_bytes",
+        "fact_overflow_pushes", "fact_overflow_pops",
     )
     if any(getattr(baseline, field) != getattr(candidate, field)
            for field in common_metrics):
         correctness.append("paired routing/lifetime metrics differ")
     if candidate.fact_normalizations != candidate.completions or \
-            candidate.fact_site_lookups != candidate.completions:
-        correctness.append("candidate did not perform one normalization and lookup per generation")
+            candidate.fact_site_lookups < candidate.completions or \
+            candidate.fact_site_lookups > candidate.callbacks:
+        correctness.append("candidate fact/site work is inconsistent")
+    expected_baseline_work = baseline.callbacks
+    if baseline.mode.endswith("queue"):
+        expected_baseline_work += baseline.completions
+    elif baseline.mode.startswith("mixed"):
+        expected_baseline_work += baseline.forced_escapes
+    if baseline.fact_normalizations != expected_baseline_work or \
+            baseline.fact_site_lookups != expected_baseline_work:
+        correctness.append("baseline recompute work count mismatch")
     if candidate.facts_build_failed != 0 or \
             candidate.fact_generation_mismatches != 0 or \
             candidate.fact_reuse_delays != 0:
@@ -271,7 +299,7 @@ def classify_pair(baseline: FactSample, candidate: FactSample) -> PairResult:
             performance.append("p99 latency regression exceeds 5%")
         if candidate.mode == "shared_fact_queue" and wall_speedup < 0.98:
             performance.append("queued throughput is below 98% of recompute baseline")
-        elif candidate.mode == "shared_fact_fused" and wall_speedup < 0.98:
+        elif candidate.mode == "shared_fact_fused" and wall_speedup < 1 / 1.02:
             performance.append("direct-path regression exceeds 2%")
         elif candidate.mode == "mixed_shared_fact":
             instruction_pass = instruction_ratio is not None and instruction_ratio <= 0.95
@@ -367,16 +395,38 @@ def _aggregate_cell(cell: Cell, results: list[PairResult]) -> dict[str, Any]:
         if result.instruction_ratio is not None
     ]
     instruction_ratio = statistics.median(instruction_values) if instruction_values else None
+    wall_spread = max(result.wall_speedup for result in results) / min(
+        result.wall_speedup for result in results
+    )
+    cpu_spread = max(result.cpu_ratio for result in results) / min(
+        result.cpu_ratio for result in results
+    )
+    p99_spread = max(result.p99_ratio for result in results) / min(
+        result.p99_ratio for result in results
+    )
+    instruction_spread = (
+        max(instruction_values) / min(instruction_values)
+        if instruction_values else None
+    )
     reasons: list[str] = []
     if correctness:
         status = "FAIL_CORRECTNESS"
         reasons = sorted({reason for result in correctness for reason in result.reasons})
+    elif any(spread > 1.10 for spread in
+             (wall_spread, cpu_spread, p99_spread)) or (
+                 instruction_spread is not None and instruction_spread > 1.10
+             ):
+        status = "INCONCLUSIVE"
+        reasons.append("gate-driving paired-ratio spread exceeds 1.10x")
     else:
         if p99_ratio > 1.05:
             reasons.append("median p99 latency regression exceeds 5%")
         if cell.candidate in ("shared_fact_queue", "shared_fact_fused"):
-            if wall_speedup < 0.98:
-                reasons.append("median throughput is below the 98% gate")
+            minimum_speedup = (
+                0.98 if cell.candidate == "shared_fact_queue" else 1 / 1.02
+            )
+            if wall_speedup < minimum_speedup:
+                reasons.append("median throughput exceeds its regression limit")
         elif cpu_ratio > 0.95 and not (
             instruction_ratio is not None and instruction_ratio <= 0.95
         ):
@@ -391,6 +441,10 @@ def _aggregate_cell(cell: Cell, results: list[PairResult]) -> dict[str, Any]:
         "median_cpu_ratio": cpu_ratio,
         "median_p99_ratio": p99_ratio,
         "median_instruction_ratio": instruction_ratio,
+        "wall_ratio_spread": wall_spread,
+        "cpu_ratio_spread": cpu_spread,
+        "p99_ratio_spread": p99_spread,
+        "instruction_ratio_spread": instruction_spread,
     }
 
 
@@ -446,12 +500,14 @@ def run_evidence(args: argparse.Namespace) -> dict[str, Any]:
         )
     if any(row["status"] == "FAIL_CORRECTNESS" for row in summaries):
         decision = "REJECT"
+    elif any(row["status"] == "INCONCLUSIVE" for row in summaries):
+        decision = "INCONCLUSIVE"
     elif all(row["status"] == "PASS" for row in summaries):
         decision = "PASS"
     else:
         decision = "NARROW"
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "decision": decision,
         "sample_pairs_per_cell": args.samples * 2,
         "environment": {
@@ -527,7 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = run_evidence(args)
     print(json.dumps({"decision": result["decision"],
                       "cells": len(result["cells"])}, sort_keys=True))
-    return 1 if result["decision"] == "REJECT" else 0
+    return 0 if result["decision"] == "PASS" else 1
 
 
 if __name__ == "__main__":

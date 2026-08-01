@@ -8,9 +8,9 @@
 size_t lccf_fact_layout_hot_bytes(lccf_fact_layout_t layout) {
     switch (layout) {
     case LCCF_FACT_LAYOUT_SPLIT64_64:
-        return sizeof(((lccf_fact_split64_64_layout_t *)0)->hot_words);
+        return sizeof(((lccf_fact_split64_64_layout_t *)0)->hot);
     case LCCF_FACT_LAYOUT_SPLIT96_64:
-        return sizeof(((lccf_fact_split96_64_layout_t *)0)->hot_words);
+        return sizeof(((lccf_fact_split96_64_layout_t *)0)->hot);
     case LCCF_FACT_LAYOUT_UNIFIED128:
         return sizeof(lccf_fact_unified128_layout_t);
     default:
@@ -21,9 +21,9 @@ size_t lccf_fact_layout_hot_bytes(lccf_fact_layout_t layout) {
 size_t lccf_fact_layout_sidecar_bytes(lccf_fact_layout_t layout) {
     switch (layout) {
     case LCCF_FACT_LAYOUT_SPLIT64_64:
-        return sizeof(((lccf_fact_split64_64_layout_t *)0)->sidecar_words);
+        return sizeof(((lccf_fact_split64_64_layout_t *)0)->sidecar);
     case LCCF_FACT_LAYOUT_SPLIT96_64:
-        return sizeof(((lccf_fact_split96_64_layout_t *)0)->sidecar_words);
+        return sizeof(((lccf_fact_split96_64_layout_t *)0)->sidecar);
     case LCCF_FACT_LAYOUT_UNIFIED128:
         return 0U;
     default:

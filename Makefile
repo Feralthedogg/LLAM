@@ -39,6 +39,8 @@ CLEAN_FILES = \
 	server_flood \
 	test_lccf_model \
 	bench_lccf_model \
+	test_lccf_fact \
+	bench_lccf_fact \
 	test_lcwe_model \
 	bench_lcwe_model \
 	test_abi_contract \
@@ -87,6 +89,8 @@ CLEAN_FILES = \
 	server_flood.exe \
 	test_lccf_model.exe \
 	bench_lccf_model.exe \
+	test_lccf_fact.exe \
+	bench_lccf_fact.exe \
 	test_lcwe_model.exe \
 	bench_lcwe_model.exe \
 	test_abi_contract.exe \
@@ -865,11 +869,13 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: test_lcwe_model bench_lcwe_model test_lccf_model bench_lccf_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_lcwe_model bench_lcwe_model test_lccf_model bench_lccf_model test_lccf_fact bench_lccf_fact test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 	./test_lccf_model
 	LCCF_MODEL_TEST_BINARY=./bench_lccf_model python3 scripts/test_bench_lccf_model.py
+	./test_lccf_fact
+	python3 scripts/test_bench_lccf_fact.py
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io

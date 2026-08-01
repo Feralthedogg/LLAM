@@ -151,9 +151,36 @@ static void resume_mixed_fairness(lccf_model_frame_core_t *frame,
                       LCCF_MODEL_COMMAND_WAIT_IO);
 }
 
+#define LCCF_DEFINE_SITE_WRAPPER(fn, index)                                   \
+    static void fn##_site_##index(                                            \
+        lccf_model_frame_core_t *frame,                                       \
+        const lccf_model_event_t *event,                                      \
+        lccf_model_command_t *command,                                        \
+        const lccf_model_config_t *config,                                    \
+        unsigned resume_site) {                                               \
+        (void)resume_site;                                                     \
+        fn(frame, event, command, config, (index));                            \
+    }
+
+#define LCCF_DEFINE_SITE_WRAPPERS(fn)                                         \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 0U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 1U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 2U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 3U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 4U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 5U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 6U)                                          \
+    LCCF_DEFINE_SITE_WRAPPER(fn, 7U)
+
+LCCF_DEFINE_SITE_WRAPPERS(resume_io_pipeline)
+LCCF_DEFINE_SITE_WRAPPERS(resume_rpc_state)
+LCCF_DEFINE_SITE_WRAPPERS(resume_timer_cancel)
+LCCF_DEFINE_SITE_WRAPPERS(resume_mixed_fairness)
+
 #define LCCF_SITE_TABLE(fn)                                                    \
     {                                                                          \
-        (fn), (fn), (fn), (fn), (fn), (fn), (fn), (fn)                       \
+        fn##_site_0U, fn##_site_1U, fn##_site_2U, fn##_site_3U,               \
+        fn##_site_4U, fn##_site_5U, fn##_site_6U, fn##_site_7U                \
     }
 
 static const lccf_model_workload_ops_t WORKLOAD_OPS[] = {
@@ -164,6 +191,8 @@ static const lccf_model_workload_ops_t WORKLOAD_OPS[] = {
 };
 
 #undef LCCF_SITE_TABLE
+#undef LCCF_DEFINE_SITE_WRAPPERS
+#undef LCCF_DEFINE_SITE_WRAPPER
 
 const lccf_model_workload_ops_t *
 lccf_model_get_workload_ops(lccf_model_workload_t workload) {

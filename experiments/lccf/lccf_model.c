@@ -37,6 +37,10 @@ static const char *const WORKLOAD_NAMES[] = {
 
 static int remote_team_create(lccf_model_batch_t *batch);
 static void remote_team_destroy(lccf_model_batch_t *batch);
+static int invoke_resolved_fact_site(
+    const lccf_fact_site_descriptor_t *descriptor,
+    const lccf_fact_core_t *fact,
+    void *context);
 
 static bool mode_valid(lccf_model_mode_t mode) {
     return mode >= LCCF_MODEL_WAKER_QUEUE &&
@@ -173,6 +177,23 @@ static lccf_fact_cell_t *fact_cell_at(
         return NULL;
     }
     return &batch->fact_cells[index];
+}
+
+static lccf_fact_core_t *fact_storage_at(
+    const lccf_model_batch_t *batch,
+    size_t index) {
+    if (batch == NULL || index >= batch->config.instance_count ||
+        !mode_uses_facts(batch->config.mode)) {
+        return NULL;
+    }
+    if (batch->config.cell_bytes == 128U) {
+        return (lccf_fact_core_t *)(void *)(
+            batch->cell_storage + index * batch->config.cell_bytes + 64U);
+    }
+    if (batch->fact_sidecar_storage == NULL) {
+        return NULL;
+    }
+    return &batch->fact_sidecar_storage[index];
 }
 
 static lccf_fact_layout_t fact_layout_for_cell_bytes(size_t cell_bytes) {
@@ -329,6 +350,7 @@ static int initialize_instance(lccf_model_batch_t *batch,
     instance->event_sequence_hash = UINT64_C(0x4556454e54534551);
     instance->command_sequence_hash = UINT64_C(0x434f4d4d414e4453);
     instance->callback_sequence_count = 0U;
+    instance->overflow_next = NULL;
     instance->index = (uint32_t)index;
     instance->reserved = 0U;
 
@@ -375,7 +397,7 @@ static int initialize_instance(lccf_model_batch_t *batch,
         lccf_fact_cell_init(
             fact_cell, frame->generation,
             fact_layout_for_cell_bytes(batch->config.cell_bytes),
-            active_ticket_count(batch)) != 0) {
+            active_ticket_count(batch), fact_storage_at(batch, index)) != 0) {
         return EPROTO;
     }
     return 0;
@@ -402,6 +424,51 @@ static void *queue_pop(lccf_model_local_queue_t *queue) {
     queue->slots[queue->head & queue->mask] = NULL;
     queue->head += 1U;
     return item;
+}
+
+static int overflow_push(lccf_model_batch_t *batch,
+                         lccf_model_cell_hot_t *cell) {
+    lccf_model_instance_t *instance;
+
+    if (batch == NULL || cell == NULL || cell->instance == NULL) {
+        return EINVAL;
+    }
+    instance = cell->instance;
+    if (instance->overflow_next != NULL ||
+        batch->overflow_tail == instance) {
+        return EPROTO;
+    }
+    if (batch->overflow_tail == NULL) {
+        batch->overflow_head = instance;
+    } else {
+        batch->overflow_tail->overflow_next = instance;
+    }
+    batch->overflow_tail = instance;
+    return 0;
+}
+
+static lccf_model_cell_hot_t *dequeue_cell(
+    lccf_model_batch_t *batch,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_cell_hot_t *cell = queue_pop(&batch->local_queue);
+
+    if (cell != NULL) {
+        return cell;
+    }
+    if (batch->overflow_head != NULL) {
+        lccf_model_instance_t *instance = batch->overflow_head;
+
+        batch->overflow_head = instance->overflow_next;
+        if (batch->overflow_head == NULL) {
+            batch->overflow_tail = NULL;
+        }
+        instance->overflow_next = NULL;
+        if (mode_uses_facts(batch->config.mode)) {
+            metrics->fact_overflow_pops += UINT64_C(1);
+        }
+        return instance->cell;
+    }
+    return NULL;
 }
 
 void lccf_model_derive_event(const lccf_model_batch_t *batch,
@@ -437,7 +504,11 @@ void lccf_model_derive_event(const lccf_model_batch_t *batch,
     } else {
         event->kind = LCCF_MODEL_EVENT_IO;
     }
-    event->reserved = 0U;
+    event->error_code =
+        event->kind == LCCF_MODEL_EVENT_IO &&
+                (event->word0 & UINT64_C(7)) == 0U
+            ? EIO
+            : 0;
 }
 
 static bool config_valid(const lccf_model_config_t *config) {
@@ -452,6 +523,8 @@ static bool config_valid(const lccf_model_config_t *config) {
         config->direct_budget > LCCF_MODEL_MAX_DIRECT_BUDGET ||
         config->chain_length == 0U ||
         config->chain_length > LCCF_MODEL_MAX_CHAIN_LENGTH ||
+        config->callback_failure_step > config->chain_length ||
+        config->fact_queue_capacity > config->instance_count ||
         config->remote_producers >
             LCCF_MODEL_REMOTE_PRODUCER_COUNT ||
         (mode_is_remote(config->mode) &&
@@ -475,6 +548,9 @@ static bool config_valid(const lccf_model_config_t *config) {
         (mode_uses_facts(config->mode) &&
          !allocation_size_valid(config->instance_count,
                                 sizeof(lccf_fact_cell_t))) ||
+        (mode_uses_facts(config->mode) && config->cell_bytes < 128U &&
+         !allocation_size_valid(config->instance_count,
+                                sizeof(lccf_fact_core_t))) ||
         config->instance_count >
             SIZE_MAX / (size_t)config->chain_length) {
         return false;
@@ -500,8 +576,10 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
         return ENOTSUP;
     }
 
-    queue_capacity =
-        next_power_of_two(config->instance_count + 1U);
+    queue_capacity = next_power_of_two(
+        mode_uses_facts(config->mode) && config->fact_queue_capacity != 0U
+            ? config->fact_queue_capacity
+            : config->instance_count + 1U);
     if (queue_capacity == 0U ||
         !allocation_size_valid(queue_capacity, sizeof(void *)) ||
         (mode_is_remote(config->mode) &&
@@ -534,6 +612,11 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
     if (mode_uses_facts(config->mode)) {
         batch->fact_cells =
             calloc(config->instance_count, sizeof(*batch->fact_cells));
+        if (config->cell_bytes < 128U) {
+            batch->fact_sidecar_storage = calloc(
+                config->instance_count,
+                sizeof(*batch->fact_sidecar_storage));
+        }
     }
     batch->local_queue.slots =
         calloc(queue_capacity, sizeof(*batch->local_queue.slots));
@@ -549,7 +632,10 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
          batch->wakers == NULL) ||
         (mode_uses_cells(config->mode) &&
          (batch->cell_storage == NULL || batch->tickets == NULL)) ||
-        (mode_uses_facts(config->mode) && batch->fact_cells == NULL)) {
+        (mode_uses_facts(config->mode) &&
+         (batch->fact_cells == NULL ||
+          (config->cell_bytes < 128U &&
+           batch->fact_sidecar_storage == NULL)))) {
         lccf_model_batch_destroy(batch);
         return ENOMEM;
     }
@@ -569,6 +655,21 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
     if (batch->ops == NULL) {
         lccf_model_batch_destroy(batch);
         return EPROTO;
+    }
+    if (mode_uses_facts(config->mode)) {
+        for (i = 0U; i < config->site_count; ++i) {
+            batch->fact_sites[i].descriptor.invoke =
+                invoke_resolved_fact_site;
+            batch->fact_sites[i].descriptor.logical_index = (uint32_t)i;
+            batch->fact_sites[i].descriptor.reserved = 0U;
+            batch->fact_sites[i].resume = batch->ops->resume_sites[i];
+            batch->fact_site_table[i] =
+                &batch->fact_sites[i].descriptor;
+            if (batch->fact_sites[i].resume == NULL) {
+                lccf_model_batch_destroy(batch);
+                return EPROTO;
+            }
+        }
     }
     for (i = 0U; i < config->instance_count; ++i) {
         if (initialize_instance(batch, i, true) != 0) {
@@ -598,6 +699,7 @@ void lccf_model_batch_destroy(lccf_model_batch_t *batch) {
     free(batch->tickets);
     free(batch->wakers);
     free(batch->fact_cells);
+    free(batch->fact_sidecar_storage);
     free(batch->cell_storage);
     free(batch->instances);
     free(batch->frame_storage);
@@ -609,6 +711,7 @@ int lccf_model_batch_reset(lccf_model_batch_t *batch) {
 
     if (batch == NULL || batch->local_queue.slots == NULL ||
         batch->local_queue.head != batch->local_queue.tail ||
+        batch->overflow_head != NULL || batch->overflow_tail != NULL ||
         (mode_is_remote(batch->config.mode) &&
          (batch->remote_queue.slots == NULL ||
           atomic_load_explicit(
@@ -623,6 +726,9 @@ int lccf_model_batch_reset(lccf_model_batch_t *batch) {
                sizeof(*batch->local_queue.slots));
     batch->local_queue.head = 0U;
     batch->local_queue.tail = 0U;
+    batch->overflow_head = NULL;
+    batch->overflow_tail = NULL;
+    batch->trace_count = 0U;
     batch->round = 0U;
     batch->callback_depth = 0U;
     batch->maximum_callback_depth = 0U;
@@ -657,6 +763,11 @@ static int validate_metrics(const lccf_model_batch_t *batch,
     }
     callback_count =
         instances * (uint64_t)batch->config.chain_length;
+    if (batch->trace_rows != NULL &&
+        (batch->trace_count > batch->trace_capacity ||
+         callback_count > batch->trace_capacity - batch->trace_count)) {
+        return ENOSPC;
+    }
     if (!metric_room(metrics->completions, instances) ||
         !metric_room(metrics->claims, instances) ||
         !metric_room(metrics->queue_pushes, callback_count) ||
@@ -683,7 +794,9 @@ static int validate_metrics(const lccf_model_batch_t *batch,
                        callback_count + instances) ||
           !metric_room(metrics->fact_queue_forwards, callback_count) ||
           !metric_room(metrics->fact_generation_mismatches, instances) ||
-          !metric_room(metrics->fact_reuse_delays, instances))) ||
+          !metric_room(metrics->fact_reuse_delays, instances) ||
+          !metric_room(metrics->fact_overflow_pushes, callback_count) ||
+          !metric_room(metrics->fact_overflow_pops, callback_count))) ||
         !metric_room(batch->fairness_tick, callback_count) ||
         !metric_room(batch->fairness_services, callback_count) ||
         (mode_uses_cells(batch->config.mode) &&
@@ -892,24 +1005,25 @@ static int fairness_service(lccf_model_batch_t *batch,
     return 0;
 }
 
-static int execute_resume_callback(
+static int execute_resolved_resume_callback(
     lccf_model_batch_t *batch,
     lccf_model_instance_t *instance,
     const lccf_model_event_t *event,
+    lccf_model_resume_fn resume,
     unsigned site,
     bool direct,
     lccf_model_metrics_t *metrics) {
-    lccf_model_resume_fn resume;
-
     if (site >= batch->config.site_count ||
-        batch->callback_depth == UINT_MAX) {
-        return EPROTO;
-    }
-    resume = batch->ops->resume_sites[site];
-    if (resume == NULL) {
+        batch->callback_depth == UINT_MAX || resume == NULL ||
+        resume != batch->ops->resume_sites[site]) {
         return EPROTO;
     }
     memset(&instance->command, 0, sizeof(instance->command));
+    if (batch->config.callback_failure_step != 0U &&
+        instance->callback_sequence_count + UINT64_C(1) ==
+            batch->config.callback_failure_step) {
+        return EIO;
+    }
     if (fairness_note_callback(batch) != 0) {
         return EIO;
     }
@@ -926,17 +1040,52 @@ static int execute_resume_callback(
     instance->event_sequence_hash = lccf_model_mix64(
         instance->event_sequence_hash ^ event->word0 ^
         lccf_model_mix64(event->word1) ^
-        ((uint64_t)event->kind << 32U) ^ (uint64_t)site);
+        ((uint64_t)event->kind << 32U) ^
+        (uint64_t)(uint32_t)event->error_code ^ (uint64_t)site);
     instance->command_sequence_hash = lccf_model_mix64(
         instance->command_sequence_hash ^ instance->command.output ^
         ((uint64_t)instance->command.next_site << 32U) ^
         (uint64_t)instance->command.kind);
     instance->callback_sequence_count += UINT64_C(1);
+    if (batch->trace_rows != NULL) {
+        lccf_model_trace_row_t *row;
+
+        if (batch->trace_count >= batch->trace_capacity) {
+            return ENOSPC;
+        }
+        row = &batch->trace_rows[batch->trace_count++];
+        row->generation = instance->frame->generation;
+        row->callback_ordinal = instance->callback_sequence_count;
+        row->event_word0 = event->word0;
+        row->event_word1 = event->word1;
+        row->command_output = instance->command.output;
+        row->instance_index = instance->index;
+        row->site_index = site;
+        row->event_kind = event->kind;
+        row->error_code = event->error_code;
+        row->command_next_site = instance->command.next_site;
+        row->command_kind = instance->command.kind;
+    }
     metrics->resume_calls += UINT64_C(1);
     if (direct) {
         metrics->direct_calls += UINT64_C(1);
     }
     return command_valid(batch, instance) ? 0 : EPROTO;
+}
+
+static int execute_resume_callback(
+    lccf_model_batch_t *batch,
+    lccf_model_instance_t *instance,
+    const lccf_model_event_t *event,
+    unsigned site,
+    bool direct,
+    lccf_model_metrics_t *metrics) {
+    if (site >= batch->config.site_count) {
+        return EPROTO;
+    }
+    return execute_resolved_resume_callback(
+        batch, instance, event, batch->ops->resume_sites[site], site,
+        direct, metrics);
 }
 
 static int claim_and_publish_wakers(lccf_model_batch_t *batch,
@@ -1193,10 +1342,11 @@ static int make_fact_ticket(
     rc = lccf_fact_ticket_from_logical(
         fact_source_kind(instance, &ticket->event),
         fact_event_kind(ticket->event.kind), ticket->generation,
-        event_result_word(ticket->event.word0), 0,
+        event_result_word(ticket->event.word0), ticket->event.error_code,
         ticket->event.word1, instance->frame->site,
         batch->config.site_count, instance->cell->home_shard,
-        ticket->ticket_index, out_ticket);
+        ticket->ticket_index, ticket->ticket_index,
+        batch->fact_site_table, out_ticket);
     if (rc == 0) {
         out_ticket->stable_flags =
             (uint64_t)ticket->event.kind |
@@ -1216,11 +1366,45 @@ static int fact_to_model_event(const lccf_fact_core_t *fact,
                    (((fact->stable_flags >> 32U) & UINT64_C(1)) << 63U);
     event->word1 = fact->payload_word;
     event->kind = (uint32_t)fact->stable_flags;
-    event->reserved = 0U;
+    event->error_code = fact->error_code;
     return event->kind >= LCCF_MODEL_EVENT_IO &&
                    event->kind <= LCCF_MODEL_EVENT_INTERNAL
                ? 0
                : EPROTO;
+}
+
+typedef struct lccf_model_fact_invoke_context {
+    lccf_model_batch_t *batch;
+    lccf_model_instance_t *instance;
+    lccf_model_metrics_t *metrics;
+    bool direct;
+} lccf_model_fact_invoke_context_t;
+
+static int invoke_resolved_fact_site(
+    const lccf_fact_site_descriptor_t *descriptor,
+    const lccf_fact_core_t *fact,
+    void *context) {
+    const lccf_model_fact_site_t *site =
+        (const lccf_model_fact_site_t *)(const void *)descriptor;
+    lccf_model_fact_invoke_context_t *invoke_context = context;
+    lccf_model_event_t event;
+    int rc;
+
+    if (descriptor == NULL || fact == NULL || invoke_context == NULL ||
+        invoke_context->batch == NULL || invoke_context->instance == NULL ||
+        invoke_context->metrics == NULL || site->resume == NULL) {
+        return EINVAL;
+    }
+    rc = fact_to_model_event(fact, &event);
+    if (rc != 0 ||
+        memcmp(&invoke_context->instance->cell->event, &event,
+               sizeof(event)) != 0) {
+        return rc != 0 ? rc : EPROTO;
+    }
+    return execute_resolved_resume_callback(
+        invoke_context->batch, invoke_context->instance, &event,
+        site->resume, invoke_context->instance->cell->next_site,
+        invoke_context->direct, invoke_context->metrics);
 }
 
 static void accumulate_fact_counters(
@@ -1409,7 +1593,14 @@ static int enqueue_claimed_cell(lccf_model_batch_t *batch,
             LCCF_MODEL_STATE_QUEUED),
         memory_order_release);
     if (queue_push(&batch->local_queue, cell) != 0) {
-        return EOVERFLOW;
+        const int overflow_rc = overflow_push(batch, cell);
+
+        if (overflow_rc != 0) {
+            return overflow_rc;
+        }
+        if (mode_uses_facts(batch->config.mode)) {
+            metrics->fact_overflow_pushes += UINT64_C(1);
+        }
     }
     metrics->queue_pushes += UINT64_C(1);
     if (forced_escape) {
@@ -1492,7 +1683,7 @@ static int resume_queued_cells(lccf_model_batch_t *batch,
                                lccf_model_metrics_t *metrics) {
     lccf_model_cell_hot_t *cell;
 
-    while ((cell = queue_pop(&batch->local_queue)) != NULL) {
+    while ((cell = dequeue_cell(batch, metrics)) != NULL) {
         const int rc = resume_one_cell(batch, cell, metrics);
 
         if (rc != 0) {
@@ -1594,7 +1785,7 @@ static int resume_budgeted_escape_cells(
     lccf_model_metrics_t *metrics) {
     lccf_model_cell_hot_t *cell;
 
-    while ((cell = queue_pop(&batch->local_queue)) != NULL) {
+    while ((cell = dequeue_cell(batch, metrics)) != NULL) {
         lccf_model_instance_t *instance = cell->instance;
         uint64_t word;
         int rc;
@@ -1690,31 +1881,106 @@ static lccf_fact_guard_t make_consume_guard(
     return guard;
 }
 
-static int consume_fact_event(
+static bool fact_event_matches(
+    const lccf_model_instance_t *instance,
+    const lccf_model_event_t *event) {
+    return memcmp(&instance->cell->event, event,
+                  sizeof(*event)) == 0;
+}
+
+static int abort_fact_generation(lccf_model_instance_t *instance) {
+    const uint64_t generation = instance->frame->generation;
+    const int rc = lccf_fact_abort(instance->fact_cell, generation);
+
+    atomic_store_explicit(
+        &instance->cell->queue_owned, 0U, memory_order_release);
+    atomic_store_explicit(
+        &instance->cell->state_generation,
+        lccf_model_pack_state(generation, LCCF_MODEL_STATE_TERMINAL),
+        memory_order_release);
+    return rc;
+}
+
+static int validate_materialized_fact(
+    const lccf_model_instance_t *instance,
+    const lccf_fact_core_t *fact) {
+    lccf_model_event_t event;
+    const int rc = fact_to_model_event(fact, &event);
+
+    return rc != 0 ? rc :
+        (fact_event_matches(instance, &event) ? 0 : EPROTO);
+}
+
+static int invoke_materialized_fact(
+    lccf_model_instance_t *instance,
+    const lccf_fact_core_t *fact,
+    bool direct,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_fact_invoke_context_t context;
+    int rc;
+
+    context.batch = instance->batch;
+    context.instance = instance;
+    context.metrics = metrics;
+    context.direct = direct;
+    rc = lccf_fact_invoke(fact, &context);
+    if (rc != 0) {
+        const int abort_rc = abort_fact_generation(instance);
+
+        return abort_rc == 0 ? rc : abort_rc;
+    }
+    return 0;
+}
+
+static int consume_fact_transaction(
     lccf_model_instance_t *instance,
     lccf_fact_consumer_t consumer,
     const lccf_fact_guard_t *guard,
     lccf_model_metrics_t *metrics,
-    lccf_fact_decision_t *decision,
-    lccf_model_event_t *event) {
+    lccf_fact_decision_t *decision) {
     lccf_fact_counters_t counters = {0};
     lccf_fact_core_t fact;
+    bool execute;
     int rc;
 
     rc = lccf_fact_consume(
-        instance->fact_cell, instance->frame->generation, consumer,
-        guard, &counters, decision, &fact);
+        instance->fact_cell, instance->frame->generation,
+        instance->cell->next_site, consumer, guard, &counters,
+        decision, &fact);
     accumulate_fact_counters(metrics, &counters);
-    if (rc == 0) {
-        rc = fact_to_model_event(&fact, event);
+    if (rc != 0) {
+        return rc;
     }
-    return rc;
+    rc = validate_materialized_fact(instance, &fact);
+    if (rc != 0) {
+        (void)abort_fact_generation(instance);
+        return rc;
+    }
+    execute =
+        (consumer == LCCF_FACT_CONSUMER_DIRECT &&
+         decision->route == LCCF_FACT_ROUTE_DIRECT) ||
+        (consumer == LCCF_FACT_CONSUMER_QUEUE &&
+         decision->route == LCCF_FACT_ROUTE_QUEUE);
+    if (!execute) {
+        return 0;
+    }
+    rc = mark_cell_running(
+        instance,
+        consumer == LCCF_FACT_CONSUMER_DIRECT
+            ? LCCF_MODEL_STATE_CLAIMED
+            : LCCF_MODEL_STATE_QUEUED);
+    if (rc != 0) {
+        (void)abort_fact_generation(instance);
+        return rc;
+    }
+    return invoke_materialized_fact(
+        instance, &fact, consumer == LCCF_FACT_CONSUMER_DIRECT,
+        metrics);
 }
 
-static int materialize_fact_event(
+static int materialize_and_invoke_fact(
     lccf_model_instance_t *instance,
-    lccf_model_metrics_t *metrics,
-    lccf_model_event_t *event) {
+    lccf_model_metrics_t *metrics) {
     lccf_fact_counters_t counters = {0};
     lccf_fact_core_t fact;
     int rc;
@@ -1722,19 +1988,17 @@ static int materialize_fact_event(
     counters.guard_rechecks = 1U;
     rc = lccf_fact_materialize(
         instance->fact_cell, instance->frame->generation,
-        &counters, &fact);
+        instance->cell->next_site, &counters, &fact);
     accumulate_fact_counters(metrics, &counters);
-    if (rc == 0) {
-        rc = fact_to_model_event(&fact, event);
+    if (rc != 0) {
+        return rc;
     }
-    return rc;
-}
-
-static bool fact_event_matches(
-    const lccf_model_instance_t *instance,
-    const lccf_model_event_t *event) {
-    return memcmp(&instance->cell->event, event,
-                  sizeof(*event)) == 0;
+    rc = validate_materialized_fact(instance, &fact);
+    if (rc != 0) {
+        (void)abort_fact_generation(instance);
+        return rc;
+    }
+    return invoke_materialized_fact(instance, &fact, true, metrics);
 }
 
 static int finish_fact_generation(
@@ -1746,8 +2010,7 @@ static int finish_fact_generation(
     const uint64_t next_generation = generation + UINT64_C(1);
     int rc;
 
-    rc = lccf_fact_finish(instance->fact_cell, generation, false,
-                          next_generation, &counters);
+    rc = lccf_fact_finish(instance->fact_cell, generation, &counters);
     accumulate_fact_counters(metrics, &counters);
     if (rc != 0) {
         return rc;
@@ -1768,17 +2031,19 @@ static int publish_ready_fact_to_queue(
     bool forced_escape) {
     const lccf_fact_guard_t guard = make_consume_guard(instance, false);
     lccf_fact_decision_t decision;
-    lccf_model_event_t event;
     int rc;
 
-    rc = consume_fact_event(instance, LCCF_FACT_CONSUMER_DIRECT,
-                            &guard, metrics, &decision, &event);
-    if (rc != 0 || decision.route != LCCF_FACT_ROUTE_QUEUE ||
-        !fact_event_matches(instance, &event)) {
+    rc = consume_fact_transaction(
+        instance, LCCF_FACT_CONSUMER_DIRECT, &guard, metrics, &decision);
+    if (rc != 0 || decision.route != LCCF_FACT_ROUTE_QUEUE) {
         return rc != 0 ? rc : EPROTO;
     }
-    return enqueue_claimed_cell(batch, instance->cell, metrics,
-                                forced_escape);
+    rc = enqueue_claimed_cell(batch, instance->cell, metrics,
+                              forced_escape);
+    if (rc != 0) {
+        (void)abort_fact_generation(instance);
+    }
+    return rc;
 }
 
 static int yield_fact_to_queue(
@@ -1791,6 +2056,9 @@ static int yield_fact_to_queue(
     if (rc == 0) {
         rc = enqueue_claimed_cell(batch, instance->cell, metrics, false);
     }
+    if (rc != 0) {
+        (void)abort_fact_generation(instance);
+    }
     return rc;
 }
 
@@ -1801,7 +2069,6 @@ static int resume_one_fact_cell(
     lccf_model_instance_t *instance;
     lccf_fact_guard_t guard;
     lccf_fact_decision_t decision;
-    lccf_model_event_t event;
     uint64_t word;
     int rc;
 
@@ -1822,21 +2089,15 @@ static int resume_one_fact_cell(
         return EPROTO;
     }
     guard = make_consume_guard(instance, true);
-    rc = consume_fact_event(instance, LCCF_FACT_CONSUMER_QUEUE,
-                            &guard, metrics, &decision, &event);
-    if (rc != 0 || decision.route != LCCF_FACT_ROUTE_QUEUE ||
-        !fact_event_matches(instance, &event) ||
-        mark_cell_running(instance, LCCF_MODEL_STATE_QUEUED) != 0) {
+    rc = consume_fact_transaction(
+        instance, LCCF_FACT_CONSUMER_QUEUE, &guard, metrics, &decision);
+    if (rc != 0 || decision.route != LCCF_FACT_ROUTE_QUEUE) {
         return rc != 0 ? rc : EPROTO;
-    }
-    rc = execute_resume_callback(batch, instance, &event,
-                                 cell->next_site, false, metrics);
-    if (rc != 0) {
-        return rc;
     }
     metrics->queue_pops += UINT64_C(1);
     rc = fairness_service(batch, metrics);
     if (rc != 0) {
+        (void)abort_fact_generation(instance);
         return rc;
     }
     publish_cell_command(instance);
@@ -1851,7 +2112,7 @@ static int resume_queued_fact_cells(
     lccf_model_metrics_t *metrics) {
     lccf_model_cell_hot_t *cell;
 
-    while ((cell = queue_pop(&batch->local_queue)) != NULL) {
+    while ((cell = dequeue_cell(batch, metrics)) != NULL) {
         const int rc = resume_one_fact_cell(batch, cell, metrics);
 
         if (rc != 0) {
@@ -1867,41 +2128,30 @@ static int run_direct_fact_segment(
     lccf_model_metrics_t *metrics) {
     lccf_fact_guard_t guard = make_consume_guard(instance, true);
     lccf_fact_decision_t decision;
-    lccf_model_event_t event;
     bool first = true;
 
     for (;;) {
         int rc;
 
         if (first) {
-            rc = consume_fact_event(
+            rc = consume_fact_transaction(
                 instance, LCCF_FACT_CONSUMER_DIRECT, &guard,
-                metrics, &decision, &event);
-            if (rc != 0 || decision.route != LCCF_FACT_ROUTE_DIRECT ||
-                mark_cell_running(instance,
-                                  LCCF_MODEL_STATE_CLAIMED) != 0) {
+                metrics, &decision);
+            if (rc != 0 || decision.route != LCCF_FACT_ROUTE_DIRECT) {
                 return rc != 0 ? rc : EPROTO;
             }
             first = false;
         } else {
-            rc = materialize_fact_event(instance, metrics, &event);
-            if (rc != 0 || !fact_event_matches(instance, &event)) {
-                return rc != 0 ? rc : EPROTO;
+            rc = materialize_and_invoke_fact(instance, metrics);
+            if (rc != 0) {
+                return rc;
             }
-        }
-        if (!fact_event_matches(instance, &event)) {
-            return EPROTO;
-        }
-        rc = execute_resume_callback(
-            batch, instance, &event, instance->cell->next_site,
-            true, metrics);
-        if (rc != 0) {
-            return rc;
         }
         publish_cell_command(instance);
         if (instance->command.kind != LCCF_MODEL_COMMAND_CONTINUE) {
             rc = fairness_service(batch, metrics);
             if (rc != 0) {
+                (void)abort_fact_generation(instance);
                 return rc;
             }
             return finish_fact_generation(batch, instance, metrics);
@@ -1909,6 +2159,7 @@ static int run_direct_fact_segment(
         if (batch->fairness_due) {
             rc = fairness_service(batch, metrics);
             if (rc != 0) {
+                (void)abort_fact_generation(instance);
                 return rc;
             }
         }
@@ -2455,7 +2706,8 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
     if (batch == NULL || metrics == NULL ||
         (!mode_uses_wakers(batch->config.mode) &&
          !mode_uses_cells(batch->config.mode)) ||
-        batch->local_queue.head != batch->local_queue.tail) {
+        batch->local_queue.head != batch->local_queue.tail ||
+        batch->overflow_head != NULL || batch->overflow_tail != NULL) {
         return EINVAL;
     }
     rc = validate_metrics(batch, metrics);
@@ -2527,6 +2779,13 @@ static bool canonical_config_equal(const lccf_model_batch_t *lhs,
            lhs->config.cell_bytes == rhs->config.cell_bytes &&
            lhs->config.site_count == rhs->config.site_count &&
            lhs->config.chain_length == rhs->config.chain_length &&
+           lhs->config.direct_budget == rhs->config.direct_budget &&
+           lhs->config.remote_producers ==
+               rhs->config.remote_producers &&
+           lhs->config.callback_failure_step ==
+               rhs->config.callback_failure_step &&
+           lhs->config.fact_queue_capacity ==
+               rhs->config.fact_queue_capacity &&
            lhs->config.seed == rhs->config.seed;
 }
 
@@ -2575,7 +2834,9 @@ bool lccf_model_batch_equal(const lccf_model_batch_t *lhs,
         !canonical_config_equal(lhs, rhs) ||
         lhs->round != rhs->round ||
         lhs->local_queue.head != lhs->local_queue.tail ||
-        rhs->local_queue.head != rhs->local_queue.tail) {
+        rhs->local_queue.head != rhs->local_queue.tail ||
+        lhs->overflow_head != NULL || lhs->overflow_tail != NULL ||
+        rhs->overflow_head != NULL || rhs->overflow_tail != NULL) {
         return false;
     }
     for (i = 0U; i < lhs->config.instance_count; ++i) {
@@ -2622,7 +2883,8 @@ uint64_t lccf_model_checksum(const lccf_model_batch_t *batch) {
     size_t i;
 
     if (batch == NULL ||
-        batch->local_queue.head != batch->local_queue.tail) {
+        batch->local_queue.head != batch->local_queue.tail ||
+        batch->overflow_head != NULL || batch->overflow_tail != NULL) {
         return 0U;
     }
     checksum =
@@ -2662,14 +2924,37 @@ bool lccf_model_fact_references_balanced(
                                  memory_order_acquire);
         size_t kind;
 
-        if (cell == NULL || cell->published ||
-            lccf_fact_unpack_generation(state_word) !=
-                instance->frame->generation ||
-            lccf_fact_unpack_state(state_word) != LCCF_FACT_STATE_ARMED ||
+        const lccf_fact_state_t fact_state =
+            lccf_fact_unpack_state(state_word);
+        const uint64_t generation =
+            lccf_fact_unpack_generation(state_word);
+        const bool armed = fact_state == LCCF_FACT_STATE_ARMED;
+        const bool terminal = fact_state == LCCF_FACT_STATE_TERMINAL;
+        size_t ticket_index;
+
+        if (cell == NULL ||
+            atomic_load_explicit(&cell->published, memory_order_acquire) ||
+            lccf_fact_storage(cell) != fact_storage_at(batch, instance_index) ||
+            generation != instance->frame->generation ||
+            (!armed && !terminal) ||
             atomic_load_explicit(
                 &cell->references[LCCF_FACT_REF_BACKEND],
-                memory_order_acquire) != active_ticket_count(batch)) {
+                memory_order_acquire) !=
+                (armed ? active_ticket_count(batch) : 0U)) {
             return false;
+        }
+        for (ticket_index = 0U;
+             ticket_index < LCCF_FACT_MAX_TICKETS;
+             ++ticket_index) {
+            const uint64_t expected_owner =
+                armed && ticket_index < active_ticket_count(batch) ?
+                    generation : 0U;
+
+            if (atomic_load_explicit(
+                    &cell->ticket_owners[ticket_index],
+                    memory_order_acquire) != expected_owner) {
+                return false;
+            }
         }
         for (kind = 0U; kind < LCCF_FACT_REF_COUNT; ++kind) {
             if (kind != LCCF_FACT_REF_BACKEND &&
@@ -2680,6 +2965,22 @@ bool lccf_model_fact_references_balanced(
         }
     }
     return true;
+}
+
+int lccf_model_set_trace_buffer(lccf_model_batch_t *batch,
+                                lccf_model_trace_row_t *rows,
+                                size_t capacity) {
+    if (batch == NULL || (rows == NULL) != (capacity == 0U) ||
+        batch->round != 0U || batch->trace_count != 0U) {
+        return EINVAL;
+    }
+    batch->trace_rows = rows;
+    batch->trace_capacity = capacity;
+    return 0;
+}
+
+size_t lccf_model_trace_count(const lccf_model_batch_t *batch) {
+    return batch == NULL ? 0U : batch->trace_count;
 }
 
 const char *lccf_model_mode_name(lccf_model_mode_t mode) {

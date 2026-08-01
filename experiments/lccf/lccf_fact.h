@@ -10,7 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
-#include <errno.h>
+
+#include "lccf_portable_errno.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,11 +19,8 @@ extern "C" {
 
 #define LCCF_FACT_VERSION 1U
 #define LCCF_FACT_MAX_GENERATION (UINT64_MAX >> 4U)
-#ifdef ESTALE
 #define LCCF_FACT_ESTALE ESTALE
-#else
-#define LCCF_FACT_ESTALE 2001
-#endif
+#define LCCF_FACT_MAX_TICKETS 8U
 
 typedef enum lccf_fact_layout {
     LCCF_FACT_LAYOUT_SPLIT64_64 = 0,
@@ -122,18 +120,33 @@ enum {
     LCCF_FACT_ESCAPE_SHARD_STATE = UINT64_C(1) << 10
 };
 
+struct lccf_fact_core;
+struct lccf_fact_site_descriptor;
+
+typedef int (*lccf_fact_site_invoke_fn)(
+    const struct lccf_fact_site_descriptor *descriptor,
+    const struct lccf_fact_core *fact,
+    void *context);
+
+typedef struct lccf_fact_site_descriptor {
+    lccf_fact_site_invoke_fn invoke;
+    uint32_t logical_index;
+    uint32_t reserved;
+} lccf_fact_site_descriptor_t;
+
 typedef struct lccf_fact_core {
     uint64_t generation;
     uint64_t fact_id;
     uint64_t stable_flags;
     int64_t result;
     uint64_t payload_word;
+    const lccf_fact_site_descriptor_t *resolved_site;
     int32_t error_code;
-    uint32_t event_kind;
-    uint32_t source_kind;
     uint32_t captured_home_shard;
     uint32_t source_node;
-    uint32_t site_index;
+    uint16_t site_index;
+    uint8_t event_kind;
+    uint8_t source_kind;
 } lccf_fact_core_t;
 
 _Static_assert(sizeof(lccf_fact_core_t) == 64U,
@@ -153,6 +166,8 @@ typedef struct lccf_fact_ticket {
     uint32_t source_node;
     uint32_t site_index;
     uint32_t site_count;
+    uint32_t owner_index;
+    const lccf_fact_site_descriptor_t *const *site_table;
 } lccf_fact_ticket_t;
 
 typedef struct lccf_fact_guard {
@@ -184,28 +199,32 @@ typedef struct lccf_fact_counters {
 } lccf_fact_counters_t;
 
 typedef struct lccf_fact_split64_64_layout {
-    uint64_t hot_words[8];
-    uint64_t sidecar_words[8];
+    unsigned char hot[64];
+    lccf_fact_core_t sidecar;
 } lccf_fact_split64_64_layout_t;
 
 typedef struct lccf_fact_split96_64_layout {
-    uint64_t hot_words[12];
-    uint64_t sidecar_words[8];
+    unsigned char hot[96];
+    lccf_fact_core_t sidecar;
 } lccf_fact_split96_64_layout_t;
 
 typedef struct lccf_fact_unified128_layout {
-    uint64_t words[16];
+    unsigned char hot[64];
+    lccf_fact_core_t fact;
 } lccf_fact_unified128_layout_t;
 
 typedef struct lccf_fact_cell {
     _Atomic uint64_t state_generation;
     _Atomic uint32_t references[LCCF_FACT_REF_COUNT];
-    lccf_fact_core_t fact;
+    _Atomic uint64_t ticket_owners[LCCF_FACT_MAX_TICKETS];
+    _Atomic uint64_t lifecycle_gate;
+    _Atomic bool shared;
+    _Atomic bool published;
+    lccf_fact_core_t *fact_storage;
+    lccf_fact_core_t fallback_fact;
     lccf_fact_ticket_t raw_ticket;
     lccf_fact_layout_t layout;
     uint32_t ticket_count;
-    bool shared;
-    bool published;
 } lccf_fact_cell_t;
 
 uint64_t lccf_fact_pack_state(uint64_t generation,
@@ -215,7 +234,8 @@ lccf_fact_state_t lccf_fact_unpack_state(uint64_t word);
 
 int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
                         lccf_fact_layout_t layout,
-                        uint32_t ticket_count);
+                        uint32_t ticket_count,
+                        lccf_fact_core_t *fact_storage);
 size_t lccf_fact_layout_hot_bytes(lccf_fact_layout_t layout);
 size_t lccf_fact_layout_sidecar_bytes(lccf_fact_layout_t layout);
 int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
@@ -225,6 +245,8 @@ int lccf_fact_ticket_from_logical(
     uint64_t generation, int64_t result, int32_t error_code,
     uint64_t payload_word, uint32_t site_index, uint32_t site_count,
     uint32_t captured_home_shard, uint32_t source_node,
+    uint32_t owner_index,
+    const lccf_fact_site_descriptor_t *const *site_table,
     lccf_fact_ticket_t *out_ticket);
 int lccf_fact_normalize(const lccf_fact_ticket_t *ticket,
                         uint64_t fact_id,
@@ -239,9 +261,11 @@ int lccf_fact_acquire(const lccf_fact_cell_t *cell,
                       lccf_fact_core_t *out_fact);
 int lccf_fact_materialize(const lccf_fact_cell_t *cell,
                           uint64_t generation,
+                          uint32_t site_index,
                           lccf_fact_counters_t *counters,
                           lccf_fact_core_t *out_fact);
 int lccf_fact_consume(lccf_fact_cell_t *cell, uint64_t generation,
+                      uint32_t site_index,
                       lccf_fact_consumer_t consumer,
                       const lccf_fact_guard_t *guard,
                       lccf_fact_counters_t *counters,
@@ -250,14 +274,17 @@ int lccf_fact_consume(lccf_fact_cell_t *cell, uint64_t generation,
 int lccf_fact_yield_to_queue(lccf_fact_cell_t *cell,
                              uint64_t generation);
 int lccf_fact_finish(lccf_fact_cell_t *cell, uint64_t generation,
-                     bool terminal, uint64_t next_generation,
                      lccf_fact_counters_t *counters);
+int lccf_fact_abort(lccf_fact_cell_t *cell, uint64_t generation);
+int lccf_fact_invoke(const lccf_fact_core_t *fact, void *context);
 int lccf_fact_retain(lccf_fact_cell_t *cell,
                      lccf_fact_ref_kind_t kind);
 int lccf_fact_release(lccf_fact_cell_t *cell,
                       lccf_fact_ref_kind_t kind);
 bool lccf_fact_can_reuse(const lccf_fact_cell_t *cell);
 int lccf_fact_module_unregister(const lccf_fact_cell_t *cell);
+const lccf_fact_core_t *lccf_fact_storage(
+    const lccf_fact_cell_t *cell);
 
 #ifdef __cplusplus
 }

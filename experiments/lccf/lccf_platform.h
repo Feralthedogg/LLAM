@@ -4,6 +4,8 @@
 #ifndef LLAM_EXPERIMENTS_LCCF_PLATFORM_H
 #define LLAM_EXPERIMENTS_LCCF_PLATFORM_H
 
+#include "lccf_portable_errno.h"
+
 #include <stddef.h>
 #include <stdint.h>
 

@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from bench_lccf_fact import (  # noqa: E402
+    Cell,
     FactSample,
+    PairResult,
+    _aggregate_cell,
     classify_pair,
     parse_sample_output,
 )
@@ -28,8 +31,9 @@ def sample(mode: str, **updates: object) -> FactSample:
     queue_pops = callbacks if queued else (85 if mixed else 0)
     direct_calls = callbacks - queue_pops
     work = completions if shared else callbacks + (completions if queued else forced)
+    site_work = callbacks if shared else work
     value = FactSample(
-        version=1,
+        version=2,
         workload="completion_io_pipeline",
         mode=mode,
         instances=17,
@@ -60,7 +64,7 @@ def sample(mode: str, **updates: object) -> FactSample:
         facts_built=completions,
         facts_build_failed=0,
         fact_normalizations=work,
-        fact_site_lookups=work,
+        fact_site_lookups=site_work,
         fact_module_pins=completions,
         fact_payload_pins=completions,
         fact_stale_losers=0,
@@ -70,6 +74,8 @@ def sample(mode: str, **updates: object) -> FactSample:
         fact_reuse_delays=0,
         fact_hot_bytes=64,
         fact_sidecar_bytes=64,
+        fact_overflow_pushes=0,
+        fact_overflow_pops=0,
         refs_balanced=True,
     )
     return replace(value, **updates)
@@ -87,7 +93,7 @@ def test_strict_parser() -> None:
         "noise\n" + encoded(value),
         encoded(value) + "\nnoise",
         "LCCF_FACT_SAMPLE {}",
-        encoded(value).replace('"version": 1', '"version": 2'),
+        encoded(value).replace('"version": 2', '"version": 1'),
         encoded(value).replace('"rounds": 4', '"rounds": true'),
         encoded(value).replace('"checksum": "0123456789abcdef"',
                                '"checksum": "xyz"'),
@@ -95,7 +101,7 @@ def test_strict_parser() -> None:
                                '"mode": "unknown"'),
     ]
     duplicate = encoded(value).replace(
-        '"version": 1', '"version": 1, "version": 1', 1
+        '"version": 2', '"version": 2, "version": 2', 1
     )
     bad_rows.append(duplicate)
     for row in bad_rows:
@@ -159,7 +165,34 @@ def test_correctness_precedes_performance() -> None:
     )
     result = classify_pair(baseline, repeated_work)
     assert result.status == "FAIL_CORRECTNESS"
-    assert any("one normalization" in reason for reason in result.reasons)
+    assert any("fact/site work" in reason for reason in result.reasons)
+
+    missing_baseline_work = sample(
+        "recompute_queue",
+        fact_normalizations=68,
+        fact_site_lookups=68,
+    )
+    result = classify_pair(
+        missing_baseline_work, sample("shared_fact_queue")
+    )
+    assert result.status == "FAIL_CORRECTNESS"
+    assert any("baseline recompute" in reason for reason in result.reasons)
+
+
+def test_spread_is_inconclusive() -> None:
+    cell = Cell(
+        workload="completion_io_pipeline",
+        candidate="shared_fact_fused",
+        baseline="recompute_fused",
+        frame_bytes=128,
+        cell_bytes=64,
+        sites=8,
+    )
+    stable = PairResult("PASS", (), 1.1, 0.8, 0.9, None)
+    unstable = PairResult("PASS", (), 1.3, 0.8, 0.9, None)
+    result = _aggregate_cell(cell, [stable, unstable])
+    assert result["status"] == "INCONCLUSIVE"
+    assert result["wall_ratio_spread"] > 1.10
 
 
 def main() -> int:
@@ -167,6 +200,7 @@ def main() -> int:
     test_queue_classification()
     test_fused_and_mixed_gates()
     test_correctness_precedes_performance()
+    test_spread_is_inconclusive()
     print("[test_bench_lccf_fact] all checks passed")
     return 0
 
