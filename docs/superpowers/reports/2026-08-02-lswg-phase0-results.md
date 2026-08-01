@@ -1,9 +1,13 @@
 # LSWG Phase 0 Results
 
-Date: 2026-08-02  
-Track: LLAM Structural Wait Graph  
-Scope: standalone synthetic model only  
-Model result: PASS  
+Date: 2026-08-02
+
+Track: LLAM Structural Wait Graph
+
+Scope: standalone synthetic model only
+
+Model result: PASS
+
 Runtime-integration status: HELD
 
 ## What was tested
@@ -69,7 +73,7 @@ The median batch time was 148.326 ms, or about 7.42 ms per 100,000-node solve.
 The conservative Phase 0 batch budget is 5,000 ms. Timing is diagnostic CPU
 time, not a cross-platform performance guarantee.
 
-ASan and UBSan completed the same 100,000-node profiles in 310.259 ms for the
+ASan and UBSan completed the same 100,000-node profiles in 283.691 ms for the
 20-solve batch with no reported error.
 
 ## Verification

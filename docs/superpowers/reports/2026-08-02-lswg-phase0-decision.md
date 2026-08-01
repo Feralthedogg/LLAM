@@ -1,8 +1,11 @@
 # LSWG Phase 0 Decision
 
-Date: 2026-08-02  
-Decision: NARROW  
-Semantic model: ACCEPT  
+Date: 2026-08-02
+
+Decision: NARROW
+
+Semantic model: ACCEPT
+
 Runtime Phase 1: HOLD
 
 ## Decision
