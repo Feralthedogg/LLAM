@@ -31,7 +31,7 @@
 #include <string.h>
 
 /* Audited runtime projection of config/llam-version.json. */
-#define LLAM_VERSION_STRING_LITERAL "2.2.0"
+#define LLAM_VERSION_STRING_LITERAL "2.2.1"
 
 /** @brief Return the smaller of two byte counts. */
 static size_t llam_min_size(size_t a, size_t b) {

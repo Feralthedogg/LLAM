@@ -162,7 +162,7 @@
     },
     {
       "limit": 800,
-      "line_count": 2667,
+      "line_count": 2694,
       "path": "tests/test_io_buffers.c"
     },
     {
@@ -177,7 +177,7 @@
     },
     {
       "limit": 800,
-      "line_count": 6624,
+      "line_count": 6721,
       "path": "tests/test_runtime_core.c"
     },
     {

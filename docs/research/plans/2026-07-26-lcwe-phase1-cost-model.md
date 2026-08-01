@@ -65,7 +65,7 @@
 - `object/lcwe-phase1/lcwe_phase1_samples.csv`
 - `object/lcwe-phase1/lcwe_phase1_summary.csv`
 - `object/lcwe-phase1/lcwe_phase1_report.md`
-- `docs/superpowers/reports/2026-07-26-lcwe-phase1-results.md`
+- `docs/research/reports/2026-07-26-lcwe-phase1-results.md`
 
 The `object/` files remain untracked raw evidence. The final report is reviewed
 and committed with its exact command, host/compiler identity, sample count,
@@ -1003,7 +1003,7 @@ git commit -m "build: integrate LCWE research harness"
 
 **Files:**
 
-- Create: `docs/superpowers/reports/2026-07-26-lcwe-phase1-results.md`
+- Create: `docs/research/reports/2026-07-26-lcwe-phase1-results.md`
 - Generated: `object/lcwe-phase1/lcwe_phase1_samples.csv`
 - Generated: `object/lcwe-phase1/lcwe_phase1_summary.csv`
 - Generated: `object/lcwe-phase1/lcwe_phase1_report.md`
@@ -1096,7 +1096,7 @@ partial run.
 - [ ] **Step 5: Create the tracked evidence report**
 
 Use the generated Markdown as the numeric source. Create
-`docs/superpowers/reports/2026-07-26-lcwe-phase1-results.md` with:
+`docs/research/reports/2026-07-26-lcwe-phase1-results.md` with:
 
 ```markdown
 # LCWE Phase 1 Cost Model Results
@@ -1142,16 +1142,16 @@ Run:
 
 ```bash
 git diff --check -- \
-  docs/superpowers/reports/2026-07-26-lcwe-phase1-results.md
+  docs/research/reports/2026-07-26-lcwe-phase1-results.md
 rg -n 'TODO|FIXME|TBD|PLACEHOLDER' \
-  docs/superpowers/reports/2026-07-26-lcwe-phase1-results.md
+  docs/research/reports/2026-07-26-lcwe-phase1-results.md
 git status --short
 ```
 
 Confirm the user's two dirty files remain unstaged. Then:
 
 ```bash
-git add docs/superpowers/reports/2026-07-26-lcwe-phase1-results.md
+git add docs/research/reports/2026-07-26-lcwe-phase1-results.md
 git commit -m "docs: record LCWE phase one evidence"
 ```
 

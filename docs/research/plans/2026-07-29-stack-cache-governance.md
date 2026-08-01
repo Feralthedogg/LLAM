@@ -8,7 +8,7 @@ auditable trim/security diagnostics without changing the frozen 2.2 option
 prefix.
 
 **Design source:**
-`docs/superpowers/specs/2026-07-29-stack-cache-governance-design.md`
+`docs/research/specs/2026-07-29-stack-cache-governance-design.md`
 
 ### Task 1: Prove and correct cross-runtime cache ownership
 

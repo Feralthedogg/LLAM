@@ -23,7 +23,7 @@ on:
 
 env:
   LLAM_BUILD_RESEARCH: "0"
-  LLAM_CI_VERSION: "2.2.0"
+  LLAM_CI_VERSION: "2.2.1"
 
 concurrency:
   group: macos-${{ github.ref }}

@@ -929,7 +929,7 @@ git commit -m "ci: validate LEIR Linux native segments"
 ### Task 9: Full Verification, Security Review, and Evidence Handoff
 
 **Files:**
-- Create after Linux evidence: `docs/superpowers/reports/2026-07-27-leir-linux-native-segment-results.md`
+- Create after Linux evidence: `docs/research/reports/2026-07-27-leir-linux-native-segment-results.md`
 - Modify only if verification exposes a defect: files owned by Tasks 1-8.
 
 **Interfaces:**
@@ -1001,7 +1001,7 @@ A `SPECIALIZED` result authorizes the next private design for cancellation/timeo
 - [ ] **Step 7: Commit the exact-SHA report and re-run CI**
 
 ```bash
-git add docs/superpowers/reports/2026-07-27-leir-linux-native-segment-results.md
+git add docs/research/reports/2026-07-27-leir-linux-native-segment-results.md
 git commit -m "docs: record LEIR Linux native segment evidence"
 git push
 ```

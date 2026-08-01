@@ -462,7 +462,7 @@ git commit -m "ci: record AOT ring profile evidence"
 ### Task 6: Verification and evidence decision
 
 **Files:**
-- Create: `docs/superpowers/reports/2026-08-01-leir-aot-ring-profile-results.md`
+- Create: `docs/research/reports/2026-08-01-leir-aot-ring-profile-results.md`
 - Generated locally only: `artifacts/leir-aot-ring-profiles/**`
 
 **Interfaces:**
@@ -525,7 +525,7 @@ the worktree contains no generated binaries or evidence directories.
 - [x] **Step 5: Commit the decision report**
 
 ```bash
-git add docs/superpowers/reports/2026-08-01-leir-aot-ring-profile-results.md
+git add docs/research/reports/2026-08-01-leir-aot-ring-profile-results.md
 git commit -m "docs: record AOT ring profile decision"
 ```
 

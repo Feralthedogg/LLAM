@@ -25,7 +25,7 @@ Win32 threads for non-gating smoke, CMake 3.20+, GNU Make compatibility, Python
 ## Global Constraints
 
 - Follow
-  `docs/superpowers/specs/2026-07-27-llam-effect-ir-design.md`.
+  `docs/research/specs/2026-07-27-llam-effect-ir-design.md`.
 - This plan implements **Phase 0A userspace advancement only**. It does not
   implement linked SQEs, `IOSQE_CQE_SKIP_SUCCESS`, a public ABI, graph fanout,
   channels/select, arbitrary predicates, or compiler integration.
@@ -180,8 +180,8 @@ Win32 threads for non-gating smoke, CMake 3.20+, GNU Make compatibility, Python
 - `object/leir-phase0a-gate/leir_phase0a_summary.csv`
 - `object/leir-phase0a-gate/leir_phase0a_metadata.json`
 - `object/leir-phase0a-gate/leir_phase0a_report.md`
-- `docs/superpowers/reports/2026-07-27-leir-phase0a-results.md`
-- `docs/superpowers/reports/2026-07-27-leir-phase0a-decision.md`
+- `docs/research/reports/2026-07-27-leir-phase0a-results.md`
+- `docs/research/reports/2026-07-27-leir-phase0a-decision.md`
 
 Raw `object/` evidence remains ignored. A tracked report is generated from the
 same parsed rows and must be byte-identical to the raw report copied into the
@@ -1489,7 +1489,7 @@ leir-phase0a-screen: test-leir-phase0
 		--min-mode-ms 100 \
 		--output-dir object/leir-phase0a-screen \
 		--tracked-report \
-			docs/superpowers/reports/2026-07-27-leir-phase0a-results.md
+			docs/research/reports/2026-07-27-leir-phase0a-results.md
 ```
 
 CMake registers the Python test only when a Python interpreter is available
@@ -1646,10 +1646,10 @@ git commit -m "ci: add LEIR Phase 0A evidence workflow"
 
 **Files:**
 
-- Create: `docs/superpowers/reports/2026-07-27-leir-phase0a-results.md`
-- Create: `docs/superpowers/reports/2026-07-27-leir-phase0a-decision.md`
+- Create: `docs/research/reports/2026-07-27-leir-phase0a-results.md`
+- Create: `docs/research/reports/2026-07-27-leir-phase0a-decision.md`
 - Create on pass:
-  `docs/superpowers/plans/2026-07-27-leir-phase0b-linux-linked-segments.md`
+  `docs/research/plans/2026-07-27-leir-phase0b-linux-linked-segments.md`
 - Modify only if the evidence requires an integrity repair:
   `scripts/bench_leir_phase0.py`
 - Modify only if the evidence requires an integrity repair:
@@ -1670,7 +1670,7 @@ Run:
 make leir-phase0a-screen
 cmp \
   object/leir-phase0a-screen/leir_phase0a_report.md \
-  docs/superpowers/reports/2026-07-27-leir-phase0a-results.md
+  docs/research/reports/2026-07-27-leir-phase0a-results.md
 ```
 
 Expected: complete evidence or an explicit `INCONCLUSIVE` integrity reason.
@@ -1693,7 +1693,7 @@ Do not classify performance if any mechanism counter fails.
 - [ ] **Step 3: Commit and push the exact screened source**
 
 ```bash
-git add docs/superpowers/reports/2026-07-27-leir-phase0a-results.md
+git add docs/research/reports/2026-07-27-leir-phase0a-results.md
 git commit -m "docs: record LEIR Phase 0A screening"
 git push -u origin leir-phase0
 ```
@@ -1763,9 +1763,9 @@ observed defect before changing the harness.
 - [ ] **Step 7: Commit and push the decision**
 
 ```bash
-git add docs/superpowers/reports/2026-07-27-leir-phase0a-results.md \
-  docs/superpowers/reports/2026-07-27-leir-phase0a-decision.md \
-  docs/superpowers/plans/2026-07-27-leir-phase0b-linux-linked-segments.md
+git add docs/research/reports/2026-07-27-leir-phase0a-results.md \
+  docs/research/reports/2026-07-27-leir-phase0a-decision.md \
+  docs/research/plans/2026-07-27-leir-phase0b-linux-linked-segments.md
 git commit -m "docs: decide LEIR Phase 0A advancement"
 git push
 ```

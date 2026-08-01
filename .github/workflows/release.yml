@@ -77,7 +77,7 @@ jobs:
         if: runner.os != 'Windows'
         timeout-minutes: 20
         run: |
-          version="2.2.0"
+          version="2.2.1"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
@@ -105,7 +105,7 @@ jobs:
       - name: Package POSIX release archive
         if: runner.os != 'Windows'
         run: |
-          version="2.2.0"
+          version="2.2.1"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
@@ -179,10 +179,10 @@ jobs:
         shell: pwsh
         run: |
           $dryRun = (& .\scripts\install.ps1 -DryRun -Target "${{ matrix.target }}" 6>&1 | Out-String)
-          if ($dryRun -notmatch "/releases/download/v2\.2\.0/") {
-            throw "standalone Windows installer default URL did not use the v2.2.0 release tag"
+          if ($dryRun -notmatch "/releases/download/v2\.2\.1/") {
+            throw "standalone Windows installer default URL did not use the v2.2.1 release tag"
           }
-          $version = "2.2.0"
+          $version = "2.2.1"
           $releaseVersion = "dev"
           if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
             $tagName = $env:GITHUB_REF_NAME
@@ -433,7 +433,7 @@ jobs:
       - name: Build, test, and package BSD
         run: |
           set -eu
-          version="2.2.0"
+          version="2.2.1"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
@@ -538,7 +538,9 @@ jobs:
       - name: Build checksum manifest
         run: |
           cd release-artifacts
+          sed -i 's/\r$//' ./*.sha256
           cat ./*.sha256 | LC_ALL=C sort -k2 > SHA256SUMS
+          sha256sum --check SHA256SUMS
 
       - name: Build release notes
         env:

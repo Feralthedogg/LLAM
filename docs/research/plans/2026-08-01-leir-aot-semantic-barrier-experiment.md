@@ -103,7 +103,7 @@ CMake, Make, Python 3 `unittest`, GitHub Actions on Ubuntu 24.04.
   locks parsing and verdict rules.
 - `.github/workflows/leir-aot-research.yml`
   runs correctness, sanitizer, stress, mechanism screen, and artifact upload.
-- `docs/superpowers/reports/2026-08-01-leir-native-pipeline-decision.md`
+- `docs/research/reports/2026-08-01-leir-native-pipeline-decision.md`
   records the rejected receive-send candidate.
 - `docs/operations/benchmarks.md`
   links the new specialized experiment without making a portable claim.
@@ -113,7 +113,7 @@ CMake, Make, Python 3 `unittest`, GitHub Actions on Ubuntu 24.04.
 ### Task 1: Freeze the rejected pipeline decision
 
 **Files:**
-- Create: `docs/superpowers/reports/2026-08-01-leir-native-pipeline-decision.md`
+- Create: `docs/research/reports/2026-08-01-leir-native-pipeline-decision.md`
 - Modify: `docs/operations/benchmarks.md`
 
 - [ ] **Step 1: Write the decision record**
@@ -135,7 +135,7 @@ Run:
 ```bash
 git diff --check
 rg -n "REJECT|exact_result_semantic_barrier|3\.0\.0" \
-  docs/superpowers/reports/2026-08-01-leir-native-pipeline-decision.md \
+  docs/research/reports/2026-08-01-leir-native-pipeline-decision.md \
   docs/operations/benchmarks.md
 ```
 

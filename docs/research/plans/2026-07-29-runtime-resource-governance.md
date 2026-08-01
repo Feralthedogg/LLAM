@@ -595,7 +595,7 @@ git commit -m "docs: define runtime resource governance contract"
 ### Task 8: Resource-stage verification gate
 
 **Files:**
-- Modify: `docs/superpowers/plans/2026-07-29-runtime-resource-governance.md`
+- Modify: `docs/research/plans/2026-07-29-runtime-resource-governance.md`
 
 **Interfaces:**
 - Consumes: every deliverable in Tasks 1-7
@@ -628,7 +628,7 @@ installed-contract parity, dependency policy, strict C-structure audit,
 
 For every option, invariant, failure mode, diagnostic counter, platform, and
 test seam in
-`docs/superpowers/specs/2026-07-29-runtime-resource-governance-design.md`,
+`docs/research/specs/2026-07-29-runtime-resource-governance-design.md`,
 record the source/test command that proves it. Any missing or indirect evidence
 keeps the task unchecked.
 
@@ -687,6 +687,6 @@ portable performance win.
 - [x] **Step 4: Mark only evidenced boxes complete and commit the gate record**
 
 ```bash
-git add docs/superpowers/plans/2026-07-29-runtime-resource-governance.md
+git add docs/research/plans/2026-07-29-runtime-resource-governance.md
 git commit -m "test: close runtime resource governance gate"
 ```

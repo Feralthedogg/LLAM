@@ -35,6 +35,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -2700,6 +2701,99 @@ static int test_waitable_timer_api(void) {
     }
     return 0;
 }
+
+#if LLAM_PLATFORM_POSIX
+static uint64_t test_stat_timespec_to_ns(const struct timespec *value) {
+    return (uint64_t)value->tv_sec * UINT64_C(1000000000) +
+           (uint64_t)value->tv_nsec;
+}
+
+static int test_stat_path_metadata_contract(void) {
+    char directory[] = "/tmp/llam-stat-path-XXXXXX";
+    char file_path[512];
+    char link_path[512];
+    struct timespec requested_times[2];
+    struct stat native_stat;
+    llam_file_stat_t stat_result;
+    const struct timespec *native_atime;
+    const struct timespec *native_mtime;
+    uint64_t expected_atime;
+    uint64_t expected_mtime;
+    int saved_errno;
+    int fd = -1;
+    int rc = 1;
+
+    if (mkdtemp(directory) == NULL) {
+        return test_fail_errno("stat metadata fixture directory failed");
+    }
+    (void)snprintf(file_path, sizeof(file_path), "%s/target", directory);
+    (void)snprintf(link_path, sizeof(link_path), "%s/link", directory);
+
+    fd = open(file_path, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0 || write(fd, "x", 1U) != 1) {
+        rc = test_fail_errno("stat metadata fixture file failed");
+        goto cleanup;
+    }
+    close(fd);
+    fd = -1;
+
+    requested_times[0].tv_sec = 1700000000;
+    requested_times[0].tv_nsec = 123456789;
+    requested_times[1].tv_sec = 1700000001;
+    requested_times[1].tv_nsec = 987654321;
+    if (utimensat(AT_FDCWD, file_path, requested_times, 0) != 0 ||
+        stat(file_path, &native_stat) != 0) {
+        rc = test_fail_errno("stat metadata timestamp fixture failed");
+        goto cleanup;
+    }
+#if LLAM_PLATFORM_DARWIN
+    native_atime = &native_stat.st_atimespec;
+    native_mtime = &native_stat.st_mtimespec;
+#else
+    native_atime = &native_stat.st_atim;
+    native_mtime = &native_stat.st_mtim;
+#endif
+    expected_atime = test_stat_timespec_to_ns(native_atime);
+    expected_mtime = test_stat_timespec_to_ns(native_mtime);
+
+    memset(&stat_result, 0, sizeof(stat_result));
+    if (llam_stat_path_ex(file_path, &stat_result, sizeof(stat_result)) != 0) {
+        rc = test_fail_errno("stat metadata regular-file query failed");
+        goto cleanup;
+    }
+    if (stat_result.atime_ns != expected_atime ||
+        stat_result.mtime_ns != expected_mtime) {
+        rc = test_fail("stat metadata lost subsecond timestamp precision");
+        goto cleanup;
+    }
+
+    if (symlink(file_path, link_path) != 0) {
+        rc = test_fail_errno("stat metadata symlink fixture failed");
+        goto cleanup;
+    }
+    memset(&stat_result, 0, sizeof(stat_result));
+    if (llam_stat_path_ex(link_path, &stat_result, sizeof(stat_result)) != 0) {
+        rc = test_fail_errno("stat metadata symlink query failed");
+        goto cleanup;
+    }
+    if (stat_result.type != LLAM_FILE_TYPE_SYMLINK) {
+        rc = test_fail("stat metadata did not classify a symbolic link");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    saved_errno = errno;
+    if (fd >= 0) {
+        close(fd);
+    }
+    (void)unlink(link_path);
+    (void)unlink(file_path);
+    (void)rmdir(directory);
+    errno = saved_errno;
+    return rc;
+}
+#endif
 
 static void blocking_wrapper_task(void *arg) {
     core_state_t *state = arg;
@@ -6611,6 +6705,9 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_detach_contract);
     RUN_RUNTIME_CORE_TEST(test_ex_option_prefixes);
     RUN_RUNTIME_CORE_TEST(test_waitable_timer_api);
+#if LLAM_PLATFORM_POSIX
+    RUN_RUNTIME_CORE_TEST(test_stat_path_metadata_contract);
+#endif
     RUN_RUNTIME_CORE_TEST(test_blocking_wrappers_api);
     RUN_RUNTIME_CORE_TEST(test_signal_wait_api);
     RUN_RUNTIME_CORE_TEST(test_errno_is_task_local_across_switches);

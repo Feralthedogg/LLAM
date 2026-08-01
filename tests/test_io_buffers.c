@@ -2547,6 +2547,33 @@ static int test_public_owned_buffer_alloc_and_positional_io(void) {
     llam_io_buffer_release(buffer);
     buffer = NULL;
 
+    for (size_t alignment = 1U; alignment < sizeof(void *); alignment <<= 1U) {
+        opts.capacity = 8192U;
+        opts.alignment = alignment;
+        if (llam_io_buffer_alloc_ex(&opts, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE, &buffer) != 0 ||
+            buffer == NULL ||
+            llam_io_buffer_capacity(buffer) < opts.capacity ||
+            llam_io_buffer_alignment(buffer) < alignment ||
+            ((uintptr_t)llam_io_buffer_data(buffer) & (alignment - 1U)) != 0U) {
+            rc = test_fail_errno("small power-of-two buffer alignment was rejected by alloc_ex");
+            goto cleanup;
+        }
+        llam_io_buffer_release(buffer);
+        buffer = NULL;
+
+        if (llam_io_buffer_alloc_aligned(8192U, alignment, &buffer) != 0 ||
+            buffer == NULL ||
+            llam_io_buffer_capacity(buffer) < 8192U ||
+            llam_io_buffer_alignment(buffer) < alignment ||
+            ((uintptr_t)llam_io_buffer_data(buffer) & (alignment - 1U)) != 0U) {
+            rc = test_fail_errno(
+                "small power-of-two buffer alignment was rejected by alloc_aligned");
+            goto cleanup;
+        }
+        llam_io_buffer_release(buffer);
+        buffer = NULL;
+    }
+
     errno = 0;
     if (llam_io_buffer_alloc_aligned(16U, 3U, &buffer) != -1 || errno != EINVAL || buffer != NULL) {
         rc = test_fail_errno("invalid owned-buffer alignment was accepted");

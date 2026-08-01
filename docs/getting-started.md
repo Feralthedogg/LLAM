@@ -39,8 +39,8 @@ Choose a release or target explicitly when automatic host detection is not what
 you want:
 
 ```sh
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.2.0/install.sh |
-  sh -s -- --version 2.2.0 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.2.1/install.sh |
+  sh -s -- --version 2.2.1 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 On Windows:

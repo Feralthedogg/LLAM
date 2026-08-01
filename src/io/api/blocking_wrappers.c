@@ -321,14 +321,25 @@ int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *o
 }
 
 #if LLAM_PLATFORM_POSIX
-static uint64_t llam_unix_seconds_to_ns(int64_t seconds) {
-    if (seconds <= 0) {
+static uint64_t llam_unix_timespec_to_ns(int64_t seconds, long nanoseconds) {
+    uint64_t seconds_value;
+    uint64_t nanoseconds_value;
+
+    if (seconds < 0) {
         return 0U;
     }
-    if ((uint64_t)seconds > UINT64_MAX / 1000000000ULL) {
+    if (nanoseconds < 0) {
+        nanoseconds = 0;
+    } else if (nanoseconds >= 1000000000L) {
+        nanoseconds = 999999999L;
+    }
+    seconds_value = (uint64_t)seconds;
+    nanoseconds_value = (uint64_t)nanoseconds;
+    if (seconds_value >
+        (UINT64_MAX - nanoseconds_value) / UINT64_C(1000000000)) {
         return UINT64_MAX;
     }
-    return (uint64_t)seconds * 1000000000ULL;
+    return seconds_value * UINT64_C(1000000000) + nanoseconds_value;
 }
 
 static uint32_t llam_file_type_from_mode(uint32_t mode) {
@@ -404,16 +415,31 @@ static void *llam_blocking_stat_call(void *arg) {
     }
 #elif LLAM_PLATFORM_POSIX
     {
+        const struct timespec *atime;
+        const struct timespec *mtime;
+        const struct timespec *ctime;
         struct stat st;
 
-        if (stat(call->path, &st) != 0) {
+        if (lstat(call->path, &st) != 0) {
             call->error_code = errno;
             return call;
         }
+#if LLAM_PLATFORM_DARWIN
+        atime = &st.st_atimespec;
+        mtime = &st.st_mtimespec;
+        ctime = &st.st_ctimespec;
+#else
+        atime = &st.st_atim;
+        mtime = &st.st_mtim;
+        ctime = &st.st_ctim;
+#endif
         call->stat.size = st.st_size >= 0 ? (uint64_t)st.st_size : 0U;
-        call->stat.mtime_ns = llam_unix_seconds_to_ns((int64_t)st.st_mtime);
-        call->stat.atime_ns = llam_unix_seconds_to_ns((int64_t)st.st_atime);
-        call->stat.ctime_ns = llam_unix_seconds_to_ns((int64_t)st.st_ctime);
+        call->stat.mtime_ns =
+            llam_unix_timespec_to_ns((int64_t)mtime->tv_sec, mtime->tv_nsec);
+        call->stat.atime_ns =
+            llam_unix_timespec_to_ns((int64_t)atime->tv_sec, atime->tv_nsec);
+        call->stat.ctime_ns =
+            llam_unix_timespec_to_ns((int64_t)ctime->tv_sec, ctime->tv_nsec);
         call->stat.mode = (uint32_t)st.st_mode;
         call->stat.type = llam_file_type_from_mode((uint32_t)st.st_mode);
         return call;

@@ -850,7 +850,7 @@ class Audit:
 
         package = self.read_text("scripts/package_release.sh")
         if package is not None:
-            check_package_version_state(package, self)
+            check_package_version_state(package, version, self)
             checks.extend(
                 [
                     (
@@ -3398,12 +3398,12 @@ def package_marked_block(
     return begin, end
 
 
-def check_package_version_state(text: str, audit: Audit) -> None:
+def check_package_version_state(text: str, version: str, audit: Audit) -> None:
     expected_preamble = (
-        'version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"',
+        f'version="${{LLAM_RELEASE_VERSION:-${{GITHUB_REF_NAME:-v{version}}}}}"',
         'version="${version#v}"',
         'abi_major="${LLAM_ABI_MAJOR:-2}"',
-        'library_version="${LLAM_VERSION:-2.2.0}"',
+        f'library_version="${{LLAM_VERSION:-{version}}}"',
     )
     lines = [
         line for line in fold_shell_logical_lines(text) if line

@@ -172,7 +172,7 @@ diff check all exit 0.
 
 ```bash
 git add \
-  docs/superpowers/plans/2026-07-29-chase-lev-slot-reuse.md \
+  docs/research/plans/2026-07-29-chase-lev-slot-reuse.md \
   Makefile \
   src/internal/runtime_proto_sched.h \
   src/core/sched/norm_queue.c \

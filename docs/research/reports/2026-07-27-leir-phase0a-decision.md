@@ -60,7 +60,7 @@ that removes submissions and completion traffic as well as task resumes.
 - Pair order: 675 ABBA rows and 450 BAAB rows
 - Measurement: 16 balanced blocks and at least 100 ms per mode
 - Generated report:
-  `docs/superpowers/reports/2026-07-27-leir-phase0a-results.md`
+  `docs/research/reports/2026-07-27-leir-phase0a-results.md`
 - Generated report SHA-256:
   `d9d084a83457204c5604dbfee6ff11ca64c8a304acb07b215d539198ffb38a08`
 
