@@ -7,7 +7,9 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define TEST_CHECK(condition)                                                   \
     do {                                                                        \
@@ -17,6 +19,9 @@
             return false;                                                       \
         }                                                                       \
     } while (0)
+
+static size_t scale_node_count = 4096U;
+static bool emit_scale_timing = false;
 
 static lswg_node_ref_t
 ref(lswg_node_kind_t kind, uint64_t primary, uint64_t generation,
@@ -839,6 +844,183 @@ test_finalized_order_is_deterministic(void)
     return true;
 }
 
+typedef struct allocation_probe {
+    size_t attempts;
+    size_t live_blocks;
+    size_t fail_at_attempt;
+} allocation_probe_t;
+
+static void *
+probe_allocate(void *context, size_t size)
+{
+    allocation_probe_t *probe = context;
+    void *allocation;
+
+    probe->attempts += 1U;
+    if (probe->fail_at_attempt != 0U &&
+        probe->attempts >= probe->fail_at_attempt) {
+        return NULL;
+    }
+    allocation = malloc(size);
+    if (allocation != NULL) {
+        probe->live_blocks += 1U;
+    }
+    return allocation;
+}
+
+static void
+probe_deallocate(void *context, void *pointer)
+{
+    allocation_probe_t *probe = context;
+
+    if (pointer != NULL) {
+        if (probe->live_blocks == 0U) {
+            abort();
+        }
+        probe->live_blocks -= 1U;
+    }
+    free(pointer);
+}
+
+static bool
+test_workspace_and_growth_failures_are_inconclusive(void)
+{
+    allocation_probe_t graph_probe = {0U, 0U, 2U};
+    allocation_probe_t workspace_probe = {0U, 0U, 4U};
+    lswg_allocator_t graph_allocator = {
+        &graph_probe, probe_allocate, probe_deallocate};
+    lswg_allocator_t workspace_allocator = {
+        &workspace_probe, probe_allocate, probe_deallocate};
+    lswg_graph_t graph;
+    lswg_workspace_t workspace;
+    lswg_result_t result;
+    const lswg_node_ref_t task = ref(LSWG_NODE_TASK, 501U, 1U, 1U);
+    const lswg_node_ref_t mutex = ref(LSWG_NODE_MUTEX, 61U, 1U, 0U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, &graph_allocator) ==
+               LSWG_STATUS_OUT_OF_MEMORY);
+    TEST_CHECK(graph_probe.live_blocks == 0U);
+    TEST_CHECK(lswg_workspace_init(&workspace, 4U, 4U,
+                                   &workspace_allocator) ==
+               LSWG_STATUS_OUT_OF_MEMORY);
+    TEST_CHECK(workspace_probe.live_blocks == 0U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(mutex, 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task, mutex,
+                                     LSWG_EDGE_TASK_WAITS_MUTEX,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_workspace_init(&workspace, 1U, 1U, NULL) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(lswg_solve(&graph, &workspace, &result) == LSWG_STATUS_OK);
+    TEST_CHECK(result.verdict == LSWG_VERDICT_INCOMPLETE);
+    TEST_CHECK((result.incomplete_reasons & LSWG_INCOMPLETE_WORKSPACE) != 0U);
+    lswg_workspace_destroy(&workspace);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(mutex, 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task, mutex,
+                                     LSWG_EDGE_TASK_WAITS_MUTEX,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    lswg_graph_mark_incomplete(&graph, LSWG_INCOMPLETE_ALLOCATION);
+    TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_workspace_init(&workspace, 2U, 1U, NULL) ==
+               LSWG_STATUS_OK);
+    TEST_CHECK(lswg_solve(&graph, &workspace, &result) == LSWG_STATUS_OK);
+    TEST_CHECK(result.verdict == LSWG_VERDICT_INCOMPLETE);
+    TEST_CHECK((result.incomplete_reasons & LSWG_INCOMPLETE_ALLOCATION) !=
+               0U);
+    lswg_workspace_destroy(&workspace);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(lswg_synthetic_populate(
+                   &graph, 100U, LSWG_SYNTHETIC_LONG_CHAIN_OPEN) ==
+               LSWG_STATUS_CAPACITY);
+    TEST_CHECK(graph.node_count == 1U);
+    TEST_CHECK(graph.nodes[0].desc.ref.identity.primary == 501U);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+static bool
+test_scale_profiles_are_bounded_and_deterministic(void)
+{
+    static const lswg_verdict_t expected[] = {
+        LSWG_VERDICT_OPEN,
+        LSWG_VERDICT_PROVEN_CYCLE,
+        LSWG_VERDICT_OPEN,
+        LSWG_VERDICT_PROVEN_ORPHAN,
+    };
+    allocation_probe_t probe = {0U, 0U, 0U};
+    lswg_allocator_t allocator = {&probe, probe_allocate, probe_deallocate};
+    lswg_graph_t graph;
+    lswg_workspace_t workspace;
+    size_t allocations_after_init;
+    clock_t solve_ticks = 0;
+    size_t profile;
+
+    TEST_CHECK(lswg_graph_init(&graph, scale_node_count, scale_node_count,
+                               &allocator) == LSWG_STATUS_OK);
+    TEST_CHECK(lswg_workspace_init(&workspace, scale_node_count,
+                                   scale_node_count, &allocator) ==
+               LSWG_STATUS_OK);
+    allocations_after_init = probe.attempts;
+
+    for (profile = 0U; profile < sizeof(expected) / sizeof(expected[0]);
+         ++profile) {
+        lswg_result_t baseline;
+        size_t repetition;
+
+        TEST_CHECK(lswg_synthetic_populate(
+                       &graph, scale_node_count,
+                       (lswg_synthetic_profile_t)profile) == LSWG_STATUS_OK);
+        TEST_CHECK(lswg_graph_finalize(&graph) == LSWG_STATUS_OK);
+        TEST_CHECK(lswg_solve(&graph, &workspace, &baseline) ==
+                   LSWG_STATUS_OK);
+        TEST_CHECK(baseline.verdict == expected[profile]);
+        for (repetition = 0U; repetition < 5U; ++repetition) {
+            lswg_result_t result;
+            const clock_t begin = clock();
+
+            TEST_CHECK(lswg_solve(&graph, &workspace, &result) ==
+                       LSWG_STATUS_OK);
+            solve_ticks += clock() - begin;
+            TEST_CHECK(result.verdict == baseline.verdict);
+            TEST_CHECK(result.fingerprint == baseline.fingerprint);
+            TEST_CHECK(result.member_count == baseline.member_count);
+            if (result.member_count != 0U) {
+                TEST_CHECK(result.members[0].kind == baseline.members[0].kind);
+                TEST_CHECK(result.members[0].identity.primary ==
+                           baseline.members[0].identity.primary);
+            }
+        }
+        TEST_CHECK(probe.attempts == allocations_after_init);
+    }
+
+    if (emit_scale_timing) {
+        const double elapsed_ms =
+            ((double)solve_ticks * 1000.0) / (double)CLOCKS_PER_SEC;
+        const double budget_ms = 5000.0;
+
+        printf("LSWG_SCALE nodes=%zu profiles=4 solves=20 "
+               "elapsed_ms=%.3f budget_ms=%.0f status=%s\n",
+               scale_node_count, elapsed_ms, budget_ms,
+               elapsed_ms <= budget_ms ? "PASS" : "FAIL");
+        TEST_CHECK(elapsed_ms <= budget_ms);
+    }
+
+    lswg_workspace_destroy(&workspace);
+    lswg_graph_destroy(&graph);
+    TEST_CHECK(probe.live_blocks == 0U);
+    return true;
+}
+
 typedef bool (*test_fn)(void);
 
 typedef struct test_case {
@@ -847,7 +1029,7 @@ typedef struct test_case {
 } test_case_t;
 
 int
-main(void)
+main(int argc, char **argv)
 {
     static const test_case_t tests[] = {
 #ifndef LSWG_GRAPH_ONLY
@@ -882,8 +1064,20 @@ main(void)
         {"malformed_select_is_rejected", test_malformed_select_is_rejected},
         {"finalized_order_is_deterministic",
          test_finalized_order_is_deterministic},
+        {"workspace_and_growth_failures_are_inconclusive",
+         test_workspace_and_growth_failures_are_inconclusive},
+        {"scale_profiles_are_bounded_and_deterministic",
+         test_scale_profiles_are_bounded_and_deterministic},
     };
     size_t index;
+
+    if (argc == 2 && strcmp(argv[1], "--scale") == 0) {
+        scale_node_count = 100000U;
+        emit_scale_timing = true;
+    } else if (argc != 1) {
+        fprintf(stderr, "usage: %s [--scale]\n", argv[0]);
+        return 2;
+    }
 
     for (index = 0U; index < sizeof(tests) / sizeof(tests[0]); ++index) {
         if (!tests[index].function()) {

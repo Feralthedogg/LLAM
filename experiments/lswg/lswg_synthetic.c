@@ -312,3 +312,258 @@ lswg_graph_finalize(lswg_graph_t *graph)
     graph->finalized = true;
     return LSWG_STATUS_OK;
 }
+
+static lswg_node_ref_t
+synthetic_ref(lswg_node_kind_t kind, uint64_t primary, uint64_t generation,
+              uint64_t auxiliary)
+{
+    lswg_node_ref_t ref;
+
+    ref.kind = kind;
+    ref.identity.primary = primary;
+    ref.identity.generation = generation;
+    ref.identity.auxiliary = auxiliary;
+    return ref;
+}
+
+static lswg_status_t
+synthetic_add_node(lswg_graph_t *graph, lswg_node_ref_t ref, uint32_t flags)
+{
+    lswg_node_desc_t node;
+
+    memset(&node, 0, sizeof(node));
+    node.ref = ref;
+    node.semantic_flags = flags;
+    return lswg_graph_add_node(graph, &node);
+}
+
+static lswg_status_t
+synthetic_add_edge(lswg_graph_t *graph, lswg_node_ref_t source,
+                   lswg_node_ref_t target, lswg_edge_kind_t kind,
+                   uint32_t flags)
+{
+    lswg_edge_desc_t edge;
+
+    edge.source = source;
+    edge.target = target;
+    edge.kind = kind;
+    edge.flags = flags;
+    return lswg_graph_add_edge(graph, &edge);
+}
+
+static lswg_status_t
+populate_long_chain_open(lswg_graph_t *graph, size_t node_count)
+{
+    size_t index;
+
+    for (index = 0U; index < node_count; ++index) {
+        const uint32_t flags =
+            index + 1U == node_count ? LSWG_NODE_RUNNABLE : 0U;
+        const lswg_status_t status = synthetic_add_node(
+            graph,
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 1U, 1U, 1U),
+            flags);
+
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    for (index = 0U; index + 1U < node_count; ++index) {
+        const lswg_status_t status = synthetic_add_edge(
+            graph,
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 1U, 1U, 1U),
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 2U, 1U, 1U),
+            LSWG_EDGE_TASK_WAITS_JOIN,
+            LSWG_EDGE_AND_REQUIRED | LSWG_EDGE_GENERATION_STABLE);
+
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    return LSWG_STATUS_OK;
+}
+
+static lswg_status_t
+populate_many_sccs(lswg_graph_t *graph, size_t node_count)
+{
+    size_t index;
+
+    for (index = 0U; index < node_count; ++index) {
+        const lswg_status_t status = synthetic_add_node(
+            graph,
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 1U, 2U, 1U),
+            0U);
+
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    for (index = 0U; index + 1U < node_count; index += 2U) {
+        const lswg_node_ref_t first =
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 1U, 2U, 1U);
+        const lswg_node_ref_t second =
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 2U, 2U, 1U);
+        lswg_status_t status = synthetic_add_edge(
+            graph, first, second, LSWG_EDGE_TASK_WAITS_JOIN,
+            LSWG_EDGE_AND_REQUIRED | LSWG_EDGE_GENERATION_STABLE);
+
+        if (status == LSWG_STATUS_OK) {
+            status = synthetic_add_edge(
+                graph, second, first, LSWG_EDGE_TASK_WAITS_JOIN,
+                LSWG_EDGE_AND_REQUIRED | LSWG_EDGE_GENERATION_STABLE);
+        }
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    if ((node_count & 1U) != 0U) {
+        const lswg_node_ref_t last = synthetic_ref(
+            LSWG_NODE_TASK, (uint64_t)node_count, 2U, 1U);
+
+        return synthetic_add_edge(
+            graph, last, last, LSWG_EDGE_TASK_WAITS_JOIN,
+            LSWG_EDGE_AND_REQUIRED | LSWG_EDGE_GENERATION_STABLE);
+    }
+    return LSWG_STATUS_OK;
+}
+
+static lswg_status_t
+populate_or_fanout_open(lswg_graph_t *graph, size_t node_count)
+{
+    const lswg_node_ref_t task =
+        synthetic_ref(LSWG_NODE_TASK, 1U, 3U, 1U);
+    const lswg_node_ref_t select =
+        synthetic_ref(LSWG_NODE_SELECT, 1U, 3U, 0U);
+    size_t index;
+    lswg_status_t status;
+
+    status = synthetic_add_node(graph, task, 0U);
+    if (status == LSWG_STATUS_OK) {
+        status = synthetic_add_node(graph, select, 0U);
+    }
+    if (status == LSWG_STATUS_OK) {
+        status = synthetic_add_edge(
+            graph, task, select, LSWG_EDGE_TASK_WAITS_SELECT,
+            LSWG_EDGE_AND_REQUIRED | LSWG_EDGE_GENERATION_STABLE);
+    }
+    if (status != LSWG_STATUS_OK) {
+        return status;
+    }
+
+    for (index = 2U; index < node_count; ++index) {
+        const lswg_node_ref_t source = synthetic_ref(
+            LSWG_NODE_EXTERNAL_SOURCE, (uint64_t)index - 1U, 1U, 0U);
+
+        status = synthetic_add_node(graph, source, LSWG_NODE_EXTERNAL_OPEN);
+        if (status == LSWG_STATUS_OK) {
+            status = synthetic_add_edge(
+                graph, select, source, LSWG_EDGE_SELECT_ALTERNATIVE,
+                LSWG_EDGE_OR_ALTERNATIVE | LSWG_EDGE_EXTERNAL_OPEN |
+                    LSWG_EDGE_GENERATION_STABLE);
+        }
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    return LSWG_STATUS_OK;
+}
+
+static lswg_status_t
+populate_mostly_open_with_orphan(lswg_graph_t *graph, size_t node_count)
+{
+    size_t index;
+
+    for (index = 0U; index < node_count; ++index) {
+        const uint32_t flags =
+            index + 1U == node_count ? LSWG_NODE_RUNNABLE : 0U;
+        const lswg_status_t status = synthetic_add_node(
+            graph,
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 1U, 4U, 1U),
+            flags);
+
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    for (index = 1U; index + 1U < node_count; ++index) {
+        const lswg_status_t status = synthetic_add_edge(
+            graph,
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)index + 1U, 4U, 1U),
+            synthetic_ref(LSWG_NODE_TASK, (uint64_t)node_count, 4U, 1U),
+            LSWG_EDGE_TASK_WAITS_JOIN,
+            LSWG_EDGE_AND_REQUIRED | LSWG_EDGE_GENERATION_STABLE);
+
+        if (status != LSWG_STATUS_OK) {
+            return status;
+        }
+    }
+    return LSWG_STATUS_OK;
+}
+
+lswg_status_t
+lswg_synthetic_populate(lswg_graph_t *graph, size_t node_count,
+                        lswg_synthetic_profile_t profile)
+{
+    size_t required_edges;
+    lswg_status_t status;
+
+    if (graph == NULL || profile < LSWG_SYNTHETIC_LONG_CHAIN_OPEN ||
+        profile > LSWG_SYNTHETIC_MOSTLY_OPEN_WITH_ORPHAN) {
+        return LSWG_STATUS_INVALID_ARGUMENT;
+    }
+    switch (profile) {
+    case LSWG_SYNTHETIC_LONG_CHAIN_OPEN:
+        if (node_count < 2U) {
+            return LSWG_STATUS_INVALID_ARGUMENT;
+        }
+        required_edges = node_count - 1U;
+        break;
+    case LSWG_SYNTHETIC_MANY_SCCS:
+        if (node_count == 0U) {
+            return LSWG_STATUS_INVALID_ARGUMENT;
+        }
+        required_edges = node_count;
+        break;
+    case LSWG_SYNTHETIC_OR_FANOUT_OPEN:
+        if (node_count < 3U) {
+            return LSWG_STATUS_INVALID_ARGUMENT;
+        }
+        required_edges = node_count - 1U;
+        break;
+    case LSWG_SYNTHETIC_MOSTLY_OPEN_WITH_ORPHAN:
+        if (node_count < 2U) {
+            return LSWG_STATUS_INVALID_ARGUMENT;
+        }
+        required_edges = node_count - 2U;
+        break;
+    default:
+        return LSWG_STATUS_INVALID_ARGUMENT;
+    }
+    if (node_count > graph->node_capacity ||
+        required_edges > graph->edge_capacity) {
+        return LSWG_STATUS_CAPACITY;
+    }
+
+    lswg_graph_reset(graph);
+    switch (profile) {
+    case LSWG_SYNTHETIC_LONG_CHAIN_OPEN:
+        status = populate_long_chain_open(graph, node_count);
+        break;
+    case LSWG_SYNTHETIC_MANY_SCCS:
+        status = populate_many_sccs(graph, node_count);
+        break;
+    case LSWG_SYNTHETIC_OR_FANOUT_OPEN:
+        status = populate_or_fanout_open(graph, node_count);
+        break;
+    case LSWG_SYNTHETIC_MOSTLY_OPEN_WITH_ORPHAN:
+        status = populate_mostly_open_with_orphan(graph, node_count);
+        break;
+    default:
+        status = LSWG_STATUS_INVALID_ARGUMENT;
+        break;
+    }
+    if (status != LSWG_STATUS_OK) {
+        lswg_graph_reset(graph);
+    }
+    return status;
+}
