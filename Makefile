@@ -39,6 +39,10 @@ CLEAN_FILES = \
 	server_flood \
 	test_lcwe_model \
 	bench_lcwe_model \
+	test_lrpa_core \
+	test_lrpa_faults \
+	bench_lrpa \
+	bench_lrpa_faults \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -85,6 +89,10 @@ CLEAN_FILES = \
 	server_flood.exe \
 	test_lcwe_model.exe \
 	bench_lcwe_model.exe \
+	test_lrpa_core.exe \
+	test_lrpa_faults.exe \
+	bench_lrpa.exe \
+	bench_lrpa_faults.exe \
 	test_abi_contract.exe \
 	test_abi_compat.exe \
 	test_connect_io.exe \
@@ -538,6 +546,20 @@ LCWE_MODEL_TEST_OBJS = \
 	$(OBJDIR)/experiments/lcwe/test_lcwe_model.o
 LCWE_MODEL_BENCH_OBJS = \
 	$(OBJDIR)/experiments/lcwe/bench_lcwe_model.o
+LRPA_FAULT_OBJDIR ?= $(OBJDIR)-lrpa-faults
+LRPA_FAULT_BUILD_SIGNATURE = $(LRPA_FAULT_OBJDIR)/.build-signature
+LRPA_CORE_SOURCES = \
+	experiments/lrpa/lrpa_core.c \
+	experiments/lrpa/lrpa_platform.c \
+	experiments/lrpa/lrpa_trace.c \
+	experiments/lrpa/lrpa_gadget_select.c \
+	experiments/lrpa/lrpa_oracle.c
+LRPA_CORE_OBJS = $(patsubst %.c,$(OBJDIR)/%.o,$(LRPA_CORE_SOURCES))
+LRPA_TEST_CORE_OBJS = $(OBJDIR)/experiments/lrpa/test_lrpa_core.o
+LRPA_BENCH_OBJS = $(OBJDIR)/experiments/lrpa/bench_lrpa.o
+LRPA_FAULT_CORE_OBJS = $(patsubst %.c,$(LRPA_FAULT_OBJDIR)/%.o,$(LRPA_CORE_SOURCES))
+LRPA_FAULT_TEST_OBJS = $(LRPA_FAULT_OBJDIR)/experiments/lrpa/test_lrpa_faults.o
+LRPA_FAULT_BENCH_OBJS = $(LRPA_FAULT_OBJDIR)/experiments/lrpa/bench_lrpa.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 BUILD_OBJS = \
@@ -572,7 +594,10 @@ BUILD_OBJS = \
 	$(TEST_SHARED_LOAD_OBJS) \
 	$(LCWE_MODEL_CORE_OBJS) \
 	$(LCWE_MODEL_TEST_OBJS) \
-	$(LCWE_MODEL_BENCH_OBJS)
+	$(LCWE_MODEL_BENCH_OBJS) \
+	$(LRPA_CORE_OBJS) \
+	$(LRPA_TEST_CORE_OBJS) \
+	$(LRPA_BENCH_OBJS)
 LINK_TARGETS = \
 	demo \
 	stress \
@@ -583,6 +608,10 @@ LINK_TARGETS = \
 	server_flood \
 	test_lcwe_model \
 	bench_lcwe_model \
+	test_lrpa_core \
+	test_lrpa_faults \
+	bench_lrpa \
+	bench_lrpa_faults \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -608,7 +637,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-lrpa test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -623,7 +652,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|test_lrpa_core|test_lrpa_faults|test_lrpa_runner|test_lrpa_shrinker|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -634,6 +663,10 @@ WINDOWS_CMAKE_TARGETS = \
 	server_flood \
 	test_lcwe_model \
 	bench_lcwe_model \
+	test_lrpa_core \
+	test_lrpa_faults \
+	bench_lrpa \
+	bench_lrpa_faults \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -673,6 +706,10 @@ test check: windows-cmake-test
 test-lcwe-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lcwe_model bench_lcwe_model
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_lcwe_model|test_bench_lcwe_model" $(WINDOWS_CTEST_ARGS)
+
+test-lrpa: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lrpa_core test_lrpa_faults bench_lrpa bench_lrpa_faults
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_lrpa_core|test_lrpa_faults|test_lrpa_runner|test_lrpa_shrinker" $(WINDOWS_CTEST_ARGS)
 
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
@@ -770,11 +807,30 @@ $(TESTHOOK_BUILD_SIGNATURE): FORCE
 		mv "$$tmp" "$@"; \
 	fi
 
+$(LRPA_FAULT_BUILD_SIGNATURE): FORCE
+	@mkdir -p $(dir $@)
+	@tmp="$@.$$$$.tmp"; \
+	{ \
+		printf 'CC=%s\n' '$(CC)'; \
+		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS) -DLRPA_ENABLE_FAULTS=1'; \
+		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'LDLIBS=%s\n' '$(SERVER_FLOOD_LDLIBS)'; \
+		printf 'LRPA_FAULT_OBJDIR=%s\n' '$(LRPA_FAULT_OBJDIR)'; \
+		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
+	} > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" "$@"; \
+	fi
+
 $(BUILD_OBJS): $(BUILD_SIGNATURE)
 
 $(SHARED_RUNTIME_OBJS): $(SHARED_BUILD_SIGNATURE)
 
 $(TESTHOOK_RUNTIME_OVERRIDE_OBJS): $(TESTHOOK_BUILD_SIGNATURE)
+
+$(LRPA_FAULT_CORE_OBJS) $(LRPA_FAULT_TEST_OBJS) $(LRPA_FAULT_BENCH_OBJS): $(LRPA_FAULT_BUILD_SIGNATURE)
 
 $(LINK_TARGETS): %: %.link-signature
 
@@ -823,9 +879,13 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_lcwe_model bench_lcwe_model test_lrpa_core test_lrpa_faults bench_lrpa bench_lrpa_faults test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
+	./test_lrpa_core
+	./test_lrpa_faults
+	LRPA_BENCH_BINARY=./bench_lrpa LRPA_FAULT_BENCH_BINARY=./bench_lrpa_faults python3 scripts/test_run_lrpa.py
+	LRPA_FAULT_BENCH_BINARY=./bench_lrpa_faults python3 scripts/test_shrink_lrpa.py
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -1950,6 +2010,12 @@ test-lcwe-model: test_lcwe_model bench_lcwe_model
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 
+test-lrpa: test_lrpa_core test_lrpa_faults bench_lrpa bench_lrpa_faults
+	./test_lrpa_core
+	./test_lrpa_faults
+	LRPA_BENCH_BINARY=./bench_lrpa LRPA_FAULT_BENCH_BINARY=./bench_lrpa_faults python3 scripts/test_run_lrpa.py
+	LRPA_FAULT_BENCH_BINARY=./bench_lrpa_faults python3 scripts/test_shrink_lrpa.py
+
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
 		--binary ./bench_lcwe_model \
@@ -2022,6 +2088,18 @@ test_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS)
 
 bench_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+test_lrpa_core: $(LRPA_CORE_OBJS) $(LRPA_TEST_CORE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LRPA_CORE_OBJS) $(LRPA_TEST_CORE_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+test_lrpa_faults: $(LRPA_FAULT_CORE_OBJS) $(LRPA_FAULT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LRPA_FAULT_CORE_OBJS) $(LRPA_FAULT_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+bench_lrpa: $(LRPA_CORE_OBJS) $(LRPA_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LRPA_CORE_OBJS) $(LRPA_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+bench_lrpa_faults: $(LRPA_FAULT_CORE_OBJS) $(LRPA_FAULT_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LRPA_FAULT_CORE_OBJS) $(LRPA_FAULT_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
 
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
@@ -2121,6 +2199,18 @@ $(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
 		experiments/lcwe/lcwe_model_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe -c -o $@ $<
+
+$(OBJDIR)/experiments/lrpa/%.o: experiments/lrpa/%.c \
+		experiments/lrpa/lrpa.h \
+		experiments/lrpa/lrpa_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lrpa -c -o $@ $<
+
+$(LRPA_FAULT_OBJDIR)/experiments/lrpa/%.o: experiments/lrpa/%.c \
+		experiments/lrpa/lrpa.h \
+		experiments/lrpa/lrpa_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLRPA_ENABLE_FAULTS=1 $(CFLAGS) -Iexperiments/lrpa -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)

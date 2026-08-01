@@ -530,6 +530,58 @@ foreach(LLAM_LCWE_MODEL_TARGET test_lcwe_model bench_lcwe_model)
     endif()
 endforeach()
 
+set(LLAM_LRPA_SOURCES
+    experiments/lrpa/lrpa_core.c
+    experiments/lrpa/lrpa_platform.c
+    experiments/lrpa/lrpa_trace.c
+    experiments/lrpa/lrpa_gadget_select.c
+    experiments/lrpa/lrpa_oracle.c
+)
+
+add_executable(test_lrpa_core
+    ${LLAM_LRPA_SOURCES}
+    experiments/lrpa/test_lrpa_core.c
+)
+add_executable(test_lrpa_faults
+    ${LLAM_LRPA_SOURCES}
+    experiments/lrpa/test_lrpa_faults.c
+)
+add_executable(bench_lrpa
+    ${LLAM_LRPA_SOURCES}
+    experiments/lrpa/bench_lrpa.c
+)
+add_executable(bench_lrpa_faults
+    ${LLAM_LRPA_SOURCES}
+    experiments/lrpa/bench_lrpa.c
+)
+target_compile_definitions(test_lrpa_faults PRIVATE LRPA_ENABLE_FAULTS=1)
+target_compile_definitions(bench_lrpa_faults PRIVATE LRPA_ENABLE_FAULTS=1)
+foreach(LLAM_LRPA_TARGET
+        test_lrpa_core
+        test_lrpa_faults
+        bench_lrpa
+        bench_lrpa_faults)
+    target_include_directories(${LLAM_LRPA_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lrpa
+    )
+    target_link_libraries(${LLAM_LRPA_TARGET} PRIVATE Threads::Threads)
+    target_compile_definitions(${LLAM_LRPA_TARGET} PRIVATE _GNU_SOURCE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${LLAM_LRPA_TARGET} PRIVATE
+            _XOPEN_SOURCE=700
+            _DARWIN_C_SOURCE
+        )
+    elseif(LLAM_SYSTEM_IS_BSD)
+        target_compile_definitions(${LLAM_LRPA_TARGET} PRIVATE
+            ${LLAM_BSD_FEATURE_DEFINITIONS}
+        )
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${LLAM_LRPA_TARGET} PRIVATE
+            _WIN32_WINNT=0x0A00
+        )
+    endif()
+endforeach()
+
 add_executable(test_abi_contract
     tests/test_abi_contract.c
 )
@@ -728,6 +780,8 @@ add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
+add_test(NAME test_lrpa_core COMMAND test_lrpa_core)
+add_test(NAME test_lrpa_faults COMMAND test_lrpa_faults)
 if(Python3_FOUND)
     add_test(
         NAME test_bench_lcwe_model
@@ -735,6 +789,21 @@ if(Python3_FOUND)
                 "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"
                 ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcwe_model.py
+    )
+    add_test(
+        NAME test_lrpa_runner
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LRPA_BENCH_BINARY=$<TARGET_FILE:bench_lrpa>"
+                "LRPA_FAULT_BENCH_BINARY=$<TARGET_FILE:bench_lrpa_faults>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_run_lrpa.py
+    )
+    add_test(
+        NAME test_lrpa_shrinker
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LRPA_FAULT_BENCH_BINARY=$<TARGET_FILE:bench_lrpa_faults>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_shrink_lrpa.py
     )
 endif()
 add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)
