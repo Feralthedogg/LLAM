@@ -93,17 +93,20 @@ forced mixed-route escape, intrusive overflow fallback, and physical
 representation addresses. An invalid site is materialized as an immutable
 `FAIL/EPROTO` fact as required by the LCCF-CFS semantic contract.
 
-Three benchmark defects were found before the final run:
+Three benchmark-harness defects were found during the experiment and its
+subsequent cross-platform validation. The current audit still reparses the
+retained primary rows and reproduces `SELECT_B`; the harness fixes are:
 
 - a wall-clock-derived fairness p99 was incorrectly compared as a logical
   identity metric; it is now validated independently while deterministic
   fairness sample counts remain equal;
-- one transiently slow calibration window could approve too few rounds; the
-  same round count must now satisfy the minimum duration twice consecutively.
+- transiently slow calibration windows could approve too few rounds; the same
+  round count must first satisfy the minimum duration twice consecutively,
+  then calibration doubles the rounds once and reconfirms the guarded window
+  twice on every platform;
 - a sub-millisecond Windows calibration probe could observe zero elapsed
-  `GetProcessTimes` ticks; calibration now treats that as insufficient rounds,
-  doubles once more after two qualifying Windows probes, reconfirms the wider
-  window, and still requires a positive CPU delta for every emitted sample.
+  `GetProcessTimes` ticks; calibration treats that as insufficient rounds and
+  still requires a positive CPU delta for every emitted sample.
 
 Linux UBSan also exposed a representation test that read event storage after
 an intentionally failed publication. The test now publishes a valid event
