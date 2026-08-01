@@ -55,78 +55,6 @@ static void run_bind_precommit_hook(void) {
     }
 }
 
-static bool fd_is_valid(llam_fd_t fd) {
-#if LLAM_PLATFORM_WINDOWS
-    return !LLAM_FD_IS_INVALID(fd);
-#else
-    return fd >= 0;
-#endif
-}
-
-static bool bindings_are_valid(
-    const leir_phase0_program_t *program,
-    const leir_phase0_value_t *values) {
-    size_t i;
-
-    for (i = 0U; i < program->slot_count; i += 1U) {
-        switch (program->slot_kinds[i]) {
-            case LEIR_PHASE0_SLOT_FD:
-                if (!fd_is_valid(values[i].fd)) {
-                    return false;
-                }
-                break;
-            case LEIR_PHASE0_SLOT_MUT_BUFFER:
-            case LEIR_PHASE0_SLOT_CONST_BUFFER:
-                if (values[i].buffer.data == NULL &&
-                    values[i].buffer.size != 0U) {
-                    return false;
-                }
-                break;
-            case LEIR_PHASE0_SLOT_U64:
-            case LEIR_PHASE0_SLOT_I64:
-                break;
-        }
-    }
-
-    for (i = 0U; i < program->node_count; i += 1U) {
-        const leir_phase0_node_desc_t *node = &program->nodes[i];
-        leir_phase0_slot_kind_t length_kind;
-        uint64_t requested;
-        size_t capacity;
-
-        switch (node->opcode) {
-            case LEIR_PHASE0_OP_READ:
-            case LEIR_PHASE0_OP_READ_EXACT:
-            case LEIR_PHASE0_OP_WRITE:
-            case LEIR_PHASE0_OP_WRITE_ALL:
-                length_kind = program->slot_kinds[node->length_slot];
-                if (length_kind == LEIR_PHASE0_SLOT_I64) {
-                    if (values[node->length_slot].i64 < 0) {
-                        break;
-                    }
-                    requested =
-                        (uint64_t)values[node->length_slot].i64;
-                } else {
-                    requested = values[node->length_slot].u64;
-                }
-                capacity = values[node->buffer_slot].buffer.size;
-                if (requested > SIZE_MAX ||
-                    (size_t)requested > capacity ||
-                    (requested != 0U &&
-                     values[node->buffer_slot].buffer.data == NULL)) {
-                    return false;
-                }
-                break;
-            case LEIR_PHASE0_OP_RETURN:
-            case LEIR_PHASE0_OP_FAIL:
-                break;
-            default:
-                return false;
-        }
-    }
-    return true;
-}
-
 static uint64_t advance_activation_generation(
     leir_phase0_instance_t *instance) {
     uint_fast64_t current = atomic_load_explicit(
@@ -221,7 +149,7 @@ int leir_phase0_instance_bind(
         saved_errno = EBUSY;
         goto done;
     }
-    if (!bindings_are_valid(program, values)) {
+    if (!leir_phase0_bindings_are_valid(program, values)) {
         goto done;
     }
     run_bind_precommit_hook();
@@ -407,6 +335,10 @@ static bool node_is_write(const leir_phase0_node_desc_t *node) {
            node->opcode == LEIR_PHASE0_OP_WRITE_ALL;
 }
 
+static bool node_is_connect(const leir_phase0_node_desc_t *node) {
+    return node->opcode == LEIR_PHASE0_OP_CONNECT;
+}
+
 static bool node_is_exact(const leir_phase0_node_desc_t *node) {
     return node->opcode == LEIR_PHASE0_OP_READ_EXACT ||
            node->opcode == LEIR_PHASE0_OP_WRITE_ALL;
@@ -429,7 +361,8 @@ static int requested_length(
     uint64_t requested;
 
     if (instance == NULL || node == NULL || requested_out == NULL ||
-        (!node_is_read(node) && !node_is_write(node))) {
+        (!node_is_read(node) && !node_is_write(node) &&
+         !node_is_connect(node))) {
         return fail_with_errno(EINVAL);
     }
 
@@ -496,6 +429,7 @@ static int current_io_args(
 static int prepare_request(
     leir_phase0_instance_t *instance,
     llam_io_req_t *req) {
+    const leir_phase0_node_desc_t *node;
     llam_fd_t fd;
     void *buffer;
     size_t count;
@@ -503,8 +437,38 @@ static int prepare_request(
     bool socket_io;
     int saved_errno;
 
-    if (req == NULL ||
-        current_io_args(
+    if (instance == NULL || req == NULL) {
+        return fail_with_errno(EINVAL);
+    }
+    node = &instance->program->nodes[instance->current_node];
+    if (node_is_connect(node)) {
+        size_t address_length;
+
+        if (requested_length(
+                instance, node, &address_length) != 0 ||
+            address_length == 0U ||
+            address_length > sizeof(struct sockaddr_storage) ||
+            address_length >
+                instance->slots[node->buffer_slot].buffer.size ||
+            instance->slots[node->buffer_slot].buffer.data == NULL) {
+            return fail_with_errno(EINVAL);
+        }
+        req->kind = LLAM_IO_KIND_CONNECT;
+        req->fd = instance->slots[node->fd_slot].fd;
+        req->buf = NULL;
+        req->count = 0U;
+        req->addr = (struct sockaddr *)
+            instance->slots[node->buffer_slot].buffer.data;
+        req->addrlen = NULL;
+        req->addr_len = (socklen_t)address_length;
+        req->recv_watch = NULL;
+        req->use_recv_op = false;
+        req->use_send_op = false;
+        req->completion_sink = leir_phase0_completion_sink;
+        req->completion_sink_context = instance;
+        return 0;
+    }
+    if (current_io_args(
             instance, &fd, &buffer, &count, &write_op) != 0) {
         return -1;
     }
@@ -551,7 +515,8 @@ static void mark_current_io_cancelled(
     const leir_phase0_node_desc_t *node =
         &instance->program->nodes[instance->current_node];
 
-    if (node_is_read(node) || node_is_write(node)) {
+    if (node_is_read(node) || node_is_write(node) ||
+        node_is_connect(node)) {
         instance->slots[node->result_slot].i64 = -1;
     }
     instance->terminal_error = ECANCELED;
@@ -632,6 +597,24 @@ static int leir_phase0_apply_result(
     size_t requested;
     size_t remaining;
 
+    if (node_is_connect(node)) {
+        if (error_code != 0 || result < 0) {
+            instance->slots[node->result_slot].i64 = -1;
+            instance->terminal_error =
+                error_code != 0 ? error_code : EIO;
+            instance->current_node = node->on_error;
+        } else if (result == 0) {
+            instance->slots[node->result_slot].i64 = 0;
+            instance->terminal_error = 0;
+            instance->current_node = node->on_success;
+        } else {
+            instance->slots[node->result_slot].i64 = -1;
+            instance->terminal_error = EPROTO;
+            instance->current_node = node->on_error;
+        }
+        instance->node_progress = 0U;
+        return 0;
+    }
     if ((!node_is_read(node) && !node_is_write(node)) ||
         requested_length(instance, node, &requested) != 0 ||
         instance->node_progress > requested) {
@@ -802,6 +785,10 @@ static leir_phase0_advance_result_t leir_phase0_advance_direct(
         if (current_node_is_terminal(instance)) {
             (void)publish_current_terminal(instance);
             return LEIR_PHASE0_ADVANCE_TERMINAL;
+        }
+        if (node_is_connect(
+                &instance->program->nodes[instance->current_node])) {
+            return LEIR_PHASE0_ADVANCE_NEEDS_BACKEND;
         }
         if (instance->opts.force_backend) {
             return LEIR_PHASE0_ADVANCE_NEEDS_BACKEND;

@@ -82,6 +82,22 @@ void llam_cldeque_init(llam_cldeque_t *deque) {
     }
 }
 
+/*
+ * top and bottom are logical counters, not ordered array indices. Unsigned
+ * subtraction preserves their bounded distance when either counter crosses
+ * SIZE_MAX. Every valid snapshot is in [0, LLAM_NORM_QUEUE_CAP]; larger
+ * modular distances represent an empty/lost-race snapshot, not queued work.
+ */
+static size_t llam_cldeque_distance(size_t top, size_t bottom) {
+    return bottom - top;
+}
+
+static bool llam_cldeque_snapshot_has_work(size_t top, size_t bottom) {
+    size_t distance = llam_cldeque_distance(top, bottom);
+
+    return distance != 0U && distance <= LLAM_NORM_QUEUE_CAP;
+}
+
 /**
  * @brief Push a task onto the owner side of a Chase-Lev deque.
  *
@@ -91,6 +107,7 @@ void llam_cldeque_init(llam_cldeque_t *deque) {
  */
 bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
     size_t bottom;
+    size_t distance;
     size_t top;
 
     if (deque == NULL || task == NULL) {
@@ -99,7 +116,8 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
-    if (bottom - top >= LLAM_NORM_QUEUE_CAP) {
+    distance = llam_cldeque_distance(top, bottom);
+    if (distance >= LLAM_NORM_QUEUE_CAP) {
         return false;
     }
 
@@ -120,6 +138,7 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
  */
 static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     size_t bottom;
+    size_t distance;
     size_t top;
     llam_task_t *task;
 
@@ -128,15 +147,12 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     }
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
-    if (bottom == 0U) {
-        return NULL;
-    }
-
     bottom -= 1U;
     atomic_store_explicit(&deque->bottom, bottom, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     top = atomic_load_explicit(&deque->top, memory_order_relaxed);
-    if (top > bottom) {
+    distance = llam_cldeque_distance(top, bottom);
+    if (distance >= LLAM_NORM_QUEUE_CAP) {
         atomic_store_explicit(&deque->bottom, top, memory_order_relaxed);
         return NULL;
     }
@@ -183,7 +199,7 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
     atomic_thread_fence(memory_order_seq_cst);
     bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
-    if (top >= bottom) {
+    if (!llam_cldeque_snapshot_has_work(top, bottom)) {
         return NULL;
     }
 
@@ -230,7 +246,7 @@ static bool llam_cldeque_has_work(llam_cldeque_t *deque) {
     }
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
     bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
-    return top < bottom;
+    return llam_cldeque_snapshot_has_work(top, bottom);
 }
 
 /**

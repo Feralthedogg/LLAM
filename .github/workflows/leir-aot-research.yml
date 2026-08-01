@@ -1,0 +1,249 @@
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+# Copyright 2026 Feralthedogg
+
+name: LEIR AOT Segment Research
+
+env:
+  LLAM_BUILD_RESEARCH: "1"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/leir-aot-research.yml"
+      - "experiments/leir/**"
+      - "src/io/api/issue.c"
+      - "src/io/linux/**"
+      - "config/llam-sources.json"
+      - "scripts/audit_build_manifests.py"
+      - "scripts/audit_license_headers.py"
+      - "scripts/test_audit_license_headers.py"
+      - "scripts/bench_leir_aot_connect.py"
+      - "scripts/test_bench_leir_aot_connect.py"
+      - "scripts/gen_leir_aot_fixture.py"
+      - "scripts/test_gen_leir_aot_fixture.py"
+      - "scripts/test_research_build_boundary.py"
+      - "scripts/verify_linux.sh"
+      - "docs/operations/benchmarks.md"
+      - "docs/superpowers/**"
+      - "CMakeLists.txt"
+      - "Makefile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leir-aot-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-contract:
+    name: linux-x86_64-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Linux research toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            liburing-dev \
+            pkg-config
+
+      - name: Configure evidence directory
+        run: |
+          echo "OUT_DIR=$RUNNER_TEMP/leir-aot-connect" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/leir-aot-connect"
+
+      - name: Record exact source and environment
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          {
+            echo "source_sha=$GITHUB_SHA"
+            uname -a
+            lscpu
+            gcc --version
+            clang --version
+            cmake --version
+            python3 --version
+            pkg-config --modversion liburing
+            cat /proc/sys/kernel/io_uring_disabled
+          } > "$OUT_DIR/environment.txt"
+
+      - name: Verify generated source and license contract
+        run: |
+          python3 scripts/gen_leir_aot_fixture.py \
+            --output-dir experiments/leir/generated \
+            --check
+          python3 -m unittest \
+            scripts/test_gen_leir_aot_fixture.py \
+            scripts/test_bench_leir_aot_connect.py \
+            scripts/test_audit_license_headers.py -v
+          python3 scripts/audit_build_manifests.py --root . --check
+          python3 scripts/audit_license_headers.py --root . --check
+
+      - name: GCC AOT correctness gate
+        shell: bash
+        run: |
+          set -o pipefail
+          make clean
+          make -j2 LLAM_BUILD_RESEARCH=1 \
+            test_leir_phase0 \
+            test_leir_connect \
+            test_leir_aot_plan \
+            test_leir_aot_module \
+            test_leir_aot_c_consumer \
+            test_leir_aot_integration \
+            test_leir_aot_linux_unit \
+            test_leir_aot_ownership \
+            test_leir_native_linux \
+            bench_leir_aot_connect \
+            CC=gcc 2>&1 | tee "$OUT_DIR/gcc-build.log"
+          ./test_leir_phase0 2>&1 | tee "$OUT_DIR/phase0.log"
+          ./test_leir_connect 2>&1 | tee "$OUT_DIR/connect.log"
+          ./test_leir_aot_plan 2>&1 | tee "$OUT_DIR/aot-plan.log"
+          ./test_leir_aot_module 2>&1 | tee "$OUT_DIR/aot-module.log"
+          ./test_leir_aot_c_consumer \
+            2>&1 | tee "$OUT_DIR/aot-c-consumer.log"
+          ./test_leir_aot_linux_unit \
+            2>&1 | tee "$OUT_DIR/aot-linux-unit.log"
+          ./test_leir_aot_ownership \
+            2>&1 | tee "$OUT_DIR/aot-ownership.log"
+          ./test_leir_native_linux --unit-only \
+            2>&1 | tee "$OUT_DIR/native-linux-unit.log"
+          set +e
+          ./test_leir_aot_integration \
+            2>&1 | tee "$OUT_DIR/aot-integration.log"
+          integration_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$integration_rc" -ne 0 ] && [ "$integration_rc" -ne 77 ]; then
+            exit "$integration_rc"
+          fi
+          echo "integration_rc=$integration_rc" \
+            > "$OUT_DIR/integration-status.txt"
+
+      - name: Clang CMake contract gate
+        run: |
+          cmake -S . -B object/leir-aot-clang \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_ASM_COMPILER=clang
+          cmake --build object/leir-aot-clang --target \
+            test_leir_aot_plan \
+            test_leir_aot_module \
+            test_leir_aot_c_consumer \
+            test_leir_aot_integration \
+            test_leir_aot_linux_unit \
+            test_leir_aot_ownership \
+            test_leir_connect \
+            bench_leir_aot_connect \
+            -j2
+          ctest --test-dir object/leir-aot-clang \
+            --output-on-failure \
+            --timeout 180 \
+            -R "test_leir_aot|test_leir_connect|test_bench_leir_aot_connect"
+
+      - name: ASan and UBSan AOT gate
+        run: |
+          cmake -S . -B object/leir-aot-sanitize \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_ASM_COMPILER=gcc \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build object/leir-aot-sanitize --target \
+            test_leir_aot_plan \
+            test_leir_aot_module \
+            test_leir_aot_c_consumer \
+            test_leir_aot_integration \
+            test_leir_aot_linux_unit \
+            test_leir_aot_ownership \
+            test_leir_connect \
+            -j2
+          env \
+            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+            ctest --test-dir object/leir-aot-sanitize \
+              --output-on-failure \
+              --timeout 180 \
+              -R "test_leir_aot|test_leir_connect"
+
+      - name: Prove research does not enter packages
+        run: |
+          if make -n LLAM_BUILD_RESEARCH=0 bench_leir_aot_connect \
+              > "$OUT_DIR/research-off.stdout" \
+              2> "$OUT_DIR/research-off.stderr"; then
+            echo "research target was available with research disabled" >&2
+            exit 1
+          fi
+          grep "research targets require LLAM_BUILD_RESEARCH=1" \
+            "$OUT_DIR/research-off.stderr"
+          if make -n LLAM_BUILD_RESEARCH=1 package \
+              > "$OUT_DIR/package.stdout" \
+              2> "$OUT_DIR/package.stderr"; then
+            echo "research-enabled package was accepted" >&2
+            exit 1
+          fi
+          grep "research-enabled builds cannot be packaged" \
+            "$OUT_DIR/package.stderr"
+          python3 -m unittest \
+            scripts/test_research_build_boundary.py -v
+
+      - name: Collect specialized mechanism evidence
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/bench_leir_aot_connect.py \
+            --binary ./bench_leir_aot_connect \
+            --output-dir "$OUT_DIR/screen" \
+            --families tcp,unix \
+            --concurrency 1,16 \
+            --payloads 64,4096 \
+            --activations 256 \
+            --samples 5 \
+            2> >(tee "$OUT_DIR/screen-stderr.log" >&2) |
+            tee "$OUT_DIR/screen-stdout.log"
+          screen_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$screen_rc" -ne 0 ] && [ "$screen_rc" -ne 3 ]; then
+            exit "$screen_rc"
+          fi
+          echo "screen_rc=$screen_rc" > "$OUT_DIR/screen-status.txt"
+          test -f "$OUT_DIR/screen/raw.csv"
+          test -f "$OUT_DIR/screen/summary.csv"
+          test -f "$OUT_DIR/screen/metadata.json"
+          test -f "$OUT_DIR/screen/verdict.json"
+          test -f "$OUT_DIR/screen/summary.md"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          verdict = json.loads(
+              (Path(os.environ["OUT_DIR"]) / "screen/verdict.json")
+              .read_text(encoding="utf-8")
+          )
+          assert verdict["scope"] == "SPECIALIZED"
+          assert verdict["release_authorized"] is False
+          assert verdict["release_gate"]["verdict"] == "BLOCKED"
+          PY
+
+      - name: Upload AOT research evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: leir-aot-connect-linux-x86_64
+          path: ${{ runner.temp }}/leir-aot-connect
+          if-no-files-found: error

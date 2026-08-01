@@ -4,6 +4,7 @@
 #ifndef LLAM_EXPERIMENTS_LEIR_PHASE0_INTERNAL_H
 #define LLAM_EXPERIMENTS_LEIR_PHASE0_INTERNAL_H
 
+#include "runtime_internal.h"
 #include "leir_phase0.h"
 
 #include <stdatomic.h>
@@ -59,6 +60,10 @@ int leir_phase0_program_create_with_allocator(
     const leir_phase0_program_desc_t *desc,
     leir_phase0_program_t **out,
     leir_phase0_calloc_fn calloc_fn);
+
+bool leir_phase0_bindings_are_valid(
+    const leir_phase0_program_t *program,
+    const leir_phase0_value_t *values);
 
 bool leir_phase0_test_inject_completion(
     leir_phase0_instance_t *instance,

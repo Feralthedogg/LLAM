@@ -109,6 +109,12 @@ class LicenseHeaderAuditTests(unittest.TestCase):
         )
         self.assertTrue(
             module.has_license_marker(
+                "// SPDX-License-Identifier: "
+                "LicenseRef-LLAM-Commercial-Reciprocity-1.0\n"
+            )
+        )
+        self.assertTrue(
+            module.has_license_marker(
                 "/* Licensed under the Apache License, "
                 'Version 2.0 (the "License"); */\n'
             )
@@ -116,6 +122,12 @@ class LicenseHeaderAuditTests(unittest.TestCase):
         self.assertFalse(
             module.has_license_marker(
                 "# SPDX-License-Identifier: Apache 2\n"
+            )
+        )
+        self.assertFalse(
+            module.has_license_marker(
+                "// SPDX-License-Identifier: "
+                "LicenseRef-LLAM-Commercial-Reciprocity\n"
             )
         )
         self.assertFalse(module.has_license_marker(late_marker))

@@ -1,0 +1,367 @@
+// SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+// Copyright 2026 Feralthedogg
+
+/**
+ * @file experiments/leir/test_leir_aot_linux_unit.c
+ * @brief Linux SQE encoding and CQE reduction tests for LEIR AOT segments.
+ */
+
+#include <stdio.h>
+
+#if !defined(__linux__)
+
+int main(void) {
+    puts("SKIP: LEIR AOT Linux unit tests require Linux");
+    return 0;
+}
+
+#else
+
+#include "io/linux/runtime_io_segment_linux_internal.h"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <limits.h>
+#include <netinet/in.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/socket.h>
+
+static void fill_connect_write_operations(
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS],
+    struct sockaddr_in *address,
+    unsigned char *payload,
+    uint32_t payload_length) {
+    memset(
+        ops,
+        0,
+        LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS * sizeof(ops[0]));
+    memset(address, 0, sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_port = htons(9U);
+    address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    ops[0].kind = LLAM_LINUX_NATIVE_OP_CONNECT;
+    ops[0].result_slot = 3U;
+    ops[0].fd = 10;
+    ops[0].buffer = address;
+    ops[0].length = (uint32_t)sizeof(*address);
+    ops[1].kind = LLAM_LINUX_NATIVE_OP_SEND;
+    ops[1].result_slot = 6U;
+    ops[1].flags = LLAM_LINUX_NATIVE_OP_PARTIAL_OK;
+    ops[1].fd = 10;
+    ops[1].buffer = payload;
+    ops[1].length = payload_length;
+}
+
+static int test_encodes_connect_and_partial_write_fields(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    struct sockaddr_in address;
+    unsigned char payload[5] = {'h', 'e', 'l', 'l', 'o'};
+    struct io_uring_sqe connect_sqe;
+    struct io_uring_sqe write_sqe;
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure connect-write segment");
+        return 1;
+    }
+    memset(&connect_sqe, 0, sizeof(connect_sqe));
+    memset(&write_sqe, 0, sizeof(write_sqe));
+    llam_linux_native_segment_prepare_sqe(
+        &segment, 0U, &connect_sqe);
+    llam_linux_native_segment_prepare_sqe(
+        &segment, 1U, &write_sqe);
+
+    if (connect_sqe.opcode != IORING_OP_CONNECT ||
+        connect_sqe.fd != ops[0].fd ||
+        connect_sqe.addr !=
+            (uint64_t)(uintptr_t)&address ||
+        connect_sqe.off != sizeof(address) ||
+        connect_sqe.len != 0U ||
+        (connect_sqe.flags & IOSQE_IO_LINK) == 0U ||
+        (connect_sqe.flags & IOSQE_CQE_SKIP_SUCCESS) == 0U ||
+        write_sqe.opcode != IORING_OP_SEND ||
+        write_sqe.fd != ops[1].fd ||
+        write_sqe.addr !=
+            (uint64_t)(uintptr_t)payload ||
+        write_sqe.len != sizeof(payload) ||
+        write_sqe.msg_flags != (uint32_t)MSG_NOSIGNAL ||
+        write_sqe.flags != 0U) {
+        fprintf(stderr, "connect-write SQE fields mismatch\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_rejects_malformed_connect_write_shapes(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    struct sockaddr_in address;
+    unsigned char payload[5] = {'h', 'e', 'l', 'l', 'o'};
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    ops[0].length = 0U;
+    errno = 0;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) == 0 ||
+        errno != EINVAL) {
+        fprintf(stderr, "zero-length connect address was accepted\n");
+        return 1;
+    }
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    ops[0].length = (uint32_t)sizeof(struct sockaddr_storage) + 1U;
+    errno = 0;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) == 0 ||
+        errno != EINVAL) {
+        fprintf(stderr, "oversized connect address was accepted\n");
+        return 1;
+    }
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    ops[1].fd += 1;
+    errno = 0;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) == 0 ||
+        errno != ENOTSUP) {
+        fprintf(stderr, "cross-descriptor connect-write was accepted\n");
+        return 1;
+    }
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    ops[1].flags = 0U;
+    errno = 0;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) == 0 ||
+        errno != ENOTSUP) {
+        fprintf(stderr, "exact connect-write shape was accepted\n");
+        return 1;
+    }
+
+    fill_connect_write_operations(
+        ops, &address, payload, 0U);
+    ops[1].buffer = NULL;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("zero-length ordinary write was rejected");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_connect_write_partial_success_is_visible(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    struct sockaddr_in address;
+    unsigned char payload[5] = {'h', 'e', 'l', 'l', 'o'};
+    int terminal_result = INT_MIN;
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure partial connect-write segment");
+        return 1;
+    }
+    segment.generation = UINT64_C(42);
+    segment.tokens[0].generation = segment.generation;
+    segment.tokens[1].generation = segment.generation;
+    segment.atomic_submission = true;
+    atomic_store_explicit(
+        &segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[1],
+            3,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_OK ||
+        terminal_result != 3 ||
+        segment.first_error != 0 ||
+        segment.suppressed_success_cqes != 1U) {
+        fprintf(stderr, "partial ordinary write was not preserved\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_connect_failure_retires_omitted_write(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    struct sockaddr_in address;
+    unsigned char payload[5] = {'h', 'e', 'l', 'l', 'o'};
+    int terminal_result = INT_MIN;
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure failing connect-write segment");
+        return 1;
+    }
+    segment.generation = UINT64_C(42);
+    segment.tokens[0].generation = segment.generation;
+    segment.tokens[1].generation = segment.generation;
+    segment.atomic_submission = true;
+    atomic_store_explicit(
+        &segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[0],
+            -ECONNREFUSED,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
+        terminal_result != -ECONNREFUSED ||
+        segment.first_error != ECONNREFUSED ||
+        segment.first_error_index != 0U ||
+        segment.observed_operation_mask != UINT64_C(1)) {
+        fprintf(stderr, "connect failure retirement mismatch\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_connect_write_rejects_impossible_results(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    struct sockaddr_in address;
+    unsigned char payload[5] = {'h', 'e', 'l', 'l', 'o'};
+    int terminal_result = INT_MIN;
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure impossible-result segment");
+        return 1;
+    }
+    segment.generation = UINT64_C(42);
+    segment.tokens[0].generation = segment.generation;
+    segment.tokens[1].generation = segment.generation;
+    segment.atomic_submission = true;
+    atomic_store_explicit(
+        &segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[0],
+            1,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
+        terminal_result != -EPROTO) {
+        fprintf(stderr, "positive connect result was not rejected\n");
+        return 1;
+    }
+
+    fill_connect_write_operations(
+        ops, &address, payload, (uint32_t)sizeof(payload));
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("reconfigure impossible-result segment");
+        return 1;
+    }
+    segment.generation = UINT64_C(43);
+    segment.tokens[0].generation = segment.generation;
+    segment.tokens[1].generation = segment.generation;
+    segment.atomic_submission = true;
+    atomic_store_explicit(
+        &segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[1],
+            0,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
+        terminal_result != -EIO) {
+        fprintf(stderr, "zero nonempty write was not rejected\n");
+        return 1;
+    }
+    return 0;
+}
+
+typedef int (*test_fn)(void);
+
+typedef struct test_case {
+    const char *name;
+    test_fn run;
+} test_case_t;
+
+int main(void) {
+    static const test_case_t tests[] = {
+        {"encode connect and partial write fields",
+         test_encodes_connect_and_partial_write_fields},
+        {"reject malformed connect-write shapes",
+         test_rejects_malformed_connect_write_shapes},
+        {"connect-write partial success is visible",
+         test_connect_write_partial_success_is_visible},
+        {"connect failure retires omitted write",
+         test_connect_failure_retires_omitted_write},
+        {"connect-write rejects impossible results",
+         test_connect_write_rejects_impossible_results},
+    };
+    size_t i;
+
+    for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); i += 1U) {
+        if (tests[i].run() != 0) {
+            fprintf(stderr, "FAIL: %s\n", tests[i].name);
+            return 1;
+        }
+    }
+    puts("LEIR AOT Linux unit tests passed");
+    return 0;
+}
+
+#endif

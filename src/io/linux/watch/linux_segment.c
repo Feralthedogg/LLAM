@@ -36,7 +36,8 @@ static bool llam_linux_native_count_is_valid(unsigned op_count) {
 
 static bool llam_linux_native_kind_is_valid(uint16_t kind) {
     return kind == LLAM_LINUX_NATIVE_OP_RECV ||
-           kind == LLAM_LINUX_NATIVE_OP_SEND;
+           kind == LLAM_LINUX_NATIVE_OP_SEND ||
+           kind == LLAM_LINUX_NATIVE_OP_CONNECT;
 }
 
 static bool llam_linux_native_mode_is_valid(
@@ -63,11 +64,16 @@ int llam_linux_native_segment_configure(
     }
     for (i = 0U; i < op_count; i += 1U) {
         unsigned flags = ops[i].flags;
+        bool is_zero_length_partial_write =
+            ops[i].kind == LLAM_LINUX_NATIVE_OP_SEND &&
+            flags == LLAM_LINUX_NATIVE_OP_PARTIAL_OK &&
+            ops[i].length == 0U;
 
         if (!llam_linux_native_kind_is_valid(ops[i].kind) ||
             (flags &
              ~(LLAM_LINUX_NATIVE_OP_FIXED_FILE |
-               LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER)) !=
+               LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER |
+               LLAM_LINUX_NATIVE_OP_PARTIAL_OK)) !=
                 0U ||
             ((flags & LLAM_LINUX_NATIVE_OP_FIXED_FILE) ==
                  0U &&
@@ -84,9 +90,36 @@ int llam_linux_native_segment_configure(
                   0U ||
               ops[i].fixed_buffer_slot >=
                   LLAM_LINUX_NATIVE_FIXED_BUFFER_SLOTS)) ||
-            ops[i].buffer == NULL ||
-            ops[i].length == 0U) {
+            (ops[i].buffer == NULL &&
+             !is_zero_length_partial_write) ||
+            (ops[i].length == 0U &&
+             !is_zero_length_partial_write)) {
             errno = EINVAL;
+            return -1;
+        }
+        if (ops[i].kind == LLAM_LINUX_NATIVE_OP_CONNECT &&
+            ops[i].length > sizeof(struct sockaddr_storage)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (ops[i].kind == LLAM_LINUX_NATIVE_OP_CONNECT &&
+            (i != 0U ||
+             op_count != 2U ||
+             flags != 0U ||
+             ops[1].kind != LLAM_LINUX_NATIVE_OP_SEND ||
+             ops[1].flags != LLAM_LINUX_NATIVE_OP_PARTIAL_OK ||
+             ops[1].fd != ops[i].fd)) {
+            errno = ENOTSUP;
+            return -1;
+        }
+        if ((flags & LLAM_LINUX_NATIVE_OP_PARTIAL_OK) != 0U &&
+            (ops[i].kind != LLAM_LINUX_NATIVE_OP_SEND ||
+             i != 1U ||
+             op_count != 2U ||
+             ops[0].kind != LLAM_LINUX_NATIVE_OP_CONNECT ||
+             flags != LLAM_LINUX_NATIVE_OP_PARTIAL_OK ||
+             ops[0].fd != ops[i].fd)) {
+            errno = ENOTSUP;
             return -1;
         }
         if (ops[i].kind == LLAM_LINUX_NATIVE_OP_RECV &&
@@ -137,7 +170,13 @@ void llam_linux_native_segment_prepare_sqe(
         return;
     }
     op = &segment->ops[index];
-    if ((op->flags &
+    if (op->kind == LLAM_LINUX_NATIVE_OP_CONNECT) {
+        io_uring_prep_connect(
+            sqe,
+            op->fd,
+            (const struct sockaddr *)op->buffer,
+            (socklen_t)op->length);
+    } else if ((op->flags &
          LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER) != 0U) {
         io_uring_prep_read_fixed(
             sqe,

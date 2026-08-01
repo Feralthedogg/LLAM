@@ -687,6 +687,15 @@ endif()
 enable_testing()
 if(Python3_Interpreter_FOUND)
     add_test(
+        NAME test_gen_leir_aot_fixture
+        COMMAND ${Python3_EXECUTABLE}
+            -m unittest scripts/test_gen_leir_aot_fixture.py -v
+    )
+    set_tests_properties(
+        test_gen_leir_aot_fixture
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
         NAME build_manifest
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_build_manifests.py
@@ -764,6 +773,14 @@ endif()
 if(LLAM_BUILD_RESEARCH)
 set(LLAM_LEIR_RESEARCH_TARGETS
     test_leir_phase0
+    test_leir_connect
+    test_leir_aot_plan
+    test_leir_aot_module
+    test_leir_aot_c_consumer
+    test_leir_aot_integration
+    test_leir_aot_linux_unit
+    test_leir_aot_ownership
+    bench_leir_aot_connect
     test_leir_native_plan
     test_leir_native_segment
     bench_leir_native_segment
@@ -772,11 +789,93 @@ set(LLAM_LEIR_RESEARCH_TARGETS
     bench_leir_phase0
 )
 set(LLAM_LEIR_PHASE0_SOURCES
+    experiments/leir/leir_bindings.c
     experiments/leir/leir_engine.c
     experiments/leir/leir_peer_process.c
     experiments/leir/leir_program.c
     experiments/leir/leir_test_support.c
 )
+
+add_executable(test_leir_aot_plan
+    experiments/leir/leir_program.c
+    experiments/leir/leir_aot_plan.c
+    experiments/leir/test_leir_aot_plan.c
+)
+target_include_directories(test_leir_aot_plan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_plan PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_module
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/test_leir_aot_module.c
+)
+target_include_directories(test_leir_aot_module PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_module PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_c_consumer
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/fixtures/leir_aot_c_consumer.c
+)
+target_include_directories(test_leir_aot_c_consumer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+
+add_executable(test_leir_aot_integration
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_linux.c
+    experiments/leir/test_leir_aot_integration.c
+)
+target_include_directories(test_leir_aot_integration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_integration PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_linux_unit
+    experiments/leir/test_leir_aot_linux_unit.c
+)
+target_include_directories(test_leir_aot_linux_unit PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_linux_unit PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_ownership
+    experiments/leir/leir_native_test_fixture.c
+    experiments/leir/test_leir_aot_ownership.c
+)
+target_include_directories(test_leir_aot_ownership PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_ownership PRIVATE llam_runtime)
+
+add_executable(bench_leir_aot_connect
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_linux.c
+    experiments/leir/leir_aot_connect_bench_support.c
+    experiments/leir/leir_bindings.c
+    experiments/leir/leir_engine.c
+    experiments/leir/leir_program.c
+    experiments/leir/bench_leir_aot_connect.c
+)
+target_include_directories(bench_leir_aot_connect PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(bench_leir_aot_connect PRIVATE llam_runtime)
 
 add_executable(test_leir_native_plan
     experiments/leir/leir_program.c
@@ -839,6 +938,7 @@ target_include_directories(bench_leir_native_pipeline PRIVATE
 target_link_libraries(bench_leir_native_pipeline PRIVATE llam_runtime)
 
 add_executable(test_leir_native_linux
+    experiments/leir/leir_native_test_fixture.c
     experiments/leir/test_leir_native_linux.c
 )
 target_include_directories(test_leir_native_linux PRIVATE
@@ -852,12 +952,22 @@ add_executable(test_leir_phase0
     ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/test_leir_phase0.c
 )
+add_executable(test_leir_connect
+    ${LLAM_LEIR_PHASE0_SOURCES}
+    experiments/leir/test_leir_connect.c
+)
 add_executable(bench_leir_phase0
     ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/bench_leir_phase0.c
 )
 target_link_libraries(test_leir_phase0 PRIVATE llam_runtime)
+target_link_libraries(test_leir_connect PRIVATE llam_runtime)
 target_link_libraries(bench_leir_phase0 PRIVATE llam_runtime)
+target_include_directories(test_leir_connect PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
 foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
     target_include_directories(${LLAM_LEIR_PHASE0_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -866,6 +976,53 @@ foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
     )
 endforeach()
 add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
+add_test(NAME test_leir_connect COMMAND test_leir_connect)
+add_test(NAME test_leir_aot_plan COMMAND test_leir_aot_plan)
+add_test(NAME test_leir_aot_module COMMAND test_leir_aot_module)
+add_test(
+    NAME test_leir_aot_c_consumer
+    COMMAND test_leir_aot_c_consumer)
+add_test(
+    NAME test_leir_aot_integration
+    COMMAND test_leir_aot_integration)
+add_test(
+    NAME test_leir_aot_linux_unit
+    COMMAND test_leir_aot_linux_unit)
+add_test(
+    NAME test_leir_aot_ownership
+    COMMAND test_leir_aot_ownership)
+set_tests_properties(
+    test_leir_aot_integration
+    PROPERTIES SKIP_RETURN_CODE 77)
+add_test(
+    NAME test_bench_leir_aot_connect_portable
+    COMMAND bench_leir_aot_connect
+        --candidate portable
+        --family tcp
+        --concurrency 2
+        --payload 64
+        --activations 8)
+add_test(
+    NAME test_bench_leir_aot_connect_native
+    COMMAND bench_leir_aot_connect
+        --candidate native
+        --family tcp
+        --concurrency 2
+        --payload 64
+        --activations 8)
+set_tests_properties(
+    test_bench_leir_aot_connect_portable
+    test_bench_leir_aot_connect_native
+    PROPERTIES SKIP_RETURN_CODE 77)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_bench_leir_aot_connect_contract
+        COMMAND ${Python3_EXECUTABLE}
+            -m unittest scripts/test_bench_leir_aot_connect.py -v)
+    set_tests_properties(
+        test_bench_leir_aot_connect_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
 add_test(NAME test_leir_native_plan COMMAND test_leir_native_plan)
 add_test(
     NAME test_leir_native_segment
@@ -1148,6 +1305,7 @@ set(LLAM_INTERNAL_TEST_TARGETS
     test_multi_runtime_core
     test_runtime_api_edges
     test_runtime_core
+    test_norm_queue_wrap
     test_windows_policy
 )
 set(LLAM_TEST_HOOK_TEST_TARGETS
@@ -1234,6 +1392,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_HAVE_IO_URING_SETUP_BUF_RING)
     target_compile_definitions(test_runtime_shutdown_internal PRIVATE LLAM_HAVE_IO_URING_BUF_RING_HELPERS=1)
 endif()
 target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime_testhooks)
+
+add_executable(test_norm_queue_wrap
+    tests/test_norm_queue_wrap.c
+)
+target_link_libraries(test_norm_queue_wrap PRIVATE llam_runtime)
 
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c
@@ -1338,6 +1501,7 @@ add_test(NAME test_runtime_stress COMMAND test_runtime_stress)
 add_test(NAME test_runtime_fuzz COMMAND test_runtime_fuzz)
 add_test(NAME test_runtime_invariants COMMAND test_runtime_invariants)
 add_test(NAME test_runtime_shutdown_internal COMMAND test_runtime_shutdown_internal)
+add_test(NAME test_norm_queue_wrap COMMAND test_norm_queue_wrap)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)

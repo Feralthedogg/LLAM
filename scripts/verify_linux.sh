@@ -87,9 +87,22 @@ PY
 
 make clean
 make -j"$JOBS" LLAM_BUILD_RESEARCH=1 \
-    test_leir_native_linux bench_leir_native_segment bench_leir_native_pipeline
+    test_leir_connect \
+    test_leir_aot_plan test_leir_aot_module test_leir_aot_c_consumer \
+    test_leir_aot_integration \
+    test_leir_aot_linux_unit test_leir_aot_ownership \
+    bench_leir_aot_connect test_leir_native_linux \
+    bench_leir_native_segment bench_leir_native_pipeline
+./test_leir_connect
+./test_leir_aot_plan
+./test_leir_aot_module
+./test_leir_aot_c_consumer
+./test_leir_aot_linux_unit
+./test_leir_aot_ownership
 ./test_leir_native_linux
 python3 -m unittest \
+    scripts/test_gen_leir_aot_fixture.py \
+    scripts/test_bench_leir_aot_connect.py \
     scripts/test_bench_leir_native.py \
     scripts/test_bench_leir_native_pipeline.py -v
 
@@ -138,6 +151,32 @@ def probe_native(label, command):
         sys.exit(probe.returncode)
 
 
+probe_native(
+    "LEIR AOT CONNECT integration",
+    ["./test_leir_aot_integration"],
+)
+probe_native(
+    "LEIR portable CONNECT-WRITE reference",
+    [
+        "./bench_leir_aot_connect",
+        "--candidate", "portable",
+        "--family", "tcp",
+        "--concurrency", "2",
+        "--payload", "64",
+        "--activations", "8",
+    ],
+)
+probe_native(
+    "LEIR AOT CONNECT-WRITE specialization",
+    [
+        "./bench_leir_aot_connect",
+        "--candidate", "native",
+        "--family", "tcp",
+        "--concurrency", "2",
+        "--payload", "64",
+        "--activations", "8",
+    ],
+)
 probe_native(
     "Linux io_uring native segment",
     [

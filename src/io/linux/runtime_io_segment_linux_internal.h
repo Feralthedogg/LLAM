@@ -37,11 +37,13 @@
 typedef enum llam_linux_native_op_kind {
     LLAM_LINUX_NATIVE_OP_RECV = 0,
     LLAM_LINUX_NATIVE_OP_SEND = 1,
+    LLAM_LINUX_NATIVE_OP_CONNECT = 2,
 } llam_linux_native_op_kind_t;
 
 enum {
     LLAM_LINUX_NATIVE_OP_FIXED_FILE = 1U << 0,
     LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER = 1U << 1,
+    LLAM_LINUX_NATIVE_OP_PARTIAL_OK = 1U << 2,
 };
 
 typedef enum llam_linux_native_segment_mode {

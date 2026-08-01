@@ -67,6 +67,14 @@ CLEAN_FILES = \
 	server_lossless \
 	server_flood \
 	test_leir_phase0 \
+	test_leir_connect \
+	test_leir_aot_plan \
+	test_leir_aot_module \
+	test_leir_aot_c_consumer \
+	test_leir_aot_integration \
+	test_leir_aot_linux_unit \
+	test_leir_aot_ownership \
+	bench_leir_aot_connect \
 	test_leir_native_plan \
 	test_leir_native_segment \
 	test_leir_native_linux \
@@ -93,6 +101,7 @@ CLEAN_FILES = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_norm_queue_wrap \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -126,6 +135,14 @@ CLEAN_FILES = \
 	server_lossless.exe \
 	server_flood.exe \
 	test_leir_phase0.exe \
+	test_leir_connect.exe \
+	test_leir_aot_plan.exe \
+	test_leir_aot_module.exe \
+	test_leir_aot_c_consumer.exe \
+	test_leir_aot_integration.exe \
+	test_leir_aot_linux_unit.exe \
+	test_leir_aot_ownership.exe \
+	bench_leir_aot_connect.exe \
 	test_leir_native_plan.exe \
 	test_leir_native_segment.exe \
 	test_leir_native_linux.exe \
@@ -152,6 +169,7 @@ CLEAN_FILES = \
 	test_runtime_fuzz.exe \
 	test_runtime_invariants.exe \
 	test_runtime_shutdown_internal.exe \
+	test_norm_queue_wrap.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -695,6 +713,8 @@ TEST_RUNTIME_INVARIANTS_OBJS = \
 	$(OBJDIR)/tests/test_runtime_invariants.o
 TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_runtime_shutdown_internal.o
+TEST_NORM_QUEUE_WRAP_OBJS = \
+	$(OBJDIR)/tests/test_norm_queue_wrap.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -720,14 +740,44 @@ TEST_TSAN_FIBER_POSITIVE_OBJS = \
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 LEIR_PHASE0_CORE_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_bindings.o \
 	$(OBJDIR)/experiments/leir/leir_engine.o \
 	$(OBJDIR)/experiments/leir/leir_peer_process.o \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_test_support.o
 LEIR_PHASE0_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_phase0.o
+LEIR_CONNECT_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/test_leir_connect.o
 LEIR_PHASE0_BENCH_OBJS = \
 	$(OBJDIR)/experiments/leir/bench_leir_phase0.o
+LEIR_AOT_PLAN_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_aot_plan.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_plan.o
+LEIR_AOT_MODULE_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_module.o
+LEIR_AOT_C_CONSUMER_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/fixtures/leir_aot_c_consumer.o
+LEIR_AOT_INTEGRATION_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_integration.o
+LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/test_leir_aot_linux_unit.o
+LEIR_AOT_OWNERSHIP_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_native_test_fixture.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_ownership.o
+LEIR_AOT_CONNECT_BENCH_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
+	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
+	$(OBJDIR)/experiments/leir/leir_bindings.o \
+	$(OBJDIR)/experiments/leir/leir_engine.o \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/bench_leir_aot_connect.o
 LEIR_NATIVE_PLAN_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_native_plan.o \
@@ -741,6 +791,7 @@ LEIR_NATIVE_SEGMENT_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_native_fixture.o \
 	$(OBJDIR)/experiments/leir/test_leir_native_segment.o
 LEIR_NATIVE_LINUX_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_native_test_fixture.o \
 	$(OBJDIR)/experiments/leir/test_leir_native_linux.o
 LEIR_NATIVE_BENCH_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_program.o \
@@ -784,7 +835,15 @@ SREM_MODEL_BENCH_OBJS = \
 RESEARCH_OBJS = \
 	$(LEIR_PHASE0_CORE_OBJS) \
 	$(LEIR_PHASE0_TEST_OBJS) \
+	$(LEIR_CONNECT_TEST_OBJS) \
 	$(LEIR_PHASE0_BENCH_OBJS) \
+	$(LEIR_AOT_PLAN_TEST_OBJS) \
+	$(LEIR_AOT_MODULE_TEST_OBJS) \
+	$(LEIR_AOT_C_CONSUMER_TEST_OBJS) \
+	$(LEIR_AOT_INTEGRATION_TEST_OBJS) \
+	$(LEIR_AOT_LINUX_UNIT_TEST_OBJS) \
+	$(LEIR_AOT_OWNERSHIP_TEST_OBJS) \
+	$(LEIR_AOT_CONNECT_BENCH_OBJS) \
 	$(LEIR_NATIVE_PLAN_TEST_OBJS) \
 	$(LEIR_NATIVE_SEGMENT_TEST_OBJS) \
 	$(LEIR_NATIVE_LINUX_TEST_OBJS) \
@@ -801,6 +860,14 @@ RESEARCH_OBJS = \
 	$(SREM_MODEL_BENCH_OBJS)
 LEIR_RESEARCH_TARGETS = \
 	test_leir_phase0 \
+	test_leir_connect \
+	test_leir_aot_plan \
+	test_leir_aot_module \
+	test_leir_aot_c_consumer \
+	test_leir_aot_integration \
+	test_leir_aot_linux_unit \
+	test_leir_aot_ownership \
+	bench_leir_aot_connect \
 	test_leir_native_plan \
 	test_leir_native_segment \
 	test_leir_native_linux \
@@ -826,6 +893,11 @@ RESEARCH_ENTRY_TARGETS = \
 	research \
 	research-test \
 	test-leir-phase0 \
+	test-leir-aot-plan \
+	test-leir-aot-module \
+	test-leir-aot-c-consumer \
+	test-leir-aot-integration \
+	test-leir-aot-connect-screen \
 	test-leir-native \
 	test-leir-native-plan \
 	test-leir-native-segment \
@@ -872,6 +944,7 @@ BUILD_OBJS = \
 	$(TEST_RUNTIME_FUZZ_OBJS) \
 	$(TEST_RUNTIME_INVARIANTS_OBJS) \
 	$(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) \
+	$(TEST_NORM_QUEUE_WRAP_OBJS) \
 	$(TEST_SYNC_OBJS) \
 	$(TEST_IO_BUFFERS_OBJS) \
 	$(TEST_WINDOWS_POLICY_OBJS) \
@@ -901,6 +974,7 @@ INTERNAL_TEST_TARGETS = \
 	test_multi_runtime_core \
 	test_runtime_api_edges \
 	test_runtime_core \
+	test_norm_queue_wrap \
 	test_windows_handle_io \
 	test_windows_policy
 TEST_HOOK_TEST_TARGETS = \
@@ -927,7 +1001,7 @@ ALL_DEPFILES = \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
 -include $(ALL_DEPFILES)
 
-.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 audit-build-manifests:
@@ -957,7 +1031,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_norm_queue_wrap|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -1021,16 +1095,16 @@ test-srem-model: windows-cmake-configure
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_srem_model|test_bench_srem_native|test_bench_srem_model" $(WINDOWS_CTEST_ARGS)
 
 test-leir-phase0: windows-cmake-configure
-	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0 bench_leir_phase0
-	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_bench_leir_phase0" $(WINDOWS_CTEST_ARGS)
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0 test_leir_connect bench_leir_phase0
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_leir_connect|test_bench_leir_phase0" $(WINDOWS_CTEST_ARGS)
 
 test-leir-native: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_plan test_leir_native_segment bench_leir_native_segment bench_leir_native_pipeline
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_plan|test_leir_native_segment|test_bench_leir_native" $(WINDOWS_CTEST_ARGS)
 
 test-leir-native-linux: windows-cmake-configure
-	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_linux
-	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_linux" $(WINDOWS_CTEST_ARGS)
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_linux test_leir_aot_linux_unit test_leir_aot_ownership
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_linux|test_leir_aot_linux_unit|test_leir_aot_ownership" $(WINDOWS_CTEST_ARGS)
 else
 research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-native test-leir-native-linux:
 	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
@@ -1186,8 +1260,11 @@ all: demo stress bench llam_broker server server_lossless server_flood static sh
 ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: $(RESEARCH_LINK_TARGETS)
 
-research-test: test-leir-phase0 test-leir-native test-leir-native-linux \
-	test-lcwe-model test-lccf-model test-srem-model
+research-test: test-leir-phase0 test-leir-aot-plan test-leir-aot-module \
+	test-leir-aot-c-consumer test-leir-aot-integration \
+	test-leir-aot-connect-screen \
+	test-leir-native test-leir-native-linux test-lcwe-model \
+	test-lccf-model test-srem-model
 else
 research research-test:
 	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
@@ -1215,7 +1292,7 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_norm_queue_wrap test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	python3 -m unittest scripts/test_audit_hardening_artifact.py -v
 	python3 scripts/audit_hardening_artifact.py ./$(SHLIB_REAL) --profile $(LLAM_HARDENING)
 	./test_abi_contract
@@ -1232,6 +1309,7 @@ test: audit-build-manifests audit-license-headers audit-c-structure audit-contex
 	./test_runtime_fuzz
 	./test_runtime_invariants
 	./test_runtime_shutdown_internal
+	./test_norm_queue_wrap
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -2430,8 +2508,9 @@ test-srem-model: test_srem_model bench_srem_model
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_native.py
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_model.py
 
-test-leir-phase0: test_leir_phase0 bench_leir_phase0
+test-leir-phase0: test_leir_phase0 test_leir_connect bench_leir_phase0
 	./test_leir_phase0
+	./test_leir_connect
 	./bench_leir_phase0 \
 		--workload socket_relay \
 		--nodes 4 \
@@ -2444,14 +2523,32 @@ test-leir-phase0: test_leir_phase0 bench_leir_phase0
 	LEIR_PHASE0_TEST_BINARY=./bench_leir_phase0 \
 		python3 -m unittest scripts/test_bench_leir_phase0.py -v
 
+test-leir-aot-plan: test_leir_aot_plan
+	./test_leir_aot_plan
+
+test-leir-aot-module: test_leir_aot_module
+	./test_leir_aot_module
+	python3 -m unittest scripts/test_gen_leir_aot_fixture.py -v
+
+test-leir-aot-c-consumer: test_leir_aot_c_consumer
+	./test_leir_aot_c_consumer
+
+test-leir-aot-integration: test_leir_aot_integration
+	./test_leir_aot_integration
+
+test-leir-aot-connect-screen: bench_leir_aot_connect
+	python3 scripts/test_bench_leir_aot_connect.py -v
+
 test-leir-native-plan: test_leir_native_plan
 	./test_leir_native_plan
 
 test-leir-native-segment: test_leir_native_segment
 	./test_leir_native_segment
 
-test-leir-native-linux: test_leir_native_linux
+test-leir-native-linux: test_leir_native_linux test_leir_aot_linux_unit test_leir_aot_ownership
 	./test_leir_native_linux --unit-only
+	./test_leir_aot_linux_unit
+	./test_leir_aot_ownership
 
 test-leir-native: test_leir_native_plan test_leir_native_segment bench_leir_native_segment bench_leir_native_pipeline
 	./test_leir_native_plan
@@ -2631,6 +2728,30 @@ bench_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS)
 test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
 
+test_leir_connect: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_CONNECT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_CONNECT_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_plan: $(RUNTIME_OBJS) $(LEIR_AOT_PLAN_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_PLAN_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_module: $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_c_consumer: $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
+
+test_leir_aot_integration: $(RUNTIME_OBJS) $(LEIR_AOT_INTEGRATION_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_INTEGRATION_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_linux_unit: $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_ownership: $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
+
+bench_leir_aot_connect: $(RUNTIME_OBJS) $(LEIR_AOT_CONNECT_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_CONNECT_BENCH_OBJS) $(LDLIBS)
+
 test_leir_native_plan: $(RUNTIME_OBJS) $(LEIR_NATIVE_PLAN_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_PLAN_TEST_OBJS) $(LDLIBS)
 
@@ -2690,6 +2811,9 @@ test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
 
 test_runtime_shutdown_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
+
+test_norm_queue_wrap: $(RUNTIME_OBJS) $(TEST_NORM_QUEUE_WRAP_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_NORM_QUEUE_WRAP_OBJS) $(LDLIBS)
 
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)

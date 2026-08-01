@@ -329,6 +329,12 @@
         "link_dependencies": ["llam_runtime"]
       },
       {
+        "name": "test_norm_queue_wrap",
+        "platforms": ["all"],
+        "sources": ["tests/test_norm_queue_wrap.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
         "name": "test_windows_handle_io",
         "platforms": ["windows"],
         "sources": ["tests/test_windows_handle_io.c"],
@@ -383,6 +389,7 @@
         "name": "test_leir_phase0",
         "platforms": ["all"],
         "sources": [
+          "experiments/leir/leir_bindings.c",
           "experiments/leir/leir_engine.c",
           "experiments/leir/leir_peer_process.c",
           "experiments/leir/leir_program.c",
@@ -393,14 +400,105 @@
       },
       {
         "family": "leir",
+        "name": "test_leir_connect",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_bindings.c",
+          "experiments/leir/leir_engine.c",
+          "experiments/leir/leir_peer_process.c",
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/test_leir_connect.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
         "name": "bench_leir_phase0",
         "platforms": ["all"],
         "sources": [
+          "experiments/leir/leir_bindings.c",
           "experiments/leir/leir_engine.c",
           "experiments/leir/leir_peer_process.c",
           "experiments/leir/leir_program.c",
           "experiments/leir/leir_test_support.c",
           "experiments/leir/bench_leir_phase0.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_plan",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_aot_plan.c",
+          "experiments/leir/test_leir_aot_plan.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_module",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/test_leir_aot_module.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_c_consumer",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/fixtures/leir_aot_c_consumer.c"
+        ],
+        "link_dependencies": []
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_integration",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/leir_aot_linux.c",
+          "experiments/leir/test_leir_aot_integration.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_linux_unit",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/test_leir_aot_linux_unit.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_ownership",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_native_test_fixture.c",
+          "experiments/leir/test_leir_aot_ownership.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "bench_leir_aot_connect",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/leir_aot_linux.c",
+          "experiments/leir/leir_aot_connect_bench_support.c",
+          "experiments/leir/leir_bindings.c",
+          "experiments/leir/leir_engine.c",
+          "experiments/leir/leir_program.c",
+          "experiments/leir/bench_leir_aot_connect.c"
         ],
         "link_dependencies": ["llam_runtime"]
       },
@@ -434,7 +532,10 @@
         "family": "leir",
         "name": "test_leir_native_linux",
         "platforms": ["all"],
-        "sources": ["experiments/leir/test_leir_native_linux.c"],
+        "sources": [
+          "experiments/leir/leir_native_test_fixture.c",
+          "experiments/leir/test_leir_native_linux.c"
+        ],
         "link_dependencies": ["llam_runtime"]
       },
       {

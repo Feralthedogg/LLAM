@@ -1137,6 +1137,9 @@ class ResearchBoundaryTests(unittest.TestCase):
     def test_default_graph_has_no_experiment_objects(self) -> None:
         self.assertNotIn("/experiments/", self.default_make_trace)
         self.assertNotIn("test_leir_", self.default_cmake_targets)
+        self.assertNotIn(
+            "bench_leir_aot_connect", self.default_cmake_targets
+        )
         package_artifacts = [
             "demo",
             "stress",
@@ -1159,6 +1162,27 @@ class ResearchBoundaryTests(unittest.TestCase):
 
     def test_explicit_graph_has_research_targets(self) -> None:
         self.assertIn("test_leir_native_plan", self.research_cmake_targets)
+        self.assertIn(
+            "bench_leir_aot_connect", self.research_cmake_targets
+        )
+        self.assertIn(
+            "test_leir_aot_c_consumer", self.research_cmake_targets
+        )
+        self.assertIn(
+            "test_leir_aot_linux_unit", self.research_cmake_targets
+        )
+        self.assertIn(
+            "test_leir_aot_ownership", self.research_cmake_targets
+        )
+        self.assertIn("test_leir_connect", self.research_cmake_targets)
+        self.assertIn(
+            "experiments/leir/bench_leir_aot_connect.c",
+            self.research_make_trace,
+        )
+        self.assertIn(
+            "experiments/leir/fixtures/leir_aot_c_consumer.c",
+            self.research_make_trace,
+        )
         for family in ("leir", "lcwe", "lccf", "srem"):
             with self.subTest(family=family):
                 self.assertIn(
@@ -1221,8 +1245,13 @@ class ResearchBoundaryTests(unittest.TestCase):
         stable_probe = 'run(["./demo"], timeout=30)'
         research_build = (
             'make -j"$JOBS" LLAM_BUILD_RESEARCH=1 \\\n'
-            "    test_leir_native_linux "
-            "bench_leir_native_segment bench_leir_native_pipeline"
+            "    test_leir_connect \\\n"
+            "    test_leir_aot_plan test_leir_aot_module "
+            "test_leir_aot_c_consumer \\\n"
+            "    test_leir_aot_integration \\\n"
+            "    test_leir_aot_linux_unit test_leir_aot_ownership \\\n"
+            "    bench_leir_aot_connect test_leir_native_linux \\\n"
+            "    bench_leir_native_segment bench_leir_native_pipeline"
         )
         stable_restore = (
             'make -j"$JOBS" LLAM_BUILD_RESEARCH=0 all'
@@ -1261,6 +1290,24 @@ class ResearchBoundaryTests(unittest.TestCase):
             "env LLAM_BUILD_RESEARCH=0 make -j2 shared "
             "audit-shared-exports",
             regression,
+        )
+
+    def test_aot_research_workflow_cannot_publish_or_authorize_release(
+        self,
+    ) -> None:
+        workflow = (
+            self.source / ".github/workflows/leir-aot-research.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("push:\n    tags:", workflow)
+        self.assertNotIn("action-gh-release", workflow)
+        self.assertNotIn("gh release", workflow)
+        self.assertIn(
+            'assert verdict["release_authorized"] is False', workflow
+        )
+        self.assertIn(
+            'assert verdict["release_gate"]["verdict"] == "BLOCKED"',
+            workflow,
         )
 
     def test_bsd_packaging_workflows_provision_python3(self) -> None:

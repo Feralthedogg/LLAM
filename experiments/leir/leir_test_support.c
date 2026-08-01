@@ -3,6 +3,8 @@
 
 #include "leir_test_support.h"
 
+#include "llam/io.h"
+
 #include <errno.h>
 #include <string.h>
 

@@ -4,11 +4,15 @@
 #ifndef LLAM_EXPERIMENTS_LEIR_PHASE0_H
 #define LLAM_EXPERIMENTS_LEIR_PHASE0_H
 
-#include "runtime_internal.h"
+#include "llam/platform.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define LEIR_PHASE0_MAX_NODES 32U
 #define LEIR_PHASE0_MAX_SLOTS 16U
@@ -21,6 +25,7 @@ typedef enum leir_phase0_opcode {
     LEIR_PHASE0_OP_WRITE_ALL = 3,
     LEIR_PHASE0_OP_RETURN = 4,
     LEIR_PHASE0_OP_FAIL = 5,
+    LEIR_PHASE0_OP_CONNECT = 6,
 } leir_phase0_opcode_t;
 
 typedef enum leir_phase0_slot_kind {
@@ -107,5 +112,9 @@ int leir_phase0_instance_run(
     leir_phase0_value_t *values_out,
     size_t value_count,
     leir_phase0_metrics_t *metrics_out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

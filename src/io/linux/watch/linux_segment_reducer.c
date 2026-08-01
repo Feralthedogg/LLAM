@@ -29,6 +29,18 @@ static int llam_linux_native_result_error(
         }
         return -result;
     }
+    if (op->kind == LLAM_LINUX_NATIVE_OP_CONNECT) {
+        return result == 0 ? 0 : EPROTO;
+    }
+    if ((op->flags & LLAM_LINUX_NATIVE_OP_PARTIAL_OK) != 0U) {
+        if (result == 0 && op->length != 0U) {
+            return EIO;
+        }
+        if ((uint32_t)result > op->length) {
+            return EPROTO;
+        }
+        return 0;
+    }
     if ((uint32_t)result != op->length) {
         return EMSGSIZE;
     }

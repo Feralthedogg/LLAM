@@ -77,6 +77,20 @@ static bool validate_io_node(const leir_phase0_program_t *program,
            edge_is_valid(program, node->on_error);
 }
 
+static bool validate_connect_node(
+    const leir_phase0_program_t *program,
+    const leir_phase0_node_desc_t *node) {
+    return slot_is(program, node->fd_slot, LEIR_PHASE0_SLOT_FD) &&
+           slot_is(program,
+                   node->buffer_slot,
+                   LEIR_PHASE0_SLOT_CONST_BUFFER) &&
+           slot_is(program, node->length_slot, LEIR_PHASE0_SLOT_U64) &&
+           slot_is(program, node->result_slot, LEIR_PHASE0_SLOT_I64) &&
+           edge_is_valid(program, node->on_success) &&
+           node->on_eof == LEIR_PHASE0_NODE_NONE &&
+           edge_is_valid(program, node->on_error);
+}
+
 static bool validate_terminal_node(
     const leir_phase0_program_t *program,
     const leir_phase0_node_desc_t *node) {
@@ -147,6 +161,12 @@ static bool validate_program(leir_phase0_program_t *program) {
             case LEIR_PHASE0_OP_WRITE:
             case LEIR_PHASE0_OP_WRITE_ALL:
                 if (!validate_io_node(program, node, true)) {
+                    return false;
+                }
+                program->io_node_count += 1U;
+                break;
+            case LEIR_PHASE0_OP_CONNECT:
+                if (!validate_connect_node(program, node)) {
                     return false;
                 }
                 program->io_node_count += 1U;

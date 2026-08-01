@@ -65,14 +65,15 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
 #if LLAM_RUNTIME_BACKEND_KQUEUE
 #if LLAM_BUILD_RESEARCH
     /*
-     * Generic public read/write keeps using its conservative blocking fallback
-     * on kqueue. A trusted internal completion sink, however, can use the
-     * existing one-shot request backend so it can retain ownership across a
-     * composed runtime-effect region.
+     * Generic public read/write/connect keeps using its conservative blocking
+     * fallback on kqueue. A trusted internal completion sink, however, can use
+     * the existing one-shot request backend so it can retain ownership across
+     * a composed runtime-effect region.
      */
     if (!kind_supported && req->completion_sink != NULL &&
         (req->kind == LLAM_IO_KIND_READ ||
-         req->kind == LLAM_IO_KIND_WRITE)) {
+         req->kind == LLAM_IO_KIND_WRITE ||
+         req->kind == LLAM_IO_KIND_CONNECT)) {
         kind_supported = true;
     }
 #endif
@@ -220,6 +221,14 @@ int llam_issue_linux_native_batch(
             if (segment->ops[operation_index].kind ==
                 LLAM_LINUX_NATIVE_OP_SEND) {
                 if (node->supports_send) {
+                    continue;
+                }
+                error = EAGAIN;
+                break;
+            }
+            if (segment->ops[operation_index].kind ==
+                LLAM_LINUX_NATIVE_OP_CONNECT) {
+                if (node->supports_connect) {
                     continue;
                 }
                 error = EAGAIN;

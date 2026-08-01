@@ -157,6 +157,15 @@ requires the exact stored `portable_verdict` to be `SPECIALIZED`. The current
 native performance verdict is `REJECT`, so this plan does not authorize a
 version change, tag, package, publication, or release.
 
+The sealed run at source revision
+`ca122928ac943d5731b03d66c75c059c2f8bc865` produced both a portable `REJECT`
+and a Linux/io_uring `REJECT`. Every measured fixed-resource cell had a
+statistically supported wall regression, while all 36 non-fixed `link_skip`
+cells were unavailable because `READ_EXACT` requires an
+`exact_result_semantic_barrier`. The immutable interpretation and successor
+research direction are recorded in
+[LEIR Native Pipeline Decision](../superpowers/reports/2026-08-01-leir-native-pipeline-decision.md).
+
 If the kernel, liburing, memlock/resource limits, registered files/buffers, or
 CQE-skip support cannot run `fixed_link_skip`, the benchmark exits with the
 native skip code and the matrix records unavailable fixed cells. It never
@@ -167,6 +176,59 @@ These results still come from one Linux backend mechanism. Even a
 `SPECIALIZED` portable promotion verdict does not by itself establish a
 portable LLAM speedup or a general language-runtime advantage; cross-platform
 evidence and the rest of release CI remain separate requirements.
+
+## LEIR AOT CONNECT-WRITE Research Screen
+
+The successor screen compares the portable LEIR `CONNECT -> WRITE` contract
+with a generated direct Linux/io_uring module. The generated path binds slots,
+prepares a two-SQE linked segment, and resumes a typed continuation without a
+per-completion opcode interpreter.
+
+Build and run the local matrix on Linux:
+
+```sh
+make LLAM_BUILD_RESEARCH=1 -j4 bench_leir_aot_connect
+python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
+python3 scripts/bench_leir_aot_connect.py \
+  --binary ./bench_leir_aot_connect \
+  --output-dir .artifacts/leir-aot-connect/local-screen
+```
+
+The default matrix covers TCP and Unix stream sockets, concurrency 1 and 16,
+payloads 64 and 4096, 256 activations, and five fresh-process samples per
+candidate in ABBA order. A constrained container that cannot submit io_uring
+operations returns the explicit skip code; it does not emit a synthetic
+performance sample. Local Docker validation therefore needs an io_uring-capable
+security profile.
+
+The bundle contains `raw.csv`, `summary.csv`, `metadata.json`, `verdict.json`,
+and `summary.md`. Metadata distinguishes `SPECIALIZED` Linux evidence from a
+portable performance claim and records source/tree/binary digests plus the
+kernel and toolchain. Successful native samples must report exactly two SQEs,
+one visible CQE, one suppressed successful CQE, one park, one wake, and zero
+hot allocations per activation.
+
+The checked-in generated C and header use
+`LicenseRef-LLAM-Commercial-Reciprocity-1.0`. Before running the screen, the
+generator contract tests verify deterministic output, reject Apache markers
+in generated files, and compile both a standalone C consumer and a C++17
+consumer without private runtime headers.
+
+The mechanism verdict has three outcomes:
+
+- `CONTINUE`: correctness and structural counters pass, and the upper 95%
+  wall-ratio bound is at most 1.05;
+- `STOP`: correctness, checksum, ownership/counter, allocation, or supported
+  wall-regression evidence fails;
+- `INCOMPLETE`: required samples or platform support are missing, or the wall
+  confidence interval crosses the 1.05 boundary.
+
+`CONTINUE` only permits broader research. The separate 3.0.0 classifier still
+requires a 1.50x wall win, CPU ratio at most 0.70, p99 ratio at most 1.10,
+short-workload non-regression, full correctness/sanitizer/fallback coverage,
+and reproduction on two Linux machines. The current local mechanism screen is
+`CONTINUE`, while the release gate is `BLOCKED`; see
+[LEIR AOT CONNECT-WRITE Mechanism Decision](../superpowers/reports/2026-08-01-leir-aot-connect-screen.md).
 
 ## Guardrails
 

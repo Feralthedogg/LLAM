@@ -134,6 +134,10 @@ ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
     "c727e131116acd03ab90a4f932170f96dc2b9be4c26bc137e6af659fecd3b074",
     # Canonical repository Makefile with the context-switch gateway audit.
     "2d8a66fc6f127c14128cab654d5cc2022249fd2f6fa9ee5015cbd8de108ebaa3",
+    # Canonical repository Makefile with LEIR AOT research targets.
+    "e7a4de19a165d1ade2d2df9725e6bd3173e7efabaf25fb9a49449ba1ea3db804",
+    # Canonical LEIR AOT graph after splitting portable and ownership tests.
+    "205dbdd06393328239f4640231970a8772ff7311f9f3780e2f2004609779ea92",
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }

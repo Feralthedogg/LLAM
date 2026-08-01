@@ -44,7 +44,10 @@ CODE_SUFFIXES = {
 SPECIAL_NAMES = {"CMakeLists.txt", "Makefile"}
 HEADER_LINE_LIMIT = 45
 SPDX_PATTERN = re.compile(
-    r"SPDX-License-Identifier:\s*Apache-2\.0(?:\s*\*/)?\s*$"
+    r"SPDX-License-Identifier:\s*"
+    r"(?:Apache-2\.0|"
+    r"LicenseRef-LLAM-Commercial-Reciprocity-1\.0)"
+    r"(?:\s*\*/)?\s*$"
 )
 FULL_NOTICE = "Licensed under the Apache License, Version 2.0"
 

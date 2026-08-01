@@ -87,7 +87,6 @@ void stress_setup_signal_dump(void) {
         fprintf(stderr, "[stress] signal dump path is too long\n");
         return;
     }
-    fprintf(stderr, "[stress] signal dump path=%s\n", g_stress_dump_path);
     sigemptyset(&g_stress_dump_signal_set);
     /*
      * LLAM uses SIGUSR1 internally as the cooperative preemption signal on
@@ -111,6 +110,14 @@ void stress_setup_signal_dump(void) {
         return;
     }
     g_stress_dump_thread_started = true;
+    /*
+     * This line is the readiness signal consumed by diagnostic harnesses.
+     * Publish it only after SIGUSR2 is blocked and the sigwait thread exists;
+     * otherwise an eager caller can deliver the signal in the setup window
+     * and terminate the process using SIGUSR2's default disposition.
+     */
+    fprintf(stderr, "[stress] signal dump path=%s\n", g_stress_dump_path);
+    (void)fflush(stderr);
 }
 
 void stress_teardown_signal_dump(void) {
