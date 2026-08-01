@@ -36,7 +36,7 @@
 - Consumes: root `LICENSE`; the exact `v2.2.1:LICENSE` bytes.
 - Produces: `ACTIVE_LICENSE_PATH`, `HISTORICAL_LICENSE_PATH`, `HISTORICAL_APACHE_SHA256`, and policy errors for missing, mismatched, or misplaced license texts.
 
-- [ ] **Step 1: Add the immutable text assets used by the tests**
+- [x] **Step 1: Add the immutable text assets used by the tests**
 
 Create the active text as an exact copy of root `LICENSE`. Create the historical text from the exact bytes returned by `git show v2.2.1:LICENSE`. Add this scope notice in `OLD-LICENSES/README.md`:
 
@@ -54,7 +54,7 @@ repository snapshot. For an earlier version, the `LICENSE` file stored at that
 exact tag or commit controls.
 ```
 
-- [ ] **Step 2: Write failing layout tests**
+- [x] **Step 2: Write failing layout tests**
 
 Extend `_write_valid_repository()` so its root and active license copies are identical and it contains the exact historical Apache fixture and scope notice. Add these tests:
 
@@ -95,13 +95,13 @@ def test_rejects_modified_historical_apache_text(self) -> None:
     self.assertIn("historical Apache text does not match v2.2.1", result.stderr)
 ```
 
-- [ ] **Step 3: Run the tests and verify the new cases fail**
+- [x] **Step 3: Run the tests and verify the new cases fail**
 
 Run: `python3 -m unittest -v scripts.test_license_policy`
 
 Expected: the four new tests fail because the checker does not yet enforce the new layout.
 
-- [ ] **Step 4: Implement minimal layout enforcement**
+- [x] **Step 4: Implement minimal layout enforcement**
 
 Add constants and checks equivalent to:
 
@@ -126,13 +126,13 @@ The checker must:
 4. require the scope notice to contain `v2.2.1`, `not an alternative license`, and `exact tag or commit`; and
 5. reject every tracked file under `LICENSES/` except the active custom text.
 
-- [ ] **Step 5: Run the focused tests**
+- [x] **Step 5: Run the focused tests**
 
 Run: `python3 -m unittest -v scripts.test_license_policy`
 
 Expected: all layout and existing policy tests pass.
 
-- [ ] **Step 6: Commit the canonical layout**
+- [x] **Step 6: Commit the canonical layout**
 
 ```bash
 git add LICENSES OLD-LICENSES scripts/check_license_policy.py scripts/test_license_policy.py

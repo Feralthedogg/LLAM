@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,14 @@ STALE_APACHE_MARKERS = (
 )
 COPYRIGHT_NOTICE = "Copyright 2026 Feralthedogg"
 LICENSE_REF = "SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0"
+ACTIVE_LICENSE_RELATIVE = Path(
+    "LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
+)
+HISTORICAL_LICENSE_RELATIVE = Path("OLD-LICENSES/Apache-2.0.txt")
+HISTORICAL_NOTICE_RELATIVE = Path("OLD-LICENSES/README.md")
+HISTORICAL_APACHE_SHA256 = (
+    "7d16370e642185e2eecad74eaf1e15179b27e2690f82644e7d247b395b600430"
+)
 REQUIRED_POLICY_FILES = (
     "LICENSE",
     "README.md",
@@ -72,6 +81,23 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.resolve()
+    layout_required = (
+        (ACTIVE_LICENSE_RELATIVE, "active LicenseRef text is missing"),
+        (HISTORICAL_LICENSE_RELATIVE, "historical Apache text is missing"),
+        (
+            HISTORICAL_NOTICE_RELATIVE,
+            "historical license scope notice is missing",
+        ),
+    )
+    missing_layout = [
+        f"{relative}: {message}"
+        for relative, message in layout_required
+        if not (root / relative).is_file()
+    ]
+    if missing_layout:
+        print("\n".join(missing_layout), file=sys.stderr)
+        return 1
+
     missing = [
         f"{relative}: required policy file is missing"
         for relative in REQUIRED_POLICY_FILES
@@ -87,6 +113,42 @@ def main() -> int:
         return 1
 
     errors: list[str] = []
+    if (root / ACTIVE_LICENSE_RELATIVE).read_bytes() != (root / "LICENSE").read_bytes():
+        errors.append(
+            f"{ACTIVE_LICENSE_RELATIVE}: must be byte-identical to LICENSE"
+        )
+
+    historical_digest = hashlib.sha256(
+        (root / HISTORICAL_LICENSE_RELATIVE).read_bytes()
+    ).hexdigest()
+    if historical_digest != HISTORICAL_APACHE_SHA256:
+        errors.append(
+            f"{HISTORICAL_LICENSE_RELATIVE}: historical Apache text does not match v2.2.1"
+        )
+
+    historical_notice = (root / HISTORICAL_NOTICE_RELATIVE).read_text(
+        encoding="utf-8"
+    )
+    historical_notice_markers = (
+        "v2.2.1",
+        "not an alternative license",
+        "exact tag or commit",
+    )
+    if not all(marker in historical_notice for marker in historical_notice_markers):
+        errors.append(
+            f"{HISTORICAL_NOTICE_RELATIVE}: historical license scope is incomplete"
+        )
+
+    tracked = tracked_files(root)
+    for path in tracked:
+        relative = path.relative_to(root)
+        if (
+            relative.parts
+            and relative.parts[0] == "LICENSES"
+            and relative != ACTIVE_LICENSE_RELATIVE
+        ):
+            errors.append(f"{relative}: inactive license text in LICENSES")
+
     readme_text = (root / "README.md").read_text(encoding="utf-8")
     readme_lower = readme_text.lower()
     if "source-available" not in readme_lower or "not osi-approved open source" not in readme_lower:
@@ -125,17 +187,22 @@ def main() -> int:
     if not all(marker in licensing_text for marker in licensing_markers):
         errors.append("docs/licensing.md: release boundary is incomplete")
 
-    for path in tracked_files(root):
+    for path in tracked:
         if not path.is_file():
+            continue
+        relative = path.relative_to(root)
+        if relative == HISTORICAL_LICENSE_RELATIVE or (
+            relative.parts and relative.parts[0] == "LICENSES"
+        ):
             continue
         data = path.read_bytes()
         if b"\0" in data:
             continue
         text = data.decode("utf-8", errors="replace")
         if has_stale_apache_notice(text):
-            errors.append(f"{path.relative_to(root)}: stale Apache license notice")
+            errors.append(f"{relative}: stale Apache license notice")
         elif COPYRIGHT_NOTICE in text and LICENSE_REF not in text:
-            errors.append(f"{path.relative_to(root)}: current LicenseRef is missing")
+            errors.append(f"{relative}: current LicenseRef is missing")
 
     if errors:
         print("\n".join(errors), file=sys.stderr)

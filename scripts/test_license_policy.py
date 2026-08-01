@@ -11,7 +11,17 @@ from pathlib import Path
 
 
 CHECKER = Path(__file__).with_name("check_license_policy.py")
+SOURCE_ROOT = CHECKER.parent.parent
 LICENSE_REF = "LicenseRef-LLAM-Commercial-Reciprocity-1.0"
+ACTIVE_LICENSE_RELATIVE = (
+    "LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
+)
+HISTORICAL_LICENSE_RELATIVE = "OLD-LICENSES/Apache-2.0.txt"
+HISTORICAL_NOTICE_RELATIVE = "OLD-LICENSES/README.md"
+CURRENT_LICENSE_TEXT = (SOURCE_ROOT / "LICENSE").read_text(encoding="utf-8")
+HISTORICAL_APACHE_TEXT = (
+    SOURCE_ROOT / HISTORICAL_LICENSE_RELATIVE
+).read_text(encoding="utf-8")
 SOFTWARE_DEFINITION = """1.4. "Software" means source code, object code, documentation, tests,
 examples, build materials, configuration, and other materials included in a
 release, branch, commit, package, repository snapshot, or copy to which this
@@ -45,12 +55,23 @@ class LicensePolicyTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    def _track(self, *relative_paths: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", "--", *relative_paths],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
     def _write_valid_repository(self) -> None:
+        self._write("LICENSE", CURRENT_LICENSE_TEXT)
+        self._write(ACTIVE_LICENSE_RELATIVE, CURRENT_LICENSE_TEXT)
+        self._write(HISTORICAL_LICENSE_RELATIVE, HISTORICAL_APACHE_TEXT)
         self._write(
-            "LICENSE",
-            "LLAM COMMERCIAL RECIPROCITY LICENSE 1.0\n\n"
-            + SOFTWARE_DEFINITION
-            + "\n",
+            HISTORICAL_NOTICE_RELATIVE,
+            "v2.2.1 and earlier only. This is not an alternative license.\n"
+            "Use the LICENSE stored at the exact tag or commit.\n",
         )
         self._write(
             "README.md",
@@ -113,6 +134,54 @@ class LicensePolicyTest(unittest.TestCase):
         result = self._run_checker()
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_missing_active_license_text(self) -> None:
+        (self.root / ACTIVE_LICENSE_RELATIVE).unlink()
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("active LicenseRef text is missing", result.stderr)
+
+    def test_rejects_active_license_text_that_differs_from_root(self) -> None:
+        self._write(ACTIVE_LICENSE_RELATIVE, "different license text\n")
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("must be byte-identical to LICENSE", result.stderr)
+
+    def test_rejects_unexpected_active_license_file(self) -> None:
+        self._write("LICENSES/Apache-2.0.txt", HISTORICAL_APACHE_TEXT)
+        self._track("LICENSES/Apache-2.0.txt")
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            "LICENSES/Apache-2.0.txt: inactive license text", result.stderr
+        )
+
+    def test_rejects_modified_historical_apache_text(self) -> None:
+        self._write(
+            HISTORICAL_LICENSE_RELATIVE,
+            HISTORICAL_APACHE_TEXT + "modified\n",
+        )
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            "historical Apache text does not match v2.2.1", result.stderr
+        )
+
+    def test_rejects_missing_historical_scope_notice(self) -> None:
+        (self.root / HISTORICAL_NOTICE_RELATIVE).unlink()
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("historical license scope notice is missing", result.stderr)
 
     def test_rejects_changed_software_definition(self) -> None:
         self._write(
