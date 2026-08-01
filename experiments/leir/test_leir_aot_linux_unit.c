@@ -17,6 +17,7 @@ int main(void) {
 
 #else
 
+#include "leir_aot_connect_bench_support.h"
 #include "io/linux/runtime_io_segment_linux_internal.h"
 
 #include <arpa/inet.h>
@@ -332,6 +333,140 @@ static int test_connect_write_rejects_impossible_results(void) {
     return 0;
 }
 
+static int test_ring_profile_option_parsing(void) {
+    static const char *const profiles[] = {
+        "submit_all",
+        "coop_taskrun",
+        "defer_taskrun",
+    };
+    size_t i;
+
+    for (i = 0U; i < sizeof(profiles) / sizeof(profiles[0]); i += 1U) {
+        char *arguments[] = {
+            "bench_leir_aot_connect",
+            "--candidate",
+            "portable",
+            "--ring-profile",
+            (char *)profiles[i],
+        };
+        bench_options_t options;
+
+        if (parse_options(
+                (int)(sizeof(arguments) / sizeof(arguments[0])),
+                arguments,
+                &options) != 0 ||
+            options.ring_profile == NULL ||
+            strcmp(options.ring_profile, profiles[i]) != 0) {
+            fprintf(
+                stderr,
+                "ring profile parse failed for %s\n",
+                profiles[i]);
+            return 1;
+        }
+    }
+    {
+        char *arguments[] = {
+            "bench_leir_aot_connect",
+            "--candidate",
+            "portable",
+        };
+        bench_options_t options;
+
+        if (parse_options(
+                (int)(sizeof(arguments) / sizeof(arguments[0])),
+                arguments,
+                &options) != 0 ||
+            strcmp(options.ring_profile, "submit_all") != 0) {
+            fputs("default ring profile is not submit_all\n", stderr);
+            return 1;
+        }
+    }
+    {
+        char *arguments[] = {
+            "bench_leir_aot_connect",
+            "--candidate",
+            "portable",
+            "--ring-profile",
+        };
+        bench_options_t options;
+
+        errno = 0;
+        if (parse_options(
+                (int)(sizeof(arguments) / sizeof(arguments[0])),
+                arguments,
+                &options) == 0 ||
+            errno != EINVAL) {
+            fputs("missing ring profile value was accepted\n", stderr);
+            return 1;
+        }
+    }
+    {
+        char *arguments[] = {
+            "bench_leir_aot_connect",
+            "--candidate",
+            "portable",
+            "--ring-profile",
+            "unknown",
+        };
+        bench_options_t options;
+
+        errno = 0;
+        if (parse_options(
+                (int)(sizeof(arguments) / sizeof(arguments[0])),
+                arguments,
+                &options) == 0 ||
+            errno != EINVAL) {
+            fputs("unknown ring profile was accepted\n", stderr);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_benchmark_timing_invariants(void) {
+    bench_metrics_t metrics;
+
+    memset(&metrics, 0, sizeof(metrics));
+    metrics.bind_ns = 5U;
+    metrics.execute_ns = 30U;
+    if (!bench_metrics_timing_is_valid(
+            BENCH_CANDIDATE_PORTABLE, &metrics)) {
+        fputs("portable zero AOT timing was rejected\n", stderr);
+        return 1;
+    }
+    metrics.aot_prepare_ns = 1U;
+    if (bench_metrics_timing_is_valid(
+            BENCH_CANDIDATE_PORTABLE, &metrics)) {
+        fputs("portable nonzero AOT timing was accepted\n", stderr);
+        return 1;
+    }
+
+    metrics.aot_prepare_ns = 5U;
+    metrics.aot_ring_ns = 20U;
+    metrics.aot_resume_ns = 5U;
+    if (!bench_metrics_timing_is_valid(
+            BENCH_CANDIDATE_NATIVE, &metrics)) {
+        fputs("native timing decomposition was rejected\n", stderr);
+        return 1;
+    }
+    metrics.aot_resume_ns = 6U;
+    if (bench_metrics_timing_is_valid(
+            BENCH_CANDIDATE_NATIVE, &metrics)) {
+        fputs("oversized native timing decomposition was accepted\n", stderr);
+        return 1;
+    }
+    metrics.aot_prepare_ns = UINT64_MAX;
+    metrics.aot_ring_ns = UINT64_MAX;
+    metrics.aot_resume_ns = UINT64_MAX;
+    metrics.execute_ns = UINT64_MAX;
+    if (bench_metrics_timing_is_valid(
+            BENCH_CANDIDATE_NATIVE, &metrics)) {
+        fputs("overflowing native timing decomposition was accepted\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 typedef int (*test_fn)(void);
 
 typedef struct test_case {
@@ -351,6 +486,10 @@ int main(void) {
          test_connect_failure_retires_omitted_write},
         {"connect-write rejects impossible results",
          test_connect_write_rejects_impossible_results},
+        {"ring profile option parsing",
+         test_ring_profile_option_parsing},
+        {"benchmark timing invariants",
+         test_benchmark_timing_invariants},
     };
     size_t i;
 

@@ -25,6 +25,9 @@ typedef struct leir_aot_linux_metrics {
     uint64_t task_parks;
     uint64_t terminal_wakes;
     uint64_t hot_allocations;
+    uint64_t prepare_ns;
+    uint64_t ring_ns;
+    uint64_t resume_ns;
     uint32_t first_error_operation;
     uint32_t resumed_continuation;
 } leir_aot_linux_metrics_t;

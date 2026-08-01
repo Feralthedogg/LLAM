@@ -770,6 +770,7 @@ LEIR_AOT_INTEGRATION_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_integration.o
 LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_linux_unit.o
 LEIR_AOT_OWNERSHIP_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_native_test_fixture.o \

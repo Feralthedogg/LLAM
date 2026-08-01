@@ -395,6 +395,9 @@ int main(void) {
         success.task.metrics.task_parks != 1U ||
         success.task.metrics.terminal_wakes != 1U ||
         success.task.metrics.hot_allocations != 0U ||
+        success.task.metrics.prepare_ns == 0U ||
+        success.task.metrics.ring_ns == 0U ||
+        success.task.metrics.resume_ns == 0U ||
         success.task.metrics.resumed_continuation !=
             LEIR_AOT_CONNECT_WRITE_WRITE_RESULT) {
         fprintf(stderr, "successful AOT result or counters mismatch\n");

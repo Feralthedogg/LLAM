@@ -39,6 +39,7 @@ typedef struct bench_options {
     unsigned concurrency;
     size_t payload;
     uint64_t activations;
+    const char *ring_profile;
     bool candidate_set;
 } bench_options_t;
 
@@ -51,6 +52,11 @@ typedef struct bench_metrics {
     uint64_t task_parks;
     uint64_t terminal_wakes;
     uint64_t hot_allocations;
+    uint64_t bind_ns;
+    uint64_t execute_ns;
+    uint64_t aot_prepare_ns;
+    uint64_t aot_ring_ns;
+    uint64_t aot_resume_ns;
 } bench_metrics_t;
 
 struct bench_state;
@@ -101,6 +107,9 @@ int parse_options(
     int argc,
     char **argv,
     bench_options_t *options);
+bool bench_metrics_timing_is_valid(
+    bench_candidate_t candidate,
+    const bench_metrics_t *metrics);
 uint64_t monotonic_ns(void);
 uint64_t process_cpu_ns(void);
 void fill_payload(

@@ -58,6 +58,10 @@ static bool alignment_is_valid(size_t alignment) {
            (alignment & (alignment - 1U)) == 0U;
 }
 
+static uint64_t elapsed_ns(uint64_t start, uint64_t finish) {
+    return finish > start ? finish - start : 1U;
+}
+
 static bool module_is_valid(
     const leir_aot_module_v1_t *module) {
     return module != NULL &&
@@ -332,8 +336,12 @@ int leir_aot_linux_ticket_run(
         llam_io_req_t *request = NULL;
         unsigned segment_state;
         uint32_t continuation;
+        uint64_t phase_started;
         int64_t semantic_result;
+        int copy_result;
         int issue_result;
+        int prepare_result;
+        int resume_result;
         int saved_errno;
         int result = -1;
 
@@ -344,10 +352,14 @@ int leir_aot_linux_ticket_run(
             saved_errno = EINVAL;
             goto finish;
         }
-        if (ticket->module->prepare(
-                ticket->module_instance, &backend) != 0 ||
-            !ticket->prepared) {
-            saved_errno = errno != 0 ? errno : EPROTO;
+        phase_started = llam_now_ns();
+        prepare_result = ticket->module->prepare(
+            ticket->module_instance, &backend);
+        saved_errno = errno;
+        metrics_out->prepare_ns = elapsed_ns(
+            phase_started, llam_now_ns());
+        if (prepare_result != 0 || !ticket->prepared) {
+            saved_errno = saved_errno != 0 ? saved_errno : EPROTO;
             goto finish;
         }
         ticket->segment.owner_runtime = task->owner_runtime;
@@ -364,9 +376,12 @@ int leir_aot_linux_ticket_run(
             goto finish;
         }
         prepare_request(request, &ticket->segment.ops[1]);
+        phase_started = llam_now_ns();
         issue_result = llam_issue_linux_native_segment(
             &ticket->segment, request);
         saved_errno = errno;
+        metrics_out->ring_ns = elapsed_ns(
+            phase_started, llam_now_ns());
         segment_state = atomic_load_explicit(
             &ticket->segment.state, memory_order_acquire);
         if (segment_state != LLAM_LINUX_NATIVE_SEGMENT_IDLE &&
@@ -399,16 +414,26 @@ int leir_aot_linux_ticket_run(
         release_segment_ownership(&ticket->segment);
         llam_api_io_req_release(g_llam_tls_shard, request);
         request = NULL;
-        if (ticket->module->resume(
-                ticket->module_instance,
-                continuation,
-                semantic_result,
-                resume_out) != 0 ||
-            ticket->module->copy_outputs(
+        phase_started = llam_now_ns();
+        resume_result = ticket->module->resume(
+            ticket->module_instance,
+            continuation,
+            semantic_result,
+            resume_out);
+        saved_errno = errno;
+        copy_result = resume_result == 0
+            ? ticket->module->copy_outputs(
                 ticket->module_instance,
                 values_out,
-                value_count) != 0) {
-            saved_errno = errno != 0 ? errno : EPROTO;
+                value_count)
+            : 0;
+        if (resume_result == 0) {
+            saved_errno = errno;
+        }
+        metrics_out->resume_ns = elapsed_ns(
+            phase_started, llam_now_ns());
+        if (resume_result != 0 || copy_result != 0) {
+            saved_errno = saved_errno != 0 ? saved_errno : EPROTO;
             goto finish;
         }
         result = 0;

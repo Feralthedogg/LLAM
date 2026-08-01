@@ -53,10 +53,14 @@ profile without changing LEIR semantics or completion ownership.
   llam_linux_research_ring_profile_config_t *out)`.
 - Produces:
   `int llam_linux_research_ring_profile_setup_errno(int setup_result)`.
+- Produces:
+  `int llam_linux_research_ring_profile_validate_topology(const
+  llam_linux_research_ring_profile_config_t *profile,
+  bool creator_is_submitter)`.
 - The config contains canonical `name`, enum `kind`, and exact
   `setup_flags`.
 
-- [ ] **Step 1: Write the selector contract test**
+- [x] **Step 1: Write the selector contract test**
 
 Create a Linux-only test whose table verifies:
 
@@ -83,7 +87,7 @@ capability bits fail with `ENOTSUP`; any explicit profile with SQPOLL fails
 with `EINVAL`; setup `-EINVAL` and `-EOPNOTSUPP` normalize to `ENOTSUP`; and
 other negative setup results preserve their positive errno.
 
-- [ ] **Step 2: Add the test target and verify RED**
+- [x] **Step 2: Add the test target and verify RED**
 
 Add `test_leir_aot_ring_profile` to the research target lists and manifest,
 then run in the Linux test container:
@@ -96,7 +100,7 @@ make -j2 LLAM_BUILD_RESEARCH=1 test_leir_aot_ring_profile
 Expected: compilation fails because the header and selector functions do not
 exist.
 
-- [ ] **Step 3: Implement the minimal selector**
+- [x] **Step 3: Implement the minimal selector**
 
 The header defines:
 
@@ -121,8 +125,11 @@ Capability bits are independent of setup-flag numeric values so tests can
 simulate older headers. `compiled_capabilities()` exposes only flags present
 under `#if defined(...)`. `select()` requires the exact bits for the requested
 profile, rejects SQPOLL, zeros `out` on entry, and sets `errno` deterministically.
+The topology validator rejects `defer_taskrun` with `ENOTSUP` when ring creation
+and submission occur on different tasks; current kernels bind non-disabled
+`SINGLE_ISSUER` rings to the setup task.
 
-- [ ] **Step 4: Verify GREEN and manifest parity**
+- [x] **Step 4: Verify GREEN and manifest parity**
 
 Run:
 
@@ -133,7 +140,7 @@ python3 scripts/audit_build_manifests.py --root . --check
 
 Expected: selector tests pass and Make/CMake/manifest projections agree.
 
-- [ ] **Step 5: Commit the selector**
+- [x] **Step 5: Commit the selector**
 
 ```bash
 git add src/io/linux/runtime_io_ring_profile_linux_internal.h \
@@ -158,14 +165,14 @@ git commit -m "research: select strict io_uring profiles"
   `LLAM_RESEARCH_IO_URING_PROFILE` is nonempty.
 - Preserves the existing SQPOLL/default setup path when the setting is absent.
 
-- [ ] **Step 1: Extend the test with real setup probes**
+- [x] **Step 1: Extend the test with real setup probes**
 
 For every compiled profile, fork a child process that sets the exact profile,
 initializes a one-worker runtime, and exits 0 on success or 77 only for
 `ENOTSUP`, `EPERM`, or `EACCES`. Add a control child with no setting and assert
 ordinary initialization still succeeds on the test host.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run the selector test in Linux with an invalid explicit profile:
 
@@ -177,23 +184,25 @@ LLAM_RESEARCH_IO_URING_PROFILE=invalid \
 Expected: the integration assertion fails because runtime initialization has
 not yet consumed the profile.
 
-- [ ] **Step 3: Add the strict initialization branch**
+- [x] **Step 3: Add the strict initialization branch**
 
 Under `LLAM_BUILD_RESEARCH && LLAM_RUNTIME_BACKEND_LINUX`, read the setting
 before the existing SQPOLL/default branches. If nonempty:
 
 1. select exact flags with the current SQPOLL request state;
-2. call `io_uring_queue_init_params()` once;
-3. map only kernel `EINVAL`/`EOPNOTSUPP` to `ENOTSUP`;
-4. initialize the same ring-ready, feature, eventfd, and `linux_submit_all`
+2. validate the profile against the current init-thread creator/I/O-worker
+   submitter topology;
+3. call `io_uring_queue_init_params()` once;
+4. map only kernel `EINVAL`/`EOPNOTSUPP` to `ENOTSUP`;
+5. initialize the same ring-ready, feature, eventfd, and `linux_submit_all`
    state used by the current successful path;
-5. return failure without retrying fewer flags when exact setup fails.
+6. return failure without retrying fewer flags when exact setup fails.
 
 Do not cache the profile in a public or production structure. The benchmark
 already owns and prints the exact request, and strict success proves the
 active setup.
 
-- [ ] **Step 4: Verify exact behavior**
+- [x] **Step 4: Verify exact behavior**
 
 Run:
 
@@ -206,7 +215,7 @@ LLAM_RESEARCH_IO_URING_PROFILE=invalid \
 Expected: the normal test passes; the explicit invalid request is rejected in
 the child contract without falling back.
 
-- [ ] **Step 5: Commit ring initialization**
+- [x] **Step 5: Commit ring initialization**
 
 ```bash
 git add src/io/engine/io_engine.c \
@@ -219,12 +228,16 @@ git commit -m "research: require exact ring profile setup"
 ### Task 3: C benchmark schema and cost attribution
 
 **Files:**
+- Modify: `Makefile`
+- Modify: `CMakeLists.txt`
+- Modify: `config/llam-sources.json`
 - Modify: `experiments/leir/leir_aot_linux.h`
 - Modify: `experiments/leir/leir_aot_linux.c`
 - Modify: `experiments/leir/leir_aot_connect_bench_support.h`
 - Modify: `experiments/leir/leir_aot_connect_bench_support.c`
 - Modify: `experiments/leir/bench_leir_aot_connect.c`
 - Modify: `experiments/leir/test_leir_aot_linux_unit.c`
+- Modify: `experiments/leir/test_leir_aot_integration.c`
 
 **Interfaces:**
 - Extends `leir_aot_linux_metrics_t` with `prepare_ns`, `ring_ns`, and
@@ -233,14 +246,14 @@ git commit -m "research: require exact ring profile setup"
 - Emits schema-2 fields `ring_profile`, `bind_ns`, `execute_ns`,
   `aot_prepare_ns`, `aot_ring_ns`, and `aot_resume_ns`.
 
-- [ ] **Step 1: Write failing option and metrics tests**
+- [x] **Step 1: Write failing option and metrics tests**
 
 Add table-driven parsing cases for all three `--ring-profile` values and
 rejections for missing/unknown values. Extend the Linux AOT unit fixture so a
 successful ticket reports positive aggregate subphase timing and so portable
 metrics require all `aot_*` values to remain zero.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run in Linux:
 
@@ -253,7 +266,7 @@ make -j2 LLAM_BUILD_RESEARCH=1 \
 
 Expected: the binary rejects `--ring-profile` or omits the schema-2 fields.
 
-- [ ] **Step 3: Implement monotonic elapsed accumulation**
+- [x] **Step 3: Implement monotonic elapsed accumulation**
 
 Use `llam_now_ns()` and a saturating helper:
 
@@ -273,7 +286,7 @@ In the benchmark, time bind and outer execute for both candidates. Add the
 native ticket subphase values to worker-local totals. Set the profile process
 setting before `llam_runtime_init_ex()` and print schema version 2.
 
-- [ ] **Step 4: Enforce structural timing invariants**
+- [x] **Step 4: Enforce structural timing invariants**
 
 Before printing a successful native sample, require:
 
@@ -288,13 +301,13 @@ metrics.aot_prepare_ns + metrics.aot_ring_ns +
 Require the portable `aot_*` fields to equal zero. Use checked addition or
 subtractive bounds so malformed counters cannot overflow the invariant.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run portable and native Unix smoke samples for `submit_all`, then repeat for
 each supported profile. Expected: one schema-2 line per process, exact profile
 identity, unchanged structural counters, and valid timing decomposition.
 
-- [ ] **Step 6: Commit benchmark instrumentation**
+- [x] **Step 6: Commit benchmark instrumentation**
 
 ```bash
 git add experiments/leir/leir_aot_linux.h \

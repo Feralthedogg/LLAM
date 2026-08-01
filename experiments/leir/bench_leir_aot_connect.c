@@ -30,6 +30,8 @@ int main(void) {
 
 #else
 
+#include "io/linux/runtime_io_ring_profile_linux_internal.h"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -161,6 +163,27 @@ static uint64_t activation_begin_for_worker(
                 : remainder);
 }
 
+static uint64_t elapsed_ns(uint64_t start, uint64_t finish) {
+    return finish > start ? finish - start : 1U;
+}
+
+static void add_timing(
+    uint64_t *total,
+    uint64_t start,
+    uint64_t finish) {
+    uint64_t elapsed = elapsed_ns(start, finish);
+
+    *total = elapsed > UINT64_MAX - *total
+        ? UINT64_MAX
+        : *total + elapsed;
+}
+
+static void add_timing_value(uint64_t *total, uint64_t value) {
+    *total = value > UINT64_MAX - *total
+        ? UINT64_MAX
+        : *total + value;
+}
+
 static void add_portable_metrics(
     bench_metrics_t *total,
     const leir_phase0_metrics_t *sample) {
@@ -184,6 +207,10 @@ static void add_native_metrics(
     total->task_parks += sample->task_parks;
     total->terminal_wakes += sample->terminal_wakes;
     total->hot_allocations += sample->hot_allocations;
+    add_timing_value(
+        &total->aot_prepare_ns, sample->prepare_ns);
+    add_timing_value(&total->aot_ring_ns, sample->ring_ns);
+    add_timing_value(&total->aot_resume_ns, sample->resume_ns);
 }
 
 static void run_portable_activation(
@@ -198,6 +225,11 @@ static void run_portable_activation(
         .inline_budget = 8U,
         .force_backend = true,
     };
+    uint64_t started_ns;
+    int bind_error;
+    int bind_result;
+    int run_error;
+    int run_result;
 
     values[0].fd = client;
     values[1].buffer.data = &state->address;
@@ -209,19 +241,32 @@ static void run_portable_activation(
     values[5].u64 = state->options.payload;
     values[6].i64 = -1;
     memset(&metrics, 0, sizeof(metrics));
-    if (leir_phase0_instance_bind(
-            &worker->portable_instance,
-            values,
-            7U,
-            &run_options) != 0 ||
-        leir_phase0_instance_run(
-            &worker->portable_instance,
-            values_out,
-            7U,
-            &metrics) != 0 ||
+    started_ns = monotonic_ns();
+    bind_result = leir_phase0_instance_bind(
+        &worker->portable_instance,
+        values,
+        7U,
+        &run_options);
+    bind_error = errno;
+    add_timing(
+        &worker->metrics.bind_ns, started_ns, monotonic_ns());
+    if (bind_result != 0) {
+        fail_state(state, "portable bind", bind_error);
+        return;
+    }
+    started_ns = monotonic_ns();
+    run_result = leir_phase0_instance_run(
+        &worker->portable_instance,
+        values_out,
+        7U,
+        &metrics);
+    run_error = errno;
+    add_timing(
+        &worker->metrics.execute_ns, started_ns, monotonic_ns());
+    if (run_result != 0 ||
         values_out[3].i64 != 0 ||
         values_out[6].i64 != (int64_t)state->options.payload) {
-        fail_state(state, "portable activation", errno);
+        fail_state(state, "portable activation", run_error);
         return;
     }
     add_portable_metrics(&worker->metrics, &metrics);
@@ -237,6 +282,11 @@ static void run_native_activation(
     leir_phase0_value_t values_out[7] = {0};
     leir_aot_resume_result_v1_t resume;
     leir_aot_linux_metrics_t metrics;
+    uint64_t started_ns;
+    int bind_error;
+    int bind_result;
+    int run_error;
+    int run_result;
 
     values[0].fd = client;
     values[1].buffer.data = &state->address;
@@ -249,19 +299,32 @@ static void run_native_activation(
     values[6].i64 = -1;
     memset(&resume, 0, sizeof(resume));
     memset(&metrics, 0, sizeof(metrics));
-    if (leir_aot_linux_ticket_bind(
-            worker->native_ticket, values, 7U) != 0 ||
-        leir_aot_linux_ticket_run(
-            worker->native_ticket,
-            values_out,
-            7U,
-            &resume,
-            &metrics) != 0 ||
+    started_ns = monotonic_ns();
+    bind_result = leir_aot_linux_ticket_bind(
+        worker->native_ticket, values, 7U);
+    bind_error = errno;
+    add_timing(
+        &worker->metrics.bind_ns, started_ns, monotonic_ns());
+    if (bind_result != 0) {
+        fail_state(state, "native bind", bind_error);
+        return;
+    }
+    started_ns = monotonic_ns();
+    run_result = leir_aot_linux_ticket_run(
+        worker->native_ticket,
+        values_out,
+        7U,
+        &resume,
+        &metrics);
+    run_error = errno;
+    add_timing(
+        &worker->metrics.execute_ns, started_ns, monotonic_ns());
+    if (run_result != 0 ||
         resume.action != LEIR_AOT_RESUME_RETURN ||
         resume.error_code != 0 ||
         values_out[3].i64 != 0 ||
         values_out[6].i64 != (int64_t)state->options.payload) {
-        fail_state(state, "native activation", errno);
+        fail_state(state, "native activation", run_error);
         return;
     }
     add_native_metrics(&worker->metrics, &metrics);
@@ -391,6 +454,12 @@ static void metrics_add(
     total->task_parks += sample->task_parks;
     total->terminal_wakes += sample->terminal_wakes;
     total->hot_allocations += sample->hot_allocations;
+    add_timing_value(&total->bind_ns, sample->bind_ns);
+    add_timing_value(&total->execute_ns, sample->execute_ns);
+    add_timing_value(
+        &total->aot_prepare_ns, sample->aot_prepare_ns);
+    add_timing_value(&total->aot_ring_ns, sample->aot_ring_ns);
+    add_timing_value(&total->aot_resume_ns, sample->aot_resume_ns);
 }
 
 static bool native_unavailable(int error_code) {
@@ -443,10 +512,18 @@ int main(int argc, char **argv) {
     if (parse_options(argc, argv, &state.options) != 0) {
         fputs(
             "usage: bench_leir_aot_connect --candidate portable|native "
+            "[--ring-profile submit_all|coop_taskrun|defer_taskrun] "
             "[--family tcp|unix] [--concurrency N] [--payload N] "
             "[--activations N]\n",
             stderr);
         return 2;
+    }
+    if (setenv(
+            LLAM_LINUX_RESEARCH_RING_PROFILE_ENV,
+            state.options.ring_profile,
+            1) != 0) {
+        perror("set ring profile");
+        goto cleanup;
     }
     if (state.options.candidate == BENCH_CANDIDATE_PORTABLE &&
         create_portable_program(&state.program) != 0) {
@@ -492,7 +569,8 @@ int main(int argc, char **argv) {
         if (native_unavailable(errno)) {
             fprintf(
                 stderr,
-                "SKIP: runtime backend unavailable: %s\n",
+                "SKIP: ring profile %s unavailable: %s\n",
+                state.options.ring_profile,
                 strerror(errno));
             result = 77;
         } else {
@@ -584,19 +662,26 @@ finish_run:
             &state.failures, memory_order_acquire) == 0U &&
         state.peer.error_code == 0 &&
         state.peer.completed == state.options.activations &&
-        metrics.activations == state.options.activations;
+        metrics.activations == state.options.activations &&
+        bench_metrics_timing_is_valid(
+            state.options.candidate, &metrics);
     p99_ns = p99_latency(
         state.latencies, (size_t)state.options.activations);
     printf(
-        "LEIR_AOT_CONNECT_SAMPLE version=1 candidate=%s family=%s "
+        "LEIR_AOT_CONNECT_SAMPLE version=2 candidate=%s "
+        "ring_profile=%s family=%s "
         "concurrency=%u payload=%zu activations=%" PRIu64 " "
         "wall_ns=%" PRIu64 " cpu_ns=%" PRIu64 " p99_ns=%" PRIu64 " "
+        "bind_ns=%" PRIu64 " execute_ns=%" PRIu64 " "
+        "aot_prepare_ns=%" PRIu64 " aot_ring_ns=%" PRIu64 " "
+        "aot_resume_ns=%" PRIu64 " "
         "correctness=%u queue_publications=%" PRIu64 " "
         "prepared_sqes=%" PRIu64 " observed_cqes=%" PRIu64 " "
         "suppressed_success_cqes=%" PRIu64 " task_parks=%" PRIu64 " "
         "terminal_wakes=%" PRIu64 " hot_allocations=%" PRIu64 " "
         "checksum=%016" PRIx64 "\n",
         candidate_name(state.options.candidate),
+        state.options.ring_profile,
         family_name(state.options.family),
         state.options.concurrency,
         state.options.payload,
@@ -604,6 +689,11 @@ finish_run:
         wall_ns,
         cpu_ns,
         p99_ns,
+        metrics.bind_ns,
+        metrics.execute_ns,
+        metrics.aot_prepare_ns,
+        metrics.aot_ring_ns,
+        metrics.aot_resume_ns,
         correctness ? 1U : 0U,
         metrics.queue_publications,
         metrics.prepared_sqes,

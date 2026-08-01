@@ -843,6 +843,7 @@ target_include_directories(test_leir_aot_integration PRIVATE
 target_link_libraries(test_leir_aot_integration PRIVATE llam_runtime)
 
 add_executable(test_leir_aot_linux_unit
+    experiments/leir/leir_aot_connect_bench_support.c
     experiments/leir/test_leir_aot_linux_unit.c
 )
 target_include_directories(test_leir_aot_linux_unit PRIVATE

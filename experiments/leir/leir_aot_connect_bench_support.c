@@ -45,6 +45,19 @@ static int parse_positive_u64(const char *text, uint64_t *value_out) {
     return 0;
 }
 
+static const char *canonical_ring_profile(const char *value) {
+    if (strcmp(value, "submit_all") == 0) {
+        return "submit_all";
+    }
+    if (strcmp(value, "coop_taskrun") == 0) {
+        return "coop_taskrun";
+    }
+    if (strcmp(value, "defer_taskrun") == 0) {
+        return "defer_taskrun";
+    }
+    return NULL;
+}
+
 int parse_options(
     int argc,
     char **argv,
@@ -56,6 +69,7 @@ int parse_options(
     options->concurrency = 4U;
     options->payload = 64U;
     options->activations = 100U;
+    options->ring_profile = "submit_all";
     for (i = 1; i < argc; i += 1) {
         const char *name = argv[i];
         const char *value;
@@ -82,6 +96,12 @@ int parse_options(
             } else if (strcmp(value, "unix") == 0) {
                 options->family = BENCH_FAMILY_UNIX;
             } else {
+                errno = EINVAL;
+                return -1;
+            }
+        } else if (strcmp(name, "--ring-profile") == 0) {
+            options->ring_profile = canonical_ring_profile(value);
+            if (options->ring_profile == NULL) {
                 errno = EINVAL;
                 return -1;
             }
@@ -117,6 +137,39 @@ int parse_options(
         return -1;
     }
     return 0;
+}
+
+bool bench_metrics_timing_is_valid(
+    bench_candidate_t candidate,
+    const bench_metrics_t *metrics) {
+    uint64_t remaining;
+
+    if (metrics == NULL ||
+        metrics->bind_ns == 0U ||
+        metrics->execute_ns == 0U) {
+        return false;
+    }
+    if (candidate == BENCH_CANDIDATE_PORTABLE) {
+        return metrics->aot_prepare_ns == 0U &&
+               metrics->aot_ring_ns == 0U &&
+               metrics->aot_resume_ns == 0U;
+    }
+    if (candidate != BENCH_CANDIDATE_NATIVE ||
+        metrics->aot_prepare_ns == 0U ||
+        metrics->aot_ring_ns == 0U ||
+        metrics->aot_resume_ns == 0U) {
+        return false;
+    }
+    remaining = metrics->execute_ns;
+    if (metrics->aot_prepare_ns > remaining) {
+        return false;
+    }
+    remaining -= metrics->aot_prepare_ns;
+    if (metrics->aot_ring_ns > remaining) {
+        return false;
+    }
+    remaining -= metrics->aot_ring_ns;
+    return metrics->aot_resume_ns <= remaining;
 }
 
 uint64_t monotonic_ns(void) {

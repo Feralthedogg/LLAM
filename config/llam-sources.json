@@ -475,6 +475,7 @@
         "name": "test_leir_aot_linux_unit",
         "platforms": ["all"],
         "sources": [
+          "experiments/leir/leir_aot_connect_bench_support.c",
           "experiments/leir/test_leir_aot_linux_unit.c"
         ],
         "link_dependencies": ["llam_runtime"]
