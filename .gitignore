@@ -14,6 +14,8 @@ compile_commands.json
 /*.plist
 /bench
 /bench_lcwe_model
+/bench_lrpa
+/bench_lrpa_faults
 /demo
 /llam_broker
 /stress
@@ -25,6 +27,8 @@ test_abi_compat
 test_connect_io
 test_io_buffers
 test_lcwe_model
+test_lrpa_core
+test_lrpa_faults
 test_multi_runtime_core
 test_nm_compat_runtime
 test_runtime_api_edges
