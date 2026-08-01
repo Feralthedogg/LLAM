@@ -1,0 +1,109 @@
+name: Defect report
+description: Report a reproducible, non-security LLAM defect.
+title: "[Defect] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security defects here.** Submit them privately at
+        https://github.com/Feralthedogg/LLAM/security/advisories/new.
+
+  - type: input
+    id: version
+    attributes:
+      label: Affected release, tag, commit, or package
+      placeholder: v3.0.0 or a full commit identifier
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04 x86_64
+    validations:
+      required: true
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Compiler and build mode
+      placeholder: clang 20, Release
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Relevant I/O or runtime backend
+      options:
+        - Linux io_uring
+        - macOS/BSD kqueue
+        - Windows IOCP
+        - Portable or backend-independent
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: modifications
+    attributes:
+      label: Modifications
+      description: State whether LLAM was modified and summarize relevant changes.
+      placeholder: Unmodified official release, or a high-level change description
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps or minimal reproducer
+      description: Include the smallest safe example and exact commands when available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, traces, or other evidence
+      description: Remove credentials, secrets, personal data, and regulated data.
+      render: shell
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Known or suspected impact
+    validations:
+      required: true
+
+  - type: input
+    id: contact
+    attributes:
+      label: Follow-up contact
+      description: GitHub handle or another safe contact method.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I confirm this report contains no security-sensitive details.
+          required: true

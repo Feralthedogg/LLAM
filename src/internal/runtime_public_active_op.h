@@ -3,7 +3,7 @@
  * @brief Active public-operation guard helpers for opaque handles.
  *
  * @copyright Copyright 2026 Feralthedogg
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
  */
 
 #ifndef LLAM_RUNTIME_PUBLIC_ACTIVE_OP_H

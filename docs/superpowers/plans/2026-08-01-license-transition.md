@@ -22,10 +22,10 @@ GitHub Actions, GitHub repository security settings.
 - Create: `docs/superpowers/specs/2026-08-01-license-transition-design.md`
 - Create: `docs/superpowers/plans/2026-08-01-license-transition.md`
 
-- [ ] Confirm the baseline `make -j4 all test CC=clang` run exits successfully.
-- [ ] Record the version boundary, unchanged ABI, policy files, automated
+- [x] Confirm the baseline `make -j4 all test CC=clang` run exits successfully.
+- [x] Record the version boundary, unchanged ABI, policy files, automated
       checks, and release acceptance criteria.
-- [ ] Verify both documents contain no unresolved placeholders.
+- [x] Verify both documents contain no unresolved placeholders.
 
 ### Task 2: Install the authoritative license and notices
 
@@ -35,14 +35,14 @@ GitHub Actions, GitHub repository security settings.
   boilerplate
 - Create: `docs/licensing.md`
 
-- [ ] Add a failing policy fixture/test for the exact section 1.4 text and
+- [x] Add a failing policy fixture/test for the exact section 1.4 text and
       prohibited stale Apache notices.
-- [ ] Replace `LICENSE` with the supplied text and approved section 1.4.
-- [ ] Convert existing LLAM-authored notices to
+- [x] Replace `LICENSE` with the supplied text and approved section 1.4.
+- [x] Convert existing LLAM-authored notices to
       `LicenseRef-LLAM-Commercial-Reciprocity-1.0`.
-- [ ] Document that `v2.2.1` and earlier remain Apache 2.0 while `v3.0.0`
+- [x] Document that `v2.2.1` and earlier remain Apache 2.0 while `v3.0.0`
       and later snapshots use the license shipped with each immutable version.
-- [ ] Run the policy test and confirm it passes.
+- [x] Run the policy test and confirm it passes.
 
 ### Task 3: Add reporting and contribution operations
 
@@ -52,13 +52,13 @@ GitHub Actions, GitHub repository security settings.
 - Create: `.github/ISSUE_TEMPLATE/config.yml`
 - Create: `CONTRIBUTING.md`
 
-- [ ] Add supported-version and private-reporting guidance with the required
+- [x] Add supported-version and private-reporting guidance with the required
       seven-day security and thirty-day general-defect reporting windows.
-- [ ] Add a structured non-security defect form with version, platform,
+- [x] Add a structured non-security defect form with version, platform,
       backend, modification, reproduction, evidence, and impact fields.
-- [ ] Add the exact contribution-license clause and DCO sign-off workflow.
-- [ ] Validate all YAML files with a parser.
-- [ ] Enable GitHub Private Vulnerability Reporting and confirm the repository
+- [x] Add the exact contribution-license clause and DCO sign-off workflow.
+- [x] Validate all YAML files with a parser.
+- [x] Enable GitHub Private Vulnerability Reporting and confirm the repository
       reports `enabled: true`.
 
 ### Task 4: Enforce the repository policy
@@ -69,13 +69,13 @@ GitHub Actions, GitHub repository security settings.
 - Modify: `Makefile`
 - Modify: `.github/workflows/linux.yml`
 
-- [ ] Write tests that demonstrate failures for altered section 1.4, stale
+- [x] Write tests that demonstrate failures for altered section 1.4, stale
       Apache notices, missing operational files, missing README disclosure, and
       release packaging that omits `LICENSE`.
-- [ ] Implement the checker using tracked-file input so ignored build output
+- [x] Implement the checker using tracked-file input so ignored build output
       and historical Git objects are not scanned.
-- [ ] Add `check-license-policy` to `make check` and the Linux CI gate.
-- [ ] Run the unit tests and the checker against the working tree.
+- [x] Add `check-license-policy` to `make check` and the Linux CI gate.
+- [x] Run the unit tests and the checker against the working tree.
 
 ### Task 5: Create the 3.0.0 product boundary
 
@@ -92,12 +92,12 @@ GitHub Actions, GitHub repository security settings.
 - Modify: `tests/test_shared_load.c`
 - Modify: release/install scripts and CI workflow version constants
 
-- [ ] Add a `3.0.0` changelog entry describing the license boundary and
+- [x] Add a `3.0.0` changelog entry describing the license boundary and
       operational files.
-- [ ] Change product/library version literals from `2.2.1` to `3.0.0`.
-- [ ] Keep `LLAM_ABI_MAJOR`, SONAME/install-name, and ABI documentation at 2.
-- [ ] Update README badge, install examples, and license section.
-- [ ] Confirm historical changelog entries and the licensing record still
+- [x] Change product/library version literals from `2.2.1` to `3.0.0`.
+- [x] Keep `LLAM_ABI_MAJOR`, SONAME/install-name, and ABI documentation at 2.
+- [x] Update README badge, install examples, and license section.
+- [x] Confirm historical changelog entries and the licensing record still
       identify prior Apache releases accurately.
 
 ### Task 6: Verify builds, policy, and packages
@@ -105,15 +105,15 @@ GitHub Actions, GitHub repository security settings.
 **Files:**
 - Verify only
 
-- [ ] Run `python3 scripts/test_license_policy.py`.
-- [ ] Run `python3 scripts/check_license_policy.py`.
-- [ ] Run `make clean && make -j4 all test CC=clang`.
-- [ ] Configure and build with CMake, then run CTest.
-- [ ] Parse workflow and issue-form YAML.
-- [ ] Parse the PowerShell packaging script in PowerShell 7.
-- [ ] Build a local release archive and verify `LICENSE`, `VERSION=3.0.0`,
+- [x] Run `python3 scripts/test_license_policy.py`.
+- [x] Run `python3 scripts/check_license_policy.py`.
+- [x] Run `make clean && make -j4 all test CC=clang`.
+- [x] Configure and build with CMake, then run CTest.
+- [x] Parse workflow and issue-form YAML.
+- [x] Parse the PowerShell packaging script in PowerShell 7.
+- [x] Build a local release archive and verify `LICENSE`, `VERSION=3.0.0`,
       `LIBRARY_VERSION=3.0.0`, and ABI-major-2 library names.
-- [ ] Review the complete diff and confirm no user-owned checkout changes or
+- [x] Review the complete diff and confirm no user-owned checkout changes or
       unrelated files are included.
 
 ### Task 7: Publish and release

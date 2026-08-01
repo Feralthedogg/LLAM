@@ -1,9 +1,9 @@
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 cmake_minimum_required(VERSION 3.20)
 
-project(llam VERSION 2.2.1 LANGUAGES C ASM)
+project(llam VERSION 3.0.0 LANGUAGES C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 2)
 set(LLAM_ABI_VERSION_MINOR 0)

@@ -1,11 +1,11 @@
 #!/bin/sh
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 set -eu
 
 prefix="/usr/local"
-version="${LLAM_INSTALL_VERSION:-2.2.1}"
+version="${LLAM_INSTALL_VERSION:-3.0.0}"
 target=""
 base_url=""
 dry_run=0

@@ -10,7 +10,7 @@
 ![BSD](https://img.shields.io/badge/BSD-kqueue-lightblue)
 ![Windows](https://img.shields.io/badge/Windows-IOCP-orange)
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![License](https://img.shields.io/badge/license-source--available-blueviolet)
 
 [Documentation](https://feralthedogg.github.io/LLAM/) starts with install,
 quickstart examples, platform support, CLI/tool options, and operations guides.
@@ -321,7 +321,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v2.2.1` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v3.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, macOS arm64, and BSD targets that pass the BSD CI smoke gate, plus
 a native Windows x86_64 `.zip` archive through `.github/workflows/release.yml`.
 
@@ -350,19 +350,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS/BSD:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.2.1/install.sh | sh -s -- --version 2.2.1 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh | sh -s -- --version 3.0.0 --prefix "$HOME/.local"
 ```
 
 Install a specific POSIX target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.2.1/install.sh | sh -s -- --version 2.2.1 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh | sh -s -- --version 3.0.0 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v2.2.1/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 2.2.1 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 3.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -1573,4 +1573,11 @@ All sync primitives are **runtime-aware**: when called from a managed task, bloc
 
 ## License
 
-LLAM is licensed under the [Apache License 2.0](LICENSE).
+LLAM `v3.0.0` and later are licensed under the
+[LLAM Commercial Reciprocity License 1.0](LICENSE). This is a custom
+**source-available** license; it is **not OSI-approved open source**.
+
+`v2.2.1` and earlier immutable releases remain under the Apache License 2.0
+terms shipped with those versions. See [docs/licensing.md](docs/licensing.md)
+for the version boundary, and [.github/SECURITY.md](.github/SECURITY.md) for
+private security reporting.

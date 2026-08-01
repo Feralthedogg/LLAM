@@ -5,7 +5,7 @@
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
- * Licensed under the Apache License, Version 2.0 (the "License");
+ * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
  */
 
 #include "llam/runtime.h"

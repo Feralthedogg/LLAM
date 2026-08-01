@@ -3,7 +3,7 @@
  * @brief Hardened stats-file opening for server_flood.
  *
  * @copyright Copyright 2026 Feralthedogg
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
  */
 
 #include "server_flood_stats_internal.h"

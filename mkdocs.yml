@@ -102,5 +102,6 @@ nav:
       - Architecture: internals/architecture.md
       - Testing Strategy: internals/testing-strategy.md
   - Project:
+      - Licensing: licensing.md
       - Documentation Guide: project/documentation-guide.md
       - Roadmap: roadmap.md

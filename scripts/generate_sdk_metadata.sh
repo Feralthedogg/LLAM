@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 set -eu
 
@@ -11,7 +11,7 @@ fi
 
 stage="$1"
 target="${2:-}"
-version="${LLAM_VERSION:-2.2.1}"
+version="${LLAM_VERSION:-3.0.0}"
 abi_major="${LLAM_ABI_MAJOR:-2}"
 
 if [ -z "$target" ]; then

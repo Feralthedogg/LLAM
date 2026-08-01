@@ -10,17 +10,7 @@
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
  */
 
 #include "llam/runtime.h"
@@ -30,7 +20,7 @@
 #include <errno.h>
 #include <string.h>
 
-#define LLAM_VERSION_STRING_LITERAL "2.2.1"
+#define LLAM_VERSION_STRING_LITERAL "3.0.0"
 
 /** @brief Return the smaller of two byte counts. */
 static size_t llam_min_size(size_t a, size_t b) {

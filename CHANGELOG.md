@@ -1,5 +1,26 @@
 # LLAM ChangeLog
 
+## 3.0.0 - 2026-08-01
+
+### Changed
+
+* establish `v3.0.0` as the first release under the LLAM Commercial
+  Reciprocity License 1.0 while leaving `v2.2.1` and all earlier immutable
+  versions under their previously published Apache License 2.0 terms.
+
+* update product, installer, packaging, workflow, shared-library, and
+  documentation metadata for `3.0.0` while retaining the public ABI at
+  `2.0`.
+
+### Added
+
+* add private security-reporting guidance, a structured non-security defect
+  form, contribution licensing and DCO instructions, and an explicit licensing
+  history.
+
+* enforce the repository license contract with a tested policy checker in the
+  normal verification flow.
+
 ## 2.2.1 - 2026-08-01
 
 ### Added

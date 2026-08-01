@@ -3,7 +3,7 @@
  * @brief Broker teardown and destroy sequencing.
  *
  * @copyright Copyright 2026 Feralthedogg
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
  */
 
 #include "runtime_internal.h"

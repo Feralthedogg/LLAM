@@ -1,5 +1,5 @@
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 name: linux
 
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
 
 env:
-  LLAM_CI_VERSION: "2.2.1"
+  LLAM_CI_VERSION: "3.0.0"
 
 concurrency:
   group: linux-${{ github.ref }}
@@ -73,6 +73,9 @@ jobs:
           done
           cargo install cargo-audit --locked
           cargo audit --version
+
+      - name: License policy
+        run: make check-license-policy
 
       - name: C static analysis
         run: make analyze-cppcheck

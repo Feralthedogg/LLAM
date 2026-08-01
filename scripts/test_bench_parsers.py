@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 """Regression tests for benchmark output parsers."""
 
