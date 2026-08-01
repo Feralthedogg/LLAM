@@ -49,9 +49,45 @@ Copyright 2026 Feralthedogg
 SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 ```
 
+### License-file layout
+
+The repository will use this layout:
+
+```text
+LICENSE
+LICENSES/
+  LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt
+OLD-LICENSES/
+  Apache-2.0.txt
+  README.md
+```
+
+- `LICENSE` remains the human-facing and legally controlling license for the
+  current repository snapshot and for release packages.
+- `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt` is a byte-identical
+  copy of `LICENSE`. It supplies the license text under the standard SPDX/REUSE
+  filename corresponding to the custom identifier used in file headers.
+- `LICENSES/` contains active license texts only. It does not contain Apache
+  2.0 because no current LLAM-authored file is offered under Apache 2.0.
+- `OLD-LICENSES/Apache-2.0.txt` preserves the exact Apache 2.0 text shipped in
+  `v2.2.1` as a historical reference. `OLD-LICENSES/README.md` states that this
+  is not an alternative license for the current snapshot and directs users to
+  the immutable earlier tag for the controlling historical copy.
+
+This separation follows the REUSE rule that active license files live under
+`LICENSES/` and that the directory must not contain unused license texts. The
+historical Apache text therefore stays outside the active directory so license
+scanners do not infer that current LLAM is dual-licensed.
+
+Release archives and installed metadata will contain `LICENSE` and the active
+`LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`. They will not contain
+`OLD-LICENSES/`, because the Apache text does not govern the new release.
+
 The transition audit found no separately owned tracked source that must remain
 under Apache 2.0. Future third-party or separately licensed material must retain
 its own license notice and must be excluded from automated LLAM-header checks.
+Such material must be placed in a conspicuously documented third-party or vendor
+location rather than mixed into LLAM-authored implementation directories.
 
 ## Public positioning
 
@@ -99,13 +135,20 @@ Origin `Signed-off-by` trailer, normally added with `git commit -s`.
 A repository policy checker will fail when:
 
 - the root license is missing or section 1.4 differs from the approved text;
+- the active `LicenseRef` text is missing or differs byte-for-byte from the root
+  `LICENSE`;
+- the historical Apache text or its scope notice is missing, or the Apache text
+  differs from the text shipped in `v2.2.1`;
+- `LICENSES/` contains anything other than the active custom license text;
 - a tracked LLAM file still contains the Apache identifier or boilerplate,
   except for explicit historical references in the licensing record;
-- a currently license-marked LLAM file lacks the new `LicenseRef`;
+- a tracked source, test, example, script, build definition, or GitHub policy
+  file lacks the new `LicenseRef` in its header or an adjacent `.license` file;
 - README does not state the source-available/non-OSI status;
 - the security policy, contribution guide, issue form, or licensing record is
   missing or incomplete; or
-- release package scripts stop including the root `LICENSE`.
+- release package scripts stop including the root `LICENSE` and active
+  `LICENSES/` text, or start packaging `OLD-LICENSES/` as current terms.
 
 The checker will be part of normal `make check`/CI execution. Package tests
 will also inspect produced archives so release artifacts contain the exact
@@ -114,11 +157,11 @@ license and the expected `3.0.0` product metadata while retaining ABI major 2.
 ## Release workflow
 
 The implementation is published on a dedicated branch and reviewed by the full
-CI matrix. Only after required checks pass will it be merged. The immutable
-`v3.0.0` tag is then created from the merged commit and the release workflow
-is allowed to build and publish artifacts. Published archives, checksums,
-embedded license, version metadata, and ABI metadata are verified before the
-transition is considered complete.
+CI matrix. The branch remains an open draft and must not be merged while the
+release hold is active. The immutable `v3.0.0` tag and GitHub release may be
+created only after the owner explicitly lifts that hold. Published archives,
+checksums, embedded license, version metadata, and ABI metadata must then be
+verified before the transition is considered complete.
 
 ## Acceptance criteria
 
@@ -130,4 +173,5 @@ transition is considered complete.
 5. Version `3.0.0` is consistent across code, documentation, workflows, and
    packages while ABI major remains 2.
 6. Local validation and the required hosted CI checks pass.
-7. The `v3.0.0` release is published and its artifacts verify successfully.
+7. Until the owner explicitly authorizes publication, no `v3.0.0` tag or
+   release exists and the transition PR remains a draft.
