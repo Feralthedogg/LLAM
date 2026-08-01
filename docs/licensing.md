@@ -19,13 +19,13 @@ Apache-licensed copy are not replaced by downloading a later version.
 
 ## Current repository snapshot
 
-The root [LICENSE](../LICENSE) expressly applies to source code, object code,
+The root [LICENSE](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE) expressly applies to source code, object code,
 documentation, tests, examples, build materials, configuration, and other
 materials in the repository snapshot unless a material is conspicuously
 identified as governed by another license.
 
 For SPDX-aware tooling, the same text is provided byte-for-byte at
-[LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt](../LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt).
+[LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt).
 The root `LICENSE` remains the controlling human-facing copy.
 
 The SPDX identifier for LLAM-authored files is:
@@ -40,7 +40,7 @@ source license**.
 ## Historical Apache text
 
 The Apache 2.0 text formerly shipped by LLAM is retained at
-[OLD-LICENSES/Apache-2.0.txt](../OLD-LICENSES/Apache-2.0.txt) for historical
+[OLD-LICENSES/Apache-2.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/OLD-LICENSES/Apache-2.0.txt) for historical
 reference. It is not an alternative license for the current repository
 snapshot. The controlling terms for `v2.2.1` or an earlier version remain the
 `LICENSE` file stored at that exact immutable tag or commit.
