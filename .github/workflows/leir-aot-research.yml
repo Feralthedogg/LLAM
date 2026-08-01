@@ -26,7 +26,7 @@ on:
       - "scripts/test_research_build_boundary.py"
       - "scripts/verify_linux.sh"
       - "docs/operations/benchmarks.md"
-      - "docs/superpowers/**"
+      - "docs/research/**"
       - "CMakeLists.txt"
       - "Makefile"
   workflow_dispatch:
