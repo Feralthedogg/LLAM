@@ -143,11 +143,13 @@ class BuildProvenanceSourceHygieneTests(unittest.TestCase):
             "bench_leir_native_pipeline",
             "bench_leir_native_segment",
             "test_leir_aot_c_consumer",
+            "test_leir_aot_completion",
             "test_leir_aot_integration",
             "test_leir_aot_linux_unit",
             "test_leir_aot_module",
             "test_leir_aot_ownership",
             "test_leir_aot_plan",
+            "test_leir_aot_portable",
             "test_leir_aot_ring_profile",
             "test_leir_connect",
             "test_leir_native_linux",
@@ -160,6 +162,29 @@ class BuildProvenanceSourceHygieneTests(unittest.TestCase):
 
 class AotRingProfileBoundaryTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
+
+    def test_aot_storage_alignment_has_msvc_fallback(self) -> None:
+        leir = self.source / "experiments" / "leir"
+        module_header = (leir / "leir_aot_module.h").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("#if defined(_MSC_VER)", module_header)
+        self.assertIn("leir_aot_storage_align_t", module_header)
+        for relative in (
+            "leir_aot_integration_linux.c",
+            "leir_aot_linux.c",
+            "leir_aot_linux_metadata_test.c",
+            "leir_aot_portable.c",
+            "test_leir_aot_completion.c",
+            "test_leir_aot_integration.c",
+            "test_leir_aot_module.c",
+            "test_leir_aot_portable.c",
+        ):
+            with self.subTest(path=relative):
+                source = (leir / relative).read_text(encoding="utf-8")
+                self.assertNotIn("max_align_t", source)
+                self.assertIn("leir_aot_storage_align_t", source)
 
     def test_selector_is_declared_only_in_research_projections(self) -> None:
         manifest = json.loads(
@@ -188,7 +213,7 @@ class AotRingProfileBoundaryTests(unittest.TestCase):
         self.assertNotIn(selector_source, stable_projection)
         self.assertNotIn(selector_header, stable_projection)
 
-    def test_workflow_runs_explicit_profile_smoke_before_full_screen(
+    def test_workflow_runs_split_v3_evidence_and_replays_audit(
         self,
     ) -> None:
         workflow = (
@@ -198,18 +223,68 @@ class AotRingProfileBoundaryTests(unittest.TestCase):
             "--profiles submit_all,coop_taskrun,defer_taskrun"
         )
         smoke_name = "      - name: Collect ring profile smoke evidence\n"
-        full_name = "      - name: Collect specialized mechanism evidence\n"
+        smoke_audit_name = "      - name: Audit ring profile smoke evidence\n"
+        full_name = "      - name: Collect portable and Linux evidence\n"
+        full_audit_name = "      - name: Audit portable and Linux evidence\n"
 
         self.assertIn("test_leir_aot_ring_profile", workflow)
         self.assertGreaterEqual(workflow.count(profile_list), 2)
+        self.assertIn("--transports unix", workflow)
+        self.assertIn("--transports tcp,unix", workflow)
+        self.assertNotIn("--families", workflow)
         self.assertIn(smoke_name, workflow)
+        self.assertIn(smoke_audit_name, workflow)
         self.assertIn(full_name, workflow)
-        self.assertLess(workflow.index(smoke_name), workflow.index(full_name))
-        self.assertIn('assert verdict["schema_version"] == 2', workflow)
+        self.assertIn(full_audit_name, workflow)
+        self.assertLess(
+            workflow.index(smoke_name), workflow.index(smoke_audit_name)
+        )
+        self.assertLess(
+            workflow.index(smoke_audit_name), workflow.index(full_name)
+        )
+        self.assertLess(
+            workflow.index(full_name), workflow.index(full_audit_name)
+        )
+        self.assertGreaterEqual(workflow.count("--audit-only"), 2)
+        self.assertIn('assert verdict["schema_version"] == 3', workflow)
         self.assertIn(
-            'assert verdict["control_profile"] == "submit_all"',
+            'assert verdict["scope"] == "PORTABLE_AND_LINUX_SEPARATE"',
             workflow,
         )
+        self.assertIn('assert verdict["portable"]', workflow)
+        self.assertIn('assert verdict["linux_profiles"]', workflow)
+        self.assertIn('assert verdict["overall_verdict"]', workflow)
+
+    def test_workflow_runs_portable_contract_on_supported_os_matrix(
+        self,
+    ) -> None:
+        workflow = (
+            self.source / ".github/workflows/leir-aot-research.yml"
+        ).read_text(encoding="utf-8")
+        for runner in (
+            "ubuntu-24.04",
+            "ubuntu-24.04-arm",
+            "macos-14",
+            "macos-15-intel",
+            "windows-2022",
+        ):
+            with self.subTest(runner=runner):
+                self.assertIn(f"runner: {runner}", workflow)
+        self.assertIn("bsd-portable-contract:", workflow)
+        self.assertIn("operating_system: freebsd", workflow)
+        self.assertGreaterEqual(
+            workflow.count("test_leir_aot_completion"), 4
+        )
+        self.assertGreaterEqual(
+            workflow.count("test_leir_aot_portable"), 4
+        )
+        self.assertIn("TSan AOT ownership gate", workflow)
+        self.assertIn("-fsanitize=thread", workflow)
+        self.assertIn(
+            "test_leir_aot_(completion|portable|integration|ownership)",
+            workflow,
+        )
+        self.assertNotIn("continue-on-error", workflow)
 
 
 class RuntimeProjectionBoundaryTests(unittest.TestCase):
@@ -278,6 +353,15 @@ class ResearchBoundaryTests(unittest.TestCase):
         )
         cls.assert_command_succeeded(research_make, "research Make trace")
         cls.research_make_trace = cls._combined_output(research_make)
+        research_test_make = cls._run(
+            [*make_common, "LLAM_BUILD_RESEARCH=1", "research-test"]
+        )
+        cls.assert_command_succeeded(
+            research_test_make, "research-test Make trace"
+        )
+        cls.research_test_make_trace = cls._combined_output(
+            research_test_make
+        )
         cls.raw_research_off = cls._run(
             [*make_common, "LLAM_BUILD_RESEARCH=0", "test_leir_native_plan"]
         )
@@ -1291,10 +1375,16 @@ class ResearchBoundaryTests(unittest.TestCase):
             "test_leir_aot_c_consumer", self.research_cmake_targets
         )
         self.assertIn(
+            "test_leir_aot_completion", self.research_cmake_targets
+        )
+        self.assertIn(
             "test_leir_aot_linux_unit", self.research_cmake_targets
         )
         self.assertIn(
             "test_leir_aot_ownership", self.research_cmake_targets
+        )
+        self.assertIn(
+            "test_leir_aot_portable", self.research_cmake_targets
         )
         self.assertIn(
             "test_leir_aot_ring_profile", self.research_cmake_targets
@@ -1307,6 +1397,24 @@ class ResearchBoundaryTests(unittest.TestCase):
         self.assertIn(
             "experiments/leir/fixtures/leir_aot_c_consumer.c",
             self.research_make_trace,
+        )
+        self.assertIn(
+            "experiments/leir/leir_aot_completion.c",
+            self.research_make_trace,
+        )
+        self.assertIn(
+            "experiments/leir/leir_aot_portable.c",
+            self.research_make_trace,
+        )
+        self.assertIn(
+            "./test_leir_aot_completion", self.research_test_make_trace
+        )
+        self.assertIn(
+            "./test_leir_aot_portable", self.research_test_make_trace
+        )
+        self.assertIn(
+            'if test "$rc" -ne 0 && test "$rc" -ne 77',
+            self.research_test_make_trace,
         )
         for family in ("leir", "lcwe", "lccf", "srem"):
             with self.subTest(family=family):
@@ -1371,10 +1479,12 @@ class ResearchBoundaryTests(unittest.TestCase):
         research_build = (
             'make -j"$JOBS" LLAM_BUILD_RESEARCH=1 \\\n'
             "    test_leir_connect \\\n"
-            "    test_leir_aot_plan test_leir_aot_module "
-            "test_leir_aot_c_consumer \\\n"
+            "    test_leir_aot_plan test_leir_aot_module \\\n"
+            "    test_leir_aot_completion test_leir_aot_portable \\\n"
+            "    test_leir_aot_c_consumer \\\n"
             "    test_leir_aot_integration \\\n"
             "    test_leir_aot_linux_unit test_leir_aot_ownership \\\n"
+            "    test_leir_aot_ring_profile \\\n"
             "    bench_leir_aot_connect test_leir_native_linux \\\n"
             "    bench_leir_native_segment bench_leir_native_pipeline"
         )
@@ -1383,6 +1493,13 @@ class ResearchBoundaryTests(unittest.TestCase):
         )
         self.assertIn(stable_build, verifier)
         self.assertIn(research_build, verifier)
+        self.assertIn("./test_leir_aot_completion", verifier)
+        self.assertIn("./test_leir_aot_portable", verifier)
+        self.assertIn('"--candidate", "linux"', verifier)
+        self.assertIn('"--process", "linux"', verifier)
+        self.assertIn('"--transport", "tcp"', verifier)
+        self.assertNotIn('"--candidate", "native"', verifier)
+        self.assertNotIn('"--family", "tcp"', verifier)
         self.assertEqual(
             verifier.splitlines().count(stable_restore),
             1,
@@ -1431,9 +1548,10 @@ class ResearchBoundaryTests(unittest.TestCase):
             'assert verdict["release_authorized"] is False', workflow
         )
         self.assertIn(
-            'assert verdict["release_gate"]["verdict"] == "BLOCKED"',
+            'assert verdict["overall_verdict"]',
             workflow,
         )
+        self.assertNotIn('verdict["release_gate"]', workflow)
 
     def test_bsd_packaging_workflows_provision_python3(self) -> None:
         for relative in (

@@ -104,12 +104,13 @@ int main(void) {
     memset(&backend, 0, sizeof(backend));
     backend.abi_version = LEIR_AOT_MODULE_ABI_V1;
     backend.struct_size = sizeof(backend);
-    backend.backend_kind = LEIR_AOT_BACKEND_LINUX_IO_URING;
+    backend.backend_kind = LEIR_AOT_BACKEND_PORTABLE;
     backend.context = &capture;
     backend.prepare_connect_write = capture_connect_write;
 
     if (module->abi_version != LEIR_AOT_MODULE_ABI_V1 ||
         module->struct_size < sizeof(*module) ||
+        module->backend_kind != LEIR_AOT_MODULE_BACKEND_AGNOSTIC ||
         module->semantic_digest != UINT64_C(0xca50ff7ddbf91222) ||
         module->instance_size == 0U ||
         module->instance_alignment == 0U ||
@@ -131,7 +132,13 @@ int main(void) {
     if (module->bind(
             instance, module->instance_size, values, 7U) != 0 ||
         module->prepare(instance, &backend) != 0 ||
-        capture.calls != 1U ||
+        capture.calls != 1U) {
+        fputs("generated portable prepare contract mismatch\n", stderr);
+        goto cleanup;
+    }
+    backend.backend_kind = LEIR_AOT_BACKEND_LINUX_IO_URING;
+    if (module->prepare(instance, &backend) != 0 ||
+        capture.calls != 2U ||
         module->resume(
             instance,
             capture.write_continuation,
@@ -152,7 +159,7 @@ int main(void) {
     if (module->bind(
             instance, module->instance_size, values, 7U) != 0 ||
         module->prepare(instance, &backend) != 0 ||
-        capture.calls != 2U ||
+        capture.calls != 3U ||
         capture.observed_generation <= capture.previous_generation) {
         fputs("generated module generation contract mismatch\n", stderr);
         goto cleanup;
@@ -169,7 +176,7 @@ int main(void) {
     }
     module->cancel(instance);
     if (module->prepare(instance, &backend) == 0 || errno != ECANCELED ||
-        capture.calls != 2U) {
+        capture.calls != 3U) {
         fputs("generated module cancellation contract mismatch\n", stderr);
         goto cleanup;
     }

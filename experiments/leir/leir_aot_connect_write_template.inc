@@ -89,7 +89,8 @@ static int prepare_connect_write(
         backend == NULL ||
         backend->abi_version != LEIR_AOT_MODULE_ABI_V1 ||
         backend->struct_size < sizeof(*backend) ||
-        backend->backend_kind != LEIR_AOT_BACKEND_LINUX_IO_URING ||
+        (backend->backend_kind != LEIR_AOT_BACKEND_LINUX_IO_URING &&
+         backend->backend_kind != LEIR_AOT_BACKEND_PORTABLE) ||
         backend->prepare_connect_write == NULL) {
         return fail_with_errno(EINVAL);
     }
@@ -197,7 +198,7 @@ static void cancel_connect_write(void *storage) {
 const leir_aot_module_v1_t leir_aot_connect_write_module_v1 = {
     .abi_version = LEIR_AOT_MODULE_ABI_V1,
     .struct_size = sizeof(leir_aot_module_v1_t),
-    .backend_kind = LEIR_AOT_BACKEND_LINUX_IO_URING,
+    .backend_kind = LEIR_AOT_MODULE_BACKEND_AGNOSTIC,
     .semantic_digest = LEIR_AOT_CONNECT_WRITE_DIGEST,
     .instance_size = sizeof(leir_aot_connect_write_instance_t),
     .instance_alignment = _Alignof(leir_aot_connect_write_instance_t),

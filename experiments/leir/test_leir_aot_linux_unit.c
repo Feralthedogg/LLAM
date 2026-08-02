@@ -345,9 +345,19 @@ static int test_ring_profile_option_parsing(void) {
         char *arguments[] = {
             "bench_leir_aot_connect",
             "--candidate",
-            "portable",
+            "linux",
+            "--process",
+            "linux",
             "--ring-profile",
             (char *)profiles[i],
+            "--transport",
+            "tcp",
+            "--block",
+            "0",
+            "--order",
+            "1",
+            "--seed",
+            "42",
         };
         bench_options_t options;
 
@@ -368,7 +378,19 @@ static int test_ring_profile_option_parsing(void) {
         char *arguments[] = {
             "bench_leir_aot_connect",
             "--candidate",
+            "oracle",
+            "--process",
             "portable",
+            "--ring-profile",
+            "portable_control",
+            "--transport",
+            "unix",
+            "--block",
+            "3",
+            "--order",
+            "0",
+            "--seed",
+            "0",
         };
         bench_options_t options;
 
@@ -376,8 +398,13 @@ static int test_ring_profile_option_parsing(void) {
                 (int)(sizeof(arguments) / sizeof(arguments[0])),
                 arguments,
                 &options) != 0 ||
-            strcmp(options.ring_profile, "submit_all") != 0) {
-            fputs("default ring profile is not submit_all\n", stderr);
+            options.candidate != BENCH_CANDIDATE_ORACLE ||
+            options.process != BENCH_PROCESS_PORTABLE ||
+            options.transport != BENCH_TRANSPORT_UNIX ||
+            strcmp(options.ring_profile, "portable_control") != 0 ||
+            options.block != 3U || options.order != 0U ||
+            options.seed != 0U) {
+            fputs("portable evidence identity parse failed\n", stderr);
             return 1;
         }
     }
@@ -385,6 +412,8 @@ static int test_ring_profile_option_parsing(void) {
         char *arguments[] = {
             "bench_leir_aot_connect",
             "--candidate",
+            "oracle",
+            "--process",
             "portable",
             "--ring-profile",
         };
@@ -405,8 +434,18 @@ static int test_ring_profile_option_parsing(void) {
             "bench_leir_aot_connect",
             "--candidate",
             "portable",
+            "--process",
+            "linux",
             "--ring-profile",
             "unknown",
+            "--transport",
+            "tcp",
+            "--block",
+            "0",
+            "--order",
+            "1",
+            "--seed",
+            "9",
         };
         bench_options_t options;
 
@@ -420,6 +459,56 @@ static int test_ring_profile_option_parsing(void) {
             return 1;
         }
     }
+    {
+        char *arguments[] = {
+            "bench_leir_aot_connect",
+            "--candidate",
+            "linux",
+            "--process",
+            "portable",
+            "--ring-profile",
+            "portable_control",
+            "--transport",
+            "tcp",
+            "--block",
+            "0",
+            "--order",
+            "0",
+            "--seed",
+            "9",
+        };
+        bench_options_t options;
+
+        errno = 0;
+        if (parse_options(
+                (int)(sizeof(arguments) / sizeof(arguments[0])),
+                arguments,
+                &options) == 0 ||
+            errno != EINVAL) {
+            fputs("cross-axis candidate was accepted\n", stderr);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_seeded_receipts_are_deterministic(void) {
+    unsigned char first[32];
+    unsigned char same[32];
+    unsigned char different[32];
+
+    fill_payload(first, sizeof(first), 7U, 11U);
+    fill_payload(same, sizeof(same), 7U, 11U);
+    fill_payload(different, sizeof(different), 7U, 12U);
+    if (memcmp(first, same, sizeof(first)) != 0 ||
+        memcmp(first, different, sizeof(first)) == 0 ||
+        bench_result_receipt(7U, 0, 32) !=
+            bench_result_receipt(7U, 0, 32) ||
+        bench_result_receipt(7U, 0, 32) ==
+            bench_result_receipt(8U, 0, 32)) {
+        fputs("seeded benchmark receipts are not deterministic\n", stderr);
+        return 1;
+    }
     return 0;
 }
 
@@ -430,14 +519,14 @@ static int test_benchmark_timing_invariants(void) {
     metrics.bind_ns = 5U;
     metrics.execute_ns = 30U;
     if (!bench_metrics_timing_is_valid(
-            BENCH_CANDIDATE_PORTABLE, &metrics)) {
-        fputs("portable zero AOT timing was rejected\n", stderr);
+            BENCH_CANDIDATE_ORACLE, &metrics)) {
+        fputs("oracle zero AOT timing was rejected\n", stderr);
         return 1;
     }
     metrics.aot_prepare_ns = 1U;
     if (bench_metrics_timing_is_valid(
-            BENCH_CANDIDATE_PORTABLE, &metrics)) {
-        fputs("portable nonzero AOT timing was accepted\n", stderr);
+            BENCH_CANDIDATE_ORACLE, &metrics)) {
+        fputs("oracle nonzero AOT timing was accepted\n", stderr);
         return 1;
     }
 
@@ -445,14 +534,14 @@ static int test_benchmark_timing_invariants(void) {
     metrics.aot_ring_ns = 20U;
     metrics.aot_resume_ns = 5U;
     if (!bench_metrics_timing_is_valid(
-            BENCH_CANDIDATE_NATIVE, &metrics)) {
-        fputs("native timing decomposition was rejected\n", stderr);
+            BENCH_CANDIDATE_LINUX, &metrics)) {
+        fputs("Linux timing decomposition was rejected\n", stderr);
         return 1;
     }
     metrics.aot_resume_ns = 6U;
     if (bench_metrics_timing_is_valid(
-            BENCH_CANDIDATE_NATIVE, &metrics)) {
-        fputs("oversized native timing decomposition was accepted\n", stderr);
+            BENCH_CANDIDATE_LINUX, &metrics)) {
+        fputs("oversized Linux timing decomposition was accepted\n", stderr);
         return 1;
     }
     metrics.aot_prepare_ns = UINT64_MAX;
@@ -460,8 +549,8 @@ static int test_benchmark_timing_invariants(void) {
     metrics.aot_resume_ns = UINT64_MAX;
     metrics.execute_ns = UINT64_MAX;
     if (bench_metrics_timing_is_valid(
-            BENCH_CANDIDATE_NATIVE, &metrics)) {
-        fputs("overflowing native timing decomposition was accepted\n", stderr);
+            BENCH_CANDIDATE_LINUX, &metrics)) {
+        fputs("overflowing Linux timing decomposition was accepted\n", stderr);
         return 1;
     }
     return 0;
@@ -488,6 +577,8 @@ int main(void) {
          test_connect_write_rejects_impossible_results},
         {"ring profile option parsing",
          test_ring_profile_option_parsing},
+        {"seeded receipts are deterministic",
+         test_seeded_receipts_are_deterministic},
         {"benchmark timing invariants",
          test_benchmark_timing_invariants},
     };

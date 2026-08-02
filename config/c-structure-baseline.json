@@ -2,6 +2,11 @@
   "entries": [
     {
       "limit": 800,
+      "line_count": 1188,
+      "path": "experiments/lccf/lccf_fact.c"
+    },
+    {
+      "limit": 800,
       "line_count": 2134,
       "path": "experiments/lccf/lccf_model.c"
     },

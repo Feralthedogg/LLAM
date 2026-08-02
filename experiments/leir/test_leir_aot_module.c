@@ -15,7 +15,7 @@
 #endif
 
 typedef union aligned_instance_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[1024];
 } aligned_instance_storage_t;
 
@@ -93,26 +93,40 @@ static int test_module_prepares_owned_connect_write(void) {
     leir_phase0_value_t outputs[7];
     struct sockaddr_in address;
     unsigned char payload[5];
-    prepare_capture_t capture;
-    leir_aot_backend_v1_t backend;
+    prepare_capture_t linux_capture;
+    prepare_capture_t portable_capture;
+    leir_aot_backend_v1_t linux_backend;
+    leir_aot_backend_v1_t portable_backend;
+    leir_aot_backend_v1_t invalid_backend;
     leir_aot_resume_result_v1_t resume;
 
     memset(&storage, 0, sizeof(storage));
-    memset(&capture, 0, sizeof(capture));
+    memset(&linux_capture, 0, sizeof(linux_capture));
+    memset(&portable_capture, 0, sizeof(portable_capture));
     initialize_values(values, &address, payload);
-    backend = (leir_aot_backend_v1_t){
+    linux_backend = (leir_aot_backend_v1_t){
         .abi_version = LEIR_AOT_MODULE_ABI_V1,
-        .struct_size = sizeof(backend),
+        .struct_size = sizeof(linux_backend),
         .backend_kind = LEIR_AOT_BACKEND_LINUX_IO_URING,
-        .context = &capture,
+        .context = &linux_capture,
         .prepare_connect_write = capture_connect_write,
     };
+    portable_backend = (leir_aot_backend_v1_t){
+        .abi_version = LEIR_AOT_MODULE_ABI_V1,
+        .struct_size = sizeof(portable_backend),
+        .backend_kind = LEIR_AOT_BACKEND_PORTABLE,
+        .context = &portable_capture,
+        .prepare_connect_write = capture_connect_write,
+    };
+    invalid_backend = portable_backend;
+    invalid_backend.backend_kind = UINT32_MAX;
     if (module->abi_version != LEIR_AOT_MODULE_ABI_V1 ||
         module->struct_size != sizeof(*module) ||
-        module->backend_kind != LEIR_AOT_BACKEND_LINUX_IO_URING ||
+        module->backend_kind != LEIR_AOT_MODULE_BACKEND_AGNOSTIC ||
         module->semantic_digest == 0U ||
         module->instance_size > sizeof(storage.bytes) ||
-        module->instance_alignment > _Alignof(max_align_t) ||
+        module->instance_alignment >
+            _Alignof(leir_aot_storage_align_t) ||
         module->slot_count != 7U ||
         module->bind(storage.bytes,
                      sizeof(storage.bytes),
@@ -121,19 +135,39 @@ static int test_module_prepares_owned_connect_write(void) {
         return 1;
     }
     address.sin_port = htons(9999U);
-    if (module->prepare(storage.bytes, &backend) != 0 ||
-        capture.calls != 1U ||
-        capture.fd != (llam_fd_t)7 ||
-        capture.address_length != sizeof(address) ||
-        ((struct sockaddr_in *)(void *)&capture.address)->sin_port !=
+    if (module->prepare(storage.bytes, &portable_backend) != 0 ||
+        portable_capture.calls != 1U ||
+        portable_capture.fd != (llam_fd_t)7 ||
+        portable_capture.address_length != sizeof(address) ||
+        ((struct sockaddr_in *)(void *)&portable_capture.address)->sin_port !=
             htons(4321U) ||
-        capture.payload_length != 5U ||
-        memcmp(capture.payload, "hello", 5U) != 0 ||
-        capture.generation == 0U ||
-        capture.connect_continuation !=
+        portable_capture.payload_length != 5U ||
+        memcmp(portable_capture.payload, "hello", 5U) != 0 ||
+        portable_capture.generation == 0U ||
+        portable_capture.connect_continuation !=
             LEIR_AOT_CONNECT_WRITE_CONNECT_ERROR ||
-        capture.write_continuation !=
+        portable_capture.write_continuation !=
             LEIR_AOT_CONNECT_WRITE_WRITE_RESULT) {
+        return 1;
+    }
+    if (module->prepare(storage.bytes, &linux_backend) != 0 ||
+        linux_capture.calls != 1U ||
+        linux_capture.fd != portable_capture.fd ||
+        linux_capture.address_length != portable_capture.address_length ||
+        memcmp(&linux_capture.address, &portable_capture.address,
+               (size_t)portable_capture.address_length) != 0 ||
+        linux_capture.payload_length != portable_capture.payload_length ||
+        memcmp(linux_capture.payload, portable_capture.payload,
+               portable_capture.payload_length) != 0 ||
+        linux_capture.generation != portable_capture.generation ||
+        linux_capture.connect_continuation !=
+            portable_capture.connect_continuation ||
+        linux_capture.write_continuation != portable_capture.write_continuation) {
+        return 1;
+    }
+    errno = 0;
+    if (module->prepare(storage.bytes, &invalid_backend) == 0 ||
+        errno != EINVAL || portable_capture.calls != 1U) {
         return 1;
     }
     if (module->resume(

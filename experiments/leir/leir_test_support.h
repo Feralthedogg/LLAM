@@ -9,10 +9,29 @@
 #include <stddef.h>
 #include <stdint.h>
 
+int leir_test_connect_write_program_create(
+    leir_phase0_program_t **program_out);
+int leir_test_connect_write_values(
+    leir_phase0_value_t *values,
+    size_t value_count,
+    llam_fd_t fd,
+    const void *address,
+    socklen_t address_length,
+    const void *payload,
+    size_t payload_length);
+bool leir_test_backend_is_unavailable(int error_code);
 int leir_test_socketpair(llam_fd_t pair_out[2]);
 int leir_test_socketpair_type(
     int socket_type,
     llam_fd_t pair_out[2]);
+int leir_test_tcp_listener(
+    llam_fd_t *listener_out,
+    struct sockaddr_storage *address_out,
+    socklen_t *address_length_out);
+int leir_test_tcp_client(llam_fd_t *client_out);
+int leir_test_tcp_refused_address(
+    struct sockaddr_storage *address_out,
+    socklen_t *address_length_out);
 void leir_test_close(llam_fd_t *fd);
 int leir_test_set_socket_buffers(llam_fd_t fd, int size);
 int leir_test_shutdown_write(llam_fd_t fd);

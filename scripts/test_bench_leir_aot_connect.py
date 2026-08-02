@@ -12,177 +12,316 @@ from scripts import bench_leir_aot_connect as bench
 
 
 def sample(candidate: str, **overrides: object) -> dict[str, object]:
+    process = str(
+        overrides.pop(
+            "process",
+            "linux" if candidate == "linux" else "portable",
+        )
+    )
+    activations = int(overrides.get("activations", 100))
+    compiled = candidate != "oracle"
     record: dict[str, object] = {
-        "version": 2,
+        "version": 3,
         "candidate": candidate,
-        "ring_profile": "submit_all",
-        "family": "tcp",
+        "transport": "tcp",
+        "workload": "connect_write",
+        "process": process,
+        "ring_profile": (
+            "submit_all" if process == "linux" else "portable_control"
+        ),
+        "block": 0,
+        "order": 0 if candidate in {"oracle", "portable"} else 1,
+        "seed": 17,
         "concurrency": 4,
         "payload": 64,
-        "activations": 100,
-        "wall_ns": 1_000_000 if candidate == "portable" else 900_000,
-        "cpu_ns": 900_000 if candidate == "portable" else 600_000,
-        "p99_ns": 20_000 if candidate == "portable" else 19_000,
-        "bind_ns": 10_000 if candidate == "portable" else 8_000,
-        "execute_ns": 900_000 if candidate == "portable" else 850_000,
-        "aot_prepare_ns": 0 if candidate == "portable" else 10_000,
-        "aot_ring_ns": 0 if candidate == "portable" else 800_000,
-        "aot_resume_ns": 0 if candidate == "portable" else 10_000,
+        "activations": activations,
+        "logical_operations": activations * 2,
         "correctness": 1,
-        "queue_publications": 0 if candidate == "portable" else 100,
-        "prepared_sqes": 0 if candidate == "portable" else 200,
-        "observed_cqes": 200 if candidate == "portable" else 100,
-        "suppressed_success_cqes": 0 if candidate == "portable" else 100,
-        "task_parks": 100,
-        "terminal_wakes": 100,
+        "result_checksum": "0123456789abcdef",
+        "peer_checksum": "fedcba9876543210",
+        "wall_ns": {
+            "oracle": 2_000_000,
+            "portable": 1_800_000,
+            "linux": 1_500_000,
+        }[candidate],
+        "cpu_ns": {
+            "oracle": 1_800_000,
+            "portable": 1_500_000,
+            "linux": 1_100_000,
+        }[candidate],
+        "p50_ns": {
+            "oracle": 20_000,
+            "portable": 19_000,
+            "linux": 16_000,
+        }[candidate],
+        "p99_ns": {
+            "oracle": 40_000,
+            "portable": 38_000,
+            "linux": 34_000,
+        }[candidate],
+        "interpreter_dispatches": 3 * activations if not compiled else 0,
+        "normalizations": activations if compiled else 0,
+        "site_lookups": activations if compiled else 0,
+        "parks": activations * (2 if candidate == "portable" else 1),
+        "wakes": activations * (2 if candidate == "portable" else 1),
         "hot_allocations": 0,
-        "checksum": "0123456789abcdef",
     }
+    if candidate == "linux":
+        record.update(
+            {
+                "prepared_sqes": activations * 2,
+                "observed_cqes": activations,
+                "suppressed_success_cqes": activations,
+                "queue_publications": activations,
+                "submit_syscalls": max(1, activations // 4),
+            }
+        )
     record.update(overrides)
     return record
 
 
-class ParseSampleTests(unittest.TestCase):
-    def test_parses_complete_sample(self) -> None:
-        line = (
-            "LEIR_AOT_CONNECT_SAMPLE version=2 candidate=native "
-            "ring_profile=submit_all family=tcp "
-            "concurrency=4 payload=64 activations=100 wall_ns=900000 "
-            "cpu_ns=600000 p99_ns=19000 bind_ns=8000 execute_ns=850000 "
-            "aot_prepare_ns=10000 aot_ring_ns=800000 aot_resume_ns=10000 "
-            "correctness=1 "
-            "queue_publications=100 prepared_sqes=200 observed_cqes=100 "
-            "suppressed_success_cqes=100 task_parks=100 terminal_wakes=100 "
-            "hot_allocations=0 checksum=0123456789abcdef"
-        )
-        self.assertEqual(bench.parse_sample(line), sample("native"))
+def pair_sample(candidate: str, process: str, block: int) -> dict[str, object]:
+    first = "oracle" if process == "portable" else "portable"
+    first_runs_first = block % 2 == 0
+    order = 0 if (candidate == first) == first_runs_first else 1
+    return sample(
+        candidate,
+        process=process,
+        ring_profile=(
+            "portable_control" if process == "portable" else "submit_all"
+        ),
+        block=block,
+        order=order,
+        seed=1000 + block,
+    )
 
-    def test_rejects_missing_duplicate_and_nonfinite_fields(self) -> None:
-        complete = bench.format_sample(sample("native"))
+
+class ParseSampleTests(unittest.TestCase):
+    def test_parses_candidate_specific_exact_schemas(self) -> None:
+        for candidate in ("oracle", "portable", "linux"):
+            record = sample(candidate)
+            with self.subTest(candidate=candidate):
+                self.assertEqual(
+                    bench.parse_sample(bench.format_sample(record)), record
+                )
+
+    def test_portable_rows_reject_linux_only_fields(self) -> None:
+        record = sample("portable")
+        record["prepared_sqes"] = 200
+        with self.assertRaisesRegex(ValueError, "unexpected"):
+            bench.format_sample(record)
+
+    def test_linux_rows_require_every_kernel_field(self) -> None:
+        record = sample("linux")
+        del record["observed_cqes"]
         with self.assertRaisesRegex(ValueError, "missing"):
-            bench.parse_sample(complete.replace(" wall_ns=900000", ""))
+            bench.format_sample(record)
+
+    def test_rejects_missing_duplicate_unknown_and_nonfinite_fields(self) -> None:
+        complete = bench.format_sample(sample("linux"))
+        with self.assertRaisesRegex(ValueError, "missing"):
+            bench.parse_sample(complete.replace(" wall_ns=1500000", ""))
         with self.assertRaisesRegex(ValueError, "duplicate"):
             bench.parse_sample(complete + " wall_ns=1")
+        with self.assertRaisesRegex(ValueError, "unexpected"):
+            bench.parse_sample(complete + " invented=1")
         with self.assertRaisesRegex(ValueError, "integer"):
-            bench.parse_sample(complete.replace("wall_ns=900000", "wall_ns=nan"))
+            bench.parse_sample(
+                complete.replace("wall_ns=1500000", "wall_ns=nan")
+            )
 
-    def test_accepts_unix_family(self) -> None:
-        record = sample("native", family="unix")
-        self.assertEqual(bench.parse_sample(bench.format_sample(record)), record)
-
-    def test_rejects_schema_profile_and_timing_contract_violations(self) -> None:
-        complete = bench.format_sample(sample("native"))
+    def test_rejects_identity_and_counter_domain_violations(self) -> None:
         cases = (
-            (complete.replace("version=2", "version=1"), "version"),
+            (sample("portable", version=2), "version"),
+            (sample("portable", workload="other"), "workload"),
             (
-                complete.replace(
-                    "ring_profile=submit_all", "ring_profile=unknown"
+                sample(
+                    "oracle", process="linux", ring_profile="submit_all"
                 ),
-                "ring_profile",
+                "process",
             ),
-            (complete.replace(" bind_ns=8000", ""), "missing"),
-            (
-                bench.format_sample(sample("portable")).replace(
-                    "aot_prepare_ns=0", "aot_prepare_ns=1"
-                ),
-                "portable",
-            ),
-            (complete.replace("aot_ring_ns=800000", "aot_ring_ns=0"), "native"),
-            (
-                complete.replace(
-                    "aot_resume_ns=10000", "aot_resume_ns=50000"
-                ),
-                "execute_ns",
-            ),
+            (sample("linux", ring_profile="portable_control"), "ring_profile"),
+            (sample("portable", result_checksum="ABC"), "checksum"),
+            (sample("portable", p50_ns=40_000, p99_ns=30_000), "p50"),
+            (sample("portable", correctness=2), "correctness"),
         )
-        for line, message in cases:
+        for record, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ValueError, message):
-                    bench.parse_sample(line)
+                    bench.format_sample(record)
 
 
-class MechanismVerdictTests(unittest.TestCase):
-    def test_continues_only_with_exact_native_counters(self) -> None:
-        verdict = bench.classify_mechanism(
-            [sample("portable")], [sample("native")]
+class PortableClassifierTests(unittest.TestCase):
+    def test_passes_compiled_semantics_and_reports_all_ratios(self) -> None:
+        result = bench.classify_portable(
+            [pair_sample("oracle", "portable", 0)],
+            [pair_sample("portable", "portable", 0)],
         )
-        self.assertEqual(verdict["verdict"], "CONTINUE")
-        self.assertAlmostEqual(verdict["wall_ratio"], 0.9)
+        self.assertEqual(result["correctness_verdict"], "PASS")
+        self.assertEqual(result["performance_verdict"], "PASS")
+        self.assertEqual(result["verdict"], "PASS")
+        for name in ("wall_ratio", "cpu_ratio", "p50_ratio", "p99_ratio"):
+            self.assertIn(name, result)
 
-        bad = sample("native", observed_cqes=101)
-        verdict = bench.classify_mechanism([sample("portable")], [bad])
-        self.assertEqual(verdict["verdict"], "STOP")
-        self.assertIn("observed_cqes", verdict["reasons"])
-
-    def test_stops_on_correctness_allocation_or_wall_regression(self) -> None:
-        cases = [
-            sample("native", correctness=0),
-            sample("native", hot_allocations=1),
-            sample("native", wall_ns=1_050_001),
-        ]
-        for candidate in cases:
-            with self.subTest(candidate=candidate):
-                verdict = bench.classify_mechanism(
-                    [sample("portable")], [candidate]
+    def test_fails_checksum_output_and_ownership_mismatches(self) -> None:
+        cases = (
+            ("result_checksum", "1111111111111111"),
+            ("peer_checksum", "2222222222222222"),
+            ("logical_operations", 199),
+            ("correctness", 0),
+        )
+        for field, value in cases:
+            portable = pair_sample("portable", "portable", 0)
+            portable[field] = value
+            with self.subTest(field=field):
+                result = bench.classify_portable(
+                    [pair_sample("oracle", "portable", 0)], [portable]
                 )
-                self.assertEqual(verdict["verdict"], "STOP")
+                self.assertEqual(result["correctness_verdict"], "FAIL")
+                self.assertIn(field, result["reasons"])
 
-    def test_rejects_mismatched_or_missing_cells(self) -> None:
-        with self.assertRaisesRegex(ValueError, "sample count"):
-            bench.classify_mechanism(
-                [sample("portable"), sample("portable")],
-                [sample("native")],
-            )
-        with self.assertRaisesRegex(ValueError, "cell"):
-            bench.classify_mechanism(
-                [sample("portable")],
-                [sample("native", payload=4096)],
-            )
-        with self.assertRaisesRegex(ValueError, "cell"):
-            bench.classify_mechanism(
-                [sample("portable", ring_profile="submit_all")],
-                [sample("native", ring_profile="coop_taskrun")],
-            )
+    def test_compiled_rows_require_zero_dispatch_and_one_B_per_activation(self) -> None:
+        cases = (
+            ("interpreter_dispatches", 1),
+            ("normalizations", 99),
+            ("site_lookups", 99),
+            ("hot_allocations", 1),
+        )
+        for field, value in cases:
+            portable = pair_sample("portable", "portable", 0)
+            portable[field] = value
+            with self.subTest(field=field):
+                result = bench.classify_portable(
+                    [pair_sample("oracle", "portable", 0)], [portable]
+                )
+                self.assertEqual(result["correctness_verdict"], "FAIL")
+                self.assertIn(field, result["reasons"])
 
-    def test_marks_threshold_crossing_confidence_as_incomplete(self) -> None:
-        portable = [sample("portable") for _ in range(5)]
-        ratios = (0.90, 0.95, 1.00, 1.08, 1.10)
-        native = [
-            sample("native", wall_ns=round(1_000_000 * ratio))
-            for ratio in ratios
+    def test_short_or_dispersed_windows_are_inconclusive_not_incorrect(self) -> None:
+        short_oracle = pair_sample("oracle", "portable", 0)
+        short_portable = pair_sample("portable", "portable", 0)
+        short_oracle["wall_ns"] = 100
+        short_portable["wall_ns"] = 90
+        short = bench.classify_portable([short_oracle], [short_portable])
+        self.assertEqual(short["correctness_verdict"], "PASS")
+        self.assertEqual(short["performance_verdict"], "INCONCLUSIVE")
+        self.assertIn("minimum_duration", short["performance_reasons"])
+
+        oracle = [pair_sample("oracle", "portable", block) for block in range(5)]
+        portable = [
+            pair_sample("portable", "portable", block) for block in range(5)
         ]
-        verdict = bench.classify_mechanism(portable, native)
-        self.assertEqual(verdict["verdict"], "INCOMPLETE")
-        self.assertIn("wall_confidence", verdict["reasons"])
+        for row, ratio in zip(portable, (0.70, 0.80, 0.90, 1.00, 1.10)):
+            row["wall_ns"] = round(2_000_000 * ratio)
+        dispersed = bench.classify_portable(oracle, portable)
+        self.assertEqual(dispersed["correctness_verdict"], "PASS")
+        self.assertEqual(dispersed["performance_verdict"], "INCONCLUSIVE")
+        self.assertIn("ratio_spread", dispersed["performance_reasons"])
+
+
+class LinuxClassifierTests(unittest.TestCase):
+    def test_passes_only_with_exact_kernel_and_common_receipts(self) -> None:
+        result = bench.classify_linux(
+            [pair_sample("portable", "linux", 0)],
+            [pair_sample("linux", "linux", 0)],
+        )
+        self.assertEqual(result["correctness_verdict"], "PASS")
+        self.assertEqual(result["verdict"], "PASS")
+
+        for field, value in (
+            ("prepared_sqes", 199),
+            ("observed_cqes", 101),
+            ("suppressed_success_cqes", 99),
+            ("queue_publications", 99),
+            ("submit_syscalls", 0),
+            ("normalizations", 99),
+            ("interpreter_dispatches", 1),
+        ):
+            linux = pair_sample("linux", "linux", 0)
+            linux[field] = value
+            with self.subTest(field=field):
+                failed = bench.classify_linux(
+                    [pair_sample("portable", "linux", 0)], [linux]
+                )
+                self.assertEqual(failed["correctness_verdict"], "FAIL")
+                self.assertIn(field, failed["reasons"])
+
+    def test_linux_result_cannot_upgrade_failed_portable_axis(self) -> None:
+        failed_portable = bench.classify_portable(
+            [pair_sample("oracle", "portable", 0)],
+            [
+                pair_sample(
+                    "portable",
+                    "portable",
+                    0,
+                )
+            ],
+        )
+        failed_portable["correctness_verdict"] = "FAIL"
+        failed_portable["verdict"] = "FAIL"
+        linux = bench.classify_linux(
+            [pair_sample("portable", "linux", 0)],
+            [pair_sample("linux", "linux", 0)],
+        )
+        combined = bench.combine_verdicts(failed_portable, linux)
+        self.assertEqual(linux["verdict"], "PASS")
+        self.assertEqual(combined["overall_verdict"], "FAIL")
+        self.assertEqual(combined["linux_effective_verdict"], "BLOCKED")
+
+    def test_performance_failure_does_not_relabel_correctness(self) -> None:
+        aggregate = bench._aggregate_cells(
+            [
+                {
+                    "verdict": "FAIL",
+                    "correctness_verdict": "PASS",
+                    "performance_verdict": "FAIL",
+                    "reasons": [],
+                    "performance_reasons": ["wall_ns"],
+                    "sample_count": 5,
+                },
+                {
+                    "verdict": "INCONCLUSIVE",
+                    "correctness_verdict": "PASS",
+                    "performance_verdict": "INCONCLUSIVE",
+                    "reasons": [],
+                    "performance_reasons": ["ratio_spread"],
+                    "sample_count": 5,
+                },
+            ]
+        )
+
+        self.assertEqual(aggregate["verdict"], "FAIL")
+        self.assertEqual(aggregate["correctness_verdict"], "PASS")
 
 
 class DriverContractTests(unittest.TestCase):
-    def test_balanced_order_preserves_equal_sample_counts(self) -> None:
-        order = bench.balanced_order(5)
+    def test_balanced_order_is_ABBA_then_BAAB(self) -> None:
         self.assertEqual(
-            order,
+            bench.balanced_order(("oracle", "portable"), 5),
             [
-                "portable",
-                "native",
-                "native",
+                "oracle",
                 "portable",
                 "portable",
-                "native",
-                "native",
+                "oracle",
+                "oracle",
                 "portable",
                 "portable",
-                "native",
+                "oracle",
+                "oracle",
+                "portable",
             ],
         )
-        self.assertEqual(order.count("portable"), 5)
-        self.assertEqual(order.count("native"), 5)
 
-    def test_benchmark_command_carries_the_exact_cell(self) -> None:
+    def test_benchmark_command_carries_pair_identity_and_seed(self) -> None:
         command = bench.benchmark_command(
             Path("/tmp/bench-leir"),
-            candidate="native",
+            candidate="linux",
+            process="linux",
             ring_profile="coop_taskrun",
-            family="unix",
+            transport="unix",
+            block=3,
+            order=1,
+            seed=99,
             concurrency=16,
             payload=4096,
             activations=512,
@@ -192,11 +331,19 @@ class DriverContractTests(unittest.TestCase):
             [
                 str(Path("/tmp/bench-leir").resolve()),
                 "--candidate",
-                "native",
+                "linux",
+                "--process",
+                "linux",
                 "--ring-profile",
                 "coop_taskrun",
-                "--family",
+                "--transport",
                 "unix",
+                "--block",
+                "3",
+                "--order",
+                "1",
+                "--seed",
+                "99",
                 "--concurrency",
                 "16",
                 "--payload",
@@ -206,255 +353,259 @@ class DriverContractTests(unittest.TestCase):
             ],
         )
 
+    def test_transient_skip_is_not_collapsed_into_unsupported(self) -> None:
+        self.assertEqual(
+            bench._skip_class("skip: Resource temporarily unavailable"),
+            "transient",
+        )
 
-class ProfileScreenTests(unittest.TestCase):
+
+class MetadataTests(unittest.TestCase):
+    def test_explicit_source_identity_survives_detached_container_mount(self) -> None:
+        revision = "5" * 40
+        digest = "a" * 64
+        failed = bench.subprocess.CompletedProcess([], 1, "", "unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            with mock.patch.dict(
+                bench.os.environ,
+                {
+                    "LLAM_SOURCE_REVISION": revision,
+                    "LLAM_SOURCE_TREE_DIGEST_SHA256": digest,
+                    "LLAM_SOURCE_TREE_DIRTY": "1",
+                },
+                clear=False,
+            ), mock.patch.object(
+                bench.subprocess, "run", return_value=failed
+            ), mock.patch.object(
+                bench,
+                "_source_tree_digest",
+                side_effect=AssertionError("override was ignored"),
+            ):
+                metadata = bench._metadata(binary, root)
+
+        self.assertEqual(metadata["source_revision"], revision)
+        self.assertEqual(metadata["source_tree_digest_sha256"], digest)
+        self.assertTrue(metadata["source_tree_dirty"])
+
+
+class ScreenAndAuditTests(unittest.TestCase):
     @staticmethod
-    def _command_record(
-        command: list[str],
-        *,
-        native_cpu_ns: int = 600_000,
-        correctness: int = 1,
-    ) -> dict[str, object]:
+    def _command_record(command: list[str]) -> dict[str, object]:
         arguments = {
             command[index]: command[index + 1]
             for index in range(1, len(command), 2)
         }
         candidate = arguments["--candidate"]
-        activations = int(arguments["--activations"])
-        record = sample(
+        return sample(
             candidate,
+            process=arguments["--process"],
             ring_profile=arguments["--ring-profile"],
-            family=arguments["--family"],
+            transport=arguments["--transport"],
+            block=int(arguments["--block"]),
+            order=int(arguments["--order"]),
+            seed=int(arguments["--seed"]),
             concurrency=int(arguments["--concurrency"]),
             payload=int(arguments["--payload"]),
-            activations=activations,
-            correctness=correctness,
-            cpu_ns=(900_000 if candidate == "portable" else native_cpu_ns),
-            queue_publications=(0 if candidate == "portable" else activations),
-            prepared_sqes=activations * 2,
+            activations=int(arguments["--activations"]),
+            logical_operations=int(arguments["--activations"]) * 2,
+            interpreter_dispatches=(
+                int(arguments["--activations"]) * 3
+                if candidate == "oracle"
+                else 0
+            ),
+            normalizations=(
+                0 if candidate == "oracle" else int(arguments["--activations"])
+            ),
+            site_lookups=(
+                0 if candidate == "oracle" else int(arguments["--activations"])
+            ),
+            prepared_sqes=(
+                int(arguments["--activations"]) * 2
+                if candidate == "linux"
+                else None
+            ),
             observed_cqes=(
-                activations * 2 if candidate == "portable" else activations
+                int(arguments["--activations"])
+                if candidate == "linux"
+                else None
             ),
             suppressed_success_cqes=(
-                0 if candidate == "portable" else activations
+                int(arguments["--activations"])
+                if candidate == "linux"
+                else None
             ),
-            task_parks=activations,
-            terminal_wakes=activations,
+            queue_publications=(
+                int(arguments["--activations"])
+                if candidate == "linux"
+                else None
+            ),
+            submit_syscalls=(1 if candidate == "linux" else None),
         )
-        return record
 
     def _run_screen(
         self,
+        root: Path,
         side_effect: object,
-        *,
-        profiles: tuple[str, ...] = (
-            "submit_all",
-            "coop_taskrun",
-            "defer_taskrun",
-        ),
-    ) -> dict[str, object]:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            binary = root / "bench"
-            binary.write_bytes(b"fixture")
-            with mock.patch.object(
-                bench, "_run_sample", side_effect=side_effect
-            ), mock.patch.object(
-                bench,
-                "_metadata",
-                return_value={"schema_version": 2},
-            ):
-                return bench.run_screen(
-                    binary=binary,
-                    output_dir=root / "evidence",
-                    profiles=profiles,
-                    families=("unix",),
-                    concurrencies=(1,),
-                    payloads=(64,),
-                    activations=8,
-                    samples=1,
-                    timeout_seconds=1,
-                )
-
-    def test_all_profiles_continue_independently(self) -> None:
-        def run(command: list[str], *, timeout_seconds: int) -> object:
-            del timeout_seconds
-            return self._command_record(command), None
-
-        verdict = self._run_screen(run)
-        self.assertEqual(verdict["mechanism_verdict"], "CONTINUE")
-        self.assertFalse(verdict["release_authorized"])
-        self.assertEqual(
-            {name: result["verdict"] for name, result in verdict["profiles"].items()},
-            {
-                "submit_all": "CONTINUE",
-                "coop_taskrun": "CONTINUE",
-                "defer_taskrun": "CONTINUE",
+    ) -> tuple[Path, dict[str, object]]:
+        binary = root / "bench"
+        output_dir = root / "evidence"
+        binary.write_bytes(b"fixture")
+        with mock.patch.object(
+            bench, "_run_sample", side_effect=side_effect
+        ), mock.patch.object(
+            bench,
+            "_metadata",
+            return_value={
+                "schema_version": 3,
+                "scope": "PORTABLE_AND_LINUX_SEPARATE",
+                "release_authorized": False,
+                "source_revision": "5" * 40,
+                "source_tree_digest_sha256": "a" * 64,
+                "source_tree_dirty": True,
+                "binary_sha256": "b" * 64,
             },
-        )
+        ):
+            verdict = bench.run_screen(
+                binary=binary,
+                output_dir=output_dir,
+                profiles=("submit_all",),
+                transports=("unix",),
+                concurrencies=(1,),
+                payloads=(64,),
+                activations=8,
+                samples=1,
+                timeout_seconds=1,
+            )
+        return output_dir, verdict
 
-    def test_unavailable_profile_does_not_change_control(self) -> None:
+    def test_writes_independent_axes_and_replays_artifacts(self) -> None:
         def run(command: list[str], *, timeout_seconds: int) -> object:
             del timeout_seconds
-            if "coop_taskrun" in command:
+            record = self._command_record(command)
+            record = {key: value for key, value in record.items() if value is not None}
+            return record, None
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir, verdict = self._run_screen(Path(directory), run)
+            self.assertEqual(verdict["portable"]["verdict"], "PASS")
+            self.assertEqual(
+                verdict["linux_profiles"]["submit_all"]["verdict"], "PASS"
+            )
+            self.assertEqual(verdict["overall_verdict"], "PASS")
+            self.assertFalse(verdict["release_authorized"])
+            self.assertEqual(bench.audit_screen(output_dir), verdict)
+            raw_header = (output_dir / "raw.csv").read_text().splitlines()[0]
+            self.assertIn("result_checksum", raw_header)
+            self.assertIn("prepared_sqes", raw_header)
+            self.assertEqual(
+                json.loads((output_dir / "verdict.json").read_text()), verdict
+            )
+
+    def test_audit_rejects_a_coordinated_worklist_shrink(self) -> None:
+        def run(command: list[str], *, timeout_seconds: int) -> object:
+            del timeout_seconds
+            record = self._command_record(command)
+            return {key: value for key, value in record.items() if value is not None}, None
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir, _ = self._run_screen(Path(directory), run)
+            attempts = json.loads((output_dir / "attempts.json").read_text())
+            attempts = attempts[:-2]
+            verdict, rows = bench._project_attempts(
+                attempts,
+                profiles=("submit_all",),
+            )
+            bench._write_projections(output_dir, attempts, verdict, rows)
+
+            with self.assertRaisesRegex(ValueError, "worklist"):
+                bench.audit_screen(output_dir)
+
+    def test_linux_unavailable_does_not_erase_portable_result(self) -> None:
+        def run(command: list[str], *, timeout_seconds: int) -> object:
+            del timeout_seconds
+            if command[command.index("--candidate") + 1] == "linux":
                 return None, "skip: Operation not supported"
-            return self._command_record(command), None
+            record = self._command_record(command)
+            record = {key: value for key, value in record.items() if value is not None}
+            return record, None
 
-        verdict = self._run_screen(run)
-        coop = verdict["profiles"]["coop_taskrun"]
-        self.assertEqual(verdict["mechanism_verdict"], "CONTINUE")
-        self.assertEqual(coop["capability"], "UNAVAILABLE")
-        self.assertEqual(coop["verdict"], "UNAVAILABLE")
+        with tempfile.TemporaryDirectory() as directory:
+            _, verdict = self._run_screen(Path(directory), run)
+            self.assertEqual(verdict["portable"]["verdict"], "PASS")
+            self.assertEqual(
+                verdict["linux_profiles"]["submit_all"]["verdict"],
+                "UNAVAILABLE",
+            )
+            self.assertEqual(verdict["overall_verdict"], "PASS")
 
-    def test_one_sided_unavailability_is_incomplete(self) -> None:
+    def test_refuses_output_directory_reuse(self) -> None:
         def run(command: list[str], *, timeout_seconds: int) -> object:
             del timeout_seconds
-            if "coop_taskrun" in command and "native" in command:
-                return None, "skip: Operation not supported"
-            return self._command_record(command), None
-
-        verdict = self._run_screen(run)
-        coop = verdict["profiles"]["coop_taskrun"]
-        self.assertEqual(coop["capability"], "PARTIAL")
-        self.assertEqual(coop["verdict"], "INCOMPLETE")
-        self.assertEqual(verdict["mechanism_verdict"], "CONTINUE")
-
-    def test_mixed_skip_classes_are_not_unavailable(self) -> None:
-        def run(command: list[str], *, timeout_seconds: int) -> object:
-            del timeout_seconds
-            if "coop_taskrun" in command:
-                reason = (
-                    "skip: Operation not supported"
-                    if "portable" in command
-                    else "skip: Permission denied"
-                )
-                return None, reason
-            return self._command_record(command), None
-
-        verdict = self._run_screen(run)
-        coop = verdict["profiles"]["coop_taskrun"]
-        self.assertEqual(coop["capability"], "PARTIAL")
-        self.assertEqual(coop["verdict"], "INCOMPLETE")
-
-    def test_correctness_failure_rejects_only_its_profile(self) -> None:
-        def run(command: list[str], *, timeout_seconds: int) -> object:
-            del timeout_seconds
-            failed = "defer_taskrun" in command and "native" in command
-            return self._command_record(
-                command, correctness=0 if failed else 1
-            ), None
-
-        verdict = self._run_screen(run)
-        self.assertEqual(verdict["profiles"]["defer_taskrun"]["verdict"], "REJECT")
-        self.assertEqual(verdict["profiles"]["submit_all"]["verdict"], "CONTINUE")
-        self.assertEqual(verdict["mechanism_verdict"], "CONTINUE")
-
-    def test_recommends_by_cpu_then_p99_then_wall_ratio(self) -> None:
-        cpu_by_profile = {
-            "submit_all": 650_000,
-            "coop_taskrun": 500_000,
-            "defer_taskrun": 550_000,
-        }
-
-        def run(command: list[str], *, timeout_seconds: int) -> object:
-            del timeout_seconds
-            profile = command[command.index("--ring-profile") + 1]
-            return self._command_record(
-                command, native_cpu_ns=cpu_by_profile[profile]
-            ), None
-
-        verdict = self._run_screen(run)
-        self.assertEqual(verdict["recommended_profile"], "coop_taskrun")
-        self.assertLess(
-            verdict["profiles"]["coop_taskrun"]["cpu_ratio"],
-            verdict["profiles"]["defer_taskrun"]["cpu_ratio"],
-        )
-
-    def test_writes_profile_aware_projections_and_refuses_reuse(self) -> None:
-        def run(command: list[str], *, timeout_seconds: int) -> object:
-            del timeout_seconds
-            return self._command_record(command), None
+            record = self._command_record(command)
+            return {key: value for key, value in record.items() if value is not None}, None
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            binary = root / "bench"
-            output_dir = root / "evidence"
-            binary.write_bytes(b"fixture")
-            with mock.patch.object(
-                bench, "_run_sample", side_effect=run
-            ), mock.patch.object(
-                bench,
-                "_metadata",
-                return_value={"schema_version": 2},
-            ):
-                verdict = bench.run_screen(
-                    binary=binary,
+            output_dir, _ = self._run_screen(root, run)
+            with self.assertRaises(FileExistsError):
+                bench.run_screen(
+                    binary=root / "bench",
                     output_dir=output_dir,
                     profiles=("submit_all",),
-                    families=("unix",),
+                    transports=("unix",),
                     concurrencies=(1,),
                     payloads=(64,),
                     activations=8,
                     samples=1,
                     timeout_seconds=1,
                 )
-                with self.assertRaises(FileExistsError):
-                    bench.run_screen(
-                        binary=binary,
-                        output_dir=output_dir,
-                        profiles=("submit_all",),
-                        families=("unix",),
-                        concurrencies=(1,),
-                        payloads=(64,),
-                        activations=8,
-                        samples=1,
-                        timeout_seconds=1,
+
+
+class EnforcementTests(unittest.TestCase):
+    def test_enforcement_returns_nonzero_for_every_non_pass_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            for verdict_name in ("FAIL", "INCONCLUSIVE"):
+                with self.subTest(verdict=verdict_name), mock.patch.object(
+                    bench,
+                    "run_screen",
+                    return_value={"overall_verdict": verdict_name},
+                ):
+                    rc = bench.main(
+                        [
+                            "--binary",
+                            str(binary),
+                            "--output-dir",
+                            str(root / verdict_name.lower()),
+                            "--profiles",
+                            "submit_all",
+                            "--transports",
+                            "unix",
+                            "--concurrency",
+                            "1",
+                            "--payloads",
+                            "64",
+                            "--activations",
+                            "8",
+                            "--samples",
+                            "1",
+                            "--enforce",
+                        ]
                     )
+                    self.assertNotEqual(rc, 0)
 
-            metadata = json.loads(
-                (output_dir / "metadata.json").read_text(encoding="utf-8")
-            )
-            saved_verdict = json.loads(
-                (output_dir / "verdict.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(verdict, saved_verdict)
-            self.assertEqual(metadata["parameters"]["profiles"], ["submit_all"])
-            self.assertIn(
-                "ring_profile", (output_dir / "raw.csv").read_text().splitlines()[0]
-            )
-            self.assertTrue(
-                (output_dir / "summary.csv")
-                .read_text(encoding="utf-8")
-                .splitlines()[0]
-                .startswith("ring_profile,")
-            )
-            self.assertIn(
-                "submit_all",
-                (output_dir / "summary.md").read_text(encoding="utf-8"),
-            )
-
-
-class ReleaseGateTests(unittest.TestCase):
-    def test_release_gate_is_stricter_and_requires_two_machines(self) -> None:
-        portable = sample("portable", wall_ns=1_500_000, cpu_ns=1_000_000)
-        native = sample("native", wall_ns=1_000_000, cpu_ns=700_000)
-        single = bench.classify_release_gate(
-            [(portable, native)], machine_count=1
-        )
-        self.assertEqual(single["verdict"], "BLOCKED")
-        self.assertIn("machine_count", single["reasons"])
-
-        two = bench.classify_release_gate(
-            [(portable, native)], machine_count=2
-        )
-        self.assertEqual(two["verdict"], "READY")
-
-    def test_release_gate_rejects_nonfinite_metrics(self) -> None:
-        native = sample("native")
-        native["wall_ns"] = math.inf
+    def test_nonfinite_mapping_is_rejected_before_classification(self) -> None:
+        portable = pair_sample("portable", "portable", 0)
+        portable["wall_ns"] = math.inf
         with self.assertRaisesRegex(ValueError, "integer"):
-            bench.classify_release_gate(
-                [(sample("portable"), native)], machine_count=2
+            bench.classify_portable(
+                [pair_sample("oracle", "portable", 0)], [portable]
             )
 
 

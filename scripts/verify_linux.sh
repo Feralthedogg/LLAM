@@ -88,14 +88,19 @@ PY
 make clean
 make -j"$JOBS" LLAM_BUILD_RESEARCH=1 \
     test_leir_connect \
-    test_leir_aot_plan test_leir_aot_module test_leir_aot_c_consumer \
+    test_leir_aot_plan test_leir_aot_module \
+    test_leir_aot_completion test_leir_aot_portable \
+    test_leir_aot_c_consumer \
     test_leir_aot_integration \
     test_leir_aot_linux_unit test_leir_aot_ownership \
+    test_leir_aot_ring_profile \
     bench_leir_aot_connect test_leir_native_linux \
     bench_leir_native_segment bench_leir_native_pipeline
 ./test_leir_connect
 ./test_leir_aot_plan
 ./test_leir_aot_module
+./test_leir_aot_completion
+./test_leir_aot_portable
 ./test_leir_aot_c_consumer
 ./test_leir_aot_linux_unit
 ./test_leir_aot_ownership
@@ -156,11 +161,20 @@ probe_native(
     ["./test_leir_aot_integration"],
 )
 probe_native(
-    "LEIR portable CONNECT-WRITE reference",
+    "LEIR AOT ring profiles",
+    ["./test_leir_aot_ring_profile"],
+)
+probe_native(
+    "LEIR portable compiled CONNECT-WRITE executor",
     [
         "./bench_leir_aot_connect",
         "--candidate", "portable",
-        "--family", "tcp",
+        "--process", "portable",
+        "--ring-profile", "portable_control",
+        "--transport", "tcp",
+        "--block", "0",
+        "--order", "1",
+        "--seed", "1",
         "--concurrency", "2",
         "--payload", "64",
         "--activations", "8",
@@ -170,8 +184,13 @@ probe_native(
     "LEIR AOT CONNECT-WRITE specialization",
     [
         "./bench_leir_aot_connect",
-        "--candidate", "native",
-        "--family", "tcp",
+        "--candidate", "linux",
+        "--process", "linux",
+        "--ring-profile", "submit_all",
+        "--transport", "tcp",
+        "--block", "0",
+        "--order", "1",
+        "--seed", "1",
         "--concurrency", "2",
         "--payload", "64",
         "--activations", "8",

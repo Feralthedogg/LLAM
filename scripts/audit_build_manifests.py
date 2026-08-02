@@ -140,6 +140,12 @@ ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
     "205dbdd06393328239f4640231970a8772ff7311f9f3780e2f2004609779ea92",
     # Canonical LEIR AOT graph with the strict ring-profile contract test.
     "22157f3d7bb1ca38f695a8fd14fa7b686b284e2ca72464bdcf9b4f2412e15584",
+    # Canonical LEIR graph with the common compiled completion consumer.
+    "7942133a4925822f50e9e284a3cc1e3dc937e68e2dc5d25a2863e57d82b03b96",
+    # Canonical LEIR graph with the portable compiled executor.
+    "f216417d0bdd8a81fbaed5c6f2a09353afa82abdb2c8569ff6dac9a240559b0a",
+    # Canonical portable executor graph with cross-platform test wrappers.
+    "240cf7feee67400527a8d9d363fbc14d4255e2dfc1bef4f6e040595c9c19b094",
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }

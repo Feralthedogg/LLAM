@@ -18,7 +18,26 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
-try:
+if __package__:
+    from .evidence_bundle import (
+        CLASSIFIER_SCHEMA,
+        EVIDENCE_SCHEMA,
+        VERDICT_SCHEMA,
+        EvidenceBundle,
+        EvidenceError,
+        RecomputedArtifacts,
+        audit_bundle,
+        canonical_json_bytes,
+        git_source_dirty_digest,
+        git_source_provenance,
+        normalize_architecture,
+    )
+    from .process_utils import (
+        CapturedProcess,
+        ProcessTimeoutError,
+        run_capture,
+    )
+else:
     from evidence_bundle import (
         CLASSIFIER_SCHEMA,
         EVIDENCE_SCHEMA,
@@ -33,25 +52,6 @@ try:
         normalize_architecture,
     )
     from process_utils import (
-        CapturedProcess,
-        ProcessTimeoutError,
-        run_capture,
-    )
-except ModuleNotFoundError:
-    from scripts.evidence_bundle import (
-        CLASSIFIER_SCHEMA,
-        EVIDENCE_SCHEMA,
-        VERDICT_SCHEMA,
-        EvidenceBundle,
-        EvidenceError,
-        RecomputedArtifacts,
-        audit_bundle,
-        canonical_json_bytes,
-        git_source_dirty_digest,
-        git_source_provenance,
-        normalize_architecture,
-    )
-    from scripts.process_utils import (
         CapturedProcess,
         ProcessTimeoutError,
         run_capture,

@@ -70,6 +70,8 @@ CLEAN_FILES = \
 	test_leir_connect \
 	test_leir_aot_plan \
 	test_leir_aot_module \
+	test_leir_aot_completion \
+	test_leir_aot_portable \
 	test_leir_aot_c_consumer \
 	test_leir_aot_integration \
 	test_leir_aot_linux_unit \
@@ -139,6 +141,8 @@ CLEAN_FILES = \
 	test_leir_connect.exe \
 	test_leir_aot_plan.exe \
 	test_leir_aot_module.exe \
+	test_leir_aot_completion.exe \
+	test_leir_aot_portable.exe \
 	test_leir_aot_c_consumer.exe \
 	test_leir_aot_integration.exe \
 	test_leir_aot_linux_unit.exe \
@@ -762,12 +766,29 @@ LEIR_AOT_PLAN_TEST_OBJS = \
 LEIR_AOT_MODULE_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_module.o
+LEIR_AOT_COMPLETION_OBJS = \
+	$(OBJDIR)/experiments/lccf/lccf_fact.o \
+	$(OBJDIR)/experiments/lccf/lccf_representation.o \
+	$(OBJDIR)/experiments/leir/leir_aot_completion.o
+LEIR_AOT_COMPLETION_TEST_OBJS = \
+	$(LEIR_AOT_COMPLETION_OBJS) \
+	$(OBJDIR)/experiments/leir/test_leir_aot_completion.o
+LEIR_AOT_PORTABLE_TEST_OBJS = \
+	$(LEIR_AOT_COMPLETION_OBJS) \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_portable.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_portable.o
 LEIR_AOT_C_CONSUMER_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/fixtures/leir_aot_c_consumer.o
 LEIR_AOT_INTEGRATION_TEST_OBJS = \
+	$(LEIR_PHASE0_CORE_OBJS) \
+	$(LEIR_AOT_COMPLETION_OBJS) \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_portable.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
+	$(OBJDIR)/experiments/leir/leir_aot_integration_linux.o \
+	$(OBJDIR)/experiments/leir/leir_aot_linux_metadata_test.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_integration.o
 LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
@@ -778,7 +799,9 @@ LEIR_AOT_OWNERSHIP_TEST_OBJS = \
 LEIR_AOT_RING_PROFILE_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_aot_ring_profile.o
 LEIR_AOT_CONNECT_BENCH_OBJS = \
+	$(LEIR_AOT_COMPLETION_OBJS) \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_portable.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
 	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
 	$(OBJDIR)/experiments/leir/leir_bindings.o \
@@ -846,6 +869,8 @@ RESEARCH_OBJS = \
 	$(LEIR_PHASE0_BENCH_OBJS) \
 	$(LEIR_AOT_PLAN_TEST_OBJS) \
 	$(LEIR_AOT_MODULE_TEST_OBJS) \
+	$(LEIR_AOT_COMPLETION_TEST_OBJS) \
+	$(LEIR_AOT_PORTABLE_TEST_OBJS) \
 	$(LEIR_AOT_C_CONSUMER_TEST_OBJS) \
 	$(LEIR_AOT_INTEGRATION_TEST_OBJS) \
 	$(LEIR_AOT_LINUX_UNIT_TEST_OBJS) \
@@ -871,6 +896,8 @@ LEIR_RESEARCH_TARGETS = \
 	test_leir_connect \
 	test_leir_aot_plan \
 	test_leir_aot_module \
+	test_leir_aot_completion \
+	test_leir_aot_portable \
 	test_leir_aot_c_consumer \
 	test_leir_aot_integration \
 	test_leir_aot_linux_unit \
@@ -904,6 +931,8 @@ RESEARCH_ENTRY_TARGETS = \
 	test-leir-phase0 \
 	test-leir-aot-plan \
 	test-leir-aot-module \
+	test-leir-aot-completion \
+	test-leir-aot-portable \
 	test-leir-aot-c-consumer \
 	test-leir-aot-integration \
 	test-leir-aot-ring-profile \
@@ -1011,7 +1040,7 @@ ALL_DEPFILES = \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
 -include $(ALL_DEPFILES)
 
-.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-ring-profile test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-completion test-leir-aot-portable test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-ring-profile test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 audit-build-manifests:
@@ -1090,7 +1119,17 @@ ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $(RESEARCH_LINK_TARGETS)
 
-research-test: test-leir-phase0 test-leir-native test-leir-native-linux test-lcwe-model test-lccf-model test-srem-model
+research-test: test-leir-phase0 test-leir-aot-completion \
+	test-leir-aot-portable test-leir-native test-leir-native-linux \
+	test-lcwe-model test-lccf-model test-srem-model
+
+test-leir-aot-completion: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_aot_completion
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "^test_leir_aot_completion$$" $(WINDOWS_CTEST_ARGS)
+
+test-leir-aot-portable: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_aot_portable
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "^test_leir_aot_portable$$" $(WINDOWS_CTEST_ARGS)
 
 test-lcwe-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lcwe_model bench_lcwe_model
@@ -1116,7 +1155,7 @@ test-leir-native-linux: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_linux test_leir_aot_linux_unit test_leir_aot_ownership
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_linux|test_leir_aot_linux_unit|test_leir_aot_ownership" $(WINDOWS_CTEST_ARGS)
 else
-research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-native test-leir-native-linux:
+research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-aot-completion test-leir-aot-portable test-leir-native test-leir-native-linux:
 	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
 	@exit 2
 endif
@@ -1271,6 +1310,7 @@ ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: $(RESEARCH_LINK_TARGETS)
 
 research-test: test-leir-phase0 test-leir-aot-plan test-leir-aot-module \
+	test-leir-aot-completion test-leir-aot-portable \
 	test-leir-aot-c-consumer test-leir-aot-integration \
 	test-leir-aot-ring-profile \
 	test-leir-aot-connect-screen \
@@ -2541,11 +2581,19 @@ test-leir-aot-module: test_leir_aot_module
 	./test_leir_aot_module
 	python3 -m unittest scripts/test_gen_leir_aot_fixture.py -v
 
+test-leir-aot-completion: test_leir_aot_completion
+	./test_leir_aot_completion
+
+test-leir-aot-portable: test_leir_aot_portable
+	./test_leir_aot_portable
+
 test-leir-aot-c-consumer: test_leir_aot_c_consumer
 	./test_leir_aot_c_consumer
 
 test-leir-aot-integration: test_leir_aot_integration
-	./test_leir_aot_integration
+	@./test_leir_aot_integration; \
+	rc=$$?; \
+	if test "$$rc" -ne 0 && test "$$rc" -ne 77; then exit "$$rc"; fi
 
 test-leir-aot-ring-profile: test_leir_aot_ring_profile
 	@./test_leir_aot_ring_profile; \
@@ -2753,6 +2801,12 @@ test_leir_aot_plan: $(RUNTIME_OBJS) $(LEIR_AOT_PLAN_TEST_OBJS)
 test_leir_aot_module: $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS) $(LDLIBS)
 
+test_leir_aot_completion: $(LEIR_AOT_COMPLETION_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LEIR_AOT_COMPLETION_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+test_leir_aot_portable: $(RUNTIME_OBJS) $(LEIR_AOT_PORTABLE_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_PORTABLE_TEST_OBJS) $(LDLIBS)
+
 test_leir_aot_c_consumer: $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
 
@@ -2762,8 +2816,8 @@ test_leir_aot_integration: $(RUNTIME_OBJS) $(LEIR_AOT_INTEGRATION_TEST_OBJS)
 test_leir_aot_linux_unit: $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS) $(LDLIBS)
 
-test_leir_aot_ownership: $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
+test_leir_aot_ownership: $(RUNTIME_TESTHOOK_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
 
 test_leir_aot_ring_profile: $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS) $(LDLIBS)
@@ -2920,7 +2974,7 @@ $(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
 		experiments/leir/leir_peer_process.h \
 		experiments/leir/leir_test_support.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir $(DEPFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -Iexperiments/lccf $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)

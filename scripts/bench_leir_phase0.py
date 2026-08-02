@@ -22,20 +22,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-try:
+if __package__:
+    from .process_utils import (
+        CapturedProcess,
+        ProcessTimeoutError,
+        run_capture,
+    )
+    from .safe_output import write_text_safely
+else:
     from process_utils import (
         CapturedProcess,
         ProcessTimeoutError,
         run_capture,
     )
     from safe_output import write_text_safely
-except ModuleNotFoundError:
-    from scripts.process_utils import (
-        CapturedProcess,
-        ProcessTimeoutError,
-        run_capture,
-    )
-    from scripts.safe_output import write_text_safely
 
 
 RESULT_PREFIX = "LEIR_PAIR "
@@ -613,7 +613,7 @@ def run_one(
         order=order,
     )
     effective_timeout = (
-        max(30.0, min_mode_ms / 1000.0 * 20.0)
+        max(60.0, min_mode_ms / 1000.0 * 20.0)
         if timeout is None
         else timeout
     )

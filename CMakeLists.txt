@@ -777,6 +777,8 @@ set(LLAM_LEIR_RESEARCH_TARGETS
     test_leir_connect
     test_leir_aot_plan
     test_leir_aot_module
+    test_leir_aot_completion
+    test_leir_aot_portable
     test_leir_aot_c_consumer
     test_leir_aot_integration
     test_leir_aot_linux_unit
@@ -821,6 +823,38 @@ target_include_directories(test_leir_aot_module PRIVATE
 )
 target_link_libraries(test_leir_aot_module PRIVATE llam_runtime)
 
+add_executable(test_leir_aot_completion
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
+    experiments/leir/test_leir_aot_completion.c
+)
+target_include_directories(test_leir_aot_completion PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(test_leir_aot_completion PRIVATE Threads::Threads)
+endif()
+
+add_executable(test_leir_aot_portable
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_portable.c
+    experiments/leir/test_leir_aot_portable.c
+)
+target_include_directories(test_leir_aot_portable PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_portable PRIVATE llam_runtime)
+
 add_executable(test_leir_aot_c_consumer
     experiments/leir/generated/leir_aot_connect_write.c
     experiments/leir/fixtures/leir_aot_c_consumer.c
@@ -831,13 +865,25 @@ target_include_directories(test_leir_aot_c_consumer PRIVATE
 )
 
 add_executable(test_leir_aot_integration
+    experiments/leir/leir_bindings.c
+    experiments/leir/leir_engine.c
+    experiments/leir/leir_peer_process.c
+    experiments/leir/leir_program.c
+    experiments/leir/leir_test_support.c
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
     experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_portable.c
     experiments/leir/leir_aot_linux.c
+    experiments/leir/leir_aot_integration_linux.c
+    experiments/leir/leir_aot_linux_metadata_test.c
     experiments/leir/test_leir_aot_integration.c
 )
 target_include_directories(test_leir_aot_integration PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 target_link_libraries(test_leir_aot_integration PRIVATE llam_runtime)
@@ -862,7 +908,10 @@ target_include_directories(test_leir_aot_ownership PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
-target_link_libraries(test_leir_aot_ownership PRIVATE llam_runtime)
+target_compile_definitions(test_leir_aot_ownership PRIVATE
+    LLAM_ENABLE_TEST_HOOKS=1)
+target_link_libraries(test_leir_aot_ownership PRIVATE
+    llam_runtime_testhooks)
 
 add_executable(test_leir_aot_ring_profile
     experiments/leir/test_leir_aot_ring_profile.c
@@ -875,7 +924,11 @@ target_include_directories(test_leir_aot_ring_profile PRIVATE
 target_link_libraries(test_leir_aot_ring_profile PRIVATE llam_runtime)
 
 add_executable(bench_leir_aot_connect
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
     experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_portable.c
     experiments/leir/leir_aot_linux.c
     experiments/leir/leir_aot_connect_bench_support.c
     experiments/leir/leir_bindings.c
@@ -886,6 +939,7 @@ add_executable(bench_leir_aot_connect
 target_include_directories(bench_leir_aot_connect PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 target_link_libraries(bench_leir_aot_connect PRIVATE llam_runtime)
@@ -992,6 +1046,8 @@ add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
 add_test(NAME test_leir_connect COMMAND test_leir_connect)
 add_test(NAME test_leir_aot_plan COMMAND test_leir_aot_plan)
 add_test(NAME test_leir_aot_module COMMAND test_leir_aot_module)
+add_test(NAME test_leir_aot_completion COMMAND test_leir_aot_completion)
+add_test(NAME test_leir_aot_portable COMMAND test_leir_aot_portable)
 add_test(
     NAME test_leir_aot_c_consumer
     COMMAND test_leir_aot_c_consumer)
@@ -1014,24 +1070,48 @@ set_tests_properties(
     test_leir_aot_integration
     PROPERTIES SKIP_RETURN_CODE 77)
 add_test(
-    NAME test_bench_leir_aot_connect_portable
+    NAME test_bench_leir_aot_connect_oracle
     COMMAND bench_leir_aot_connect
-        --candidate portable
-        --family tcp
+        --candidate oracle
+        --process portable
+        --ring-profile portable_control
+        --transport tcp
+        --block 0
+        --order 0
+        --seed 1
         --concurrency 2
         --payload 64
         --activations 8)
 add_test(
-    NAME test_bench_leir_aot_connect_native
+    NAME test_bench_leir_aot_connect_portable
     COMMAND bench_leir_aot_connect
-        --candidate native
-        --family tcp
+        --candidate portable
+        --process portable
+        --ring-profile portable_control
+        --transport tcp
+        --block 0
+        --order 1
+        --seed 1
+        --concurrency 2
+        --payload 64
+        --activations 8)
+add_test(
+    NAME test_bench_leir_aot_connect_linux
+    COMMAND bench_leir_aot_connect
+        --candidate linux
+        --process linux
+        --ring-profile submit_all
+        --transport tcp
+        --block 0
+        --order 1
+        --seed 1
         --concurrency 2
         --payload 64
         --activations 8)
 set_tests_properties(
+    test_bench_leir_aot_connect_oracle
     test_bench_leir_aot_connect_portable
-    test_bench_leir_aot_connect_native
+    test_bench_leir_aot_connect_linux
     PROPERTIES SKIP_RETURN_CODE 77)
 if(Python3_Interpreter_FOUND)
     add_test(

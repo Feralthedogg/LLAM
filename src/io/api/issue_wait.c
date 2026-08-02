@@ -20,6 +20,10 @@
 
 #include "io/runtime_io_api_internal.h"
 
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+#include "io/linux/runtime_io_segment_linux_internal.h"
+#endif
+
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static llam_io_park_snapshot_hook_fn
     g_llam_io_park_snapshot_hook;
@@ -218,6 +222,31 @@ static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reaso
             continue;
         }
         node = &rt->nodes[(unsigned)node_index];
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+        {
+            llam_linux_native_batch_t *native_batch =
+                atomic_load_explicit(
+                    &req->linux_native_batch,
+                    memory_order_acquire);
+
+            if (native_batch != NULL) {
+                atomic_store_explicit(&req->abort_reason,
+                                      (unsigned)reason,
+                                      memory_order_release);
+                if (atomic_load_explicit(&req->wait_mode,
+                                         memory_order_acquire) !=
+                        LLAM_IO_WAIT_MODE_INFLIGHT ||
+                    atomic_load_explicit(&req->attached_node_index,
+                                         memory_order_acquire) !=
+                        attached_node_index) {
+                    continue;
+                }
+                (void)llam_linux_native_batch_request_cancel(
+                    node, native_batch, req);
+                return true;
+            }
+        }
+#endif
         atomic_store_explicit(&req->abort_reason,
                               (unsigned)reason,
                               memory_order_release);
@@ -296,6 +325,45 @@ static bool llam_abort_published_io_setup(llam_io_req_t *req,
             return true;
         }
         if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+            llam_linux_native_batch_t *native_batch =
+                atomic_load_explicit(
+                    &req->linux_native_batch,
+                    memory_order_acquire);
+
+            if (native_batch != NULL) {
+                int node_index = llam_io_req_node_index(req);
+                llam_node_t *node;
+
+                if (node_index < 0 ||
+                    (unsigned)node_index >= rt->active_nodes) {
+                    return false;
+                }
+                node = &rt->nodes[(unsigned)node_index];
+                if (llam_linux_native_batch_abort_queued(
+                        node, native_batch, req)) {
+                    llam_io_set_abort_result(req, reason);
+                    return true;
+                }
+                if (atomic_load_explicit(
+                        &req->linux_native_batch,
+                        memory_order_acquire) != native_batch ||
+                    atomic_load_explicit(
+                        &req->wait_mode,
+                        memory_order_acquire) !=
+                        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+                    continue;
+                }
+                atomic_store_explicit(&req->abort_reason,
+                                      (unsigned)reason,
+                                      memory_order_release);
+                llam_record_fatal_deferred(rt, EPROTO);
+                if (wait_for_completion != NULL) {
+                    *wait_for_completion = true;
+                }
+                return true;
+            }
+#endif
             llam_io_submit_detach_result_t result =
                 llam_detach_submit_req_current(req, NULL);
 

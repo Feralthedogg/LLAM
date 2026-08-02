@@ -35,6 +35,8 @@ test_io_buffers
 /test_leir_connect
 /test_leir_aot_plan
 /test_leir_aot_module
+/test_leir_aot_completion
+/test_leir_aot_portable
 /test_leir_aot_c_consumer
 /test_leir_aot_integration
 /test_leir_aot_linux_unit

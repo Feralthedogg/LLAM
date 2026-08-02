@@ -10,7 +10,19 @@
 #include <stdint.h>
 
 #define LEIR_AOT_MODULE_ABI_V1 1U
+#define LEIR_AOT_MODULE_BACKEND_AGNOSTIC 0U
 #define LEIR_AOT_BACKEND_LINUX_IO_URING 1U
+#define LEIR_AOT_BACKEND_PORTABLE 2U
+
+#if defined(_MSC_VER)
+typedef union leir_aot_storage_align {
+    long double long_double_value;
+    void *pointer_value;
+    uint64_t integer_value;
+} leir_aot_storage_align_t;
+#else
+typedef max_align_t leir_aot_storage_align_t;
+#endif
 
 typedef enum leir_aot_resume_action_v1 {
     LEIR_AOT_RESUME_RETURN = 0,

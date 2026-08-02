@@ -12,9 +12,127 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+static int leir_test_set_nonblocking_socket(llam_fd_t fd) {
+#if LLAM_PLATFORM_WINDOWS
+    u_long enabled = 1UL;
+
+    if (ioctlsocket((SOCKET)fd, FIONBIO, &enabled) == SOCKET_ERROR) {
+        errno = EIO;
+        return -1;
+    }
+#else
+    int flags = fcntl((int)fd, F_GETFL, 0);
+
+    if (flags < 0 || fcntl((int)fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        return -1;
+    }
+#endif
+    return 0;
+}
+
+int leir_test_connect_write_program_create(
+    leir_phase0_program_t **program_out) {
+    static const leir_phase0_slot_kind_t slots[] = {
+        LEIR_PHASE0_SLOT_FD,
+        LEIR_PHASE0_SLOT_CONST_BUFFER,
+        LEIR_PHASE0_SLOT_U64,
+        LEIR_PHASE0_SLOT_I64,
+        LEIR_PHASE0_SLOT_CONST_BUFFER,
+        LEIR_PHASE0_SLOT_U64,
+        LEIR_PHASE0_SLOT_I64,
+    };
+    static const leir_phase0_node_desc_t nodes[] = {
+        {
+            .opcode = LEIR_PHASE0_OP_CONNECT,
+            .fd_slot = 0U,
+            .buffer_slot = 1U,
+            .length_slot = 2U,
+            .result_slot = 3U,
+            .on_success = 1U,
+            .on_eof = LEIR_PHASE0_NODE_NONE,
+            .on_error = 3U,
+        },
+        {
+            .opcode = LEIR_PHASE0_OP_WRITE,
+            .fd_slot = 0U,
+            .buffer_slot = 4U,
+            .length_slot = 5U,
+            .result_slot = 6U,
+            .on_success = 2U,
+            .on_eof = 3U,
+            .on_error = 3U,
+        },
+        {
+            .opcode = LEIR_PHASE0_OP_RETURN,
+            .fd_slot = LEIR_PHASE0_NODE_NONE,
+            .buffer_slot = LEIR_PHASE0_NODE_NONE,
+            .length_slot = LEIR_PHASE0_NODE_NONE,
+            .result_slot = 6U,
+            .on_success = LEIR_PHASE0_NODE_NONE,
+            .on_eof = LEIR_PHASE0_NODE_NONE,
+            .on_error = LEIR_PHASE0_NODE_NONE,
+        },
+        {
+            .opcode = LEIR_PHASE0_OP_FAIL,
+            .fd_slot = LEIR_PHASE0_NODE_NONE,
+            .buffer_slot = LEIR_PHASE0_NODE_NONE,
+            .length_slot = LEIR_PHASE0_NODE_NONE,
+            .result_slot = 6U,
+            .on_success = LEIR_PHASE0_NODE_NONE,
+            .on_eof = LEIR_PHASE0_NODE_NONE,
+            .on_error = LEIR_PHASE0_NODE_NONE,
+        },
+    };
+    const leir_phase0_program_desc_t desc = {
+        .nodes = nodes,
+        .slot_kinds = slots,
+        .node_count = sizeof(nodes) / sizeof(nodes[0]),
+        .slot_count = sizeof(slots) / sizeof(slots[0]),
+        .entry_node = 0U,
+    };
+
+    return leir_phase0_program_create(&desc, program_out);
+}
+
+int leir_test_connect_write_values(
+    leir_phase0_value_t *values,
+    size_t value_count,
+    llam_fd_t fd,
+    const void *address,
+    socklen_t address_length,
+    const void *payload,
+    size_t payload_length) {
+    if (values == NULL || value_count != 7U ||
+        LLAM_FD_IS_INVALID(fd) || address == NULL ||
+        address_length == 0U ||
+        (payload == NULL && payload_length != 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(values, 0, value_count * sizeof(values[0]));
+    values[0].fd = fd;
+    values[1].buffer.data = (void *)(uintptr_t)address;
+    values[1].buffer.size = (size_t)address_length;
+    values[2].u64 = (uint64_t)address_length;
+    values[3].i64 = -1;
+    values[4].buffer.data = (void *)(uintptr_t)payload;
+    values[4].buffer.size = payload_length;
+    values[5].u64 = (uint64_t)payload_length;
+    values[6].i64 = -1;
+    return 0;
+}
+
+bool leir_test_backend_is_unavailable(int error_code) {
+    return error_code == ENOTSUP || error_code == EAGAIN ||
+           error_code == ENOSYS || error_code == EPERM ||
+           error_code == EACCES;
+}
 
 int leir_test_socketpair_type(
     int socket_type,
@@ -122,6 +240,89 @@ int leir_test_socketpair_type(
 
 int leir_test_socketpair(llam_fd_t pair_out[2]) {
     return leir_test_socketpair_type(SOCK_STREAM, pair_out);
+}
+
+int leir_test_tcp_listener(
+    llam_fd_t *listener_out,
+    struct sockaddr_storage *address_out,
+    socklen_t *address_length_out) {
+    struct sockaddr_in address;
+    socklen_t address_length = (socklen_t)sizeof(address);
+    llam_fd_t listener;
+
+    if (listener_out == NULL || address_out == NULL ||
+        address_length_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *listener_out = LLAM_INVALID_FD;
+    memset(address_out, 0, sizeof(*address_out));
+    *address_length_out = 0U;
+    listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (LLAM_FD_IS_INVALID(listener)) {
+#if LLAM_PLATFORM_WINDOWS
+        errno = EIO;
+#endif
+        return -1;
+    }
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(0U);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listener,
+             (const struct sockaddr *)(const void *)&address,
+             (socklen_t)sizeof(address)) != 0 ||
+        listen(listener, 16) != 0 ||
+        getsockname(listener,
+                    (struct sockaddr *)(void *)&address,
+                    &address_length) != 0 ||
+        leir_test_set_nonblocking_socket(listener) != 0) {
+#if LLAM_PLATFORM_WINDOWS
+        errno = EIO;
+#endif
+        leir_test_close(&listener);
+        return -1;
+    }
+    memcpy(address_out, &address, sizeof(address));
+    *address_length_out = address_length;
+    *listener_out = listener;
+    return 0;
+}
+
+int leir_test_tcp_client(llam_fd_t *client_out) {
+    llam_fd_t client;
+
+    if (client_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *client_out = LLAM_INVALID_FD;
+    client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (LLAM_FD_IS_INVALID(client)) {
+#if LLAM_PLATFORM_WINDOWS
+        errno = EIO;
+#endif
+        return -1;
+    }
+    if (leir_test_set_nonblocking_socket(client) != 0) {
+        leir_test_close(&client);
+        return -1;
+    }
+    *client_out = client;
+    return 0;
+}
+
+int leir_test_tcp_refused_address(
+    struct sockaddr_storage *address_out,
+    socklen_t *address_length_out) {
+    llam_fd_t listener = LLAM_INVALID_FD;
+
+    if (leir_test_tcp_listener(
+            &listener, address_out, address_length_out) != 0) {
+        return -1;
+    }
+    leir_test_close(&listener);
+    return 0;
 }
 
 void leir_test_close(llam_fd_t *fd) {
