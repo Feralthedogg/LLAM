@@ -1,0 +1,1188 @@
+/*
+ * Copyright 2026 Feralthedogg
+ * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+ */
+
+#include "lccf_fact.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
+
+#define LCCF_FACT_STATE_BITS 4U
+#define LCCF_FACT_STATE_MASK UINT64_C(0x0f)
+#define LCCF_FACT_LIFECYCLE_CLOSED (UINT64_C(1) << 63U)
+#define LCCF_FACT_LIFECYCLE_COUNT_MASK \
+    (LCCF_FACT_LIFECYCLE_CLOSED - UINT64_C(1))
+
+static bool state_is_visible(lccf_fact_state_t state) {
+    return state == LCCF_FACT_STATE_READY ||
+           state == LCCF_FACT_STATE_RUNNING_DIRECT ||
+           state == LCCF_FACT_STATE_QUEUED ||
+           state == LCCF_FACT_STATE_RUNNING_QUEUED;
+}
+
+static bool state_is_running(lccf_fact_state_t state) {
+    return state == LCCF_FACT_STATE_RUNNING_DIRECT ||
+           state == LCCF_FACT_STATE_RUNNING_QUEUED;
+}
+
+static bool source_is_valid(lccf_fact_source_t source) {
+    return source >= LCCF_FACT_SOURCE_LINUX_CQE &&
+           source < LCCF_FACT_SOURCE_COUNT;
+}
+
+static bool event_is_valid(lccf_fact_event_kind_t event_kind) {
+    return event_kind >= LCCF_FACT_EVENT_IO &&
+           event_kind < LCCF_FACT_EVENT_COUNT;
+}
+
+static bool layout_is_valid(lccf_fact_layout_t layout) {
+    return layout >= LCCF_FACT_LAYOUT_SPLIT64_64 &&
+           layout < LCCF_FACT_LAYOUT_COUNT;
+}
+
+static bool representation_is_valid(
+    lccf_representation_t representation) {
+    return representation >= LCCF_REP_CANONICAL_HELPER &&
+           representation < LCCF_REP_COUNT;
+}
+
+static bool representation_storage_is_valid(
+    lccf_representation_t representation,
+    const void *storage) {
+    if (representation == LCCF_REP_CANONICAL_HELPER) {
+        return storage == NULL;
+    }
+    if (storage == NULL) {
+        return false;
+    }
+    if (representation == LCCF_REP_SHARED_EVENT) {
+        return (uintptr_t)storage % _Alignof(lccf_event_core_t) == 0U;
+    }
+    if (representation == LCCF_REP_FULL_FACT) {
+        return (uintptr_t)storage % _Alignof(lccf_fact_core_t) == 0U;
+    }
+    return false;
+}
+
+static void clear_representation_storage(lccf_fact_cell_t *cell) {
+    const lccf_representation_t representation =
+        (lccf_representation_t)atomic_load_explicit(
+            &cell->representation, memory_order_relaxed);
+    const size_t bytes =
+        lccf_representation_sidecar_bytes(representation);
+
+    if (bytes != 0U && cell->representation_storage != NULL) {
+        memset(cell->representation_storage, 0, bytes);
+    }
+}
+
+static int retire_backend_reference(lccf_fact_cell_t *cell);
+
+static void counter_increment(uint64_t *counter) {
+    if (counter != NULL) {
+        *counter += 1U;
+    }
+}
+
+static bool operation_enter(lccf_fact_cell_t *cell) {
+    uint64_t gate = atomic_load_explicit(&cell->lifecycle_gate,
+                                         memory_order_acquire);
+
+    for (;;) {
+        if ((gate & LCCF_FACT_LIFECYCLE_CLOSED) != 0U ||
+            (gate & LCCF_FACT_LIFECYCLE_COUNT_MASK) ==
+                LCCF_FACT_LIFECYCLE_COUNT_MASK) {
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &cell->lifecycle_gate, &gate, gate + UINT64_C(1),
+                memory_order_acq_rel, memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+static void operation_leave(lccf_fact_cell_t *cell) {
+    (void)atomic_fetch_sub_explicit(&cell->lifecycle_gate, UINT64_C(1),
+                                    memory_order_release);
+}
+
+static void close_lifecycle(lccf_fact_cell_t *cell) {
+    (void)atomic_fetch_or_explicit(
+        &cell->lifecycle_gate, LCCF_FACT_LIFECYCLE_CLOSED,
+        memory_order_acq_rel);
+    while ((atomic_load_explicit(&cell->lifecycle_gate,
+                                 memory_order_acquire) &
+            LCCF_FACT_LIFECYCLE_COUNT_MASK) != 0U) {
+        atomic_signal_fence(memory_order_seq_cst);
+    }
+}
+
+static void open_lifecycle(lccf_fact_cell_t *cell) {
+    atomic_store_explicit(&cell->lifecycle_gate, 0U, memory_order_release);
+}
+
+static void initialize_ticket_owners(lccf_fact_cell_t *cell,
+                                     uint64_t generation,
+                                     uint32_t ticket_count) {
+    size_t index;
+
+    for (index = 0U; index < LCCF_FACT_MAX_TICKETS; ++index) {
+        atomic_store_explicit(
+            &cell->ticket_owners[index],
+            index < ticket_count ? generation : 0U,
+            memory_order_relaxed);
+    }
+}
+
+static bool references_are_zero(const lccf_fact_cell_t *cell) {
+    size_t index;
+
+    for (index = 0U; index < LCCF_FACT_REF_COUNT; ++index) {
+        if (atomic_load_explicit(&cell->references[index],
+                                 memory_order_acquire) != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int retire_ticket_ownership(lccf_fact_cell_t *cell,
+                                   const lccf_fact_ticket_t *ticket) {
+    uint64_t expected;
+    uint64_t state_word;
+
+    if (ticket->owner_index >= cell->ticket_count ||
+        ticket->owner_index >= LCCF_FACT_MAX_TICKETS) {
+        return EINVAL;
+    }
+    expected = ticket->generation;
+    if (!atomic_compare_exchange_strong_explicit(
+            &cell->ticket_owners[ticket->owner_index], &expected, 0U,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return LCCF_FACT_ESTALE;
+    }
+    state_word = atomic_load_explicit(&cell->state_generation,
+                                      memory_order_acquire);
+    if (lccf_fact_unpack_generation(state_word) != ticket->generation) {
+        return LCCF_FACT_ESTALE;
+    }
+    return retire_backend_reference(cell);
+}
+
+static void retire_stale_ticket_token(lccf_fact_cell_t *cell,
+                                      const lccf_fact_ticket_t *ticket) {
+    uint64_t expected = ticket->generation;
+
+    if (ticket->owner_index < cell->ticket_count &&
+        ticket->owner_index < LCCF_FACT_MAX_TICKETS) {
+        (void)atomic_compare_exchange_strong_explicit(
+            &cell->ticket_owners[ticket->owner_index], &expected, 0U,
+            memory_order_acq_rel, memory_order_acquire);
+    }
+}
+
+static uint64_t i64_to_bits(int64_t value) {
+    uint64_t result;
+
+    memcpy(&result, &value, sizeof(result));
+    return result;
+}
+
+uint64_t lccf_fact_compute_id(const lccf_fact_core_t *fact) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    static const uint64_t prime = UINT64_C(1099511628211);
+    const uint64_t words[] = {
+        fact->generation,
+        fact->stable_flags,
+        i64_to_bits(fact->result),
+        fact->payload_word,
+        ((uint64_t)(uint32_t)fact->error_code << 32U) | fact->event_kind,
+        ((uint64_t)fact->captured_home_shard << 32U) | fact->source_node,
+        fact->site_index,
+    };
+    size_t index;
+
+    for (index = 0U; index < sizeof(words) / sizeof(words[0]); ++index) {
+        uint64_t word = words[index];
+        unsigned byte;
+
+        for (byte = 0U; byte < 8U; ++byte) {
+            hash ^= word & UINT64_C(0xff);
+            hash *= prime;
+            word >>= 8U;
+        }
+    }
+    return hash;
+}
+
+static int reference_add(lccf_fact_cell_t *cell,
+                         lccf_fact_ref_kind_t kind,
+                         uint32_t amount) {
+    uint32_t current;
+
+    if (cell == NULL || kind < LCCF_FACT_REF_CALLBACK ||
+        kind >= LCCF_FACT_REF_COUNT || amount == 0U) {
+        return EINVAL;
+    }
+    current = atomic_load_explicit(&cell->references[kind],
+                                   memory_order_relaxed);
+    for (;;) {
+        if (current > UINT32_MAX - amount) {
+            return EOVERFLOW;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &cell->references[kind], &current, current + amount,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            return 0;
+        }
+    }
+}
+
+static int reference_subtract(lccf_fact_cell_t *cell,
+                              lccf_fact_ref_kind_t kind,
+                              uint32_t amount) {
+    uint32_t current;
+
+    if (cell == NULL || kind < LCCF_FACT_REF_CALLBACK ||
+        kind >= LCCF_FACT_REF_COUNT || amount == 0U) {
+        return EINVAL;
+    }
+    current = atomic_load_explicit(&cell->references[kind],
+                                   memory_order_relaxed);
+    for (;;) {
+        if (current < amount) {
+            return EPROTO;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &cell->references[kind], &current, current - amount,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            return 0;
+        }
+    }
+}
+
+static int retire_backend_reference(lccf_fact_cell_t *cell) {
+    return reference_subtract(cell, LCCF_FACT_REF_BACKEND, 1U);
+}
+
+uint64_t lccf_fact_pack_state(uint64_t generation,
+                              lccf_fact_state_t state) {
+    if (generation > LCCF_FACT_MAX_GENERATION ||
+        state < LCCF_FACT_STATE_ARMED || state >= LCCF_FACT_STATE_COUNT) {
+        return 0U;
+    }
+    return (generation << LCCF_FACT_STATE_BITS) | (uint64_t)state;
+}
+
+uint64_t lccf_fact_unpack_generation(uint64_t word) {
+    return word >> LCCF_FACT_STATE_BITS;
+}
+
+lccf_fact_state_t lccf_fact_unpack_state(uint64_t word) {
+    return (lccf_fact_state_t)(word & LCCF_FACT_STATE_MASK);
+}
+
+static int cell_init(lccf_fact_cell_t *cell, uint64_t generation,
+                     lccf_fact_layout_t layout,
+                     uint32_t ticket_count,
+                     lccf_representation_t representation,
+                     void *representation_storage,
+                     bool legacy_configurable) {
+    size_t index;
+
+    if (cell == NULL || generation > LCCF_FACT_MAX_GENERATION ||
+        !layout_is_valid(layout) || ticket_count == 0U ||
+        ticket_count > LCCF_FACT_MAX_TICKETS ||
+        !representation_is_valid(representation) ||
+        (!legacy_configurable && !representation_storage_is_valid(
+             representation, representation_storage))) {
+        return EINVAL;
+    }
+    memset(cell, 0, sizeof(*cell));
+    atomic_init(&cell->state_generation,
+                lccf_fact_pack_state(generation, LCCF_FACT_STATE_ARMED));
+    for (index = 0U; index < LCCF_FACT_REF_COUNT; ++index) {
+        atomic_init(&cell->references[index], 0U);
+    }
+    for (index = 0U; index < LCCF_FACT_MAX_TICKETS; ++index) {
+        atomic_init(&cell->ticket_owners[index],
+                    index < ticket_count ? generation : 0U);
+    }
+    atomic_init(&cell->lifecycle_gate, 0U);
+    atomic_init(&cell->representation, (uint32_t)representation);
+    atomic_init(&cell->published, false);
+    atomic_store_explicit(&cell->references[LCCF_FACT_REF_BACKEND],
+                          ticket_count, memory_order_relaxed);
+    cell->representation_storage = representation_storage;
+    cell->fact_storage = representation == LCCF_REP_FULL_FACT
+                             ? representation_storage
+                             : NULL;
+    clear_representation_storage(cell);
+    cell->layout = layout;
+    cell->ticket_count = ticket_count;
+    cell->legacy_configurable = legacy_configurable;
+    return 0;
+}
+
+int lccf_fact_cell_init(lccf_fact_cell_t *cell, uint64_t generation,
+                        lccf_fact_layout_t layout,
+                        uint32_t ticket_count,
+                        lccf_fact_core_t *fact_storage) {
+    lccf_fact_core_t *storage;
+    int rc;
+
+    if (cell == NULL) {
+        return EINVAL;
+    }
+    storage = fact_storage == NULL ? &cell->fallback_fact : fact_storage;
+    rc = cell_init(cell, generation, layout, ticket_count,
+                   LCCF_REP_CANONICAL_HELPER, NULL, true);
+    if (rc != 0) {
+        return rc;
+    }
+    cell->representation_storage = storage;
+    cell->fact_storage = storage;
+    memset(storage, 0, sizeof(*storage));
+    return 0;
+}
+
+int lccf_fact_cell_init_representation(
+    lccf_fact_cell_t *cell, uint64_t generation,
+    lccf_fact_layout_t layout, uint32_t ticket_count,
+    lccf_representation_t representation,
+    void *representation_storage) {
+    return cell_init(cell, generation, layout, ticket_count,
+                     representation, representation_storage, false);
+}
+
+int lccf_fact_cell_arm(lccf_fact_cell_t *cell, uint64_t generation,
+                       uint32_t ticket_count) {
+    lccf_representation_t representation;
+    uint64_t current;
+    uint64_t exclusive;
+    size_t index;
+
+    if (cell == NULL || generation > LCCF_FACT_MAX_GENERATION ||
+        ticket_count == 0U || ticket_count > LCCF_FACT_MAX_TICKETS) {
+        return EINVAL;
+    }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    if (!representation_is_valid(representation) ||
+        (!cell->legacy_configurable && !representation_storage_is_valid(
+             representation, cell->representation_storage))) {
+        return EINVAL;
+    }
+    current = atomic_load_explicit(&cell->state_generation,
+                                   memory_order_acquire);
+    if (lccf_fact_unpack_state(current) != LCCF_FACT_STATE_TERMINAL) {
+        return EBUSY;
+    }
+    if (generation <= lccf_fact_unpack_generation(current)) {
+        return LCCF_FACT_ESTALE;
+    }
+    exclusive = lccf_fact_pack_state(
+        lccf_fact_unpack_generation(current), LCCF_FACT_STATE_BUILDING);
+    if (!atomic_compare_exchange_strong_explicit(
+            &cell->state_generation, &current, exclusive,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return EBUSY;
+    }
+    close_lifecycle(cell);
+    if (!references_are_zero(cell) ||
+        atomic_load_explicit(&cell->published, memory_order_acquire)) {
+        atomic_store_explicit(
+            &cell->state_generation, current, memory_order_release);
+        return EBUSY;
+    }
+    clear_representation_storage(cell);
+    memset(&cell->raw_ticket, 0, sizeof(cell->raw_ticket));
+    for (index = 0U; index < LCCF_FACT_REF_COUNT; ++index) {
+        atomic_store_explicit(&cell->references[index], 0U,
+                              memory_order_relaxed);
+    }
+    atomic_store_explicit(&cell->references[LCCF_FACT_REF_BACKEND],
+                          ticket_count, memory_order_relaxed);
+    initialize_ticket_owners(cell, generation, ticket_count);
+    cell->ticket_count = ticket_count;
+    atomic_store_explicit(&cell->published, false, memory_order_relaxed);
+    open_lifecycle(cell);
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_fact_pack_state(generation, LCCF_FACT_STATE_ARMED),
+        memory_order_release);
+    return 0;
+}
+
+int lccf_fact_ticket_from_logical(
+    lccf_fact_source_t source, lccf_fact_event_kind_t event_kind,
+    uint64_t generation, int64_t result, int32_t error_code,
+    uint64_t payload_word, uint32_t site_index, uint32_t site_count,
+    uint32_t captured_home_shard, uint32_t source_node,
+    uint32_t owner_index,
+    const lccf_fact_site_descriptor_t *const *site_table,
+    lccf_fact_ticket_t *out_ticket) {
+    if (!source_is_valid(source) || !event_is_valid(event_kind) ||
+        generation > LCCF_FACT_MAX_GENERATION || error_code < 0 ||
+        site_count == 0U || site_count > UINT16_MAX ||
+        owner_index >= LCCF_FACT_MAX_TICKETS || site_table == NULL ||
+        out_ticket == NULL) {
+        return EINVAL;
+    }
+    memset(out_ticket, 0, sizeof(*out_ticket));
+    out_ticket->generation = generation;
+    out_ticket->payload_word = payload_word;
+    out_ticket->event_kind = (uint32_t)event_kind;
+    out_ticket->source_kind = (uint32_t)source;
+    out_ticket->captured_home_shard = captured_home_shard;
+    out_ticket->source_node = source_node;
+    out_ticket->site_index = site_index;
+    out_ticket->site_count = site_count;
+    out_ticket->owner_index = owner_index;
+    out_ticket->site_table = site_table;
+
+    switch (source) {
+    case LCCF_FACT_SOURCE_LINUX_CQE:
+        if (error_code != 0) {
+            out_ticket->raw_result = -(int64_t)error_code;
+            out_ticket->raw_aux = i64_to_bits(result);
+        } else {
+            out_ticket->raw_result = result;
+        }
+        break;
+    case LCCF_FACT_SOURCE_KQUEUE:
+        out_ticket->raw_result = result;
+        out_ticket->raw_error = error_code;
+        if (error_code != 0) {
+            out_ticket->raw_flags |= LCCF_FACT_RAW_KQUEUE_ERROR;
+        }
+        break;
+    case LCCF_FACT_SOURCE_IOCP:
+        out_ticket->raw_result = result;
+        out_ticket->raw_error = error_code;
+        if (error_code == 0) {
+            out_ticket->raw_flags |= LCCF_FACT_RAW_IOCP_SUCCESS;
+        }
+        break;
+    case LCCF_FACT_SOURCE_TIMER:
+    case LCCF_FACT_SOURCE_CANCEL:
+    case LCCF_FACT_SOURCE_EXTERNAL:
+    case LCCF_FACT_SOURCE_STOP:
+        out_ticket->raw_result = result;
+        out_ticket->raw_error = error_code;
+        break;
+    default:
+        return EINVAL;
+    }
+    return 0;
+}
+
+static bool published_representation_failed(
+    const lccf_fact_cell_t *cell,
+    lccf_representation_t representation) {
+    if (representation == LCCF_REP_SHARED_EVENT) {
+        return ((const lccf_event_core_t *)cell->representation_storage)
+                   ->event_kind == LCCF_FACT_EVENT_FAIL;
+    }
+    if (representation == LCCF_REP_FULL_FACT) {
+        return ((const lccf_fact_core_t *)cell->representation_storage)
+                   ->event_kind == LCCF_FACT_EVENT_FAIL;
+    }
+    return false;
+}
+
+static int try_publish_representation(
+    lccf_fact_cell_t *cell,
+    const lccf_fact_ticket_t *ticket,
+    lccf_representation_t representation,
+    lccf_fact_counters_t *counters,
+    bool *out_won) {
+    uint64_t observed;
+    uint64_t building;
+    uint64_t ready;
+    uint64_t generation;
+    int rc;
+
+    if (cell == NULL || ticket == NULL || counters == NULL ||
+        out_won == NULL || ticket->generation > LCCF_FACT_MAX_GENERATION ||
+        !representation_is_valid(representation) ||
+        (representation != LCCF_REP_CANONICAL_HELPER &&
+         cell->representation_storage == NULL)) {
+        return EINVAL;
+    }
+    *out_won = false;
+    counter_increment(&counters->claim_attempts);
+    if (!operation_enter(cell)) {
+        return EBUSY;
+    }
+    observed = atomic_load_explicit(&cell->state_generation,
+                                    memory_order_acquire);
+    generation = lccf_fact_unpack_generation(observed);
+    if (ticket->generation != generation) {
+        retire_stale_ticket_token(cell, ticket);
+        counter_increment(&counters->generation_mismatches);
+        counter_increment(&counters->stale_losers);
+        operation_leave(cell);
+        return LCCF_FACT_ESTALE;
+    }
+    rc = retire_ticket_ownership(cell, ticket);
+    if (rc != 0) {
+        counter_increment(&counters->stale_losers);
+        operation_leave(cell);
+        return rc;
+    }
+    observed = atomic_load_explicit(&cell->state_generation,
+                                    memory_order_acquire);
+    building = lccf_fact_pack_state(generation, LCCF_FACT_STATE_BUILDING);
+    if (lccf_fact_unpack_state(observed) != LCCF_FACT_STATE_ARMED ||
+        !atomic_compare_exchange_strong_explicit(
+            &cell->state_generation, &observed, building,
+            memory_order_acq_rel, memory_order_acquire)) {
+        counter_increment(&counters->stale_losers);
+        rc = lccf_fact_unpack_generation(observed) == generation
+                 ? 0
+                 : LCCF_FACT_ESTALE;
+        operation_leave(cell);
+        return rc;
+    }
+    atomic_store_explicit(&cell->representation,
+                          (uint32_t)representation,
+                          memory_order_relaxed);
+
+    if ((ticket->raw_flags & LCCF_FACT_TICKET_FAIL_MODULE_PIN) != 0U) {
+        counter_increment(&counters->fact_build_failures);
+        atomic_store_explicit(&cell->published, false,
+                              memory_order_relaxed);
+        atomic_store_explicit(
+            &cell->state_generation,
+            lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+            memory_order_release);
+        operation_leave(cell);
+        return ENODEV;
+    }
+    rc = reference_add(cell, LCCF_FACT_REF_MODULE, 1U);
+    if (rc != 0) {
+        atomic_store_explicit(
+            &cell->state_generation,
+            lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+            memory_order_release);
+        operation_leave(cell);
+        return rc;
+    }
+    counter_increment(&counters->module_pins);
+
+    if (ticket->payload_word != 0U &&
+        (ticket->raw_flags & LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN) == 0U) {
+        rc = reference_add(cell, LCCF_FACT_REF_PAYLOAD, 1U);
+        if (rc != 0) {
+            (void)reference_subtract(cell, LCCF_FACT_REF_MODULE, 1U);
+            atomic_store_explicit(
+                &cell->state_generation,
+                lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+                memory_order_release);
+            operation_leave(cell);
+            return rc;
+        }
+        counter_increment(&counters->payload_pins);
+    }
+
+    cell->raw_ticket = *ticket;
+    atomic_store_explicit(&cell->published, false, memory_order_relaxed);
+    rc = lccf_representation_publish(
+        representation, ticket, cell->representation_storage, counters);
+    if (rc != 0) {
+        counter_increment(&counters->fact_build_failures);
+        if (ticket->payload_word != 0U &&
+            (ticket->raw_flags &
+             LCCF_FACT_TICKET_FAIL_PAYLOAD_PIN) == 0U) {
+            (void)reference_subtract(
+                cell, LCCF_FACT_REF_PAYLOAD, 1U);
+        }
+        (void)reference_subtract(cell, LCCF_FACT_REF_MODULE, 1U);
+        atomic_store_explicit(
+            &cell->state_generation,
+            lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+            memory_order_release);
+        operation_leave(cell);
+        return rc;
+    }
+    if (published_representation_failed(cell, representation)) {
+        counter_increment(&counters->fact_build_failures);
+    }
+    counter_increment(&counters->fact_builds);
+    atomic_store_explicit(&cell->published, true, memory_order_relaxed);
+    ready = lccf_fact_pack_state(generation, LCCF_FACT_STATE_READY);
+    atomic_store_explicit(&cell->state_generation, ready,
+                          memory_order_release);
+    *out_won = true;
+    operation_leave(cell);
+    return 0;
+}
+
+int lccf_fact_try_publish_configured(
+    lccf_fact_cell_t *cell,
+    const lccf_fact_ticket_t *ticket,
+    lccf_fact_counters_t *counters,
+    bool *out_won) {
+    lccf_representation_t representation;
+
+    if (cell == NULL || cell->legacy_configurable) {
+        return EINVAL;
+    }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    return try_publish_representation(
+        cell, ticket, representation, counters, out_won);
+}
+
+int lccf_fact_try_publish(lccf_fact_cell_t *cell,
+                          const lccf_fact_ticket_t *ticket,
+                          bool shared,
+                          lccf_fact_counters_t *counters,
+                          bool *out_won) {
+    lccf_representation_t representation;
+
+    if (cell == NULL || !cell->legacy_configurable) {
+        return EINVAL;
+    }
+    representation = shared ? LCCF_REP_FULL_FACT
+                            : LCCF_REP_CANONICAL_HELPER;
+    return try_publish_representation(
+        cell, ticket, representation, counters, out_won);
+}
+
+static int materialize_visible_fact(
+    const lccf_fact_cell_t *cell,
+    uint64_t generation,
+    uint32_t site_index,
+    bool use_initial_site,
+    bool require_persistent,
+    lccf_fact_counters_t *counters,
+    lccf_fact_core_t *out_fact) {
+    lccf_fact_cell_t *mutable_cell = (lccf_fact_cell_t *)(uintptr_t)cell;
+    lccf_fact_ticket_t ticket;
+    lccf_representation_t representation;
+    const void *storage;
+    uint64_t before;
+    uint64_t after;
+    int rc;
+
+    if (cell == NULL || counters == NULL || out_fact == NULL) {
+        return EINVAL;
+    }
+    if (!operation_enter(mutable_cell)) {
+        return EBUSY;
+    }
+    before = atomic_load_explicit(&cell->state_generation,
+                                  memory_order_acquire);
+    if (lccf_fact_unpack_generation(before) != generation) {
+        operation_leave(mutable_cell);
+        return LCCF_FACT_ESTALE;
+    }
+    if (!state_is_visible(lccf_fact_unpack_state(before))) {
+        operation_leave(mutable_cell);
+        return EAGAIN;
+    }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    if (!representation_is_valid(representation)) {
+        operation_leave(mutable_cell);
+        return EPROTO;
+    }
+    if (require_persistent &&
+        representation == LCCF_REP_CANONICAL_HELPER) {
+        operation_leave(mutable_cell);
+        return ENODATA;
+    }
+    rc = reference_add(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
+    if (rc != 0) {
+        operation_leave(mutable_cell);
+        return rc;
+    }
+    after = atomic_load_explicit(&cell->state_generation,
+                                 memory_order_acquire);
+    if (lccf_fact_unpack_generation(after) != generation ||
+        !state_is_visible(lccf_fact_unpack_state(after)) ||
+        !atomic_load_explicit(&cell->published, memory_order_relaxed)) {
+        (void)reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U);
+        operation_leave(mutable_cell);
+        return LCCF_FACT_ESTALE;
+    }
+    ticket = cell->raw_ticket;
+    storage = cell->representation_storage;
+    if (use_initial_site) {
+        site_index = ticket.site_index;
+    }
+    rc = lccf_representation_materialize(
+        representation, &ticket, storage, site_index, counters, out_fact);
+    if (reference_subtract(mutable_cell, LCCF_FACT_REF_EXTERNAL, 1U) != 0 &&
+        rc == 0) {
+        rc = EPROTO;
+    }
+    operation_leave(mutable_cell);
+    return rc;
+}
+
+int lccf_fact_acquire(const lccf_fact_cell_t *cell,
+                      uint64_t generation,
+                      lccf_fact_core_t *out_fact) {
+    lccf_fact_counters_t ignored_counters = {0};
+
+    return materialize_visible_fact(
+        cell, generation, 0U, true, true, &ignored_counters, out_fact);
+}
+
+int lccf_fact_materialize(const lccf_fact_cell_t *cell,
+                          uint64_t generation,
+                          uint32_t site_index,
+                          lccf_fact_counters_t *counters,
+                          lccf_fact_core_t *out_fact) {
+    return materialize_visible_fact(
+        cell, generation, site_index, false, false, counters, out_fact);
+}
+
+static uint64_t guard_escape_reasons(const lccf_fact_guard_t *guard) {
+    uint64_t reasons = 0U;
+
+    if ((guard->flags & LCCF_FACT_GUARD_DIRECT_ENABLED) == 0U) {
+        reasons |= LCCF_FACT_ESCAPE_MODULE_POLICY;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_MODULE_ENABLED) == 0U) {
+        reasons |= LCCF_FACT_ESCAPE_MODULE_POLICY;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_BACKEND_CAPABLE) == 0U) {
+        reasons |= LCCF_FACT_ESCAPE_BACKEND_CAPABILITY;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_STOP) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_STOP;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_FAIRNESS_DUE) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_FAIRNESS;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_TRACE) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_TRACE;
+    }
+    if ((guard->flags & (LCCF_FACT_GUARD_SHARD_PAUSED |
+                         LCCF_FACT_GUARD_SHARD_OFFLINE)) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_SHARD_STATE;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_CALLBACK_ACTIVE) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_CALLBACK_ACTIVE;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_QUEUE_PRESSURE) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_QUEUE_PRESSURE;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_MIGRATING) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_MIGRATION;
+    }
+    if (guard->budget_remaining == 0U) {
+        reasons |= LCCF_FACT_ESCAPE_BUDGET;
+    }
+    if (guard->consuming_shard != guard->current_home_shard) {
+        reasons |= LCCF_FACT_ESCAPE_WRONG_SHARD;
+    }
+    return reasons;
+}
+
+static uint64_t queued_defer_reasons(const lccf_fact_guard_t *guard) {
+    uint64_t reasons = 0U;
+
+    if ((guard->flags & LCCF_FACT_GUARD_MODULE_ENABLED) == 0U) {
+        reasons |= LCCF_FACT_ESCAPE_MODULE_POLICY;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_BACKEND_CAPABLE) == 0U) {
+        reasons |= LCCF_FACT_ESCAPE_BACKEND_CAPABILITY;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_STOP) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_STOP;
+    }
+    if ((guard->flags & (LCCF_FACT_GUARD_SHARD_PAUSED |
+                         LCCF_FACT_GUARD_SHARD_OFFLINE)) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_SHARD_STATE;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_CALLBACK_ACTIVE) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_CALLBACK_ACTIVE;
+    }
+    if ((guard->flags & LCCF_FACT_GUARD_MIGRATING) != 0U) {
+        reasons |= LCCF_FACT_ESCAPE_MIGRATION;
+    }
+    return reasons;
+}
+
+int lccf_fact_consume(lccf_fact_cell_t *cell, uint64_t generation,
+                      uint32_t site_index,
+                      lccf_fact_consumer_t consumer,
+                      const lccf_fact_guard_t *guard,
+                      lccf_fact_counters_t *counters,
+                      lccf_fact_decision_t *out_decision,
+                      lccf_fact_core_t *out_fact) {
+    uint64_t observed;
+    uint64_t desired;
+    uint64_t reasons;
+    lccf_fact_state_t state;
+    int rc;
+
+    if (cell == NULL || guard == NULL || counters == NULL ||
+        out_decision == NULL || out_fact == NULL ||
+        (consumer != LCCF_FACT_CONSUMER_DIRECT &&
+         consumer != LCCF_FACT_CONSUMER_QUEUE)) {
+        return EINVAL;
+    }
+    if (!operation_enter(cell)) {
+        return EBUSY;
+    }
+    observed = atomic_load_explicit(&cell->state_generation,
+                                    memory_order_acquire);
+    if (lccf_fact_unpack_generation(observed) != generation) {
+        operation_leave(cell);
+        return LCCF_FACT_ESTALE;
+    }
+    state = lccf_fact_unpack_state(observed);
+    if ((consumer == LCCF_FACT_CONSUMER_DIRECT &&
+         state != LCCF_FACT_STATE_READY) ||
+        (consumer == LCCF_FACT_CONSUMER_QUEUE &&
+         state != LCCF_FACT_STATE_QUEUED)) {
+        operation_leave(cell);
+        return EPROTO;
+    }
+    rc = lccf_fact_materialize(
+        cell, generation, site_index, counters, out_fact);
+    if (rc != 0) {
+        operation_leave(cell);
+        return rc;
+    }
+    counter_increment(&counters->guard_rechecks);
+    memset(out_decision, 0, sizeof(*out_decision));
+    out_decision->destination_shard = guard->current_home_shard;
+    reasons = guard_escape_reasons(guard);
+    out_decision->escape_reasons = reasons;
+
+    if (consumer == LCCF_FACT_CONSUMER_DIRECT) {
+        if (reasons == 0U) {
+            rc = reference_add(cell, LCCF_FACT_REF_CALLBACK, 1U);
+            if (rc != 0) {
+                operation_leave(cell);
+                return rc;
+            }
+            desired = lccf_fact_pack_state(
+                generation, LCCF_FACT_STATE_RUNNING_DIRECT);
+            if (!atomic_compare_exchange_strong_explicit(
+                    &cell->state_generation, &observed, desired,
+                    memory_order_acq_rel, memory_order_acquire)) {
+                (void)reference_subtract(cell, LCCF_FACT_REF_CALLBACK, 1U);
+                operation_leave(cell);
+                return EBUSY;
+            }
+            out_decision->route = LCCF_FACT_ROUTE_DIRECT;
+            operation_leave(cell);
+            return 0;
+        }
+        rc = reference_add(cell, LCCF_FACT_REF_QUEUE, 1U);
+        if (rc != 0) {
+            operation_leave(cell);
+            return rc;
+        }
+        desired = lccf_fact_pack_state(generation, LCCF_FACT_STATE_QUEUED);
+        if (!atomic_compare_exchange_strong_explicit(
+                &cell->state_generation, &observed, desired,
+                memory_order_acq_rel, memory_order_acquire)) {
+            (void)reference_subtract(cell, LCCF_FACT_REF_QUEUE, 1U);
+            operation_leave(cell);
+            return EBUSY;
+        }
+        out_decision->route = LCCF_FACT_ROUTE_QUEUE;
+        operation_leave(cell);
+        return 0;
+    }
+
+    reasons = queued_defer_reasons(guard);
+    if ((reasons & ~LCCF_FACT_ESCAPE_MIGRATION) != 0U) {
+        out_decision->route = LCCF_FACT_ROUTE_DEFER;
+        out_decision->escape_reasons = reasons;
+        operation_leave(cell);
+        return 0;
+    }
+    if (guard->consuming_shard != guard->current_home_shard) {
+        out_decision->route = LCCF_FACT_ROUTE_FORWARD;
+        out_decision->escape_reasons |= LCCF_FACT_ESCAPE_WRONG_SHARD;
+        counter_increment(&counters->queue_forwards);
+        operation_leave(cell);
+        return 0;
+    }
+    if (reasons != 0U) {
+        out_decision->route = LCCF_FACT_ROUTE_DEFER;
+        out_decision->escape_reasons = reasons;
+        operation_leave(cell);
+        return 0;
+    }
+    rc = reference_add(cell, LCCF_FACT_REF_CALLBACK, 1U);
+    if (rc != 0) {
+        operation_leave(cell);
+        return rc;
+    }
+    desired = lccf_fact_pack_state(
+        generation, LCCF_FACT_STATE_RUNNING_QUEUED);
+    if (!atomic_compare_exchange_strong_explicit(
+            &cell->state_generation, &observed, desired,
+            memory_order_acq_rel, memory_order_acquire)) {
+        (void)reference_subtract(cell, LCCF_FACT_REF_CALLBACK, 1U);
+        operation_leave(cell);
+        return EBUSY;
+    }
+    rc = reference_subtract(cell, LCCF_FACT_REF_QUEUE, 1U);
+    if (rc != 0) {
+        operation_leave(cell);
+        return rc;
+    }
+    out_decision->route = LCCF_FACT_ROUTE_QUEUE;
+    out_decision->escape_reasons = 0U;
+    operation_leave(cell);
+    return 0;
+}
+
+int lccf_fact_yield_to_queue(lccf_fact_cell_t *cell,
+                             uint64_t generation) {
+    uint64_t observed;
+    uint64_t desired;
+    int rc;
+
+    if (cell == NULL) {
+        return EINVAL;
+    }
+    if (!operation_enter(cell)) {
+        return EBUSY;
+    }
+    observed = atomic_load_explicit(&cell->state_generation,
+                                    memory_order_acquire);
+    if (lccf_fact_unpack_generation(observed) != generation) {
+        operation_leave(cell);
+        return LCCF_FACT_ESTALE;
+    }
+    if (!state_is_running(lccf_fact_unpack_state(observed))) {
+        operation_leave(cell);
+        return EPROTO;
+    }
+    rc = reference_add(cell, LCCF_FACT_REF_QUEUE, 1U);
+    if (rc != 0) {
+        operation_leave(cell);
+        return rc;
+    }
+    desired = lccf_fact_pack_state(generation, LCCF_FACT_STATE_QUEUED);
+    if (!atomic_compare_exchange_strong_explicit(
+            &cell->state_generation, &observed, desired,
+            memory_order_acq_rel, memory_order_acquire)) {
+        (void)reference_subtract(cell, LCCF_FACT_REF_QUEUE, 1U);
+        operation_leave(cell);
+        return EBUSY;
+    }
+    rc = reference_subtract(cell, LCCF_FACT_REF_CALLBACK, 1U);
+    operation_leave(cell);
+    return rc;
+}
+
+int lccf_fact_finish(lccf_fact_cell_t *cell, uint64_t generation,
+                     lccf_fact_counters_t *counters) {
+    uint64_t observed;
+    lccf_fact_state_t state;
+    uint32_t payload_refs;
+    size_t index;
+
+    if (cell == NULL || counters == NULL ||
+        generation > LCCF_FACT_MAX_GENERATION) {
+        return EINVAL;
+    }
+    observed = atomic_load_explicit(&cell->state_generation,
+                                    memory_order_acquire);
+    if (lccf_fact_unpack_generation(observed) != generation) {
+        return LCCF_FACT_ESTALE;
+    }
+    state = lccf_fact_unpack_state(observed);
+    if (!state_is_running(state)) {
+        return EPROTO;
+    }
+    if (!atomic_compare_exchange_strong_explicit(
+            &cell->state_generation, &observed,
+            lccf_fact_pack_state(generation,
+                                 LCCF_FACT_STATE_BUILDING),
+            memory_order_acq_rel, memory_order_acquire)) {
+        return EBUSY;
+    }
+    close_lifecycle(cell);
+    payload_refs = atomic_load_explicit(
+        &cell->references[LCCF_FACT_REF_PAYLOAD], memory_order_acquire);
+    if (atomic_load_explicit(&cell->references[LCCF_FACT_REF_CALLBACK],
+                             memory_order_acquire) != 1U ||
+        atomic_load_explicit(&cell->references[LCCF_FACT_REF_QUEUE],
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&cell->references[LCCF_FACT_REF_BACKEND],
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&cell->references[LCCF_FACT_REF_EXTERNAL],
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&cell->references[LCCF_FACT_REF_MODULE],
+                             memory_order_acquire) != 1U ||
+        payload_refs > 1U) {
+        counter_increment(&counters->reuse_delays);
+        atomic_store_explicit(&cell->state_generation, observed,
+                              memory_order_release);
+        open_lifecycle(cell);
+        return EBUSY;
+    }
+    for (index = 0U; index < cell->ticket_count; ++index) {
+        if (atomic_load_explicit(&cell->ticket_owners[index],
+                                 memory_order_acquire) != 0U) {
+            counter_increment(&counters->reuse_delays);
+            atomic_store_explicit(&cell->state_generation, observed,
+                                  memory_order_release);
+            open_lifecycle(cell);
+            return EBUSY;
+        }
+    }
+    atomic_store_explicit(&cell->published, false, memory_order_relaxed);
+    atomic_store_explicit(&cell->references[LCCF_FACT_REF_PAYLOAD], 0U,
+                          memory_order_relaxed);
+    atomic_store_explicit(&cell->references[LCCF_FACT_REF_MODULE], 0U,
+                          memory_order_relaxed);
+    atomic_store_explicit(&cell->references[LCCF_FACT_REF_CALLBACK], 0U,
+                          memory_order_relaxed);
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+        memory_order_release);
+    return 0;
+}
+
+int lccf_fact_abort(lccf_fact_cell_t *cell, uint64_t generation) {
+    uint64_t observed;
+    lccf_fact_state_t state;
+    size_t index;
+
+    if (cell == NULL) {
+        return EINVAL;
+    }
+    observed = atomic_load_explicit(&cell->state_generation,
+                                    memory_order_acquire);
+    if (lccf_fact_unpack_generation(observed) != generation) {
+        return LCCF_FACT_ESTALE;
+    }
+    state = lccf_fact_unpack_state(observed);
+    if (!state_is_visible(state)) {
+        return EPROTO;
+    }
+    if (!atomic_compare_exchange_strong_explicit(
+            &cell->state_generation, &observed,
+            lccf_fact_pack_state(generation,
+                                 LCCF_FACT_STATE_BUILDING),
+            memory_order_acq_rel, memory_order_acquire)) {
+        return EBUSY;
+    }
+    close_lifecycle(cell);
+    if (atomic_load_explicit(&cell->references[LCCF_FACT_REF_EXTERNAL],
+                             memory_order_acquire) != 0U) {
+        atomic_store_explicit(&cell->state_generation, observed,
+                              memory_order_release);
+        open_lifecycle(cell);
+        return EBUSY;
+    }
+    for (index = 0U; index < LCCF_FACT_REF_COUNT; ++index) {
+        atomic_store_explicit(&cell->references[index], 0U,
+                              memory_order_relaxed);
+    }
+    for (index = 0U; index < LCCF_FACT_MAX_TICKETS; ++index) {
+        atomic_store_explicit(&cell->ticket_owners[index], 0U,
+                              memory_order_relaxed);
+    }
+    atomic_store_explicit(&cell->published, false, memory_order_relaxed);
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_fact_pack_state(generation, LCCF_FACT_STATE_TERMINAL),
+        memory_order_release);
+    return 0;
+}
+
+int lccf_fact_invoke(const lccf_fact_core_t *fact, void *context) {
+    if (fact == NULL || fact->resolved_site == NULL ||
+        fact->resolved_site->invoke == NULL ||
+        fact->resolved_site->logical_index != fact->site_index) {
+        return EPROTO;
+    }
+    return fact->resolved_site->invoke(fact->resolved_site, fact, context);
+}
+
+int lccf_fact_retain(lccf_fact_cell_t *cell,
+                     lccf_fact_ref_kind_t kind) {
+    int rc;
+
+    if (cell == NULL || !operation_enter(cell)) {
+        return cell == NULL ? EINVAL : EBUSY;
+    }
+    rc = reference_add(cell, kind, 1U);
+    operation_leave(cell);
+    return rc;
+}
+
+int lccf_fact_release(lccf_fact_cell_t *cell,
+                      lccf_fact_ref_kind_t kind) {
+    return reference_subtract(cell, kind, 1U);
+}
+
+bool lccf_fact_can_reuse(const lccf_fact_cell_t *cell) {
+    uint64_t state_word;
+    lccf_fact_state_t state;
+    size_t index;
+
+    if (cell == NULL) {
+        return false;
+    }
+    state_word = atomic_load_explicit(&cell->state_generation,
+                                      memory_order_acquire);
+    state = lccf_fact_unpack_state(state_word);
+    if ((state != LCCF_FACT_STATE_ARMED &&
+         state != LCCF_FACT_STATE_TERMINAL) ||
+        atomic_load_explicit(&cell->published, memory_order_acquire) ||
+        (atomic_load_explicit(&cell->lifecycle_gate,
+                              memory_order_acquire) &
+         LCCF_FACT_LIFECYCLE_COUNT_MASK) != 0U) {
+        return false;
+    }
+    if (!references_are_zero(cell)) {
+        return false;
+    }
+    for (index = 0U; index < LCCF_FACT_MAX_TICKETS; ++index) {
+        if (atomic_load_explicit(&cell->ticket_owners[index],
+                                 memory_order_acquire) != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int lccf_fact_module_unregister(const lccf_fact_cell_t *cell) {
+    if (cell == NULL) {
+        return EINVAL;
+    }
+    return atomic_load_explicit(
+               &cell->references[LCCF_FACT_REF_MODULE],
+               memory_order_acquire) == 0U
+               ? 0
+               : EBUSY;
+}
+
+const lccf_fact_core_t *lccf_fact_storage(
+    const lccf_fact_cell_t *cell) {
+    lccf_representation_t representation;
+
+    if (cell == NULL) {
+        return NULL;
+    }
+    if (cell->legacy_configurable) {
+        return cell->fact_storage;
+    }
+    representation = (lccf_representation_t)atomic_load_explicit(
+        &cell->representation, memory_order_relaxed);
+    return representation == LCCF_REP_FULL_FACT
+               ? cell->representation_storage
+               : NULL;
+}

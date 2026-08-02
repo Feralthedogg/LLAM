@@ -51,7 +51,11 @@ Confirm RED and commit: `test: define LCCF fact contracts`.
 
 Implement acq-rel generation claim, winner-owned reference transfer, canonical event normalization, one-time site resolution, ordinary fact writes followed by release publication, and acquire readers. Provide synthetic Linux, kqueue, IOCP, timer, cancel, external wake, and stop adapters that map equivalent logical outcomes to equal canonical events.
 
-Use explicit counters for claim attempts, fact builds, normalization calls, site lookups, pins, stale losers, and reuse delays. Tests must show exactly one normalization and one lookup per winning generation and balanced references for success and every injected failure.
+Use explicit counters for claim attempts, fact builds, normalization calls,
+initial and continuation site lookups, pins, stale losers, and reuse delays.
+Tests must show exactly one normalization and initial lookup per winning
+generation, explicit lookup after a command changes `next_site`, and balanced
+references for success and every injected failure.
 
 Commit: `research: publish immutable LCCF facts`.
 
@@ -86,7 +90,13 @@ recompute_fused / shared_fact_fused
 mixed_recompute / mixed_shared_fact
 ```
 
-First create tests that compare literal event/errno/command sequences and existing canonical batch equality. Cover I/O-timeout, I/O-cancel, migration, stop, module disable, worker offlining, generation reuse, callback failure, escape overflow, module unregister busy, exactly-once frame/payload drop, and sidecar overwrite prevention.
+First create tests that compare literal event/errno/command sequences and
+existing canonical batch equality. Give each modeled resume site a distinct
+function address so an initial descriptor cannot impersonate a continuation
+site. Cover I/O-timeout, I/O-cancel, migration, stop, module disable, worker
+offlining, generation reuse, callback failure, escape overflow, module
+unregister busy, exactly-once frame/payload drop, and sidecar overwrite
+prevention.
 
 All modes must share the same seed-derived inputs and final checksum. Commit: `test: compare LCCF fact lifecycles`.
 
@@ -100,7 +110,11 @@ All modes must share the same seed-derived inputs and final checksum. Commit: `t
 
 Write strict parser/classifier tests first. Benchmark each layout and paired mode with identical operation counts, alternating ABBA/BAAB order in fresh processes. Emit wall, process CPU, optional instructions when supported, p50/p99, normalization/lookup counts, pin balance, allocations, guard rechecks, forwards, and checksum.
 
-Retain raw samples and calculate process-local candidate/baseline ratios before aggregation. Classify correctness before performance. Enforce queued >=98%, direct regression <=2%, mixed CPU or instructions improvement >=5%, p99 regression <=5%, zero hot allocation, and exactly one normalize/lookup per generation.
+Retain raw samples and calculate process-local candidate/baseline ratios before
+aggregation. Classify correctness before performance. Enforce queued >=98%,
+direct regression <=2%, mixed CPU or instructions improvement >=5%, p99
+regression <=5%, zero hot allocation, exactly one normalization and initial
+site lookup per generation, and explicit continuation-site dispatch.
 
 Commit: `bench: measure LCCF common facts`.
 
