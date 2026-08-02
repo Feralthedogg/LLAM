@@ -480,6 +480,25 @@ class RunnerFailureTests(unittest.TestCase):
                 with self.assertRaises(MatrixRunError):
                     self._run_with(result)
 
+    def test_default_timeout_allows_asymmetric_screen_cell(self) -> None:
+        def slow_cell_runner(
+            command: list[str], *, timeout: float
+        ) -> CapturedProcess:
+            if timeout < 60.0:
+                raise ProcessTimeoutError(command, timeout, "", "")
+            return CapturedProcess(command, 0, VALID_ROW + "\n", "")
+
+        sample = run_one(
+            Path("/tmp/bench_leir_phase0"),
+            self.cell,
+            process_sample=1,
+            activations=128,
+            min_mode_ms=100,
+            runner=slow_cell_runner,
+        )
+
+        self.assertEqual(sample.process_sample, 1)
+
     def test_valid_row_is_bound_to_command(self) -> None:
         sample = self._run_with(
             CapturedProcess(["bench"], 0, VALID_ROW + "\n", "")
