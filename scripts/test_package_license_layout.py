@@ -20,8 +20,13 @@ SOURCE_ROOT = Path(__file__).resolve().parent.parent
 ACTIVE_LICENSE_RELATIVE = Path(
     "LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
 )
+APACHE_LICENSE_RELATIVE = Path("LICENSES/OLD-LICENSE/Apache-2.0.txt")
+APACHE_MANIFEST_RELATIVE = Path(
+    "LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
+)
 CURRENT_LICENSE_BYTES = b"current license\n"
-HISTORICAL_LICENSE_BYTES = b"historical Apache license\n"
+APACHE_LICENSE_BYTES = b"Apache license\n"
+APACHE_MANIFEST_BYTES = b"include/llam/runtime.h\n"
 
 
 class PackageLicenseLayoutTest(unittest.TestCase):
@@ -87,9 +92,8 @@ class PackageLicenseLayoutTest(unittest.TestCase):
 
         self._write("LICENSE", CURRENT_LICENSE_BYTES)
         self._write(ACTIVE_LICENSE_RELATIVE, CURRENT_LICENSE_BYTES)
-        self._write(
-            "OLD-LICENSES/Apache-2.0.txt", HISTORICAL_LICENSE_BYTES
-        )
+        self._write(APACHE_LICENSE_RELATIVE, APACHE_LICENSE_BYTES)
+        self._write(APACHE_MANIFEST_RELATIVE, APACHE_MANIFEST_BYTES)
         self._write("README.md", b"fixture\n")
         self._write("CHANGELOG.md", b"fixture\n")
         self._write("scripts/stress_server.py", b"# fixture\n")
@@ -145,7 +149,7 @@ class PackageLicenseLayoutTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertTrue(self.archive.is_file())
 
-    def test_archive_contains_only_active_license_metadata(self) -> None:
+    def test_archive_contains_mixed_license_metadata(self) -> None:
         self._package_archive()
 
         with tarfile.open(self.archive, mode="r:xz") as archive:
@@ -153,14 +157,28 @@ class PackageLicenseLayoutTest(unittest.TestCase):
             active_name = (
                 f"{self.package}/{ACTIVE_LICENSE_RELATIVE.as_posix()}"
             )
+            apache_name = (
+                f"{self.package}/{APACHE_LICENSE_RELATIVE.as_posix()}"
+            )
+            manifest_name = (
+                f"{self.package}/{APACHE_MANIFEST_RELATIVE.as_posix()}"
+            )
             self.assertIn(active_name, names)
+            self.assertIn(apache_name, names)
+            self.assertIn(manifest_name, names)
             root_license = archive.extractfile(f"{self.package}/LICENSE")
             active_license = archive.extractfile(active_name)
+            apache_license = archive.extractfile(apache_name)
+            apache_manifest = archive.extractfile(manifest_name)
 
             self.assertIsNotNone(root_license)
             self.assertIsNotNone(active_license)
+            self.assertIsNotNone(apache_license)
+            self.assertIsNotNone(apache_manifest)
             self.assertEqual(CURRENT_LICENSE_BYTES, root_license.read())
             self.assertEqual(CURRENT_LICENSE_BYTES, active_license.read())
+            self.assertEqual(APACHE_LICENSE_BYTES, apache_license.read())
+            self.assertEqual(APACHE_MANIFEST_BYTES, apache_manifest.read())
             self.assertFalse(any("/OLD-LICENSES/" in name for name in names))
 
     def test_archive_installer_preserves_active_license_metadata(self) -> None:
@@ -203,6 +221,12 @@ class PackageLicenseLayoutTest(unittest.TestCase):
             CURRENT_LICENSE_BYTES,
             installed_active.read_bytes(),
         )
+        installed_apache = prefix / "share/llam" / APACHE_LICENSE_RELATIVE
+        installed_manifest = prefix / "share/llam" / APACHE_MANIFEST_RELATIVE
+        self.assertTrue(installed_apache.is_file())
+        self.assertTrue(installed_manifest.is_file())
+        self.assertEqual(APACHE_LICENSE_BYTES, installed_apache.read_bytes())
+        self.assertEqual(APACHE_MANIFEST_BYTES, installed_manifest.read_bytes())
         self.assertFalse((prefix / "share/llam/OLD-LICENSES").exists())
 
 

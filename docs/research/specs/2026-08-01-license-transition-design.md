@@ -1,178 +1,99 @@
-# LLAM 3.0.0 License Transition Design
+<!--
+Copyright 2026 Feralthedogg
+SPDX-License-Identifier: Apache-2.0
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+-->
+
+# LLAM Mixed-License Transition Design
 
 **Date:** 2026-08-01
 
-## Objective
+**Revised:** 2026-08-03
 
-Adopt the LLAM Commercial Reciprocity License 1.0 for new LLAM releases while
-preserving the Apache License 2.0 grants already attached to published commits,
-tags, releases, and copies.
+## Decision
 
-This document records a repository and release policy. It is not a legal opinion
-about the enforceability of the custom license.
+The root `LICENSE` contains the LLAM Commercial Reciprocity License 1.0, but
+the repository is mixed-license. Files already published under Apache License
+2.0 keep that license, including later modifications. First-party files created
+after the transition use the custom license unless they are conspicuously
+identified as separately licensed.
 
-## Release boundary
+This supersedes the earlier all-current-files custom-license interpretation.
+It preserves previously granted rights without changing immutable historical
+tags, releases, commits, or received copies.
 
-- The first release under the new license is `v3.0.0`.
-- `v2.2.1` and every earlier immutable tag, release, commit, and copy retain
-  their existing Apache License 2.0 terms.
-- Published history is not rewritten and existing tags are not moved.
-- The product major version changes because the licensing terms materially
-  change. The shared-library ABI remains at major version 2 because this change
-  does not alter the binary interface.
-- `docs/licensing.md` will make the boundary discoverable without requiring a
-  reader to reconstruct it from Git history.
+## Lineage classification
 
-## License application
+The transition audit compares the last published Apache lineages rooted at:
 
-The repository root `LICENSE` will contain the supplied LLAM Commercial
-Reciprocity License 1.0 text. Section 1.4 defines `Software` through an express
-application notice:
+- `9062b687d3205ffdff24f3f1c05eac019b2b9a34`
+- `f4b3f4f39d254e2c1463ec33b5b3c58f5fb505b0`
 
-```text
-1.4. "Software" means source code, object code, documentation, tests,
-examples, build materials, configuration, and other materials to which this
-License is expressly applied by a LICENSE file, package notice, file header,
-or other accompanying notice, excluding materials expressly identified as
-governed by another license.
-```
+A current path descended from a file in either lineage remains Apache-licensed.
+Renames are followed by Git history. The root `LICENSE` is an explicit
+custom-license exception. A current first-party path with no qualifying
+lineage is custom-licensed.
 
-The root `LICENSE` therefore applies the new terms to the complete repository
-snapshot unless a material is conspicuously identified as separately licensed.
-Existing LLAM-authored tracked files that currently carry an Apache identifier
-or boilerplate will receive this concise notice in the syntax appropriate to
-their file type:
-
-```text
-Copyright 2026 Feralthedogg
-SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-Licensed under the LLAM Commercial Reciprocity License 1.0.
-See the LICENSE file distributed with this Software.
-```
-
-### License-file layout
-
-The repository will use this layout:
+## Repository layout
 
 ```text
 LICENSE
 LICENSES/
   LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt
-OLD-LICENSES/
-  Apache-2.0.txt
-  README.md
+  OLD-LICENSE/
+    Apache-2.0.txt
+    APACHE-2.0-FILES.txt
 ```
 
-- `LICENSE` remains the human-facing and legally controlling license for the
-  current repository snapshot and for release packages.
-- `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt` is a byte-identical
-  copy of `LICENSE`. It supplies the license text under the standard SPDX/REUSE
-  filename corresponding to the custom identifier used in file headers.
-- `LICENSES/` contains active license texts only. It does not contain Apache
-  2.0 because no current LLAM-authored file is offered under Apache 2.0.
-- `OLD-LICENSES/Apache-2.0.txt` preserves the exact Apache 2.0 text shipped in
-  `v2.2.1` as a historical reference. `OLD-LICENSES/README.md` states that this
-  is not an alternative license for the current snapshot and directs users to
-  the immutable earlier tag for the controlling historical copy.
+- `LICENSE` is the human-facing custom license.
+- The `LicenseRef` file is its byte-identical SPDX lookup copy.
+- `Apache-2.0.txt` is the exact Apache text previously distributed by LLAM.
+- `APACHE-2.0-FILES.txt` is the sorted, duplicate-free, repository-relative
+  list of all current Apache-licensed paths.
 
-This separation follows the REUSE rule that active license files live under
-`LICENSES/` and that the directory must not contain unused license texts. The
-historical Apache text therefore stays outside the active directory so license
-scanners do not infer that current LLAM is dual-licensed.
+The manifest is an express license selector and covers formats that cannot
+carry a notice. Apache-capable files carry `SPDX-License-Identifier:
+Apache-2.0` and point to `LICENSES/OLD-LICENSE/Apache-2.0.txt`. Custom-capable
+files carry `SPDX-License-Identifier:
+LicenseRef-LLAM-Commercial-Reciprocity-1.0`.
 
-Release archives and installed metadata will contain `LICENSE` and the active
-`LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`. They will not contain
-`OLD-LICENSES/`, because the Apache text does not govern the new release.
+## Enforcement and distribution
 
-The transition audit found no separately owned tracked source that must remain
-under Apache 2.0. Future third-party or separately licensed material must retain
-its own license notice and must be excluded from automated LLAM-header checks.
-Such material must be placed in a conspicuously documented third-party or vendor
-location rather than mixed into LLAM-authored implementation directories.
+The policy checker verifies the canonical Apache text hash, the exact custom
+license mirror, manifest ordering and path safety, tracked-file membership,
+license/header consistency, documentation, and packaging markers. It rejects
+obsolete layout references and new unclassified first-party implementation
+files.
+
+Release archives, platform packages, archive-local installers, and CMake
+install rules include all four pieces of license metadata. Package integration
+tests verify their exact contents. This ensures recipients can resolve the
+governing terms without reconstructing repository history.
 
 ## Public positioning
 
-The README license badge and license section will call LLAM
-**source-available** and explicitly state that its license is not OSI-approved
-open source. The project must not be described as open source without that
-qualification.
-
-## Reporting and contribution operations
-
-### Security reporting
-
-`.github/SECURITY.md` will:
-
-- identify `3.x` as supported and earlier release lines as unsupported;
-- direct security reports to GitHub Private Vulnerability Reporting;
-- explain that public issues must not contain security-sensitive details;
-- request version, platform, backend, modification status, impact,
-  reproduction steps, and supporting evidence;
-- describe the license's seven-day security-defect reporting requirement and
-  forty-five-day non-security-defect reporting requirement; and
-- avoid promising a response or remediation service-level agreement.
-
-Private Vulnerability Reporting will be enabled and verified for the public
-repository. General defects will use a structured GitHub issue form with the
-same diagnostic fields and a prominent security-reporting redirect.
-
-### Contributions
-
-`CONTRIBUTING.md` will include the approved contribution-license clause
-verbatim:
-
-```text
-By intentionally submitting a contribution for inclusion in LLAM, you agree
-to license that contribution under the LLAM Commercial Reciprocity License
-1.0, unless the submission is conspicuously marked "Not a Contribution" or a
-separate written agreement applies.
-```
-
-Contributors will certify origin and licensing with a Developer Certificate of
-Origin `Signed-off-by` trailer, normally added with `git commit -s`.
-
-## Automated enforcement
-
-A repository policy checker will fail when:
-
-- the root license is missing or section 1.4 differs from the approved text;
-- the active `LicenseRef` text is missing or differs byte-for-byte from the root
-  `LICENSE`;
-- the historical Apache text or its scope notice is missing, or the Apache text
-  differs from the text shipped in `v2.2.1`;
-- `LICENSES/` contains anything other than the active custom license text;
-- a tracked LLAM file still contains the Apache identifier or boilerplate,
-  except for explicit historical references in the licensing record;
-- a tracked source, test, example, script, build definition, or GitHub policy
-  file lacks the new `LicenseRef` in its header or an adjacent `.license` file;
-- README does not state the source-available/non-OSI status;
-- the security policy, contribution guide, issue form, or licensing record is
-  missing or incomplete; or
-- release package scripts stop including the root `LICENSE` and active
-  `LICENSES/` text, or start packaging `OLD-LICENSES/` as current terms.
-
-The checker will be part of normal `make check`/CI execution. Package tests
-will also inspect produced archives so release artifacts contain the exact
-license and the expected `3.0.0` product metadata while retaining ABI major 2.
-
-## Release workflow
-
-The implementation is published on a dedicated branch and reviewed by the full
-CI matrix. The branch remains an open draft and must not be merged while the
-release hold is active. The immutable `v3.0.0` tag and GitHub release may be
-created only after the owner explicitly lifts that hold. Published archives,
-checksums, embedded license, version metadata, and ABI metadata must then be
-verified before the transition is considered complete.
+Public documentation describes LLAM as mixed-license. The custom portion is
+source-available and not OSI-approved open source; the paths in the Apache
+manifest remain Apache-2.0 licensed.
 
 ## Acceptance criteria
 
-1. Current tracked LLAM materials and generated release archives are governed
-   by the supplied custom license and its express application notice.
-2. Historical Apache-licensed releases remain untouched and documented.
-3. Private and public defect-reporting routes exist and are usable.
-4. Contribution licensing and DCO sign-off are documented.
-5. Version `3.0.0` is consistent across code, documentation, workflows, and
-   packages while ABI major remains 2.
-6. Local validation and the required hosted CI checks pass.
-7. Until the owner explicitly authorizes publication, no `v3.0.0` tag or
-   release exists and the transition PR remains a draft.
+1. The manifest contains every and only current Apache-lineage path.
+2. Apache paths retain complete Apache notices or valid sidecars where the file
+   format permits them.
+3. New first-party paths use the custom notice.
+4. Root and packaged license metadata identify both license families.
+5. Policy and package tests pass without weakening existing safety checks.
+6. Unrelated worktree changes remain byte-for-byte unchanged apart from their
+   required license notice.

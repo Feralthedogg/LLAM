@@ -1,7 +1,17 @@
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-# Licensed under the LLAM Commercial Reciprocity License 1.0.
-# See the LICENSE file distributed with this Software.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
 
 param(
     [string]$Target = "windows-x86_64",
@@ -259,6 +269,8 @@ $BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 
 Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt")
+Require-Input (Join-Path $Root "LICENSES\OLD-LICENSE\Apache-2.0.txt")
+Require-Input (Join-Path $Root "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt")
 Require-Input (Join-Path $Root "README.md")
 Require-Input (Join-Path $Root "CHANGELOG.md")
 Require-Input (Join-Path $Root "scripts\install.sh")
@@ -275,6 +287,8 @@ Require-Input $BenchExe
 foreach ($InputPath in @(
     (Join-Path $Root "LICENSE"),
     (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"),
+    (Join-Path $Root "LICENSES\OLD-LICENSE\Apache-2.0.txt"),
+    (Join-Path $Root "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt"),
     (Join-Path $Root "README.md"),
     (Join-Path $Root "CHANGELOG.md"),
     (Join-Path $Root "scripts\install.sh"),
@@ -295,7 +309,12 @@ Set-Content -LiteralPath (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "ABI_MAJOR") -Value $AbiMajor -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "LIBRARY_VERSION") -Value $LibraryVersion -NoNewline
 Copy-Item -LiteralPath @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md"), (Join-Path $Root "CHANGELOG.md")) -Destination $Stage
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage "LICENSES\OLD-LICENSE") | Out-Null
 Copy-Item -LiteralPath (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt") -Destination (Join-Path $Stage "LICENSES")
+Copy-Item -LiteralPath @(
+    (Join-Path $Root "LICENSES\OLD-LICENSE\Apache-2.0.txt"),
+    (Join-Path $Root "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt")
+) -Destination (Join-Path $Stage "LICENSES\OLD-LICENSE")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.sh") -Destination $Stage
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 foreach ($Item in Get-ChildItem -LiteralPath (Join-Path $Root "docs") -Force) {

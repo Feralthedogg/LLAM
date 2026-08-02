@@ -1,7 +1,17 @@
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-# Licensed under the LLAM Commercial Reciprocity License 1.0.
-# See the LICENSE file distributed with this Software.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
 
 name: Release
 
@@ -116,10 +126,8 @@ jobs:
           grep '/examples/server_flood_stats.h$' package-files.txt
           grep '/LICENSE$' package-files.txt
           grep '/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt$' package-files.txt
-          if grep '/OLD-LICENSES/' package-files.txt; then
-            echo "historical licenses must not be shipped as active package terms" >&2
-            exit 1
-          fi
+          grep '/LICENSES/OLD-LICENSE/Apache-2.0.txt$' package-files.txt
+          grep '/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt$' package-files.txt
           rm -f package-files.txt
           tmp="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-smoke.XXXXXX")"
           trap 'rm -rf "$tmp"' EXIT
@@ -138,7 +146,10 @@ jobs:
           cmp LICENSE "$tmp/prefix-success/share/llam/LICENSE"
           cmp LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt \
             "$tmp/prefix-success/share/llam/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-          test ! -e "$tmp/prefix-success/share/llam/OLD-LICENSES"
+          cmp LICENSES/OLD-LICENSE/Apache-2.0.txt \
+            "$tmp/prefix-success/share/llam/LICENSES/OLD-LICENSE/Apache-2.0.txt"
+          cmp LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt \
+            "$tmp/prefix-success/share/llam/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
           mkdir -p "$tmp/outside"
           ln -s "$tmp/outside" "$tmp/prefix-link"
           if sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --prefix "$tmp/prefix-link" --force > "$tmp/install-symlink.out" 2>&1; then
@@ -201,6 +212,8 @@ jobs:
           foreach ($file in @(
             "LICENSE",
             "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt",
+            "LICENSES\OLD-LICENSE\Apache-2.0.txt",
+            "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt",
             "install.sh",
             "install.ps1",
             "include\llam\runtime.h",
@@ -216,9 +229,6 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $root $file))) {
               throw "missing package file: $file"
             }
-          }
-          if (Test-Path -LiteralPath (Join-Path $root "OLD-LICENSES")) {
-            throw "historical licenses must not be shipped as active package terms"
           }
           $archiveInstall = & (Join-Path $root "install.ps1") -DryRun -Prefix (Join-Path $tmp "prefix") 6>&1 | Out-String
           if ($archiveInstall -notmatch "copy .*include" -or $archiveInstall -notmatch "copy .*lib") {
@@ -250,8 +260,15 @@ jobs:
           if ($sourceLicenseRef -ne $installedLicenseRef) {
             throw "archive-local Windows installer changed the active LicenseRef text"
           }
-          if (Test-Path -LiteralPath (Join-Path $successPrefix "share\llam\OLD-LICENSES")) {
-            throw "archive-local Windows installer installed historical licenses"
+          $sourceApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\OLD-LICENSE\Apache-2.0.txt").Hash
+          $installedApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\OLD-LICENSE\Apache-2.0.txt")).Hash
+          if ($sourceApacheLicense -ne $installedApacheLicense) {
+            throw "archive-local Windows installer changed the Apache 2.0 text"
+          }
+          $sourceApacheManifest = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt").Hash
+          $installedApacheManifest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt")).Hash
+          if ($sourceApacheManifest -ne $installedApacheManifest) {
+            throw "archive-local Windows installer changed the Apache 2.0 file manifest"
           }
           $hardlinkPrefix = Join-Path $tmp "prefix-hardlink"
           $hardlinkHeaderDir = Join-Path $hardlinkPrefix "include\llam"
@@ -550,10 +567,8 @@ jobs:
           grep '/lib/pkgconfig/llam.pc$' package-files.txt
           grep '/LICENSE$' package-files.txt
           grep '/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt$' package-files.txt
-          if grep '/OLD-LICENSES/' package-files.txt; then
-            echo "historical licenses must not be shipped as active package terms" >&2
-            exit 1
-          fi
+          grep '/LICENSES/OLD-LICENSE/Apache-2.0.txt$' package-files.txt
+          grep '/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt$' package-files.txt
           rm -f package-files.txt
 
       - name: Sync BSD artifacts back to runner

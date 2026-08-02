@@ -10,7 +10,7 @@
 ![BSD](https://img.shields.io/badge/BSD-kqueue-lightblue)
 ![Windows](https://img.shields.io/badge/Windows-IOCP-orange)
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
-![License](https://img.shields.io/badge/license-source--available-blueviolet)
+![License](https://img.shields.io/badge/license-mixed-blueviolet)
 
 [Documentation](https://feralthedogg.github.io/LLAM/) starts with install,
 quickstart examples, platform support, CLI/tool options, and operations guides.
@@ -1573,11 +1573,14 @@ All sync primitives are **runtime-aware**: when called from a managed task, bloc
 
 ## License
 
-LLAM `v3.0.0` and later are licensed under the
-[LLAM Commercial Reciprocity License 1.0](LICENSE). This is a custom
-**source-available** license; it is **not OSI-approved open source**.
+This repository is **mixed-license**. The root
+[LLAM Commercial Reciprocity License 1.0](LICENSE) governs newly created and
+custom-marked files. Files listed in
+[the Apache manifest](LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt) remain under
+[Apache License 2.0](LICENSES/OLD-LICENSE/Apache-2.0.txt), including later
+modifications to those files. The custom license is source-available and is
+not OSI-approved open source.
 
-`v2.2.1` and earlier immutable releases remain under the Apache License 2.0
-terms shipped with those versions. See [docs/licensing.md](docs/licensing.md)
-for the version boundary, and [.github/SECURITY.md](.github/SECURITY.md) for
+See [docs/licensing.md](docs/licensing.md) for the exact file-selection rules
+and historical boundary, and [.github/SECURITY.md](.github/SECURITY.md) for
 private security reporting.

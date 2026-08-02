@@ -7,59 +7,65 @@ See the LICENSE file distributed with this Software.
 
 # Licensing
 
-LLAM uses an immutable-version license boundary.
+The current LLAM repository is **mixed-license**. A file's governing terms are
+selected by its file notice and by the explicit Apache path manifest described
+below; the root license does not replace rights already granted for previously
+published Apache-licensed files.
 
-| Version or snapshot | Governing terms |
-| --- | --- |
-| `v2.2.1` and earlier tags, commits, releases, and copies | Apache License 2.0 terms shipped with that version |
-| `v3.0.0` and later tags, commits, releases, and copies | The `LICENSE` file shipped with that immutable version |
+## LLAM Commercial Reciprocity License 1.0
 
-The `v3.0.0` release is the first release under the LLAM Commercial
-Reciprocity License 1.0. Previously published history has not been rewritten,
-and earlier tags have not been moved. Rights already granted for an earlier
-Apache-licensed copy are not replaced by downloading a later version.
-
-## Current repository snapshot
-
-The root [LICENSE](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE) expressly applies to source code, object code,
-documentation, tests, examples, build materials, configuration, and other
-materials in the repository snapshot unless a material is conspicuously
-identified as governed by another license.
-
-For SPDX-aware tooling, the same text is provided byte-for-byte at
+The root [LICENSE](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE) is
+the human-facing copy of the LLAM Commercial Reciprocity License 1.0. The same
+text is provided byte-for-byte for SPDX-aware tooling at
 [LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt).
-The root `LICENSE` remains the controlling human-facing copy.
 
-The SPDX identifier for LLAM-authored files is:
+The custom license applies to files carrying this identifier and to newly
+created first-party files that are not in the Apache manifest:
 
 ```text
 SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 ```
 
-This is a custom **source-available** license. It is **not an OSI-approved open
-source license**.
+This is a source-available license. It is not an OSI-approved open source
+license.
 
-## Historical Apache text
+## Apache License 2.0 files
 
-The Apache 2.0 text formerly shipped by LLAM is retained at
-[OLD-LICENSES/Apache-2.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/OLD-LICENSES/Apache-2.0.txt) for historical
-reference. It is not an alternative license for the current repository
-snapshot. The controlling terms for `v2.2.1` or an earlier version remain the
-`LICENSE` file stored at that exact immutable tag or commit.
+Files already distributed under Apache License 2.0 remain under those terms,
+including later modifications to the same files. Their exact current paths are
+listed in
+[LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt),
+and the governing text is stored at
+[LICENSES/OLD-LICENSE/Apache-2.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/OLD-LICENSE/Apache-2.0.txt).
 
-Custom `v3.0.0` release archives and installed metadata contain the root
-`LICENSE` and the active `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`.
-They do not present `OLD-LICENSES/` as current terms.
+Apache-marked source files use `SPDX-License-Identifier: Apache-2.0` and point
+to that text. For formats that cannot carry a header, an adjacent `.license`
+sidecar supplies the same notice.
 
-## Third-party material
+The manifest is authoritative for **Untagged** files as well: a listed path is
+Apache-licensed even if its format has no in-file notice. A path not listed in
+the manifest is not made Apache-licensed merely because a similarly named file
+existed in another revision.
 
-Separately licensed material must retain its own copyright and license notices.
-Its location and governing terms must be recorded conspicuously in the
-repository and release package. The LLAM license does not replace those terms.
+## Historical boundary and lineage
 
-## Choosing terms for a copy
+Immutable tags, commits, releases, and copies keep the terms under which they
+were received. In particular, `v2.2.1` and earlier published snapshots remain
+under the Apache License 2.0 terms shipped with those snapshots.
 
-Use the `LICENSE` file contained in the exact release, package, tag, commit, or
-repository snapshot you received. Section 19.6 of the current license makes
-that immutable version the controlling reference when terms differ between
-versions.
+For the transition audit, Apache lineage was reconstructed from the published
+tips `9062b687d3205ffdff24f3f1c05eac019b2b9a34` and
+`f4b3f4f39d254e2c1463ec33b5b3c58f5fb505b0`. The root `LICENSE` is an explicit
+custom-license exception. Files created after that boundary use the custom
+license unless they contain separately licensed material.
+
+## Release packages and third-party material
+
+Release archives and installed metadata include the root `LICENSE`, its
+`LicenseRef` mirror, the Apache 2.0 text, and the Apache file manifest. This
+keeps the mixed-license selection rules available alongside every distributed
+copy.
+
+Separately licensed third-party material must retain its own copyright and
+license notices and be recorded conspicuously. Neither LLAM license replaces
+those terms.

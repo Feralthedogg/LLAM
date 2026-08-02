@@ -10,7 +10,11 @@ $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("llam-license-layout-" 
 $Repo = Join-Path $TempRoot "repo"
 $Build = Join-Path $Repo "build\Release"
 $ActiveLicense = "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
+$ApacheLicense = "LICENSES\OLD-LICENSE\Apache-2.0.txt"
+$ApacheManifest = "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt"
 $CurrentText = "current license`n"
+$ApacheText = "Apache license`n"
+$ManifestText = "include/llam/runtime.h`n"
 
 if (-not $IsWindows -and -not ("LlamWin32FileInfo" -as [type])) {
     Add-Type -TypeDefinition @"
@@ -99,7 +103,8 @@ try {
 
     Write-Utf8File (Join-Path $Repo "LICENSE") $CurrentText
     Write-Utf8File (Join-Path $Repo $ActiveLicense) $CurrentText
-    Write-Utf8File (Join-Path $Repo "OLD-LICENSES\Apache-2.0.txt") "historical Apache license`n"
+    Write-Utf8File (Join-Path $Repo $ApacheLicense) $ApacheText
+    Write-Utf8File (Join-Path $Repo $ApacheManifest) $ManifestText
     Write-Utf8File (Join-Path $Repo "README.md") "fixture`n"
     Write-Utf8File (Join-Path $Repo "CHANGELOG.md") "fixture`n"
     Write-Utf8File (Join-Path $Repo "docs\fixture.md") "fixture`n"
@@ -143,8 +148,22 @@ try {
     if ([System.IO.File]::ReadAllText($ActivePath) -cne $CurrentText) {
         throw "active LicenseRef content changed in Windows archive"
     }
+    $ApachePath = Join-Path $PackageRoot $ApacheLicense
+    if (-not (Test-Path -LiteralPath $ApachePath -PathType Leaf)) {
+        throw "Apache 2.0 text is missing from Windows archive"
+    }
+    if ([System.IO.File]::ReadAllText($ApachePath) -cne $ApacheText) {
+        throw "Apache 2.0 text changed in Windows archive"
+    }
+    $ManifestPath = Join-Path $PackageRoot $ApacheManifest
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        throw "Apache 2.0 file manifest is missing from Windows archive"
+    }
+    if ([System.IO.File]::ReadAllText($ManifestPath) -cne $ManifestText) {
+        throw "Apache 2.0 file manifest changed in Windows archive"
+    }
     if (Test-Path -LiteralPath (Join-Path $PackageRoot "OLD-LICENSES")) {
-        throw "historical licenses were packaged as current Windows terms"
+        throw "obsolete top-level OLD-LICENSES directory was packaged"
     }
 
     Write-Host "Windows package license layout ok"

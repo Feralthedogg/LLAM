@@ -4,9 +4,10 @@
 
 ### Changed
 
-* establish `v3.0.0` as the first release under the LLAM Commercial
-  Reciprocity License 1.0 while leaving `v2.2.1` and all earlier immutable
-  versions under their previously published Apache License 2.0 terms.
+* establish a mixed-license repository for `v3.0.0`: newly created and
+  custom-marked files use the LLAM Commercial Reciprocity License 1.0, while
+  files already published under Apache License 2.0 remain Apache-licensed and
+  are recorded in an explicit path manifest.
 
 * update product, installer, packaging, workflow, shared-library, and
   documentation metadata for `3.0.0` while retaining the public ABI at
