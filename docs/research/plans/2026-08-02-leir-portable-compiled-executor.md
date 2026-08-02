@@ -932,8 +932,14 @@ git commit -m "research: share terminal consumption across LEIR adapters"
 **Files:**
 
 - Modify: `experiments/leir/bench_leir_aot_connect.c`
+- Modify: `experiments/leir/leir_aot_connect_bench_support.h`
+- Modify: `experiments/leir/leir_aot_connect_bench_support.c`
+- Modify: `experiments/leir/test_leir_aot_linux_unit.c`
 - Modify: `scripts/bench_leir_aot_connect.py`
 - Modify: `scripts/test_bench_leir_aot_connect.py`
+- Modify: `Makefile`
+- Modify: `CMakeLists.txt`
+- Modify: `config/llam-sources.json`
 - Create: `docs/research/reports/2026-08-02-leir-portable-compiled-executor-results.md`
 - Create: `docs/research/reports/2026-08-02-leir-portable-compiled-executor-decision.md`
 - Modify: `docs/operations/benchmarks.md`
@@ -956,7 +962,7 @@ prepared_sqes, observed_cqes, suppressed_success_cqes,
 queue_publications, submit_syscalls
 ```
 
-- [ ] **Step 1: Write failing parser and classifier tests**
+- [x] **Step 1: Write failing parser and classifier tests**
 
 Add literal fixtures that prove:
 
@@ -973,7 +979,7 @@ missing/duplicate/unknown fields and non-finite ratios are rejected
 any non-PASS enforcement decision exits nonzero
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -984,14 +990,14 @@ python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
 Expected: the current single-axis schema cannot express the portable compiled
 candidate or independent decisions.
 
-- [ ] **Step 3: Extend the C benchmark without changing workloads**
+- [x] **Step 3: Extend the C benchmark without changing workloads**
 
 Run the same deterministic activation inputs through the interpreter oracle,
 portable compiled B, and Linux linked B. Candidate setup, listener creation,
 payload allocation, ticket initialization, and calibration stay outside the
 measured window. Emit exact work and ownership counters for every row.
 
-- [ ] **Step 4: Implement two classifiers**
+- [x] **Step 4: Implement two classifiers**
 
 The portable classifier compares oracle to portable compiled B and reports
 correctness, dispatch removal, normalization, site lookup, park/wake,

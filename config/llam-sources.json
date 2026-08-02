@@ -550,6 +550,7 @@
           "experiments/lccf/lccf_representation.c",
           "experiments/leir/leir_aot_completion.c",
           "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/leir_aot_portable.c",
           "experiments/leir/leir_aot_linux.c",
           "experiments/leir/leir_aot_connect_bench_support.c",
           "experiments/leir/leir_bindings.c",

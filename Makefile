@@ -801,6 +801,7 @@ LEIR_AOT_RING_PROFILE_TEST_OBJS = \
 LEIR_AOT_CONNECT_BENCH_OBJS = \
 	$(LEIR_AOT_COMPLETION_OBJS) \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_portable.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
 	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
 	$(OBJDIR)/experiments/leir/leir_bindings.o \

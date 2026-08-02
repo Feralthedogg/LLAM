@@ -928,6 +928,7 @@ add_executable(bench_leir_aot_connect
     experiments/lccf/lccf_representation.c
     experiments/leir/leir_aot_completion.c
     experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_portable.c
     experiments/leir/leir_aot_linux.c
     experiments/leir/leir_aot_connect_bench_support.c
     experiments/leir/leir_bindings.c
@@ -1069,24 +1070,48 @@ set_tests_properties(
     test_leir_aot_integration
     PROPERTIES SKIP_RETURN_CODE 77)
 add_test(
-    NAME test_bench_leir_aot_connect_portable
+    NAME test_bench_leir_aot_connect_oracle
     COMMAND bench_leir_aot_connect
-        --candidate portable
-        --family tcp
+        --candidate oracle
+        --process portable
+        --ring-profile portable_control
+        --transport tcp
+        --block 0
+        --order 0
+        --seed 1
         --concurrency 2
         --payload 64
         --activations 8)
 add_test(
-    NAME test_bench_leir_aot_connect_native
+    NAME test_bench_leir_aot_connect_portable
     COMMAND bench_leir_aot_connect
-        --candidate native
-        --family tcp
+        --candidate portable
+        --process portable
+        --ring-profile portable_control
+        --transport tcp
+        --block 0
+        --order 1
+        --seed 1
+        --concurrency 2
+        --payload 64
+        --activations 8)
+add_test(
+    NAME test_bench_leir_aot_connect_linux
+    COMMAND bench_leir_aot_connect
+        --candidate linux
+        --process linux
+        --ring-profile submit_all
+        --transport tcp
+        --block 0
+        --order 1
+        --seed 1
         --concurrency 2
         --payload 64
         --activations 8)
 set_tests_properties(
+    test_bench_leir_aot_connect_oracle
     test_bench_leir_aot_connect_portable
-    test_bench_leir_aot_connect_native
+    test_bench_leir_aot_connect_linux
     PROPERTIES SKIP_RETURN_CODE 77)
 if(Python3_Interpreter_FOUND)
     add_test(
