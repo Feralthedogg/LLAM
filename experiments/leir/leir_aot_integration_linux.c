@@ -42,7 +42,7 @@ enum {
 };
 
 typedef union linux_integration_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[LINUX_INTEGRATION_STORAGE_SIZE];
 } linux_integration_storage_t;
 

@@ -33,7 +33,7 @@ enum {
 };
 
 typedef union metadata_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[METADATA_STORAGE_SIZE];
 } metadata_storage_t;
 

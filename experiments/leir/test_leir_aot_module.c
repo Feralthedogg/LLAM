@@ -15,7 +15,7 @@
 #endif
 
 typedef union aligned_instance_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[1024];
 } aligned_instance_storage_t;
 
@@ -125,7 +125,8 @@ static int test_module_prepares_owned_connect_write(void) {
         module->backend_kind != LEIR_AOT_MODULE_BACKEND_AGNOSTIC ||
         module->semantic_digest == 0U ||
         module->instance_size > sizeof(storage.bytes) ||
-        module->instance_alignment > _Alignof(max_align_t) ||
+        module->instance_alignment >
+            _Alignof(leir_aot_storage_align_t) ||
         module->slot_count != 7U ||
         module->bind(storage.bytes,
                      sizeof(storage.bytes),

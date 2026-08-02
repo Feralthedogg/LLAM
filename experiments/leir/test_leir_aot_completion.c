@@ -24,7 +24,7 @@
     } while (0)
 
 typedef union completion_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[4096];
 } completion_storage_t;
 
@@ -147,7 +147,8 @@ static int initialize_completion(completion_storage_t *storage,
     memset(storage, 0, sizeof(*storage));
     memset(instance, 0, sizeof(*instance));
     CHECK(leir_aot_completion_size() <= sizeof(storage->bytes));
-    CHECK(leir_aot_completion_alignment() <= _Alignof(max_align_t));
+    CHECK(leir_aot_completion_alignment() <=
+          _Alignof(leir_aot_storage_align_t));
     CHECK(leir_aot_completion_init(
               storage->bytes, sizeof(storage->bytes), &spy_module,
               instance, sizeof(*instance)) == 0);

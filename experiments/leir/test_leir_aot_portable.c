@@ -28,7 +28,7 @@
     } while (0)
 
 typedef union aligned_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[4096];
 } aligned_storage_t;
 
@@ -141,7 +141,8 @@ static int fixture_init(portable_fixture_t *fixture) {
     effects.write = scripted_write;
     CHECK(leir_aot_portable_ticket_size() <=
           sizeof(fixture->ticket_storage.bytes));
-    CHECK(leir_aot_portable_ticket_alignment() <= _Alignof(max_align_t));
+    CHECK(leir_aot_portable_ticket_alignment() <=
+          _Alignof(leir_aot_storage_align_t));
     CHECK(leir_aot_connect_write_module_v1.instance_size <=
           sizeof(fixture->module_storage.bytes));
     CHECK(leir_aot_portable_ticket_init(

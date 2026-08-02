@@ -45,7 +45,7 @@ struct leir_aot_portable_ticket {
     uint32_t write_continuation;
     bool prepared;
     atomic_uint state;
-    max_align_t completion_alignment;
+    leir_aot_storage_align_t completion_alignment;
     unsigned char completion_storage[];
 };
 

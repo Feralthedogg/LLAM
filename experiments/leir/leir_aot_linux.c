@@ -52,7 +52,7 @@ struct leir_aot_linux_ticket {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_linux_native_segment_t segment;
 #endif
-    max_align_t completion_alignment;
+    leir_aot_storage_align_t completion_alignment;
     unsigned char completion_storage[];
 };
 

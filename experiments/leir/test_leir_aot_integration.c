@@ -26,7 +26,7 @@ enum {
 };
 
 typedef union aot_storage {
-    max_align_t alignment;
+    leir_aot_storage_align_t alignment;
     unsigned char bytes[AOT_INTEGRATION_STORAGE_SIZE];
 } aot_storage_t;
 

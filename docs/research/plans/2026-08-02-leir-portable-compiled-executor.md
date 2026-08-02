@@ -1185,7 +1185,7 @@ Execution receipts:
 
 - The boundary suite first failed on missing completion/portable Make entry
   points, ignored executables, stale benchmark arguments, and absent portable
-  platform jobs. The completed suite passes all 26 tests.
+  platform jobs. The completed suite passes all 27 tests.
 - `make -j4 LLAM_BUILD_RESEARCH=1 research-test` passes. The full Python
   discovery passes 418 tests with four documented platform skips. The three
   benchmark drivers now preserve one `ProcessTimeoutError` class identity both
@@ -1202,6 +1202,10 @@ Execution receipts:
   test now probes that capability before creating peer waiters and returns the
   documented CTest skip code instead of hanging. The same test executes and
   passes on macOS; Linux native execution remains a CI receipt.
+- The Windows contract exposed that MSVC C11 does not provide `max_align_t`.
+  A research-local storage-alignment type now uses the standard type where it
+  exists and an equivalent fundamental-type union under MSVC; an x86_64 MinGW
+  cross-build of all four portable executables passes locally.
 - CI now keeps portable completion/module/C-consumer execution hard-required on
   Linux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64, and FreeBSD x86_64,
   and separately runs Linux GCC, Clang, ASan+UBSan, TSan, ring-profile, and

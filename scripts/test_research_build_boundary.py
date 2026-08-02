@@ -163,6 +163,29 @@ class BuildProvenanceSourceHygieneTests(unittest.TestCase):
 class AotRingProfileBoundaryTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
 
+    def test_aot_storage_alignment_has_msvc_fallback(self) -> None:
+        leir = self.source / "experiments" / "leir"
+        module_header = (leir / "leir_aot_module.h").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("#if defined(_MSC_VER)", module_header)
+        self.assertIn("leir_aot_storage_align_t", module_header)
+        for relative in (
+            "leir_aot_integration_linux.c",
+            "leir_aot_linux.c",
+            "leir_aot_linux_metadata_test.c",
+            "leir_aot_portable.c",
+            "test_leir_aot_completion.c",
+            "test_leir_aot_integration.c",
+            "test_leir_aot_module.c",
+            "test_leir_aot_portable.c",
+        ):
+            with self.subTest(path=relative):
+                source = (leir / relative).read_text(encoding="utf-8")
+                self.assertNotIn("max_align_t", source)
+                self.assertIn("leir_aot_storage_align_t", source)
+
     def test_selector_is_declared_only_in_research_projections(self) -> None:
         manifest = json.loads(
             (self.source / "config/llam-sources.json").read_text(
