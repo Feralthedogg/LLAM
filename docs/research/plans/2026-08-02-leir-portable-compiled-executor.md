@@ -1008,7 +1008,7 @@ submission, park/wake, wall, CPU, p50, and p99 evidence.
 Both use predeclared ABBA/BAAB paired windows, a minimum measured duration,
 ratio-spread/confidence checks, and exact machine-readable rejection reasons.
 
-- [ ] **Step 5: Run contract tests and bounded evidence**
+- [x] **Step 5: Run contract tests and bounded evidence**
 
 Run:
 
@@ -1028,14 +1028,14 @@ Expected: audit reproduces every summary byte for byte. A negative or
 inconclusive performance verdict is retained honestly and does not invalidate
 correctness receipts.
 
-- [ ] **Step 6: Write separate result and decision records**
+- [x] **Step 6: Write separate result and decision records**
 
 Record exact commit, host/kernel/compiler, raw artifact path, matrix size,
 minimum window, correctness counts, independent verdicts, and limitations.
 State explicitly that neither decision authorizes production, version change,
 tagging, packaging, or a 3.0.0 release.
 
-- [ ] **Step 7: Verify documentation and commit**
+- [x] **Step 7: Verify documentation and commit**
 
 Run:
 
@@ -1055,6 +1055,11 @@ git add experiments/leir/bench_leir_aot_connect.c \
   docs/operations/benchmarks.md
 git commit -m "bench: separate portable and Linux LEIR evidence"
 ```
+
+Implementation and classifier wiring were committed first as `4ebf252` so the
+full evidence matrix could name a clean source revision. The result, decision,
+and operations documentation are committed as the following documentation
+batch; this avoids a circular report-to-own-commit provenance claim.
 
 ---
 

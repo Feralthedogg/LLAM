@@ -177,104 +177,94 @@ These results still come from one Linux backend mechanism. Even a
 portable LLAM speedup or a general language-runtime advantage; cross-platform
 evidence and the rest of release CI remain separate requirements.
 
-## LEIR AOT CONNECT-WRITE Research Screen
+## LEIR Portable And Linux Compiled-Executor Evidence
 
-The successor screen compares the portable LEIR `CONNECT -> WRITE` contract
-with a generated direct Linux/io_uring module. The generated path binds slots,
-prepares a two-SQE linked segment, and resumes a typed continuation without a
-per-completion opcode interpreter.
+This screen evaluates two independent axes for the same generated
+`CONNECT -> WRITE` module:
 
-Build and run the local matrix on Linux:
+- the portable axis compares the phase-0 interpreter oracle with portable
+  compiled B;
+- the Linux axis compares portable compiled B with the linked io_uring B
+  implementation under each strict ring profile.
+
+Build and run the frozen matrix on Linux:
 
 ```sh
 make LLAM_BUILD_RESEARCH=1 -j4 bench_leir_aot_connect
 python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
 python3 scripts/bench_leir_aot_connect.py \
   --binary ./bench_leir_aot_connect \
-  --output-dir .artifacts/leir-aot-connect/local-screen \
+  --output-dir object/leir-portable-compiled-executor \
   --profiles submit_all,coop_taskrun,defer_taskrun
+python3 scripts/bench_leir_aot_connect.py \
+  --audit-only \
+  --output-dir object/leir-portable-compiled-executor
 ```
 
-The default matrix covers all three strict profiles, TCP and Unix stream
-sockets, concurrency 1 and 16, payloads 64 and 4096, 256 activations, and five
-fresh-process samples per candidate in ABBA order. Each generated-native sample
-is paired only with a portable sample using the same profile. A constrained
-container that cannot submit io_uring operations returns the explicit skip
-code; it does not emit a synthetic performance sample. Local Docker validation
-therefore needs an io_uring-capable security profile.
+Collection and audit return zero for a structurally valid bundle even when a
+performance result is `INCONCLUSIVE` or `FAIL`. Add `--enforce` only when a
+caller intentionally requires the overall portable verdict to be exactly
+`PASS`; every other verdict then exits nonzero.
 
-For a quick capability check before the full matrix, run:
+The default matrix covers TCP and Unix stream sockets, concurrency 1 and 16,
+payloads 64 and 4096 bytes, 256 activations, and five paired fresh-process
+samples per candidate. Candidate order follows a deterministic ABBA/BAAB
+schedule. Each pair carries the same block identity and seed.
+
+For a capability smoke test, use a separate create-once output directory:
 
 ```sh
 python3 scripts/bench_leir_aot_connect.py \
   --binary ./bench_leir_aot_connect \
-  --output-dir .artifacts/leir-aot-connect/profile-smoke \
-  --profiles submit_all,coop_taskrun,defer_taskrun \
-  --families unix \
+  --output-dir object/leir-portable-compiled-smoke \
+  --profiles submit_all \
+  --transports unix \
   --concurrency 1 \
   --payloads 64 \
   --activations 8 \
   --samples 1
 ```
 
-The current LLAM topology creates each ring on the runtime initialization task
-and submits it from a dedicated I/O worker. Current Linux kernels bind a
-non-disabled `SINGLE_ISSUER` ring to its setup task, so `defer_taskrun` is
-reported as `UNAVAILABLE` before ring creation. This is a topology result, not
-a performance loss. Measuring that profile requires a separate worker-owned
-ring-construction experiment. No profile is silently downgraded to fewer setup
-flags.
+Every schema-3 row records common semantic receipts: result and peer
+checksums, logical operations, dispatches, completion normalizations, site
+lookups, parks, wakes, allocations, wall time, CPU time, p50, and p99. Only the
+Linux candidate may add prepared SQEs, observed CQEs, suppressed successful
+CQEs, queue publications, and submit syscalls. Portable rows containing Linux
+fields fail parsing.
 
-The bundle contains `raw.csv`, `summary.csv`, `metadata.json`, `verdict.json`,
-and `summary.md`. Metadata distinguishes `SPECIALIZED` Linux evidence from a
-portable performance claim and records source/tree/binary digests plus the
-kernel and toolchain. Successful native samples must report exactly two SQEs,
-one visible CQE, one suppressed successful CQE, one park, one wake, and zero
-hot allocations per activation.
+Successful compiled rows require zero interpreter dispatches and hot
+allocations, one normalization and site lookup per activation, matching
+park/wake ownership, and the same checksums as their paired baseline. A
+successful Linux row additionally requires exactly two SQEs, one visible CQE,
+one suppressed successful CQE, and one queue publication per activation.
 
-Schema-2 samples also record diagnostic cost attribution:
+The bundle contains `attempts.json`, `raw.csv`, `summary.csv`, `metadata.json`,
+`verdict.json`, and `summary.md`. Metadata records the exact revision,
+source-tree digest and cleanliness, binary digest, frozen matrix, classifier
+policy, kernel, compiler, Python, and liburing versions. Audit is read-only: it
+validates every expected worklist receipt and regenerates all projections in
+memory before comparing them byte for byte.
 
-- `bind_ns`: slot binding before portable or generated execution;
-- `execute_ns`: the outer portable run or generated ticket run;
-- `aot_prepare_ns`: generated module preparation;
-- `aot_ring_ns`: native segment issue through terminal completion and task
-  resumption;
-- `aot_resume_ns`: generated continuation resume and output copy.
+Correctness and performance verdicts stay separate. The portable result is
+authoritative for the general direction; a Linux specialization cannot upgrade
+a failed or inconclusive portable result. Linux profiles are still reported
+independently, and `UNAVAILABLE` never becomes a synthetic sample.
 
-Portable samples require all three `aot_*` counters to remain zero. Native
-samples require them to be positive and their overflow-safe sum not to exceed
-`execute_ns`.
+With the current setup-task/dedicated-I/O-worker topology, Linux
+`defer_taskrun` is unavailable because `SINGLE_ISSUER` ownership cannot be
+silently transferred. Measuring it requires a separate worker-owned ring
+construction experiment.
 
-The checked-in generated C and header use
-`LicenseRef-LLAM-Commercial-Reciprocity-1.0`. Before running the screen, the
-generator contract tests verify deterministic output, reject Apache markers
-in generated files, and compile both a standalone C consumer and a C++17
-consumer without private runtime headers.
+The clean run at revision `4ebf252549566415ac6911862fe3b9bd074c7c84`
+produced portable correctness `PASS`, Linux `submit_all` and `coop_taskrun`
+correctness `PASS`, and favorable median ratios. Performance remained
+`INCONCLUSIVE` because at least one metric in the required cells exceeded the
+predeclared 20% ratio-spread limit. `defer_taskrun` was `UNAVAILABLE`.
 
-The mechanism verdict has three outcomes:
-
-- `CONTINUE`: correctness and structural counters pass, and the upper 95%
-  wall-ratio bound is at most 1.05;
-- `STOP`: correctness, checksum, ownership/counter, allocation, or supported
-  wall-regression evidence fails;
-- `INCOMPLETE`: required samples or platform support are missing, or the wall
-  confidence interval crosses the 1.05 boundary.
-
-That top-level verdict belongs only to the `submit_all` control profile. Each
-profile independently reports `CONTINUE`, `REJECT`, `INCOMPLETE`, or
-`UNAVAILABLE`, plus capability and same-profile CPU, p99, and wall ratios. An
-optional profile cannot rewrite a successful control verdict. Among profiles
-whose complete cells all continue, `recommended_profile` ranks median CPU
-ratio first, then p99 ratio, then wall ratio. The recommendation is
-Linux/io_uring research evidence only; it is not a portable default, public API
-promise, or release authorization.
-
-`CONTINUE` only permits broader research. The separate 3.0.0 classifier still
-requires a 1.50x wall win, CPU ratio at most 0.70, p99 ratio at most 1.10,
-short-workload non-regression, full correctness/sanitizer/fallback coverage,
-and reproduction on two Linux machines. The current local mechanism screen is
-`CONTINUE`, while the release gate is `BLOCKED`; see
-[LEIR AOT CONNECT-WRITE Mechanism Decision](../research/reports/2026-08-01-leir-aot-connect-screen.md).
+See [LEIR Portable Compiled Executor Results](../research/reports/2026-08-02-leir-portable-compiled-executor-results.md)
+and [Decision](../research/reports/2026-08-02-leir-portable-compiled-executor-decision.md).
+No result authorizes a version change, tag, package, publication, or 3.0.0
+release.
 
 ## Guardrails
 
