@@ -589,7 +589,10 @@ cleanup:
     if (refusal_task != NULL) {
         (void)llam_join(refusal_task);
     }
-    leir_test_close(&peer.listener);
+    if ((result != 0 || success.run_result != 0) &&
+        peer.listener >= 0) {
+        (void)shutdown((int)peer.listener, SHUT_RDWR);
+    }
     if (peer_started) {
         (void)pthread_join(peer_thread, NULL);
     }
@@ -601,6 +604,7 @@ cleanup:
         fputs("Linux AOT peer payload mismatch\n", stderr);
         result = 1;
     }
+    leir_test_close(&peer.listener);
     if (candidate_destroy(&refusal) != 0 ||
         candidate_destroy(&success) != 0) {
         fputs("Linux AOT ticket destroy mismatch\n", stderr);
