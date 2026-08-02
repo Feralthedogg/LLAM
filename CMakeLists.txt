@@ -865,13 +865,24 @@ target_include_directories(test_leir_aot_c_consumer PRIVATE
 )
 
 add_executable(test_leir_aot_integration
+    experiments/leir/leir_bindings.c
+    experiments/leir/leir_engine.c
+    experiments/leir/leir_peer_process.c
+    experiments/leir/leir_program.c
+    experiments/leir/leir_test_support.c
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
     experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_portable.c
     experiments/leir/leir_aot_linux.c
+    experiments/leir/leir_aot_integration_linux.c
     experiments/leir/test_leir_aot_integration.c
 )
 target_include_directories(test_leir_aot_integration PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 target_link_libraries(test_leir_aot_integration PRIVATE llam_runtime)

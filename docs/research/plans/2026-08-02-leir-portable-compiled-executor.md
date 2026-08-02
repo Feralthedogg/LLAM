@@ -720,6 +720,8 @@ git commit -m "research: execute generated LEIR effects portably"
 **Files:**
 
 - Modify: `experiments/leir/test_leir_aot_integration.c`
+- Create: `experiments/leir/leir_aot_integration_linux.h`
+- Create: `experiments/leir/leir_aot_integration_linux.c`
 - Modify: `experiments/leir/leir_test_support.h`
 - Modify: `experiments/leir/leir_test_support.c`
 - Modify: `Makefile`
@@ -732,7 +734,7 @@ git commit -m "research: execute generated LEIR effects portably"
 - Produces: one platform-portable integration matrix; Linux additionally runs
   the specialized adapter over equivalent inputs.
 
-- [ ] **Step 1: Write a failing portable integration row**
+- [x] **Step 1: Write a failing portable integration row**
 
 Inside an LLAM task, bind a portable ticket with `effects == NULL`, connect to
 the controlled listener, write a literal payload, and assert:
@@ -749,7 +751,7 @@ hot allocations        0
 Run the same initial slots through the interpreter oracle and compare action,
 error, every output slot, and peer-visible bytes.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -760,21 +762,22 @@ make LLAM_BUILD_RESEARCH=1 -j4 test_leir_aot_integration
 
 Expected: the test fails because only the current Linux ticket is wired.
 
-- [ ] **Step 3: Add cross-platform success and refusal fixtures**
+- [x] **Step 3: Add cross-platform success and refusal fixtures**
 
 Reuse the existing listener lifetime and Winsock setup helpers. Add separate
 connections for oracle, portable compiled, and Linux specialized paths so no
 candidate reuses a side effect. On non-Linux platforms, require oracle and
 portable compiled rows; only the Linux row may report `ENOTSUP`.
 
-- [ ] **Step 4: Add cancellation and out-of-order ownership rows**
+- [x] **Step 4: Add cancellation and out-of-order ownership rows**
 
 Run two portable tickets with distinct module/event storage. Complete the
 second first, cancel the first, and assert independent generation, output,
-module lifetime, publication, and terminal wake counters. A stale delivery for
-the cancelled ticket cannot mutate the successful ticket.
+module lifetime, and terminal publication counters. The common-consumer tests
+inject stale delivery; this integration row additionally proves that cancelling
+and rebinding the first ticket cannot mutate the successful second ticket.
 
-- [ ] **Step 5: Verify the real integration matrix**
+- [x] **Step 5: Verify the real integration matrix**
 
 Run:
 
@@ -792,12 +795,15 @@ ctest --test-dir build-leir-portable --output-on-failure \
 Expected: portable success, refusal, cancellation, and ownership pass; Linux
 runs where supported and otherwise skips only its own row.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add experiments/leir/test_leir_aot_integration.c \
+  experiments/leir/leir_aot_integration_linux.h \
+  experiments/leir/leir_aot_integration_linux.c \
   experiments/leir/leir_test_support.h \
-  experiments/leir/leir_test_support.c Makefile CMakeLists.txt
+  experiments/leir/leir_test_support.c Makefile CMakeLists.txt \
+  config/llam-sources.json
 git commit -m "test: prove portable compiled LEIR parity"
 ```
 

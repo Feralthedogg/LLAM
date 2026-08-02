@@ -782,8 +782,12 @@ LEIR_AOT_C_CONSUMER_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/fixtures/leir_aot_c_consumer.o
 LEIR_AOT_INTEGRATION_TEST_OBJS = \
+	$(LEIR_PHASE0_CORE_OBJS) \
+	$(LEIR_AOT_COMPLETION_OBJS) \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_portable.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
+	$(OBJDIR)/experiments/leir/leir_aot_integration_linux.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_integration.o
 LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
