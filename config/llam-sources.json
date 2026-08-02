@@ -468,6 +468,20 @@
       },
       {
         "family": "leir",
+        "name": "test_leir_aot_portable",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/lccf/lccf_fact.c",
+          "experiments/lccf/lccf_representation.c",
+          "experiments/leir/leir_aot_completion.c",
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/leir_aot_portable.c",
+          "experiments/leir/test_leir_aot_portable.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
         "name": "test_leir_aot_c_consumer",
         "platforms": ["all"],
         "sources": [

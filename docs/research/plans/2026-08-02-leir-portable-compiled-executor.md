@@ -565,6 +565,9 @@ git commit -m "research: add common compiled completion consumer"
 - Create: `experiments/leir/test_leir_aot_portable.c`
 - Modify: `Makefile`
 - Modify: `CMakeLists.txt`
+- Modify: `config/c-structure-baseline.json`
+- Modify: `config/llam-sources.json`
+- Modify: `scripts/audit_build_manifests.py`
 
 **Interfaces:**
 
@@ -590,6 +593,7 @@ typedef struct leir_aot_portable_metrics {
     uint64_t normalizations;
     uint64_t site_lookups;
     uint64_t hot_allocations;
+    uint64_t generation;
     uint32_t resumed_continuation;
 } leir_aot_portable_metrics_t;
 
@@ -619,7 +623,7 @@ int leir_aot_portable_ticket_destroy(
 Passing `effects == NULL` selects adapters that call `llam_connect()` and
 `llam_write()` directly. Tests inject deterministic hooks below those wrappers.
 
-- [ ] **Step 1: Write RED state-machine and hook tests**
+- [x] **Step 1: Write RED state-machine and hook tests**
 
 Use caller-owned aligned buffers and fixed hook scripts. Cover:
 
@@ -638,7 +642,7 @@ bind after consumed               generation advances and old delivery stale
 Every successful row asserts `interpreter_dispatches == 0`,
 `hot_allocations == 0`, one terminal publication, and one normalization.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -648,7 +652,7 @@ make LLAM_BUILD_RESEARCH=1 -j4 test_leir_aot_portable
 
 Expected: target or portable ticket symbols are missing.
 
-- [ ] **Step 3: Implement prepare capture and direct control**
+- [x] **Step 3: Implement prepare capture and direct control**
 
 The portable backend callback copies no payload or address: generated bind
 already owns those bytes. It records the generated pointers, lengths,
@@ -671,14 +675,20 @@ if (connect_result != 0) {
 There is no loop over LEIR nodes. Once an effect hook is called, every outcome
 publishes a terminal record; none transfers to the interpreter.
 
-- [ ] **Step 4: Implement common publication and consume**
+Cancellation is encoded in the ticket state (`BOUND_CANCELLED` and
+`RUNNING_CANCELLED`). The execution owner closes the acceptance window with
+`RUNNING[_CANCELLED] -> COMPLETING`, then performs the generated module cancel
+and terminal publication itself. A cancelling thread never mutates generated
+module state concurrently with resume.
+
+- [x] **Step 4: Implement common publication and consume**
 
 Arm the embedded completion using the generation supplied by generated
 prepare. Publish a portable-source IO or cancel record, consume it through the
 common direct path, and obtain output slots only through that consumer. Copy
 normalization and lookup counts into portable metrics.
 
-- [ ] **Step 5: Verify GREEN and mutation boundaries**
+- [x] **Step 5: Verify GREEN and mutation boundaries**
 
 Run:
 
@@ -692,12 +702,14 @@ rg -n "switch[[:space:]]*\(.*opcode|leir_phase0_execute" \
 
 Expected: tests pass and the search returns no match.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add experiments/leir/leir_aot_portable.h \
   experiments/leir/leir_aot_portable.c \
-  experiments/leir/test_leir_aot_portable.c Makefile CMakeLists.txt
+  experiments/leir/test_leir_aot_portable.c Makefile CMakeLists.txt \
+  config/c-structure-baseline.json config/llam-sources.json \
+  scripts/audit_build_manifests.py
 git commit -m "research: execute generated LEIR effects portably"
 ```
 
