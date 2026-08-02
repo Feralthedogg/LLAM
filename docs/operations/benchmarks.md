@@ -164,7 +164,7 @@ statistically supported wall regression, while all 36 non-fixed `link_skip`
 cells were unavailable because `READ_EXACT` requires an
 `exact_result_semantic_barrier`. The immutable interpretation and successor
 research direction are recorded in
-[LEIR Native Pipeline Decision](../superpowers/reports/2026-08-01-leir-native-pipeline-decision.md).
+[LEIR Native Pipeline Decision](../research/reports/2026-08-01-leir-native-pipeline-decision.md).
 
 If the kernel, liburing, memlock/resource limits, registered files/buffers, or
 CQE-skip support cannot run `fixed_link_skip`, the benchmark exits with the
@@ -274,7 +274,7 @@ requires a 1.50x wall win, CPU ratio at most 0.70, p99 ratio at most 1.10,
 short-workload non-regression, full correctness/sanitizer/fallback coverage,
 and reproduction on two Linux machines. The current local mechanism screen is
 `CONTINUE`, while the release gate is `BLOCKED`; see
-[LEIR AOT CONNECT-WRITE Mechanism Decision](../superpowers/reports/2026-08-01-leir-aot-connect-screen.md).
+[LEIR AOT CONNECT-WRITE Mechanism Decision](../research/reports/2026-08-01-leir-aot-connect-screen.md).
 
 ## Guardrails
 

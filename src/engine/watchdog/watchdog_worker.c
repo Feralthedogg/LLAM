@@ -31,7 +31,9 @@
 #include <immintrin.h>
 #endif
 
-#if defined(__linux__) && LLAM_ARCH_X86_64 && (defined(__GNUC__) || defined(__clang__))
+#if defined(__linux__) && LLAM_ARCH_X86_64 && \
+    (defined(__GNUC__) || defined(__clang__)) && \
+    !LLAM_ASAN_FIBER_ENABLED
 #define LLAM_WATCHDOG_HAVE_AVX512 1
 #else
 #define LLAM_WATCHDOG_HAVE_AVX512 0

@@ -22,6 +22,14 @@ import unittest
 from unittest import mock
 
 
+def _load_version_manifest(source: Path) -> dict[str, object]:
+    return json.loads(
+        (source / "config" / "llam-version.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
 class PackageArchivePortabilityTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
 
@@ -204,6 +212,32 @@ class AotRingProfileBoundaryTests(unittest.TestCase):
         )
 
 
+class RuntimeProjectionBoundaryTests(unittest.TestCase):
+    source = Path(__file__).resolve().parents[1]
+
+    def test_make_security_fixtures_follow_manifest_version(self) -> None:
+        manifest = _load_version_manifest(self.source)
+        version = manifest["version"]
+        makefile = (self.source / "Makefile").read_text(encoding="utf-8")
+
+        self.assertIn(f"LLAM_VERSION ?= {version}", makefile)
+        self.assertNotRegex(
+            makefile,
+            r"libllam_runtime\.so\.\d+\.\d+\.\d+",
+        )
+        self.assertIn("libllam_runtime.so.$(LLAM_VERSION)", makefile)
+
+    def test_address_sanitizer_uses_scalar_watchdog_reduction(self) -> None:
+        source = (
+            self.source / "src" / "engine" / "watchdog" / "watchdog_worker.c"
+        ).read_text(encoding="utf-8")
+        selector = source.split(
+            "#define LLAM_WATCHDOG_HAVE_AVX512 1", 1
+        )[0].rsplit("#if", 1)[1]
+
+        self.assertIn("!LLAM_ASAN_FIBER_ENABLED", selector)
+
+
 class ResearchBoundaryTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
     requested_work: Path | None = None
@@ -214,6 +248,8 @@ class ResearchBoundaryTests(unittest.TestCase):
             if shutil.which(command) is None:
                 raise unittest.SkipTest(f"{command} is not available")
 
+        manifest = _load_version_manifest(cls.source)
+        cls.library_version = manifest["version"]
         cls._temporary_work: tempfile.TemporaryDirectory[str] | None = None
         if cls.requested_work is None:
             cls._temporary_work = tempfile.TemporaryDirectory(
@@ -342,7 +378,9 @@ class ResearchBoundaryTests(unittest.TestCase):
         if os.uname().sysname == "Darwin":
             artifact_names.append("libllam_runtime.2.dylib")
         else:
-            artifact_names.append("libllam_runtime.so.2.2.0")
+            artifact_names.append(
+                f"libllam_runtime.so.{cls.library_version}"
+            )
         for artifact_name in artifact_names:
             mode = "1" if artifact_name == "libllam_runtime.a" else "0"
             (package_source / f"{artifact_name}.llam-build-provenance").write_text(
@@ -811,9 +849,9 @@ class ResearchBoundaryTests(unittest.TestCase):
             record[key] = value
         return record
 
-    @staticmethod
+    @classmethod
     def _validate_abi_probe_record(
-        record: dict[str, str], prefix: Path
+        cls, record: dict[str, str], prefix: Path
     ) -> dict[str, str]:
         required = {
             "abi_version",
@@ -840,18 +878,20 @@ class ResearchBoundaryTests(unittest.TestCase):
         for field in required - {"runtime_name", "version_string", "platform_name"}:
             if not record[field].isdigit():
                 raise AssertionError(f"non-numeric ABI probe field {field}")
+        version = str(_load_version_manifest(cls.source)["version"])
+        version_major, version_minor, version_patch = version.split(".")
         expected_values = {
             "abi_version": str(2 << 16),
             "abi_major": "2",
             "abi_minor": "0",
-            "version_major": "2",
-            "version_minor": "2",
-            "version_patch": "0",
+            "version_major": version_major,
+            "version_minor": version_minor,
+            "version_patch": version_patch,
             "reserved0": "0",
             "task_context_slot_count": "4",
             "reserved1": "0",
             "runtime_name": "LLAM",
-            "version_string": "2.2.0",
+            "version_string": version,
         }
         for field, value in expected_values.items():
             if record[field] != value:
@@ -996,7 +1036,10 @@ class ResearchBoundaryTests(unittest.TestCase):
             raise AssertionError(f"pkg-config cflags escaped prefix: {cflags}")
         if expected_libflag not in shlex.split(libs):
             raise AssertionError(f"pkg-config libs escaped prefix: {libs}")
-        if "-lllam_runtime" not in shlex.split(libs) or version != "2.2.0":
+        if (
+            "-lllam_runtime" not in shlex.split(libs)
+            or version != cls.library_version
+        ):
             raise AssertionError(f"unexpected pkg-config contract: {version} {libs}")
 
         source = cls.work / f"pkg-config-consumer-{prefix.name}.c"
@@ -1229,7 +1272,9 @@ class ResearchBoundaryTests(unittest.TestCase):
         if os.uname().sysname == "Darwin":
             package_artifacts.append("libllam_runtime.2.dylib")
         else:
-            package_artifacts.append("libllam_runtime.so.2.2.0")
+            package_artifacts.append(
+                f"libllam_runtime.so.{self.library_version}"
+            )
         for artifact in package_artifacts:
             with self.subTest(artifact=artifact):
                 self.assertIn(
@@ -1961,6 +2006,10 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
     def test_abi_probe_record_rejects_missing_wrong_and_escaped_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="abi-probe-mutation-") as directory:
             prefix = Path(directory)
+            version = str(
+                _load_version_manifest(ResearchBoundaryTests.source)["version"]
+            )
+            version_major, version_minor, version_patch = version.split(".")
             library = prefix / "lib" / "libllam_runtime.fixture"
             library.parent.mkdir(parents=True)
             library.write_bytes(b"fixture")
@@ -1968,16 +2017,16 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                 "abi_version": str(2 << 16),
                 "abi_major": "2",
                 "abi_minor": "0",
-                "version_major": "2",
-                "version_minor": "2",
-                "version_patch": "0",
+                "version_major": version_major,
+                "version_minor": version_minor,
+                "version_patch": version_patch,
                 "reserved0": "0",
                 "struct_size": "104",
                 "runtime_opts_size": "64",
                 "spawn_opts_size": "48",
                 "runtime_stats_size": "128",
                 "runtime_name": "LLAM",
-                "version_string": "2.2.0",
+                "version_string": version,
                 "platform_name": "fixture",
                 "task_context_slot_count": "4",
                 "reserved1": "0",
@@ -1989,7 +2038,7 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                 ResearchBoundaryTests._validate_abi_probe_record(record, prefix)[
                     "version_string"
                 ],
-                "2.2.0",
+                version,
             )
             missing = record.copy()
             missing.pop("runtime_stats_size")
