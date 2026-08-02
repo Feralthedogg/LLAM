@@ -28,6 +28,10 @@ typedef union completion_storage {
     unsigned char bytes[4096];
 } completion_storage_t;
 
+enum {
+    COMPLETION_REARM_GENERATIONS = 4096,
+};
+
 typedef struct spy_instance {
     unsigned resume_calls;
     unsigned copy_calls;
@@ -378,12 +382,57 @@ static int test_callback_failure_aborts_and_rearms(void) {
     return 0;
 }
 
+static int test_repeated_publish_consume_rearm(void) {
+    completion_storage_t storage;
+    spy_instance_t instance;
+    leir_phase0_value_t output;
+    leir_aot_completion_t *completion;
+    leir_aot_completion_metrics_t metrics;
+    leir_aot_resume_result_v1_t resume;
+    uint64_t generation;
+    const uint64_t direct_guard =
+        LEIR_AOT_COMPLETION_GUARD_DIRECT_ENABLED |
+        LEIR_AOT_COMPLETION_GUARD_BACKEND_CAPABLE;
+
+    memset(&output, 0, sizeof(output));
+    CHECK(initialize_completion(&storage, &instance, &completion) == 0);
+    for (generation = 1U;
+         generation <= COMPLETION_REARM_GENERATIONS;
+         generation += 1U) {
+        leir_aot_completion_record_t record =
+            record_for(generation, (int64_t)generation);
+
+        CHECK(leir_aot_completion_arm(completion, generation) == 0);
+        CHECK(leir_aot_completion_publish(completion, &record) == 0);
+        CHECK(leir_aot_completion_consume(
+                  completion, generation, LEIR_AOT_COMPLETION_DIRECT,
+                  direct_guard, &output, 1U, &resume) == 0);
+        CHECK(output.i64 == (int64_t)generation);
+        CHECK(resume.action == LEIR_AOT_RESUME_RETURN);
+        CHECK(resume.error_code == 0);
+    }
+    leir_aot_completion_metrics(completion, &metrics);
+    CHECK(metrics.publications == COMPLETION_REARM_GENERATIONS);
+    CHECK(metrics.normalizations == COMPLETION_REARM_GENERATIONS);
+    CHECK(metrics.site_lookups == COMPLETION_REARM_GENERATIONS);
+    CHECK(metrics.direct_consumes == COMPLETION_REARM_GENERATIONS);
+    CHECK(metrics.queued_consumes == 0U);
+    CHECK(metrics.duplicate_rejections == 0U);
+    CHECK(metrics.stale_rejections == 0U);
+    CHECK(metrics.aborts == 0U);
+    CHECK(instance.resume_calls == COMPLETION_REARM_GENERATIONS);
+    CHECK(instance.copy_calls == COMPLETION_REARM_GENERATIONS);
+    CHECK(leir_aot_completion_destroy(completion) == 0);
+    return 0;
+}
+
 int main(void) {
     CHECK(test_shared_event_publication_and_direct_consume() == 0);
     CHECK(test_queue_transfer_and_module_defer() == 0);
     CHECK(test_duplicate_and_stale_deliveries() == 0);
     CHECK(test_cancel_and_malformed_failure() == 0);
     CHECK(test_callback_failure_aborts_and_rearms() == 0);
+    CHECK(test_repeated_publish_consume_rearm() == 0);
     puts("LEIR common AOT completion tests passed");
     return 0;
 }

@@ -931,6 +931,8 @@ RESEARCH_ENTRY_TARGETS = \
 	test-leir-phase0 \
 	test-leir-aot-plan \
 	test-leir-aot-module \
+	test-leir-aot-completion \
+	test-leir-aot-portable \
 	test-leir-aot-c-consumer \
 	test-leir-aot-integration \
 	test-leir-aot-ring-profile \
@@ -1117,7 +1119,17 @@ ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $(RESEARCH_LINK_TARGETS)
 
-research-test: test-leir-phase0 test-leir-native test-leir-native-linux test-lcwe-model test-lccf-model test-srem-model
+research-test: test-leir-phase0 test-leir-aot-completion \
+	test-leir-aot-portable test-leir-native test-leir-native-linux \
+	test-lcwe-model test-lccf-model test-srem-model
+
+test-leir-aot-completion: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_aot_completion
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "^test_leir_aot_completion$$" $(WINDOWS_CTEST_ARGS)
+
+test-leir-aot-portable: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_aot_portable
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "^test_leir_aot_portable$$" $(WINDOWS_CTEST_ARGS)
 
 test-lcwe-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lcwe_model bench_lcwe_model
@@ -1143,7 +1155,7 @@ test-leir-native-linux: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_linux test_leir_aot_linux_unit test_leir_aot_ownership
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_linux|test_leir_aot_linux_unit|test_leir_aot_ownership" $(WINDOWS_CTEST_ARGS)
 else
-research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-native test-leir-native-linux:
+research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-aot-completion test-leir-aot-portable test-leir-native test-leir-native-linux:
 	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
 	@exit 2
 endif
@@ -1298,6 +1310,7 @@ ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: $(RESEARCH_LINK_TARGETS)
 
 research-test: test-leir-phase0 test-leir-aot-plan test-leir-aot-module \
+	test-leir-aot-completion test-leir-aot-portable \
 	test-leir-aot-c-consumer test-leir-aot-integration \
 	test-leir-aot-ring-profile \
 	test-leir-aot-connect-screen \
@@ -2578,7 +2591,9 @@ test-leir-aot-c-consumer: test_leir_aot_c_consumer
 	./test_leir_aot_c_consumer
 
 test-leir-aot-integration: test_leir_aot_integration
-	./test_leir_aot_integration
+	@./test_leir_aot_integration; \
+	rc=$$?; \
+	if test "$$rc" -ne 0 && test "$$rc" -ne 77; then exit "$$rc"; fi
 
 test-leir-aot-ring-profile: test_leir_aot_ring_profile
 	@./test_leir_aot_ring_profile; \

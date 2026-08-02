@@ -144,6 +144,8 @@ ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
     "7942133a4925822f50e9e284a3cc1e3dc937e68e2dc5d25a2863e57d82b03b96",
     # Canonical LEIR graph with the portable compiled executor.
     "f216417d0bdd8a81fbaed5c6f2a09353afa82abdb2c8569ff6dac9a240559b0a",
+    # Canonical portable executor graph with cross-platform test wrappers.
+    "240cf7feee67400527a8d9d363fbc14d4255e2dfc1bef4f6e040595c9c19b094",
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }

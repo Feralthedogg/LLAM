@@ -104,6 +104,8 @@ jobs:
             test_leir_connect \
             test_leir_aot_plan \
             test_leir_aot_module \
+            test_leir_aot_completion \
+            test_leir_aot_portable \
             test_leir_aot_c_consumer \
             test_leir_aot_integration \
             test_leir_aot_linux_unit \
@@ -116,6 +118,10 @@ jobs:
           ./test_leir_connect 2>&1 | tee "$OUT_DIR/connect.log"
           ./test_leir_aot_plan 2>&1 | tee "$OUT_DIR/aot-plan.log"
           ./test_leir_aot_module 2>&1 | tee "$OUT_DIR/aot-module.log"
+          ./test_leir_aot_completion \
+            2>&1 | tee "$OUT_DIR/aot-completion.log"
+          ./test_leir_aot_portable \
+            2>&1 | tee "$OUT_DIR/aot-portable.log"
           ./test_leir_aot_c_consumer \
             2>&1 | tee "$OUT_DIR/aot-c-consumer.log"
           ./test_leir_aot_linux_unit \
@@ -153,6 +159,8 @@ jobs:
           cmake --build object/leir-aot-clang --target \
             test_leir_aot_plan \
             test_leir_aot_module \
+            test_leir_aot_completion \
+            test_leir_aot_portable \
             test_leir_aot_c_consumer \
             test_leir_aot_integration \
             test_leir_aot_linux_unit \
@@ -178,6 +186,8 @@ jobs:
           cmake --build object/leir-aot-sanitize --target \
             test_leir_aot_plan \
             test_leir_aot_module \
+            test_leir_aot_completion \
+            test_leir_aot_portable \
             test_leir_aot_c_consumer \
             test_leir_aot_integration \
             test_leir_aot_linux_unit \
@@ -192,6 +202,27 @@ jobs:
               --output-on-failure \
               --timeout 180 \
               -R "test_leir_aot|test_leir_connect"
+
+      - name: TSan AOT ownership gate
+        run: |
+          cmake -S . -B object/leir-aot-tsan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_ASM_COMPILER=gcc \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build object/leir-aot-tsan --target \
+            test_leir_aot_completion \
+            test_leir_aot_portable \
+            test_leir_aot_integration \
+            test_leir_aot_ownership \
+            -j2
+          env TSAN_OPTIONS=halt_on_error=1:history_size=7 \
+            ctest --test-dir object/leir-aot-tsan \
+              --output-on-failure \
+              --timeout 180 \
+              -R "^test_leir_aot_(completion|portable|integration|ownership)$"
 
       - name: Prove research does not enter packages
         run: |
@@ -222,7 +253,7 @@ jobs:
             --binary ./bench_leir_aot_connect \
             --output-dir "$OUT_DIR/profile-smoke" \
             --profiles submit_all,coop_taskrun,defer_taskrun \
-            --families unix \
+            --transports unix \
             --concurrency 1 \
             --payloads 64 \
             --activations 8 \
@@ -239,7 +270,16 @@ jobs:
           test -f "$OUT_DIR/profile-smoke/metadata.json"
           test -f "$OUT_DIR/profile-smoke/verdict.json"
 
-      - name: Collect specialized mechanism evidence
+      - name: Audit ring profile smoke evidence
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/bench_leir_aot_connect.py \
+            --output-dir "$OUT_DIR/profile-smoke" \
+            --audit-only |
+            tee "$OUT_DIR/profile-smoke-audit.log"
+
+      - name: Collect portable and Linux evidence
         shell: bash
         run: |
           set +e
@@ -247,7 +287,7 @@ jobs:
             --binary ./bench_leir_aot_connect \
             --output-dir "$OUT_DIR/screen" \
             --profiles submit_all,coop_taskrun,defer_taskrun \
-            --families tcp,unix \
+            --transports tcp,unix \
             --concurrency 1,16 \
             --payloads 64,4096 \
             --activations 256 \
@@ -274,20 +314,31 @@ jobs:
               (Path(os.environ["OUT_DIR"]) / "screen/verdict.json")
               .read_text(encoding="utf-8")
           )
-          assert verdict["schema_version"] == 2
-          assert verdict["scope"] == "SPECIALIZED"
-          assert verdict["control_profile"] == "submit_all"
-          assert set(verdict["profiles"]) == {
+          assert verdict["schema_version"] == 3
+          assert verdict["scope"] == "PORTABLE_AND_LINUX_SEPARATE"
+          assert verdict["portable"]
+          assert verdict["linux_profiles"]
+          assert verdict["overall_verdict"] in {
+              "PASS",
+              "INCONCLUSIVE",
+              "FAIL",
+          }
+          assert set(verdict["linux_profiles"]) == {
               "submit_all",
               "coop_taskrun",
               "defer_taskrun",
           }
-          assert verdict["profiles"]["defer_taskrun"]["verdict"] == (
-              "UNAVAILABLE"
-          )
           assert verdict["release_authorized"] is False
-          assert verdict["release_gate"]["verdict"] == "BLOCKED"
           PY
+
+      - name: Audit portable and Linux evidence
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/bench_leir_aot_connect.py \
+            --output-dir "$OUT_DIR/screen" \
+            --audit-only |
+            tee "$OUT_DIR/screen-audit.log"
 
       - name: Upload AOT research evidence
         if: always()
@@ -296,3 +347,137 @@ jobs:
           name: leir-aot-connect-linux-x86_64
           path: ${{ runner.temp }}/leir-aot-connect
           if-no-files-found: error
+
+  portable-contract:
+    name: portable-${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            cc: gcc
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            cc: gcc
+          - name: macos-aarch64
+            runner: macos-14
+            cc: clang
+          - name: macos-x86_64
+            runner: macos-15-intel
+            cc: clang
+          - name: windows-x86_64
+            runner: windows-2022
+            cc: cl
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Linux portable dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            liburing-dev
+
+      - name: Build and run POSIX portable contract
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S . -B object/leir-aot-portable \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_ASM_COMPILER=${{ matrix.cc }}
+          cmake --build object/leir-aot-portable --parallel 2 --target \
+            test_leir_aot_completion \
+            test_leir_aot_portable \
+            test_leir_aot_module \
+            test_leir_aot_c_consumer
+          ctest --test-dir object/leir-aot-portable \
+            --output-on-failure \
+            --timeout 180 \
+            -R "^(test_leir_aot_completion|test_leir_aot_portable|test_leir_aot_module|test_leir_aot_c_consumer)$"
+
+      - name: Build and run Windows portable contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B object/leir-aot-portable `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DLLAM_BUILD_RESEARCH=ON `
+            -DLLAM_ENABLE_WINDOWS_BACKEND=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build object/leir-aot-portable --config Release --target `
+            test_leir_aot_completion `
+            test_leir_aot_portable `
+            test_leir_aot_module `
+            test_leir_aot_c_consumer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir object/leir-aot-portable `
+            --output-on-failure `
+            --timeout 180 `
+            -C Release `
+            -R "^(test_leir_aot_completion|test_leir_aot_portable|test_leir_aot_module|test_leir_aot_c_consumer)$"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  bsd-portable-contract:
+    name: portable-freebsd-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: cpa.sh {0}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Start FreeBSD VM
+        uses: cross-platform-actions/action@0c165ad7eb2d6a7e8552d6af5aad2bbedfc646b0 # v1.1.0
+        timeout-minutes: 10
+        with:
+          operating_system: freebsd
+          version: '15.0'
+          architecture: x86-64
+          shell: sh
+          memory: 6G
+          cpu_count: 2
+
+      - name: Install FreeBSD portable dependencies
+        run: |
+          set -eu
+          packages=""
+          if ! command -v cmake >/dev/null 2>&1; then
+            packages="$packages cmake"
+          fi
+          if ! command -v python3 >/dev/null 2>&1; then
+            packages="$packages python3"
+          fi
+          if [ -n "$packages" ]; then
+            sudo pkg install -y $packages
+          fi
+          command -v cc
+          command -v cmake
+          command -v python3
+
+      - name: Build and run FreeBSD portable contract
+        run: |
+          set -eu
+          cmake -S . -B object/leir-aot-portable \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=cc \
+            -DCMAKE_ASM_COMPILER=cc
+          cmake --build object/leir-aot-portable --parallel 2 --target \
+            test_leir_aot_completion \
+            test_leir_aot_portable \
+            test_leir_aot_module \
+            test_leir_aot_c_consumer
+          ctest --test-dir object/leir-aot-portable \
+            --output-on-failure \
+            --timeout 180 \
+            -R '^(test_leir_aot_completion|test_leir_aot_portable|test_leir_aot_module|test_leir_aot_c_consumer)$'

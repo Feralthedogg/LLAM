@@ -22,6 +22,7 @@ enum {
     AOT_INTEGRATION_PAYLOAD_SIZE = 64,
     AOT_INTEGRATION_SLOT_COUNT = 7,
     AOT_INTEGRATION_STORAGE_SIZE = 32768,
+    AOT_INTEGRATION_SKIP = 77,
 };
 
 typedef union aot_storage {
@@ -258,6 +259,84 @@ static bool portable_metrics_are_valid(
            metrics->resumed_continuation == continuation;
 }
 
+static int probe_oracle_backend(
+    const leir_phase0_program_t *program) {
+    aot_candidate_t probe;
+    struct sockaddr_storage address;
+    socklen_t address_length;
+    llam_runtime_opts_t options;
+    llam_task_t *task = NULL;
+    bool runtime_started = false;
+    bool run_finished = false;
+    int result = 1;
+
+    memset(&probe, 0, sizeof(probe));
+    probe.client = LLAM_INVALID_FD;
+    if (leir_test_tcp_refused_address(
+            &address, &address_length) != 0 ||
+        candidate_init(
+            &probe, AOT_CANDIDATE_ORACLE, program,
+            &address, address_length, UINT64_C(0x50524f4245)) != 0) {
+        perror("portable integration backend probe fixtures");
+        goto cleanup;
+    }
+    memset(&options, 0, sizeof(options));
+    options.deterministic = 1U;
+    options.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&options) != 0) {
+        if (leir_test_backend_is_unavailable(errno)) {
+            fprintf(stderr,
+                    "SKIP: phase0 backend unavailable: %s\n",
+                    strerror(errno));
+            result = AOT_INTEGRATION_SKIP;
+            goto cleanup;
+        }
+        perror("portable integration backend probe runtime");
+        goto cleanup;
+    }
+    runtime_started = true;
+    task = llam_spawn(candidate_task, &probe, NULL);
+    if (task == NULL || llam_run() != 0) {
+        perror("portable integration backend probe run");
+        goto cleanup;
+    }
+    run_finished = true;
+    if (llam_join(task) != 0) {
+        perror("portable integration backend probe join");
+        goto cleanup;
+    }
+    task = NULL;
+    if (probe.run_result != 0 &&
+        leir_test_backend_is_unavailable(probe.run_errno)) {
+        fprintf(stderr,
+                "SKIP: phase0 backend unavailable: %s\n",
+                strerror(probe.run_errno));
+        result = AOT_INTEGRATION_SKIP;
+        goto cleanup;
+    }
+    if (!semantic_refusal_is_valid(&probe) ||
+        probe.run_result != -1) {
+        fputs("portable integration backend probe mismatch\n", stderr);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (runtime_started && !run_finished) {
+        (void)llam_runtime_request_stop();
+        (void)llam_run();
+    }
+    if (task != NULL) {
+        (void)llam_join(task);
+    }
+    candidate_destroy(&probe);
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+    return result;
+}
+
 static bool peers_match(
     const aot_peer_t *peer,
     const aot_candidate_t *candidate) {
@@ -295,6 +374,7 @@ static int run_portable_oracle_matrix(void) {
     bool runtime_started = false;
     bool run_finished = false;
     size_t i;
+    int probe_result;
     int result = 1;
 
     memset(&oracle_success, 0, sizeof(oracle_success));
@@ -313,8 +393,15 @@ static int run_portable_oracle_matrix(void) {
         perror("portable integration program");
         goto cleanup;
     }
+    probe_result = probe_oracle_backend(program);
+    if (probe_result != 0) {
+        result = probe_result;
+        goto cleanup;
+    }
     memset(&options, 0, sizeof(options));
     options.deterministic = 1U;
+    options.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     if (llam_runtime_init(&options) != 0) {
         perror("portable integration runtime");
         goto cleanup;
@@ -493,6 +580,8 @@ static int run_portable_ownership_case(void) {
     state.peer.listener = LLAM_INVALID_FD;
     memset(&options, 0, sizeof(options));
     options.deterministic = 1U;
+    options.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     if (llam_runtime_init(&options) != 0) {
         perror("portable ownership runtime");
         goto cleanup;
@@ -573,8 +662,10 @@ cleanup:
 }
 
 int main(void) {
-    if (run_portable_oracle_matrix() != 0) {
-        return 1;
+    int result = run_portable_oracle_matrix();
+
+    if (result != 0) {
+        return result;
     }
     if (run_portable_ownership_case() != 0) {
         return 1;

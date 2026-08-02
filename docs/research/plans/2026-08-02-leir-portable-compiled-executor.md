@@ -1067,10 +1067,18 @@ batch; this avoids a circular report-to-own-commit provenance claim.
 
 **Files:**
 
+- Modify: `.gitignore`
 - Modify: `Makefile`
-- Modify: `CMakeLists.txt`
+- Verify unchanged: `CMakeLists.txt`
 - Modify: `.github/workflows/leir-aot-research.yml`
+- Modify: `experiments/leir/test_leir_aot_completion.c`
+- Modify: `experiments/leir/test_leir_aot_integration.c`
+- Modify: `scripts/audit_build_manifests.py`
+- Modify: `scripts/bench_leir_native.py`
+- Modify: `scripts/bench_leir_native_pipeline.py`
+- Modify: `scripts/bench_leir_phase0.py`
 - Modify: `scripts/test_research_build_boundary.py`
+- Modify: `scripts/verify_linux.sh`
 - Modify: `docs/research/plans/2026-08-02-leir-portable-compiled-executor.md`
 
 **Interfaces:**
@@ -1088,7 +1096,7 @@ test-leir-aot-connect-screen
 - Produces matching CMake/CTest targets only when
   `LLAM_BUILD_RESEARCH=ON`.
 
-- [ ] **Step 1: Write failing build-boundary tests**
+- [x] **Step 1: Write failing build-boundary tests**
 
 Add behavioral tests that configure/build default and research trees and
 assert:
@@ -1102,7 +1110,7 @@ shared-library exports contain no new research symbol
 generated output uses the new license identifier
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -1113,14 +1121,14 @@ python3 -m unittest scripts/test_research_build_boundary.py -v
 Expected: new targets are not yet fully represented in both build systems and
 workflow receipts.
 
-- [ ] **Step 3: Complete Make, CMake, and CI integration**
+- [x] **Step 3: Complete Make, CMake, and CI integration**
 
 Add the new tests to `research-test`, CTest, sanitizer, Windows compile/run,
 macOS, BSD, Linux x86_64, and Linux aarch64 jobs. Linux-only execution may skip
 only on explicit kernel/sandbox capability errors; portable completion and
 portable Executor tests never skip by platform.
 
-- [ ] **Step 4: Run the complete local verification matrix**
+- [x] **Step 4: Run the complete local verification matrix**
 
 Run from a clean tree after committing implementation batches:
 
@@ -1130,7 +1138,8 @@ make -j4 LLAM_BUILD_RESEARCH=1 research-test
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 python3 scripts/audit_build_manifests.py --root . --check
 python3 scripts/audit_license_headers.py --root .
-python3 scripts/check_c_structure.py --root .
+python3 scripts/audit_c_structure.py --root . --mode ratchet \
+  --baseline config/c-structure-baseline.json
 git diff --check
 
 cmake --fresh -S . -B build-leir-portable-final \
@@ -1142,7 +1151,7 @@ ctest --test-dir build-leir-portable-final --output-on-failure
 Expected: all applicable checks pass with no warning treated as an ignored
 failure.
 
-- [ ] **Step 5: Run sanitizer and race receipts**
+- [x] **Step 5: Run sanitizer and race receipts**
 
 Run the focused completion/portable/generated tests under ASan+UBSan on the
 local host and TSan on Linux. Exercise at least 2,000 generations for
@@ -1150,7 +1159,7 @@ publish/consume/rearm and at least two concurrently completing tickets.
 Expected: zero sanitizer findings, stale mutations, duplicate resumes,
 reference imbalance, or hot allocations.
 
-- [ ] **Step 6: Re-run build boundary and strict documentation**
+- [x] **Step 6: Re-run build boundary and strict documentation**
 
 Run:
 
@@ -1161,7 +1170,7 @@ python3 -m mkdocs build --strict --site-dir /tmp/llam-leir-portable-final-site
 
 Expected: research isolation and all documentation links pass.
 
-- [ ] **Step 7: Update this plan's checkboxes and commit verification wiring**
+- [x] **Step 7: Update this plan's checkboxes and commit verification wiring**
 
 Mark only executed and evidenced steps complete. Then commit:
 
@@ -1171,6 +1180,32 @@ git add Makefile CMakeLists.txt .github/workflows/leir-aot-research.yml \
   docs/research/plans/2026-08-02-leir-portable-compiled-executor.md
 git commit -m "ci: verify portable compiled LEIR research"
 ```
+
+Execution receipts:
+
+- The boundary suite first failed on missing completion/portable Make entry
+  points, ignored executables, stale benchmark arguments, and absent portable
+  platform jobs. The completed suite passes all 26 tests.
+- `make -j4 LLAM_BUILD_RESEARCH=1 research-test` passes. The full Python
+  discovery passes 418 tests with four documented platform skips. The three
+  benchmark drivers now preserve one `ProcessTimeoutError` class identity both
+  when imported as `scripts.*` and when executed directly.
+- The final macOS CMake tree builds and passes all 64 CTest entries; five
+  Linux-only rows skip explicitly. Strict MkDocs, build-manifest, license,
+  structure-ratchet, and whitespace audits pass.
+- The completion lifecycle runs 4,096 publish/consume/rearm generations with
+  exact callback and metric counts. Focused macOS ASan+UBSan passes with leak
+  detection disabled because Apple ASan does not implement it. Linux arm64
+  Docker passes strict GCC, leak-enabled ASan+UBSan, and TSan completion,
+  portable, and ownership gates with zero sanitizer findings.
+- Docker's security policy denies the Phase-0 `io_uring` oracle. The integration
+  test now probes that capability before creating peer waiters and returns the
+  documented CTest skip code instead of hanging. The same test executes and
+  passes on macOS; Linux native execution remains a CI receipt.
+- CI now keeps portable completion/module/C-consumer execution hard-required on
+  Linux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64, and FreeBSD x86_64,
+  and separately runs Linux GCC, Clang, ASan+UBSan, TSan, ring-profile, and
+  replay-audit gates.
 
 - [ ] **Step 8: Push a stacked draft PR and wait for green CI**
 
