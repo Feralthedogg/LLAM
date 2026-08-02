@@ -257,6 +257,11 @@
          11. A submission conspicuously marked "Not a Contribution" is not a
          Contribution.
 
+   1.26. "License Steward" means Feralthedogg. The License Steward may publicly
+         designate a successor in the Official Repository, and a successor
+         validly designated in that manner thereafter becomes the License
+         Steward.
+
 2. ACCEPTANCE AND COPYRIGHT LICENSE
 
    2.1. By exercising any permission granted by this License, You accept and
@@ -380,11 +385,17 @@
    6.1. While exercising rights under this License, You may Distribute Modified
         Covered Files or an Object Form containing them if You:
 
-      (a) place a prominent notice in each Modified Covered File stating that it
-          has been modified;
+      (a) provide a prominent notice stating that the covered Software has been
+          modified. The notice must be distributed with, or otherwise made
+          reasonably available to recipients of, the Modified Covered Files and
+          may appear in each Modified Covered File, in accompanying release
+          notes or a changelog, in a source repository made available to
+          recipients, or in other accompanying documentation;
 
-      (b) identify the modification date or a revision identifier containing the
-          Modification;
+      (b) identify, in that notice or accompanying materials, the modification
+          date or a revision identifier from which recipients can reasonably
+          determine the Modified Covered Files and the applicable
+          Modifications;
 
       (c) license every Modified Covered File under this License, except where
           an express alternative license notice applies under Section 10.4;
@@ -814,7 +825,7 @@
          termination survive. Without limitation, source-availability
          commitments for prior Distributions, reporting duties that arose before
          termination, Sections 8.10 through 8.12, and Sections 9 and 12 through
-         19 survive termination.
+         20 survive termination.
 
    15.8. Sections 15.1 through 15.4 do not restore a patent license terminated
          under Section 13.
@@ -880,6 +891,90 @@
    19.6. For a particular release, branch, commit, package, file, or copy, the
          license text distributed with or expressly applied to that material
          controls.
+
+20. LATER LICENSE VERSIONS AND FORWARD-ONLY ELECTION
+
+   20.1. Official Later Versions.
+
+         The License Steward may publish revised or new official versions of
+         the LLAM Commercial Reciprocity License. No person other than the
+         License Steward may publish a new version using that name. Each
+         official version must have a distinguishing version number. An
+         "Official Later Version" means a version that the License Steward
+         expressly identifies as succeeding this License and as having a higher
+         version number.
+
+   20.2. Optional Election.
+
+         After an Official Later Version is published, You may, separately for
+         any release, branch, commit, package, file, or copy of the Software
+         that You are authorized to Distribute:
+
+      (a) continue to Distribute that material under the version of this
+          License already applicable to it; or
+
+      (b) elect to Distribute that material under any Official Later Version.
+
+         An Official Later Version does not apply automatically. You are not
+         required to make an election merely because a later version has been
+         published.
+
+   20.3. Making an Election.
+
+         An election under Section 20.2(b) is made only when You expressly apply
+         the Official Later Version through a LICENSE file, package metadata,
+         file header, or other accompanying notice; include or provide the
+         complete text of that Official Later Version as it requires; and
+         identify the elected version using its applicable license name,
+         version number, or license identifier. Distribution after publication
+         of an Official Later Version, without such an express election, does
+         not change the applicable version.
+
+   20.4. Forward-Only Effect.
+
+         Once You Distribute particular material under an Official Later
+         Version pursuant to Section 20.2(b), the election is irrevocable for
+         that distributed material and for Modified Covered Files derived from
+         that elected material. You, and each recipient exercising rights
+         received through that elected material, may thereafter Distribute that
+         material or those Modified Covered Files only under:
+
+      (a) the elected Official Later Version; or
+
+      (b) a still higher Official Later Version elected in accordance with this
+          Section.
+
+         The elected version may not be removed or replaced with an earlier
+         version for that material. Every later election is subject to the same
+         forward-only rule.
+
+   20.5. No Retroactive Effect on Separate Earlier Rights.
+
+         An election does not withdraw, limit, or modify rights validly received
+         under an earlier version for an earlier or independently obtained
+         release, branch, commit, package, file, or copy. Such separately
+         received material may remain under its applicable earlier version.
+         Those separate earlier rights do not authorize You to represent
+         material elected under an Official Later Version, or Modified Covered
+         Files derived from that elected material, as governed by an earlier
+         version.
+
+   20.6. Scope of Grants.
+
+         This Section itself authorizes an election of an Official Later
+         Version, and no separate permission from a Contributor is required for
+         an election made in accordance with this Section. However, an election
+         does not expand the scope of any copyright or patent rights granted by
+         a Contributor beyond the scope of the rights granted by that
+         Contributor under Sections 2 and 3.
+
+         An election is effective only for material that You have authority to
+         Distribute.
+
+   20.7. Differently Licensed Material.
+
+         This Section does not change the license of third-party or differently
+         licensed material identified under Sections 10.4 or 14.
 
 END OF TERMS
 
