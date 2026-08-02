@@ -29,6 +29,9 @@ typedef enum lccf_model_mode {
     LCCF_MODEL_SHARED_FACT_FUSED = 9,
     LCCF_MODEL_MIXED_RECOMPUTE = 10,
     LCCF_MODEL_MIXED_SHARED_FACT = 11,
+    LCCF_MODEL_SHARED_EVENT_QUEUE = 12,
+    LCCF_MODEL_SHARED_EVENT_FUSED = 13,
+    LCCF_MODEL_MIXED_SHARED_EVENT = 14,
     LCCF_MODEL_MODE_COUNT,
 } lccf_model_mode_t;
 
@@ -95,6 +98,7 @@ typedef struct lccf_model_metrics {
     uint64_t facts_build_failed;
     uint64_t fact_normalizations;
     uint64_t fact_site_lookups;
+    uint64_t fact_changed_site_materializations;
     uint64_t fact_module_pins;
     uint64_t fact_payload_pins;
     uint64_t fact_stale_losers;

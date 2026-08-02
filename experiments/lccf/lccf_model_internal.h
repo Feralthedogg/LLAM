@@ -169,7 +169,8 @@ struct lccf_model_batch {
     uint64_t round;
     unsigned char *frame_storage;
     unsigned char *cell_storage;
-    lccf_fact_core_t *fact_sidecar_storage;
+    unsigned char *fact_sidecar_storage;
+    size_t fact_sidecar_stride;
     lccf_fact_cell_t *fact_cells;
     lccf_model_instance_t *instances;
     lccf_model_waker_t *wakers;
