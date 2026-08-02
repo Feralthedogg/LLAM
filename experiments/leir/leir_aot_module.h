@@ -10,7 +10,9 @@
 #include <stdint.h>
 
 #define LEIR_AOT_MODULE_ABI_V1 1U
+#define LEIR_AOT_MODULE_BACKEND_AGNOSTIC 0U
 #define LEIR_AOT_BACKEND_LINUX_IO_URING 1U
+#define LEIR_AOT_BACKEND_PORTABLE 2U
 
 typedef enum leir_aot_resume_action_v1 {
     LEIR_AOT_RESUME_RETURN = 0,

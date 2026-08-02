@@ -134,8 +134,11 @@ class LeirAotFixtureGeneratorTests(unittest.TestCase):
             consumer.write_text(
                 '#include "generated/leir_aot_connect_write.h"\n'
                 "int main() {\n"
-                "    return leir_aot_connect_write_module_v1.abi_version == "
-                "LEIR_AOT_MODULE_ABI_V1 ? 0 : 1;\n"
+                "    return "
+                "leir_aot_connect_write_module_v1.abi_version == "
+                "LEIR_AOT_MODULE_ABI_V1 && "
+                "leir_aot_connect_write_module_v1.backend_kind == "
+                "LEIR_AOT_MODULE_BACKEND_AGNOSTIC ? 0 : 1;\n"
                 "}\n",
                 encoding="utf-8",
             )

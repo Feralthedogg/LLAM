@@ -69,8 +69,7 @@ static bool module_is_valid(
     return module != NULL &&
            module->abi_version == LEIR_AOT_MODULE_ABI_V1 &&
            module->struct_size >= sizeof(*module) &&
-           module->backend_kind ==
-               LEIR_AOT_BACKEND_LINUX_IO_URING &&
+           module->backend_kind == LEIR_AOT_MODULE_BACKEND_AGNOSTIC &&
            module->semantic_digest != 0U &&
            module->instance_size != 0U &&
            alignment_is_valid(module->instance_alignment) &&
