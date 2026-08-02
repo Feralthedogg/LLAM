@@ -157,7 +157,7 @@ ASan/UBSan/TSan, and GitHub Actions.
   `lccf_fact_invoke()`; `lccf_fact_finish()`; `lccf_fact_abort()`; and
   `lccf_fact_cell_arm()`.
 
-- [ ] **Step 1: Record and verify the exact dependency blobs**
+- [x] **Step 1: Record and verify the exact dependency blobs**
 
 Use these immutable Git blob identities before applying the files:
 
@@ -184,7 +184,7 @@ done
 
 Expected: the five hashes above, in order.
 
-- [ ] **Step 2: Apply only those five files**
+- [x] **Step 2: Apply only those five files**
 
 Use file patches from the reviewed commit. Do not merge the older LCCF model,
 benchmark, report, Makefile, CMake, or workflow deltas into this stacked branch.
@@ -204,7 +204,7 @@ done
 
 Expected: each local file has the corresponding blob identity from Step 1.
 
-- [ ] **Step 3: Prove default and package isolation**
+- [x] **Step 3: Prove default and package isolation**
 
 Run:
 
@@ -218,7 +218,7 @@ find object -path '*experiments/lccf/lccf_fact.o' -o \
 
 Expected: boundary tests pass and the final `find` prints nothing.
 
-- [ ] **Step 4: Commit the exact dependency import**
+- [x] **Step 4: Commit the exact dependency import**
 
 ```bash
 git add experiments/lccf/lccf_portable_errno.h \
@@ -237,12 +237,13 @@ git commit -m "research: reuse shared completion representation"
 
 - Modify: `experiments/leir/leir_aot_module.h`
 - Modify: `experiments/leir/leir_aot_connect_write_template.inc`
+- Modify: `experiments/leir/leir_aot_linux.c`
 - Modify: `experiments/leir/test_leir_aot_module.c`
 - Modify: `experiments/leir/fixtures/leir_aot_c_consumer.c`
-- Modify: `scripts/gen_leir_aot_fixture.py`
 - Modify: `scripts/test_gen_leir_aot_fixture.py`
-- Regenerate: `experiments/leir/generated/leir_aot_connect_write.h`
-- Regenerate: `experiments/leir/generated/leir_aot_connect_write.c`
+- Verify unchanged: `scripts/gen_leir_aot_fixture.py`
+- Verify unchanged: `experiments/leir/generated/leir_aot_connect_write.h`
+- Verify unchanged: `experiments/leir/generated/leir_aot_connect_write.c`
 
 **Interfaces:**
 
@@ -260,7 +261,7 @@ git commit -m "research: reuse shared completion representation"
 - `leir_aot_backend_v1_t.backend_kind` is one of the two concrete adapter
   identities.
 
-- [ ] **Step 1: Write failing backend-neutral module tests**
+- [x] **Step 1: Write failing backend-neutral module tests**
 
 In `test_leir_aot_module.c`, run the same bound instance through two capture
 backends and assert that both preparations carry identical fd, address,
@@ -276,7 +277,7 @@ CHECK(prepare_with_kind(UINT32_MAX) == -1 && errno == EINVAL);
 The production change that makes this pass is removing the Linux-only module
 check while retaining exact backend validation.
 
-- [ ] **Step 2: Run the focused test and observe RED**
+- [x] **Step 2: Run the focused test and observe RED**
 
 Run:
 
@@ -287,14 +288,14 @@ make LLAM_BUILD_RESEARCH=1 -j4 test_leir_aot_module
 
 Expected: the module still advertises Linux and rejects the portable adapter.
 
-- [ ] **Step 3: Implement the minimal research ABI correction**
+- [x] **Step 3: Implement the minimal research ABI correction**
 
 Add the three identities above. In generated prepare, accept only portable or
 Linux concrete backends and keep all ABI version, structure size, callback,
 bound-instance, and cancellation checks unchanged. Do not add a platform
 header, opcode switch, or operation loop.
 
-- [ ] **Step 4: Update generator and standalone consumer contracts**
+- [x] **Step 4: Update generator and standalone consumer contracts**
 
 The generator test must compile both C11 and C++17 consumers, compare generated
 bytes to the checked-in files, and reject generated output containing any of:
@@ -311,7 +312,7 @@ realloc(
 The standalone consumer prepares once with each concrete adapter and verifies
 identical captured values.
 
-- [ ] **Step 5: Regenerate and verify GREEN**
+- [x] **Step 5: Regenerate and verify GREEN**
 
 Run:
 
@@ -325,16 +326,15 @@ python3 -m unittest scripts/test_gen_leir_aot_fixture.py -v
 Expected: module, C consumer, C++17 compilation, deterministic generation, and
 absence checks pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add experiments/leir/leir_aot_module.h \
   experiments/leir/leir_aot_connect_write_template.inc \
+  experiments/leir/leir_aot_linux.c \
   experiments/leir/test_leir_aot_module.c \
   experiments/leir/fixtures/leir_aot_c_consumer.c \
-  experiments/leir/generated/leir_aot_connect_write.h \
-  experiments/leir/generated/leir_aot_connect_write.c \
-  scripts/gen_leir_aot_fixture.py scripts/test_gen_leir_aot_fixture.py
+  scripts/test_gen_leir_aot_fixture.py
 git commit -m "research: make generated LEIR module backend neutral"
 ```
 
@@ -349,6 +349,8 @@ git commit -m "research: make generated LEIR module backend neutral"
 - Create: `experiments/leir/test_leir_aot_completion.c`
 - Modify: `Makefile`
 - Modify: `CMakeLists.txt`
+- Modify: `config/llam-sources.json`
+- Modify: `scripts/audit_build_manifests.py`
 
 **Interfaces:**
 
@@ -389,8 +391,7 @@ size_t leir_aot_completion_alignment(void);
 int leir_aot_completion_init(
     void *storage, size_t storage_size,
     const leir_aot_module_v1_t *module,
-    void *module_instance, size_t module_instance_size,
-    leir_phase0_value_t *values_out, size_t value_count);
+    void *module_instance, size_t module_instance_size);
 int leir_aot_completion_arm(
     leir_aot_completion_t *completion, uint64_t generation);
 int leir_aot_completion_publish(
@@ -398,10 +399,14 @@ int leir_aot_completion_publish(
     const leir_aot_completion_record_t *record);
 int leir_aot_completion_consume(
     leir_aot_completion_t *completion,
+    uint64_t generation,
     leir_aot_completion_route_t route,
     uint64_t guard_flags,
+    leir_phase0_value_t *values_out,
+    size_t value_count,
     leir_aot_resume_result_v1_t *resume_out);
-int leir_aot_completion_cancel(leir_aot_completion_t *completion);
+int leir_aot_completion_cancel(
+    leir_aot_completion_t *completion, uint32_t continuation);
 int leir_aot_completion_set_module_available(
     leir_aot_completion_t *completion, bool available);
 int leir_aot_completion_destroy(leir_aot_completion_t *completion);
@@ -412,10 +417,23 @@ void leir_aot_completion_metrics(
 
 The opaque object contains one `lccf_fact_cell_t`, one aligned
 `lccf_event_core_t`, a fixed descriptor table for the generated continuations,
-the module/output bindings, atomics for module availability/cancellation, and
+the module binding, atomics for module availability/cancellation, and
 metrics. There is no heap ownership.
 
-- [ ] **Step 1: Write RED tests for exact B publication**
+Output storage belongs to each consume transaction rather than the completion
+object, matching the portable and Linux ticket APIs that receive their output
+buffers at run time.
+
+Cancellation also carries an explicit generated continuation; the common
+consumer therefore never assumes that a module's continuation numbering starts
+at a particular value.
+
+The explicit consume generation is part of the queue-delivery contract: a
+delayed delivery from an older generation must not claim a newly armed cell.
+Queue transfer or deferral returns `EAGAIN`; duplicate publication or consume
+returns `EBUSY` and increments the duplicate-rejection metric.
+
+- [x] **Step 1: Write RED tests for exact B publication**
 
 Add a spy module and assert:
 
@@ -431,7 +449,7 @@ CHECK(sizeof(lccf_event_core_t) == 48U);
 Publish must not invoke resume. The test fails initially because the common
 completion API and target do not exist.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -441,7 +459,7 @@ make LLAM_BUILD_RESEARCH=1 -j4 test_leir_aot_completion
 
 Expected: the target or required symbols are missing.
 
-- [ ] **Step 3: Add research-only object groups**
+- [x] **Step 3: Add research-only object groups**
 
 Add this common source group to Make and CMake without adding an installed or
 runtime-library source:
@@ -454,17 +472,18 @@ LEIR_AOT_COMPLETION_OBJS = \
 ```
 
 ```cmake
-set(LLAM_LEIR_AOT_COMPLETION_SOURCES
+add_executable(test_leir_aot_completion
     experiments/lccf/lccf_fact.c
     experiments/lccf/lccf_representation.c
     experiments/leir/leir_aot_completion.c
+    experiments/leir/test_leir_aot_completion.c
 )
 ```
 
 Only completion, portable, Linux, integration, and benchmark research targets
 link this group. Production targets do not.
 
-- [ ] **Step 4: Implement init, arm, and publication**
+- [x] **Step 4: Implement init, arm, and publication**
 
 `init` records module/output bindings but leaves the cell unarmed. The first
 `arm(generation)` initializes the LCCF cell with `LCCF_REP_SHARED_EVENT`, one
@@ -475,7 +494,7 @@ terminal generation and call `lccf_fact_cell_arm()`. Build an
 `lccf_fact_try_publish_configured()`. Copy LCCF normalization and site-lookup
 counters into completion metrics after each operation.
 
-- [ ] **Step 5: Write RED tests for common direct/queue resume**
+- [x] **Step 5: Write RED tests for common direct/queue resume**
 
 Cover these literal behaviors:
 
@@ -493,7 +512,7 @@ malformed event      immutable FAIL/EPROTO reaches generated failure result
 Expected values are literal counters and output slots, not values computed by
 the implementation helper.
 
-- [ ] **Step 6: Implement the one consumer transaction**
+- [x] **Step 6: Implement the one consumer transaction**
 
 Use `lccf_fact_consume()` for direct or queued admission, invoke only through
 `lccf_fact_invoke()`, copy outputs only after generated resume succeeds, then
@@ -501,7 +520,7 @@ call `lccf_fact_finish()`. On resume or copy failure call `lccf_fact_abort()`.
 Queue transfer uses the LCCF decision and queue reference; it does not rebuild
 or renormalize the event.
 
-- [ ] **Step 7: Verify GREEN and sanitizers**
+- [x] **Step 7: Verify GREEN and sanitizers**
 
 Run:
 
@@ -516,7 +535,6 @@ clang -Iinclude -Isrc/internal -Isrc -Iexperiments/lccf \
   experiments/lccf/lccf_fact.c \
   experiments/lccf/lccf_representation.c \
   experiments/leir/leir_aot_completion.c \
-  experiments/leir/generated/leir_aot_connect_write.c \
   experiments/leir/test_leir_aot_completion.c \
   -pthread -o /tmp/llam-leir-aot-completion-sanitize
 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
@@ -526,12 +544,13 @@ UBSAN_OPTIONS=halt_on_error=1 \
 
 Expected: every lifecycle case passes with no sanitizer finding.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add experiments/leir/leir_aot_completion.h \
   experiments/leir/leir_aot_completion.c \
-  experiments/leir/test_leir_aot_completion.c Makefile CMakeLists.txt
+  experiments/leir/test_leir_aot_completion.c Makefile CMakeLists.txt \
+  config/llam-sources.json scripts/audit_build_manifests.py
 git commit -m "research: add common compiled completion consumer"
 ```
 

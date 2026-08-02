@@ -70,6 +70,7 @@ CLEAN_FILES = \
 	test_leir_connect \
 	test_leir_aot_plan \
 	test_leir_aot_module \
+	test_leir_aot_completion \
 	test_leir_aot_c_consumer \
 	test_leir_aot_integration \
 	test_leir_aot_linux_unit \
@@ -139,6 +140,7 @@ CLEAN_FILES = \
 	test_leir_connect.exe \
 	test_leir_aot_plan.exe \
 	test_leir_aot_module.exe \
+	test_leir_aot_completion.exe \
 	test_leir_aot_c_consumer.exe \
 	test_leir_aot_integration.exe \
 	test_leir_aot_linux_unit.exe \
@@ -762,6 +764,13 @@ LEIR_AOT_PLAN_TEST_OBJS = \
 LEIR_AOT_MODULE_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_module.o
+LEIR_AOT_COMPLETION_OBJS = \
+	$(OBJDIR)/experiments/lccf/lccf_fact.o \
+	$(OBJDIR)/experiments/lccf/lccf_representation.o \
+	$(OBJDIR)/experiments/leir/leir_aot_completion.o
+LEIR_AOT_COMPLETION_TEST_OBJS = \
+	$(LEIR_AOT_COMPLETION_OBJS) \
+	$(OBJDIR)/experiments/leir/test_leir_aot_completion.o
 LEIR_AOT_C_CONSUMER_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/fixtures/leir_aot_c_consumer.o
@@ -846,6 +855,7 @@ RESEARCH_OBJS = \
 	$(LEIR_PHASE0_BENCH_OBJS) \
 	$(LEIR_AOT_PLAN_TEST_OBJS) \
 	$(LEIR_AOT_MODULE_TEST_OBJS) \
+	$(LEIR_AOT_COMPLETION_TEST_OBJS) \
 	$(LEIR_AOT_C_CONSUMER_TEST_OBJS) \
 	$(LEIR_AOT_INTEGRATION_TEST_OBJS) \
 	$(LEIR_AOT_LINUX_UNIT_TEST_OBJS) \
@@ -871,6 +881,7 @@ LEIR_RESEARCH_TARGETS = \
 	test_leir_connect \
 	test_leir_aot_plan \
 	test_leir_aot_module \
+	test_leir_aot_completion \
 	test_leir_aot_c_consumer \
 	test_leir_aot_integration \
 	test_leir_aot_linux_unit \
@@ -1011,7 +1022,7 @@ ALL_DEPFILES = \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
 -include $(ALL_DEPFILES)
 
-.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-ring-profile test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-completion test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-ring-profile test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 audit-build-manifests:
@@ -2541,6 +2552,9 @@ test-leir-aot-module: test_leir_aot_module
 	./test_leir_aot_module
 	python3 -m unittest scripts/test_gen_leir_aot_fixture.py -v
 
+test-leir-aot-completion: test_leir_aot_completion
+	./test_leir_aot_completion
+
 test-leir-aot-c-consumer: test_leir_aot_c_consumer
 	./test_leir_aot_c_consumer
 
@@ -2753,6 +2767,9 @@ test_leir_aot_plan: $(RUNTIME_OBJS) $(LEIR_AOT_PLAN_TEST_OBJS)
 test_leir_aot_module: $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS) $(LDLIBS)
 
+test_leir_aot_completion: $(LEIR_AOT_COMPLETION_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LEIR_AOT_COMPLETION_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+
 test_leir_aot_c_consumer: $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
 
@@ -2920,7 +2937,7 @@ $(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
 		experiments/leir/leir_peer_process.h \
 		experiments/leir/leir_test_support.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir $(DEPFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -Iexperiments/lccf $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)

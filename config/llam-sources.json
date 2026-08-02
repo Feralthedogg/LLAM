@@ -451,6 +451,23 @@
       },
       {
         "family": "leir",
+        "name": "test_leir_aot_completion",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/lccf/lccf_fact.c",
+          "experiments/lccf/lccf_representation.c",
+          "experiments/leir/leir_aot_completion.c",
+          "experiments/leir/test_leir_aot_completion.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      },
+      {
+        "family": "leir",
         "name": "test_leir_aot_c_consumer",
         "platforms": ["all"],
         "sources": [

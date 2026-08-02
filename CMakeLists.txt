@@ -777,6 +777,7 @@ set(LLAM_LEIR_RESEARCH_TARGETS
     test_leir_connect
     test_leir_aot_plan
     test_leir_aot_module
+    test_leir_aot_completion
     test_leir_aot_c_consumer
     test_leir_aot_integration
     test_leir_aot_linux_unit
@@ -820,6 +821,22 @@ target_include_directories(test_leir_aot_module PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 target_link_libraries(test_leir_aot_module PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_completion
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
+    experiments/leir/test_leir_aot_completion.c
+)
+target_include_directories(test_leir_aot_completion PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(test_leir_aot_completion PRIVATE Threads::Threads)
+endif()
 
 add_executable(test_leir_aot_c_consumer
     experiments/leir/generated/leir_aot_connect_write.c
@@ -992,6 +1009,7 @@ add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
 add_test(NAME test_leir_connect COMMAND test_leir_connect)
 add_test(NAME test_leir_aot_plan COMMAND test_leir_aot_plan)
 add_test(NAME test_leir_aot_module COMMAND test_leir_aot_module)
+add_test(NAME test_leir_aot_completion COMMAND test_leir_aot_completion)
 add_test(
     NAME test_leir_aot_c_consumer
     COMMAND test_leir_aot_c_consumer)
