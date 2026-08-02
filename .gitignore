@@ -56,3 +56,5 @@ perf.data
 perf.data.old
 scripts/bench_tokio_compare/target/
 scripts/__pycache__/
+**/.superpowers/
+**/superpowers/
