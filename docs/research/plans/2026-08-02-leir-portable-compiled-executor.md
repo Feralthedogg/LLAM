@@ -815,12 +815,14 @@ git commit -m "test: prove portable compiled LEIR parity"
 
 - Modify: `experiments/leir/leir_aot_linux.h`
 - Modify: `experiments/leir/leir_aot_linux.c`
-- Modify: `experiments/leir/test_leir_aot_linux_unit.c`
+- Modify: `experiments/leir/leir_aot_integration_linux.c`
 - Modify: `experiments/leir/test_leir_aot_ownership.c`
-- Modify: `experiments/leir/test_leir_aot_ring_profile.c`
-- Modify: `experiments/leir/test_leir_aot_integration.c`
+- Create: `experiments/leir/leir_aot_linux_metadata_test.h`
+- Create: `experiments/leir/leir_aot_linux_metadata_test.c`
+- Modify: `src/io/api/issue_wait.c`
 - Modify: `Makefile`
 - Modify: `CMakeLists.txt`
+- Modify: `config/llam-sources.json`
 
 **Interfaces:**
 
@@ -837,11 +839,12 @@ uint64_t interpreter_dispatches;
 - Existing SQE/CQE, park/wake, queue publication, allocation, continuation,
   and timing fields retain their meanings.
 
-- [ ] **Step 1: Write RED tests that forbid direct Linux resume**
+- [x] **Step 1: Write RED tests that forbid direct Linux resume**
 
-Use a spy module whose resume verifies that a published B event and common
-consumer claim already exist. Cover connect error, write success, write error,
-cancellation, and duplicate terminal delivery. Assert:
+Extend the real Linux success/refusal matrix with common-publication receipts,
+and pair it with the common-consumer callback/cancellation/duplicate tests and
+the lower-level Linux reducer tests. Audit the adapter source for direct
+`ticket->module->resume` or `ticket->module->copy_outputs` calls. Assert:
 
 ```text
 terminal publications  1
@@ -853,20 +856,21 @@ successful observed CQEs 1
 suppressed CQEs         1
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
-Run on Linux or the existing Linux unit fixture:
+Run the architecture audit and then the Linux integration fixture:
 
 ```bash
-make LLAM_BUILD_RESEARCH=1 -j4 \
-  test_leir_aot_linux_unit test_leir_aot_ownership
-./test_leir_aot_linux_unit
-./test_leir_aot_ownership
+rg -n 'ticket->module->(resume|copy_outputs)' \
+  experiments/leir/leir_aot_linux.c
+make LLAM_BUILD_RESEARCH=1 -j4 test_leir_aot_integration
+./test_leir_aot_integration
 ```
 
-Expected: direct `module->resume()` bypasses the required publication receipt.
+Expected before implementation: the source audit finds the bypass and the
+Linux integration lacks the required publication receipt.
 
-- [ ] **Step 3: Replace direct resume with publish/consume**
+- [x] **Step 3: Replace direct resume with publish/consume**
 
 After the segment reaches semantic terminal and ownership is retired, create a
 Linux-source completion record from `first_error_index`, `first_error`, and
@@ -874,15 +878,22 @@ Linux-source completion record from `first_error_index`, `first_error`, and
 the same common consumer as the portable adapter. Remove the direct
 `module->resume()` and `module->copy_outputs()` calls from the Linux adapter.
 
-- [ ] **Step 4: Preserve Linux retirement and cancellation contracts**
+- [x] **Step 4: Preserve Linux retirement and cancellation contracts**
 
 Do not alter SQE flags or kernel retirement semantics. Connect remains
 `IOSQE_IO_LINK | IOSQE_CQE_SKIP_SUCCESS`; the final write keeps its CQE. Early
 connect failure selects its continuation; successful connect remains
 unobservable. Cancellation is terminal only after all required target and
-cancel CQEs retire.
+cancel CQEs retire. A token rejected during park setup must remove a still
+queued native batch before request or ticket storage can be reused; an
+in-flight native batch keeps backend ownership until native cancellation
+retires. The integration fixture holds Linux submission behind a lifecycle
+gate so the pre-cancelled row is deterministically queued, then rebinds the
+same ticket after the common cancellation completion. The ownership fixture
+also drives queued and in-flight setup-abort states directly through the
+test-hook runtime so both ownership branches have exact receipts.
 
-- [ ] **Step 5: Run Linux regression and sanitizer tests**
+- [x] **Step 5: Run Linux regression and sanitizer tests**
 
 Run:
 
@@ -901,15 +912,16 @@ ctest --test-dir build-leir-portable --output-on-failure \
 Expected: ownership and ring-profile receipts remain exact, while every Linux
 terminal row records one B publication and zero interpreter dispatches.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add experiments/leir/leir_aot_linux.h \
   experiments/leir/leir_aot_linux.c \
-  experiments/leir/test_leir_aot_linux_unit.c \
+  experiments/leir/leir_aot_integration_linux.c \
   experiments/leir/test_leir_aot_ownership.c \
-  experiments/leir/test_leir_aot_ring_profile.c \
-  experiments/leir/test_leir_aot_integration.c Makefile CMakeLists.txt
+  experiments/leir/leir_aot_linux_metadata_test.h \
+  experiments/leir/leir_aot_linux_metadata_test.c \
+  src/io/api/issue_wait.c Makefile CMakeLists.txt config/llam-sources.json
 git commit -m "research: share terminal consumption across LEIR adapters"
 ```
 

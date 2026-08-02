@@ -8,12 +8,18 @@
 
 #include "leir_aot_linux.h"
 
+#include "leir_aot_completion.h"
+
+#include "lccf_fact.h"
+
 #include "io/runtime_io_api_internal.h"
 #include "runtime_internal.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +52,8 @@ struct leir_aot_linux_ticket {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_linux_native_segment_t segment;
 #endif
+    max_align_t completion_alignment;
+    unsigned char completion_storage[];
 };
 
 static int fail_with_errno(int error_code) {
@@ -81,6 +89,20 @@ static bool module_is_valid(
            module->cancel != NULL;
 }
 
+static leir_aot_completion_t *ticket_completion(
+    leir_aot_linux_ticket_t *ticket) {
+    return (leir_aot_completion_t *)(void *)
+        ticket->completion_storage;
+}
+
+#if LLAM_RUNTIME_BACKEND_LINUX
+static const leir_aot_completion_t *ticket_completion_const(
+    const leir_aot_linux_ticket_t *ticket) {
+    return (const leir_aot_completion_t *)(const void *)
+        ticket->completion_storage;
+}
+#endif
+
 static bool ticket_is_valid(
     const leir_aot_linux_ticket_t *ticket) {
     return ticket != NULL &&
@@ -92,7 +114,9 @@ static bool ticket_is_valid(
 }
 
 size_t leir_aot_linux_ticket_size(void) {
-    return sizeof(leir_aot_linux_ticket_t);
+    return offsetof(
+               leir_aot_linux_ticket_t, completion_storage) +
+           leir_aot_completion_size();
 }
 
 size_t leir_aot_linux_ticket_alignment(void) {
@@ -106,25 +130,34 @@ int leir_aot_linux_ticket_init(
     void *module_instance,
     size_t module_instance_size) {
     leir_aot_linux_ticket_t *ticket = ticket_storage;
+    int rc;
 
     if (ticket_storage == NULL ||
-        ticket_storage_size < sizeof(*ticket) ||
         (uintptr_t)ticket_storage %
                 _Alignof(leir_aot_linux_ticket_t) !=
             0U ||
+        ticket_storage_size < leir_aot_linux_ticket_size() ||
         !module_is_valid(module) ||
         module_instance == NULL ||
         module_instance_size < module->instance_size ||
         (uintptr_t)module_instance % module->instance_alignment != 0U) {
         return fail_with_errno(EINVAL);
     }
-    memset(ticket, 0, sizeof(*ticket));
+    memset(ticket, 0, leir_aot_linux_ticket_size());
     ticket->magic = LEIR_AOT_LINUX_TICKET_MAGIC;
     ticket->module = module;
     ticket->module_instance = module_instance;
     ticket->module_instance_size = module_instance_size;
     atomic_init(
         &ticket->state, LEIR_AOT_LINUX_TICKET_INITIALIZED);
+    rc = leir_aot_completion_init(
+        ticket->completion_storage, leir_aot_completion_size(),
+        module, module_instance, module_instance_size);
+    if (rc != 0) {
+        ticket->magic = 0U;
+        return fail_with_errno(rc);
+    }
+    errno = 0;
     return 0;
 }
 
@@ -218,7 +251,12 @@ static int prepare_connect_write(
         payload_length > UINT32_MAX ||
         (payload_length != 0U && payload == NULL) ||
         generation == 0U ||
-        connect_error_continuation == write_continuation) {
+        generation > LCCF_FACT_MAX_GENERATION ||
+        connect_error_continuation == write_continuation ||
+        connect_error_continuation >=
+            LEIR_AOT_COMPLETION_SITE_CAPACITY ||
+        write_continuation >=
+            LEIR_AOT_COMPLETION_SITE_CAPACITY) {
         return fail_with_errno(EINVAL);
     }
 
@@ -283,6 +321,37 @@ static void copy_metrics(
             : UINT32_MAX;
 }
 
+static void copy_completion_metrics(
+    const leir_aot_completion_metrics_t *before,
+    const leir_aot_completion_metrics_t *after,
+    leir_aot_linux_metrics_t *out) {
+    out->terminal_publications =
+        after->publications - before->publications;
+    out->normalizations =
+        after->normalizations - before->normalizations;
+    out->site_lookups =
+        after->site_lookups - before->site_lookups;
+}
+
+static int publish_terminal(
+    leir_aot_linux_ticket_t *ticket,
+    uint64_t generation,
+    uint32_t continuation,
+    int64_t semantic_result,
+    int error_code) {
+    leir_aot_completion_record_t record;
+
+    memset(&record, 0, sizeof(record));
+    record.generation = generation;
+    record.result = semantic_result;
+    record.continuation = continuation;
+    record.source_kind = LCCF_FACT_SOURCE_LINUX_CQE;
+    record.event_kind = LCCF_FACT_EVENT_IO;
+    record.error_code = error_code;
+    return leir_aot_completion_publish(
+        ticket_completion(ticket), &record);
+}
+
 static void release_segment_ownership(
     llam_linux_native_segment_t *segment) {
     segment->req = NULL;
@@ -326,6 +395,8 @@ int leir_aot_linux_ticket_run(
 
 #if LLAM_RUNTIME_BACKEND_LINUX
     {
+        leir_aot_completion_metrics_t completion_before;
+        leir_aot_completion_metrics_t completion_after;
         leir_aot_backend_v1_t backend = {
             .abi_version = LEIR_AOT_MODULE_ABI_V1,
             .struct_size = sizeof(backend),
@@ -337,12 +408,13 @@ int leir_aot_linux_ticket_run(
         llam_io_req_t *request = NULL;
         unsigned segment_state;
         uint32_t continuation;
+        uint64_t generation;
         uint64_t phase_started;
         int64_t semantic_result;
-        int copy_result;
+        int completion_result;
+        int error_code;
         int issue_result;
         int prepare_result;
-        int resume_result;
         int saved_errno;
         int result = -1;
 
@@ -398,6 +470,11 @@ int leir_aot_linux_ticket_run(
                     ? ticket->connect_error_continuation
                     : ticket->write_continuation;
             semantic_result = ticket->segment.semantic_result;
+        } else if (segment_state ==
+                       LLAM_LINUX_NATIVE_SEGMENT_RETIRED &&
+                   ticket->segment.first_error == ECANCELED) {
+            continuation = ticket->connect_error_continuation;
+            semantic_result = -(int64_t)ECANCELED;
         } else if (issue_result == 0 &&
                    segment_state ==
                        LLAM_LINUX_NATIVE_SEGMENT_RETIRED &&
@@ -411,30 +488,45 @@ int leir_aot_linux_ticket_run(
             goto finish;
         }
 
+        generation = ticket->segment.generation;
+        error_code = ticket->segment.first_error;
+        if (error_code == 0 && semantic_result < 0 &&
+            semantic_result >= -(int64_t)INT_MAX) {
+            error_code = (int)-semantic_result;
+        }
         metrics_out->resumed_continuation = continuation;
         release_segment_ownership(&ticket->segment);
         llam_api_io_req_release(g_llam_tls_shard, request);
         request = NULL;
         phase_started = llam_now_ns();
-        resume_result = ticket->module->resume(
-            ticket->module_instance,
-            continuation,
-            semantic_result,
-            resume_out);
-        saved_errno = errno;
-        copy_result = resume_result == 0
-            ? ticket->module->copy_outputs(
-                ticket->module_instance,
-                values_out,
-                value_count)
-            : 0;
-        if (resume_result == 0) {
-            saved_errno = errno;
+        leir_aot_completion_metrics(
+            ticket_completion_const(ticket), &completion_before);
+        completion_result = leir_aot_completion_arm(
+            ticket_completion(ticket), generation);
+        if (completion_result == 0) {
+            completion_result = error_code == ECANCELED
+                ? leir_aot_completion_cancel(
+                      ticket_completion(ticket), continuation)
+                : publish_terminal(
+                      ticket, generation, continuation,
+                      semantic_result, error_code);
         }
+        if (completion_result == 0) {
+            completion_result = leir_aot_completion_consume(
+                ticket_completion(ticket), generation,
+                LEIR_AOT_COMPLETION_DIRECT,
+                LEIR_AOT_COMPLETION_GUARD_DIRECT_ENABLED |
+                    LEIR_AOT_COMPLETION_GUARD_BACKEND_CAPABLE,
+                values_out, value_count, resume_out);
+        }
+        leir_aot_completion_metrics(
+            ticket_completion_const(ticket), &completion_after);
+        copy_completion_metrics(
+            &completion_before, &completion_after, metrics_out);
         metrics_out->resume_ns = elapsed_ns(
             phase_started, llam_now_ns());
-        if (resume_result != 0 || copy_result != 0) {
-            saved_errno = saved_errno != 0 ? saved_errno : EPROTO;
+        if (completion_result != 0) {
+            saved_errno = completion_result;
             goto finish;
         }
         result = 0;
@@ -464,6 +556,7 @@ finish:
 int leir_aot_linux_ticket_destroy(
     leir_aot_linux_ticket_t *ticket) {
     unsigned state;
+    int rc;
 
     if (!ticket_is_valid(ticket)) {
         return fail_with_errno(EINVAL);
@@ -486,6 +579,12 @@ int leir_aot_linux_ticket_destroy(
                 memory_order_acquire)) {
             break;
         }
+    }
+    rc = leir_aot_completion_destroy(ticket_completion(ticket));
+    if (rc != 0) {
+        atomic_store_explicit(
+            &ticket->state, state, memory_order_release);
+        return fail_with_errno(rc);
     }
     if (state == LEIR_AOT_LINUX_TICKET_BOUND) {
         ticket->module->cancel(ticket->module_instance);

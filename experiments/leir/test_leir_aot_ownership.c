@@ -19,6 +19,16 @@ int main(void) {
 
 #include "leir_native_test_fixture.h"
 
+#include "io/runtime_io_api_internal.h"
+
+#if !defined(LLAM_ENABLE_TEST_HOOKS)
+bool llam_io_test_abort_published_io_setup(
+    llam_io_req_t *req,
+    llam_io_abort_reason_t reason,
+    bool *wait_for_completion);
+#endif
+
+#include <errno.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -143,9 +153,131 @@ static int test_independent_tickets_wake_out_of_order(void) {
     return 0;
 }
 
+static int test_setup_abort_detaches_queued_batch(void) {
+    queue_fixture_t fixture;
+    bool wait_for_completion = true;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            1U,
+            &completions) != 0) {
+        perror("queued setup-abort fixture init");
+        return 1;
+    }
+    if (!llam_linux_native_batch_enqueue(
+            &fixture.node, &fixture.batch, &fixture.req) ||
+        !llam_io_test_abort_published_io_setup(
+            &fixture.req, LLAM_IO_ABORT_CANCEL,
+            &wait_for_completion) ||
+        wait_for_completion ||
+        fixture.req.result != -1 ||
+        fixture.req.error_code != ECANCELED ||
+        atomic_load_explicit(
+            &fixture.req.wait_mode,
+            memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE ||
+        atomic_load_explicit(
+            &fixture.req.linux_native_batch,
+            memory_order_acquire) != NULL ||
+        atomic_load_explicit(
+            &fixture.batch.state,
+            memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_BATCH_RETIRED ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_SEGMENT_RETIRED ||
+        fixture.segment.first_error != ECANCELED ||
+        fixture.segment.first_error_index != UINT_MAX ||
+        fixture.segment.semantic_result != -(int64_t)ECANCELED ||
+        fixture.segment.batch != NULL ||
+        fixture.node.native_batch_head != NULL ||
+        fixture.node.native_batch_tail != NULL ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        completions != 0U) {
+        fputs("queued native setup abort did not retire ownership\n",
+              stderr);
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_setup_abort_requests_inflight_native_cancel(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_batch_t *taken;
+    bool wait_for_completion = false;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            1U,
+            &completions) != 0) {
+        perror("inflight setup-abort fixture init");
+        return 1;
+    }
+    if (!llam_linux_native_batch_enqueue(
+            &fixture.node, &fixture.batch, &fixture.req)) {
+        perror("inflight setup-abort enqueue");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    taken = llam_linux_native_batch_take_all(&fixture.node);
+    if (taken != &fixture.batch || taken->next != NULL ||
+        !llam_io_test_abort_published_io_setup(
+            &fixture.req, LLAM_IO_ABORT_CANCEL,
+            &wait_for_completion) ||
+        !wait_for_completion ||
+        atomic_load_explicit(
+            &fixture.req.abort_reason,
+            memory_order_acquire) != LLAM_IO_ABORT_CANCEL ||
+        atomic_load_explicit(
+            &fixture.req.wait_mode,
+            memory_order_acquire) != LLAM_IO_WAIT_MODE_INFLIGHT ||
+        atomic_load_explicit(
+            &fixture.req.linux_native_batch,
+            memory_order_acquire) != &fixture.batch ||
+        atomic_load_explicit(
+            &fixture.batch.cancel_requested,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.batch.cancel_state,
+            memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_CANCEL_QUEUED ||
+        fixture.node.native_cancel_head != &fixture.batch ||
+        fixture.node.native_cancel_tail != &fixture.batch ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        completions != 0U) {
+        fputs("inflight native setup abort did not retain ownership\n",
+              stderr);
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
 int main(void) {
     if (test_independent_tickets_wake_out_of_order() != 0) {
         fputs("FAIL: independent tickets wake out of order\n", stderr);
+        return 1;
+    }
+    if (test_setup_abort_detaches_queued_batch() != 0) {
+        fputs("FAIL: queued native setup abort\n", stderr);
+        return 1;
+    }
+    if (test_setup_abort_requests_inflight_native_cancel() != 0) {
+        fputs("FAIL: inflight native setup abort\n", stderr);
         return 1;
     }
     puts("LEIR AOT ownership tests passed");

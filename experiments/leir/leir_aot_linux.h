@@ -19,6 +19,10 @@ typedef struct leir_aot_linux_metrics {
     uint64_t activations;
     uint64_t logical_operations;
     uint64_t queue_publications;
+    uint64_t terminal_publications;
+    uint64_t normalizations;
+    uint64_t site_lookups;
+    uint64_t interpreter_dispatches;
     uint64_t prepared_sqes;
     uint64_t observed_cqes;
     uint64_t suppressed_success_cqes;

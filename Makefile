@@ -788,6 +788,7 @@ LEIR_AOT_INTEGRATION_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_aot_portable.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
 	$(OBJDIR)/experiments/leir/leir_aot_integration_linux.o \
+	$(OBJDIR)/experiments/leir/leir_aot_linux_metadata_test.o \
 	$(OBJDIR)/experiments/leir/test_leir_aot_integration.o
 LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
@@ -798,6 +799,7 @@ LEIR_AOT_OWNERSHIP_TEST_OBJS = \
 LEIR_AOT_RING_PROFILE_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_aot_ring_profile.o
 LEIR_AOT_CONNECT_BENCH_OBJS = \
+	$(LEIR_AOT_COMPLETION_OBJS) \
 	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
 	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
 	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
@@ -2798,8 +2800,8 @@ test_leir_aot_integration: $(RUNTIME_OBJS) $(LEIR_AOT_INTEGRATION_TEST_OBJS)
 test_leir_aot_linux_unit: $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS) $(LDLIBS)
 
-test_leir_aot_ownership: $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
+test_leir_aot_ownership: $(RUNTIME_TESTHOOK_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
 
 test_leir_aot_ring_profile: $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS) $(LDLIBS)

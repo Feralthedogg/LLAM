@@ -877,6 +877,7 @@ add_executable(test_leir_aot_integration
     experiments/leir/leir_aot_portable.c
     experiments/leir/leir_aot_linux.c
     experiments/leir/leir_aot_integration_linux.c
+    experiments/leir/leir_aot_linux_metadata_test.c
     experiments/leir/test_leir_aot_integration.c
 )
 target_include_directories(test_leir_aot_integration PRIVATE
@@ -907,7 +908,10 @@ target_include_directories(test_leir_aot_ownership PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
-target_link_libraries(test_leir_aot_ownership PRIVATE llam_runtime)
+target_compile_definitions(test_leir_aot_ownership PRIVATE
+    LLAM_ENABLE_TEST_HOOKS=1)
+target_link_libraries(test_leir_aot_ownership PRIVATE
+    llam_runtime_testhooks)
 
 add_executable(test_leir_aot_ring_profile
     experiments/leir/test_leir_aot_ring_profile.c
@@ -920,6 +924,9 @@ target_include_directories(test_leir_aot_ring_profile PRIVATE
 target_link_libraries(test_leir_aot_ring_profile PRIVATE llam_runtime)
 
 add_executable(bench_leir_aot_connect
+    experiments/lccf/lccf_fact.c
+    experiments/lccf/lccf_representation.c
+    experiments/leir/leir_aot_completion.c
     experiments/leir/generated/leir_aot_connect_write.c
     experiments/leir/leir_aot_linux.c
     experiments/leir/leir_aot_connect_bench_support.c
@@ -931,6 +938,7 @@ add_executable(bench_leir_aot_connect
 target_include_directories(bench_leir_aot_connect PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
     ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 target_link_libraries(bench_leir_aot_connect PRIVATE llam_runtime)
