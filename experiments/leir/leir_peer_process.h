@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 #ifndef LLAM_EXPERIMENTS_LEIR_PEER_PROCESS_H
 #define LLAM_EXPERIMENTS_LEIR_PEER_PROCESS_H
 
@@ -16,6 +19,11 @@ typedef enum leir_bench_order {
     LEIR_BENCH_ORDER_ABBA = 0,
     LEIR_BENCH_ORDER_BAAB = 1,
 } leir_bench_order_t;
+
+typedef enum leir_peer_socket_kind {
+    LEIR_PEER_SOCKET_STREAM = 0,
+    LEIR_PEER_SOCKET_SEQPACKET = 1,
+} leir_peer_socket_kind_t;
 
 typedef struct leir_bench_options {
     leir_bench_workload_t workload;
@@ -44,6 +52,9 @@ typedef struct leir_peer_config {
     size_t payload;
     uint64_t activations;
     unsigned transactions_per_activation;
+    unsigned warmup_transactions_per_connection;
+    leir_peer_socket_kind_t socket_kind;
+    unsigned operations_per_activation;
 } leir_peer_config_t;
 
 typedef struct leir_peer_result {

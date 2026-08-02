@@ -46,15 +46,15 @@ static bool llam_safepoint_should_auto_preempt(llam_runtime_t *rt,
         task == NULL ||
         now_ns == 0U ||
         rt->preempt_mode < LLAM_PREEMPT_AUTO ||
-        task->last_started_ns == 0U ||
-        now_ns <= task->last_started_ns) {
+        shard->current_started_ns == 0U ||
+        now_ns <= shard->current_started_ns) {
         return false;
     }
 
     quantum_ns = rt->preempt_quantum_ns != 0U
                      ? rt->preempt_quantum_ns
                      : llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
-    elapsed_ns = now_ns - task->last_started_ns;
+    elapsed_ns = now_ns - shard->current_started_ns;
     if (rt->preempt_mode != LLAM_PREEMPT_STRICT && quantum_ns <= UINT64_MAX / 2U) {
         quantum_ns *= 2U;
     }

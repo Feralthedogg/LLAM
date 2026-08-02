@@ -32,6 +32,20 @@ ABI rules:
 - Pointers returned as static strings are owned by the library and remain valid
   until process exit.
 
+## Stable And Research Build Boundary
+
+`LLAM_BUILD_RESEARCH` is a private build switch and defaults to `OFF`. It may
+enable internal experiments and their test targets, but it does not create a
+second public ABI. Both modes install the same public headers, documented
+dynamic exports, ABI-major-2 shared-library identity/SONAME, `pkg-config`
+contract, and CMake package contract. The public version remains `2.2.0`.
+
+Consumers must treat only the stable contract above as supported. Research-mode
+symbols, layouts, objects, tests, and experiment sources are internal; they
+must not be added to public headers or used as a reason to change the ABI or
+library version. A research-enabled build cannot be packaged: the package
+command fails before it creates an archive.
+
 ## Public Handle Hardening Model
 
 LLAM public handles are opaque lifetime guards, not cryptographic process
@@ -89,6 +103,7 @@ with `errno` set on failure.
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
 | Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_create`, `llam_runtime_default`, `llam_runtime_run_handle`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_destroy`, `llam_runtime_shutdown` | Explicit runtime handles are the canonical embedding boundary. Legacy host-thread lifecycle calls operate on `llam_runtime_default()`; managed task spawn/stop/shutdown wrappers target the current owner runtime and cannot cross-stop peer runtimes. Shutdown releases backend resources while public cleanup handles keep their documented post-shutdown behavior. FFI bindings should prefer `_ex` and option initializers. |
+| External driving | `llam_runtime_drive_once`, `llam_runtime_next_deadline`, `llam_runtime_get_readiness`, `llam_runtime_wake` | Available only for handles created with `LLAM_RUNTIME_DRIVER_EXTERNAL`. A successful drive never enters the scheduler's idle wait and executes at most one cooperative task segment. Readiness objects are borrowed and runtime-owned; callers must preserve the caller-sized struct handshake. |
 | Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_runtime_spawn_ex`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. Embedders with explicit runtimes should spawn with `llam_runtime_spawn_ex()`. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until`, `llam_timer_create_ex`, `llam_timer_create`, `llam_timer_wait`, `llam_timer_wait_until`, `llam_timer_reset`, `llam_timer_cancel`, `llam_timer_destroy` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. Waitable interval timers are runtime-aware public handles; destroy returns `EBUSY` while a wait/reset/cancel operation is active. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. Cancel/query also fail with `EBUSY` during active public-handle teardown. Managed cross-runtime token operations fail with `EXDEV`. |
@@ -315,6 +330,23 @@ cooperative stop request is a successful scheduler outcome: the run call returns
 `0` after the target runtime observes `llam_runtime_request_stop()` and all live
 tasks have exited or become irrelevant to the drained runtime. Backend or fatal
 runtime failures return `-1` with `errno` set.
+
+Externally driven runtimes use a separate bounded contract:
+`llam_runtime_drive_once()` returns `PROGRESS`, `IDLE`, or `DONE` and executes
+at most one managed task segment; `llam_runtime_next_deadline()` returns an
+absolute monotonic deadline or `UINT64_MAX`; and
+`llam_runtime_get_readiness()` projects a borrowed POSIX fd or Windows event
+into caller-sized storage. The runtime retains ownership of the native object.
+Only one unmanaged host thread may hold the drive token at once, although
+successive calls may migrate between host threads. Concurrent drive calls fail
+with `EBUSY`, while managed-task and scheduler-callback reentry fail with
+`ENOTSUP`. `llam_runtime_run_handle()` is not an alternate driver for this mode
+and fails with `ENOTSUP`.
+
+The scheduler-side bound ends at the next cooperative task boundary. Task code
+that performs an opaque blocking call or fails to yield can still occupy the
+host thread; use LLAM's asynchronous I/O or blocking-callback APIs when the host
+loop requires a wall-clock responsiveness bound.
 
 `llam_runtime_request_stop()` requests cooperative stop and wakes scheduler,
 I/O, and blocking workers. It does not forcibly kill live tasks; `llam_run()`

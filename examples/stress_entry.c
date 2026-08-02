@@ -66,17 +66,25 @@ int stress_run_multi_phase(const char *phase_name,
             override_online_floor < g_llam_runtime.active_shards ? override_online_floor : g_llam_runtime.active_shards;
     }
     for (i = 0U; i < entry_count; ++i) {
+        llam_task_t *task;
+
         if (entries[i].task_fn == NULL) {
             continue;
         }
-        if (llam_spawn(entries[i].task_fn,
-                     entries[i].arg,
-                     &(llam_spawn_opts_t){
-                         .task_class = LLAM_TASK_CLASS_DEFAULT,
-                         .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                         .flags = LLAM_SPAWN_F_PINNED,
-                     }) == NULL) {
+        task = llam_spawn(entries[i].task_fn,
+                          entries[i].arg,
+                          &(llam_spawn_opts_t){
+                              .task_class = LLAM_TASK_CLASS_DEFAULT,
+                              .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                              .flags = LLAM_SPAWN_F_PINNED,
+                          });
+        if (task == NULL) {
             perror("llam_spawn");
+            llam_runtime_shutdown();
+            return 1;
+        }
+        if (llam_detach(task) != 0) {
+            perror("llam_detach");
             llam_runtime_shutdown();
             return 1;
         }

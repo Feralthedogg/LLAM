@@ -2,6 +2,15 @@
  * @file src/io/windows/watch/windows_submit.c
  * @brief Windows IOCP request submission path.
  *
+ * @details
+ * Submission pins the descriptor association under the lifecycle lock and
+ * copies its generation into the overlapped operation before the backend can
+ * own it. A helper result of @c -1 means no completion packet owns the request,
+ * @c 0 transfers lifetime to IOCP, and @c 1 reports synchronous success on a
+ * handle configured to suppress that packet. Completion revalidates the saved
+ * generation, so reuse of the same numeric HANDLE or SOCKET cannot redirect an
+ * older operation to a replacement association.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
@@ -28,14 +37,12 @@ static bool llam_windows_req_is_handle_rw(const llam_io_req_t *req) {
             req->kind == LLAM_IO_KIND_HANDLE_PWRITE);
 }
 
-static bool llam_windows_req_skips_completion_on_success(llam_node_t *node, llam_io_req_t *req) {
-    if (req == NULL) {
+static bool llam_windows_op_skips_completion_on_success(
+    const llam_windows_io_op_t *op) {
+    if (op == NULL || op->association == NULL) {
         return false;
     }
-    if (llam_windows_req_is_handle_rw(req)) {
-        return llam_windows_handle_skips_completion_on_success(node, req->handle);
-    }
-    return llam_windows_fd_skips_completion_on_success(node, req->fd);
+    return op->association->skip_completion_on_success != 0U;
 }
 
 /*
@@ -45,25 +52,29 @@ static bool llam_windows_req_skips_completion_on_success(llam_node_t *node, llam
  *  -1: submission failed before the backend owns the request
  */
 static int llam_windows_submit_rw(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op, bool write_op) {
+    SOCKET socket_fd;
     DWORD transferred = 0;
     DWORD flags = (DWORD)(write_op ? 0 : req->recv_flags);
     int rc;
 
     (void)node;
-    if (req->count > (size_t)ULONG_MAX) {
+    if (op == NULL || op->association == NULL ||
+        !op->association->is_socket ||
+        req->count > (size_t)ULONG_MAX) {
         errno = EINVAL;
         return -1;
     }
+    socket_fd = (SOCKET)op->association->authority;
     op->wsabuf.buf = (CHAR *)req->buf;
     op->wsabuf.len = (ULONG)req->count;
     if (write_op) {
-        rc = WSASend(req->fd, &op->wsabuf, 1, &transferred, 0, &op->overlapped, NULL);
+        rc = WSASend(socket_fd, &op->wsabuf, 1, &transferred, 0, &op->overlapped, NULL);
     } else {
-        rc = WSARecv(req->fd, &op->wsabuf, 1, &transferred, &flags, &op->overlapped, NULL);
+        rc = WSARecv(socket_fd, &op->wsabuf, 1, &transferred, &flags, &op->overlapped, NULL);
     }
     if (rc == 0) {
         op->immediate_bytes = transferred;
-        return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
+        return llam_windows_op_skips_completion_on_success(op) ? 1 : 0;
     }
     {
         int err = WSAGetLastError();
@@ -77,25 +88,30 @@ static int llam_windows_submit_rw(llam_node_t *node, llam_io_req_t *req, llam_wi
 }
 
 static int llam_windows_submit_handle_rw(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op, bool write_op) {
+    HANDLE handle;
     DWORD transferred = 0;
     BOOL ok;
 
     (void)node;
-    if (req->count > (size_t)ULONG_MAX || LLAM_HANDLE_IS_INVALID(req->handle)) {
+    if (op == NULL || op->association == NULL ||
+        op->association->is_socket ||
+        req->count > (size_t)ULONG_MAX ||
+        LLAM_HANDLE_IS_INVALID(req->handle)) {
         errno = EINVAL;
         return -1;
     }
+    handle = (HANDLE)op->association->authority;
     if (req->kind == LLAM_IO_KIND_HANDLE_PREAD || req->kind == LLAM_IO_KIND_HANDLE_PWRITE) {
         llam_windows_set_overlapped_offset(&op->overlapped, req->offset);
     }
     if (write_op) {
-        ok = WriteFile((HANDLE)req->handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
+        ok = WriteFile(handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
     } else {
-        ok = ReadFile((HANDLE)req->handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
+        ok = ReadFile(handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
     }
     if (ok) {
         op->immediate_bytes = transferred;
-        return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
+        return llam_windows_op_skips_completion_on_success(op) ? 1 : 0;
     }
     {
         DWORD err = GetLastError();
@@ -110,23 +126,30 @@ static int llam_windows_submit_handle_rw(llam_node_t *node, llam_io_req_t *req, 
 
 static int llam_windows_submit_accept(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op) {
     LPFN_ACCEPTEX acceptex = NULL;
+    SOCKET listener;
     DWORD bytes = 0;
     unsigned accept_prepost;
 
-    if (llam_windows_load_acceptex(node, req->fd, &acceptex) != 0) {
+    if (op == NULL || op->association == NULL ||
+        !op->association->is_socket) {
+        errno = EINVAL;
+        return -1;
+    }
+    listener = (SOCKET)op->association->authority;
+    if (llam_windows_load_acceptex(node, listener, &acceptex) != 0) {
         return -1;
     }
     accept_prepost = node != NULL ? node->windows_accept_prepost : 0U;
     if (accept_prepost > 0U) {
-        llam_windows_accept_socket_pool_warm(node, req->fd, accept_prepost);
+        llam_windows_accept_socket_pool_warm(node, listener, accept_prepost);
     }
-    op->accept_socket = llam_windows_accept_socket_acquire(node, req->fd);
+    op->accept_socket = llam_windows_accept_socket_acquire(node, listener);
     if (op->accept_socket == INVALID_SOCKET) {
         errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
         return -1;
     }
     req->fd_result = LLAM_INVALID_FD;
-    if (!acceptex(req->fd,
+    if (!acceptex(listener,
                   op->accept_socket,
                   op->accept_buffer,
                   0,
@@ -143,20 +166,27 @@ static int llam_windows_submit_accept(llam_node_t *node, llam_io_req_t *req, lla
         return -1;
     }
     op->immediate_bytes = bytes;
-    return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
+    return llam_windows_op_skips_completion_on_success(op) ? 1 : 0;
 }
 
 static int llam_windows_submit_connect(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op) {
     LPFN_CONNECTEX connectex = NULL;
+    SOCKET socket_fd;
     DWORD bytes = 0;
 
-    if (llam_windows_load_connectex(node, req->fd, &connectex) != 0) {
+    if (op == NULL || op->association == NULL ||
+        !op->association->is_socket) {
+        errno = EINVAL;
         return -1;
     }
-    if (llam_windows_bind_connect_socket(req->fd, req->addr) != 0) {
+    socket_fd = (SOCKET)op->association->authority;
+    if (llam_windows_load_connectex(node, socket_fd, &connectex) != 0) {
         return -1;
     }
-    if (!connectex(req->fd, req->addr, (int)req->addr_len, NULL, 0, &bytes, &op->overlapped)) {
+    if (llam_windows_bind_connect_socket(socket_fd, req->addr) != 0) {
+        return -1;
+    }
+    if (!connectex(socket_fd, req->addr, (int)req->addr_len, NULL, 0, &bytes, &op->overlapped)) {
         int err = WSAGetLastError();
 
         if (err == WSA_IO_PENDING) {
@@ -166,17 +196,26 @@ static int llam_windows_submit_connect(llam_node_t *node, llam_io_req_t *req, ll
         return -1;
     }
     op->immediate_bytes = bytes;
-    return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
+    return llam_windows_op_skips_completion_on_success(op) ? 1 : 0;
 }
 
 static int llam_windows_submit_poll(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op) {
+    SOCKET socket_fd;
     DWORD transferred = 0;
     int socket_type = 0;
     int rc;
 
     (void)node;
-    if (!llam_windows_iocp_poll_supported(req->fd, req->poll_events) ||
-        !llam_windows_socket_info(req->fd, NULL, &socket_type)) {
+    if (op == NULL || op->association == NULL ||
+        !op->association->is_socket) {
+        errno = EINVAL;
+        return -1;
+    }
+    socket_fd = (SOCKET)op->association->authority;
+    if (!llam_windows_iocp_poll_supported(
+            (llam_fd_t)socket_fd, req->poll_events) ||
+        !llam_windows_socket_info(
+            (llam_fd_t)socket_fd, NULL, &socket_type)) {
         errno = EOPNOTSUPP;
         return -1;
     }
@@ -189,13 +228,13 @@ static int llam_windows_submit_poll(llam_node_t *node, llam_io_req_t *req, llam_
         }
         op->poll_backend = LLAM_WINDOWS_POLL_BACKEND_SEND;
         op->wsabuf.len = 0U;
-        rc = WSASend(req->fd, &op->wsabuf, 1, &transferred, 0, &op->overlapped, NULL);
+        rc = WSASend(socket_fd, &op->wsabuf, 1, &transferred, 0, &op->overlapped, NULL);
     } else if (socket_type == SOCK_DGRAM) {
         op->poll_backend = LLAM_WINDOWS_POLL_BACKEND_RECVFROM_PEEK;
         op->poll_flags = MSG_PEEK;
         op->poll_from_len = (int)sizeof(op->poll_from);
         op->wsabuf.len = 1U;
-        rc = WSARecvFrom(req->fd,
+        rc = WSARecvFrom(socket_fd,
                          &op->wsabuf,
                          1,
                          &transferred,
@@ -208,11 +247,11 @@ static int llam_windows_submit_poll(llam_node_t *node, llam_io_req_t *req, llam_
         op->poll_backend = LLAM_WINDOWS_POLL_BACKEND_RECV;
         op->poll_flags = MSG_PEEK;
         op->wsabuf.len = 1U;
-        rc = WSARecv(req->fd, &op->wsabuf, 1, &transferred, &op->poll_flags, &op->overlapped, NULL);
+        rc = WSARecv(socket_fd, &op->wsabuf, 1, &transferred, &op->poll_flags, &op->overlapped, NULL);
     }
     if (rc == 0) {
         op->immediate_bytes = transferred;
-        return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
+        return llam_windows_op_skips_completion_on_success(op) ? 1 : 0;
     }
     {
         int err = WSAGetLastError();
@@ -295,6 +334,7 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
         return;
     }
     op->association = association;
+    op->association_generation = association->generation;
 
     switch (req->kind) {
     case LLAM_IO_KIND_READ:

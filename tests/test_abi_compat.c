@@ -120,6 +120,55 @@ static int test_partial_runtime_opts_prefix_defaults(void) {
     return 0;
 }
 
+static int test_frozen_runtime_opts_prefix_ignores_current_tail(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    const size_t frozen_size = LLAM_RUNTIME_OPTS_V2_2_SIZE;
+
+    memset(&opts, 0xA5, sizeof(opts));
+    if (llam_runtime_opts_init(&opts, frozen_size) != 0) {
+        return fail_errno("llam_runtime_opts_init frozen-prefix call failed");
+    }
+    if (!guard_unchanged((const unsigned char *)(const void *)&opts + frozen_size,
+                         sizeof(opts) - frozen_size)) {
+        return fail_msg("llam_runtime_opts_init wrote into the current-only tail");
+    }
+
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_create(&opts, frozen_size, &runtime) != 0) {
+        return fail_errno("frozen-prefix runtime create read the current-only tail");
+    }
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        llam_runtime_destroy(runtime);
+        return fail_errno("frozen-prefix runtime stats collection failed");
+    }
+    if (stats.stack_cache_budget_bytes !=
+            LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES ||
+        stats.stack_cache_high_watermark_bytes !=
+            LLAM_RUNTIME_STACK_CACHE_DEFAULT_HIGH_WATERMARK_BYTES ||
+        stats.stack_cache_low_watermark_bytes !=
+            LLAM_RUNTIME_STACK_CACHE_DEFAULT_LOW_WATERMARK_BYTES ||
+        stats.stack_cache_idle_ns != LLAM_RUNTIME_STACK_CACHE_DEFAULT_IDLE_NS ||
+        stats.stack_cache_flags != 0U) {
+        llam_runtime_destroy(runtime);
+        return fail_msg("frozen-prefix runtime did not resolve stack-cache defaults");
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return fail_errno("frozen-prefix runtime pin failed");
+    }
+    if (raw_runtime->external_driver.enabled) {
+        llam_runtime_end_public_op(raw_runtime);
+        llam_runtime_destroy(runtime);
+        return fail_msg("frozen-prefix runtime unexpectedly selected external driving");
+    }
+    llam_runtime_end_public_op(raw_runtime);
+    llam_runtime_destroy(runtime);
+    return 0;
+}
+
 static int test_partial_spawn_opts_prefix_defaults(void) {
     llam_runtime_opts_t runtime_opts;
     uint8_t partial_opts[1] = {0U};
@@ -283,6 +332,7 @@ int main(void) {
     if (test_old_runtime_opts_prefix() != 0 ||
         test_old_spawn_opts_prefix() != 0 ||
         test_partial_runtime_opts_prefix_defaults() != 0 ||
+        test_frozen_runtime_opts_prefix_ignores_current_tail() != 0 ||
         test_partial_spawn_opts_prefix_defaults() != 0 ||
         test_partial_group_spawn_opts_prefix_defaults() != 0 ||
         test_old_binding_runtime_roundtrip() != 0) {

@@ -156,6 +156,34 @@ Install with CMake:
 cmake --install build --prefix "$HOME/.local"
 ```
 
+## Stable And Research Builds
+
+The default build is the stable public contract. `LLAM_BUILD_RESEARCH` is
+private and defaults to `OFF`; enabling it adds internal experiments and their
+test suite, not public headers or APIs. OFF and ON retain the same public
+headers, ABI major `2`, SONAME/shared-library identity, dynamic exports,
+`pkg-config` metadata, and CMake package contract. The version remains
+`2.2.0` in both modes.
+
+Use the two modes explicitly:
+
+```bash
+make -j4 all test
+make -j4 LLAM_BUILD_RESEARCH=1 research-test
+cmake -S . -B build -DLLAM_BUILD_RESEARCH=OFF
+cmake -S . -B build-research -DLLAM_BUILD_RESEARCH=ON
+```
+
+Build hardening defaults to the capability-probed `compatible` profile.
+`LLAM_HARDENING=off` disables LLAM-selected flags, while
+`LLAM_HARDENING=strict` fails when required platform protections are missing.
+See [Build From Source](docs/build.md#build-hardening-profiles).
+
+Research-enabled builds cannot be packaged: the command fails before an
+archive is created. Benchmark evidence is create-once and audits are read-only.
+The current native performance verdict is `REJECT`, so this work does not
+permit a version change, tag, package, publication, or release.
+
 Run the included programs:
 
 ```bash
@@ -373,17 +401,27 @@ Include the canonical public API:
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer size-aware `_ex` entry points so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
 Embedding code should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()` as the canonical lifecycle. The older host-thread lifecycle calls remain convenience wrappers for the process-default runtime; managed task spawn/stop/shutdown wrappers target the task's owner runtime and do not stop foreign runtimes.
+Explicit runtime handles are encoded family/slot/generation tokens rather than
+storage addresses. Treat them as opaque values: pass them back to LLAM APIs,
+never dereference them, and discard them after `llam_runtime_destroy()`.
 macOS/BSD kqueue performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
 Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
 ## Execution Model
 
-Embedding applications should drive explicit runtime handles:
+Embedding applications should normally drive explicit runtime handles:
 
 1. Create a runtime with `llam_runtime_create()`.
 2. Spawn root tasks with `llam_runtime_spawn_ex()`.
 3. Run the scheduler with `llam_runtime_run_handle()`.
 4. Tear down with `llam_runtime_destroy()`.
+
+Hosts that already own an event loop can instead set
+`opts.driver_mode = LLAM_RUNTIME_DRIVER_EXTERNAL`, wait on the borrowed native
+object returned by `llam_runtime_get_readiness()`, combine it with
+`llam_runtime_next_deadline()`, and call `llam_runtime_drive_once()` to execute
+at most one managed task segment. This keeps event-loop authority in the host
+without creating an opaque scheduler thread for task dispatch.
 
 ```c
 #include "llam/runtime.h"
@@ -701,6 +739,10 @@ Runtime lifecycle:
 | API | Purpose |
 | --- | --- |
 | `llam_runtime_opts_init` | Fill runtime options with ABI-safe library defaults. |
+| `llam_runtime_create` | Create an independent explicit runtime handle. |
+| `llam_runtime_default` | Return the process-default compatibility runtime handle. |
+| `llam_runtime_run_handle` | Drive an internally scheduled explicit runtime to completion or stop. |
+| `llam_runtime_destroy` | Stop and release an explicit runtime handle. |
 | `llam_runtime_init_ex` | Initialize the runtime with an explicit option struct size for FFI. |
 | `llam_runtime_init` | Initialize the runtime. |
 | `llam_runtime_request_stop` | Request cooperative scheduler stop and wake workers. |
@@ -708,6 +750,15 @@ Runtime lifecycle:
 | `llam_runtime_collect_stats_ex` | Collect stats with an explicit output struct size for FFI. |
 | `llam_runtime_collect_stats` | Collect scheduler, I/O, blocking, and queue statistics. |
 | `llam_runtime_write_stats_json` | Write a newline-terminated JSON stats snapshot to an fd. |
+
+Host-driven scheduling:
+
+| API | Purpose |
+| --- | --- |
+| `llam_runtime_drive_once` | Advance without an idle wait and execute at most one cooperative task segment. |
+| `llam_runtime_next_deadline` | Return the next absolute scheduler deadline or `UINT64_MAX`. |
+| `llam_runtime_get_readiness` | Return a caller-sized projection of the borrowed native readiness object. |
+| `llam_runtime_wake` | Notify a host loop that an externally driven runtime should be polled again. |
 
 Task scheduling:
 
@@ -746,7 +797,7 @@ Spawn options:
 | `LLAM_STACK_CLASS_DEFAULT` | Default stack size class. |
 | `LLAM_STACK_CLASS_LARGE` | Larger stack size class. |
 | `LLAM_STACK_CLASS_HUGE` | Very large stack size class. |
-| `LLAM_SPAWN_F_PINNED` | Hint that the task should stay pinned. |
+| `LLAM_SPAWN_F_PINNED` | Hard logical-shard affinity; same-shard helper threads remain allowed. |
 | `LLAM_SPAWN_F_NO_PREEMPT` | Hint that preemption should be restricted. |
 | `LLAM_SPAWN_F_SYS_TASK` | Runtime/system task hint. |
 | `LLAM_SPAWN_F_LATENCY_CRITICAL` | Latency-critical task hint. |
@@ -899,6 +950,16 @@ Important fields:
 | `idle_spin_max_iters` | Maximum idle-spin iterations. |
 | `sqpoll_cpu` | CPU reserved for SQPOLL. |
 | `profile` | Runtime policy profile: balanced, release-fast, debug-safe, or io-latency. |
+| `signal_flags` | Process-signal integration flags; `0` fully opts out and preserves host actions. |
+| `preempt_signal` | POSIX preemption signal; `0` selects the platform default. |
+
+`llam_runtime_opts_init()` enables preemption and guard-fault signal
+integration for compatibility. Signal-participating POSIX runtimes must use
+the same flags and resolved preemption signal; an incompatible create fails
+with `EBUSY`. Non-guard faults chain the saved host action, teardown preserves
+a later host replacement, and alternate signal stacks are borrowed or
+allocated per OS thread. See
+[Embedding LLAM](docs/guides/embedding.md#own-the-process-signal-policy).
 
 Experimental flags:
 
@@ -1132,6 +1193,12 @@ current maintained contract rather than future roadmap work:
   the task's owner runtime; spawn-time cancellation tokens and task-group
   children stay in their target owner runtime; and owner-tagged runtime objects
   fail cross-owner managed use with `EXDEV`.
+- External driver mode is the bounded event-loop embedding boundary. It resolves
+  one logical scheduler shard, leaves task-segment authority with the host,
+  reports a borrowed POSIX fd or Windows event plus the next absolute deadline,
+  and executes at most one task segment per successful drive call. Concurrent
+  drive ownership fails with `EBUSY`; managed or scheduler reentry fails with
+  `ENOTSUP`.
 - In-process opaque handles are hardened against stale use, wrong-family casts,
   simple forgery, owner mismatch, and active-operation destroy races. They are
   not a capability boundary against arbitrary same-process memory read/write.

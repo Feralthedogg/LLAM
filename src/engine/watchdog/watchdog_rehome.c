@@ -196,6 +196,24 @@ static bool llam_task_can_rehome_io_wait(const llam_shard_t *source,
     return atomic_load_explicit(&req->wait_mode, memory_order_acquire) == (unsigned)expected_mode;
 }
 
+/** @brief Revalidate one claimed task wait and request activation. */
+static bool llam_rehome_io_generation_matches(const llam_task_t *task,
+                                              const llam_io_req_t *req,
+                                              uint64_t wait_generation,
+                                              uint64_t operation_generation) {
+    return task != NULL && req != NULL &&
+           wait_generation != 0U && operation_generation != 0U &&
+           llam_task_active_io_req_load(task) == req &&
+           atomic_load_explicit(&task->wait_generation,
+                                memory_order_acquire) == wait_generation &&
+           atomic_load_explicit(&task->active_io_generation,
+                                memory_order_acquire) ==
+               operation_generation &&
+           atomic_load_explicit(&req->operation_generation,
+                                memory_order_acquire) ==
+               operation_generation;
+}
+
 /**
  * @brief Rewrite task and request ownership to the target shard.
  *
@@ -246,21 +264,68 @@ void llam_rehome_inflight_io_waiters(llam_runtime_t *rt, llam_shard_t *source, l
 
         pthread_mutex_lock(&owner->lock);
         for (task = owner->all_tasks; task != NULL; task = task->all_next) {
-            llam_io_req_t *req = llam_task_active_io_req_load(task);
+            llam_io_req_t *req;
+            uint64_t wait_generation;
+            uint64_t operation_generation;
 
-            if (!llam_task_can_rehome_io_wait(source, target, task, req, LLAM_IO_WAIT_MODE_INFLIGHT)) {
+            /*
+             * Keep the established allocation-owner lock -> resolver gate
+             * order. The claim pins this wait and its recyclable request
+             * storage until every ownership store has committed.
+             */
+            if (!llam_task_wait_resolver_try_begin(task)) {
                 continue;
+            }
+            req = llam_task_active_io_req_load(task);
+            wait_generation = atomic_load_explicit(
+                &task->wait_generation, memory_order_acquire);
+            operation_generation = req != NULL
+                                       ? atomic_load_explicit(
+                                             &req->operation_generation,
+                                             memory_order_acquire)
+                                       : 0U;
+
+            if (!llam_task_can_rehome_io_wait(
+                    source,
+                    target,
+                    task,
+                    req,
+                    LLAM_IO_WAIT_MODE_INFLIGHT) ||
+                !llam_rehome_io_generation_matches(
+                    task,
+                    req,
+                    wait_generation,
+                    operation_generation)) {
+                goto release_resolver;
             }
             // In-flight completions race with rehome; transfer only if owner still matches.
             if (!llam_io_req_transfer_inflight_owner(req, source->id, target->id)) {
-                continue;
+                goto release_resolver;
             }
-            task->parked_shard = target->id;
+            if (!llam_rehome_io_generation_matches(
+                    task,
+                    req,
+                    wait_generation,
+                    operation_generation)) {
+                /*
+                 * Owner publication is irreversible: completion may already
+                 * have consumed the target credit. Do not write metadata for
+                 * an unprovable activation, but make the split fatal.
+                 */
+                llam_record_fatal_deferred(rt, EPROTO);
+                goto release_resolver;
+            }
+            atomic_store_explicit(&task->parked_shard,
+                                  target->id,
+                                  memory_order_release);
             atomic_store_explicit(&req->owner_shard,
                                   target->id,
                                   memory_order_release);
             llam_merge_rehome_task(source, target, task);
             migrated += 1U;
+
+release_resolver:
+            llam_task_wait_resolver_end(task);
         }
         pthread_mutex_unlock(&owner->lock);
     }
@@ -431,7 +496,6 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
     llam_io_req_t *cur;
     unsigned eligible = 0U;
     unsigned migrated = 0U;
-
     if (migrated_out != NULL) {
         *migrated_out = 0U;
     }
@@ -458,6 +522,7 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
             continue;
         }
         if (task == NULL || task->state != LLAM_TASK_STATE_PARKED ||
+            (task->flags & LLAM_TASK_FLAG_PINNED) != 0U ||
             (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_IO ||
             task->parked_shard != target_shard->id || llam_task_active_io_req_load(task) != cur ||
             atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)LLAM_IO_WAIT_MODE_SUBMIT_QUEUE ||

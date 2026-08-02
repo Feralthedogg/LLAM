@@ -45,6 +45,10 @@ _Static_assert(offsetof(llam_spawn_opts_t, reserved0) == offsetof(llam_spawn_opt
                "llam_spawn_opts_t.reserved0 must occupy the post-flags ABI padding");
 _Static_assert(offsetof(llam_spawn_opts_t, deadline_ns) == offsetof(llam_spawn_opts_t, reserved0) + sizeof(uint32_t),
                "llam_spawn_opts_t.deadline_ns offset must not move after reserved0");
+_Static_assert(sizeof(((llam_spawn_opts_t *)0)->user_context) == sizeof(void *),
+               "llam_spawn_opts_t.user_context must be pointer-sized");
+_Static_assert(LLAM_TASK_CONTEXT_SLOT_COUNT == 4U,
+               "the public inline task context slot count must remain four");
 ASSERT_FIELD_U32(llam_runtime_opts_t, deterministic);
 ASSERT_FIELD_U32(llam_runtime_opts_t, forced_yield_every);
 ASSERT_FIELD_U32(llam_runtime_opts_t, idle_spin_max_iters);
@@ -52,12 +56,63 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, profile);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved0);
 ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_mode);
 ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_poll_period);
+ASSERT_FIELD_U32(llam_runtime_opts_t, worker_min);
+ASSERT_FIELD_U32(llam_runtime_opts_t, worker_count);
+ASSERT_FIELD_U32(llam_runtime_opts_t, worker_max);
+ASSERT_FIELD_U32(llam_runtime_opts_t, blocking_min);
+ASSERT_FIELD_U32(llam_runtime_opts_t, blocking_max);
+ASSERT_FIELD_U32(llam_runtime_opts_t, affinity_policy);
+ASSERT_FIELD_U32(llam_runtime_opts_t, cpu_count);
+ASSERT_FIELD_U32(llam_runtime_opts_t, reserved1);
+ASSERT_FIELD_U32(llam_runtime_opts_t, stack_cache_flags);
+ASSERT_FIELD_U32(llam_runtime_opts_t, reserved2);
+ASSERT_FIELD_U32(llam_runtime_opts_t, driver_mode);
+ASSERT_FIELD_U32(llam_runtime_opts_t, reserved3);
+ASSERT_FIELD_U32(llam_runtime_opts_t, signal_flags);
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->on_task_resume) ==
+                   sizeof(llam_task_switch_hook_fn),
+               "llam_runtime_opts_t.on_task_resume must retain callback type");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->on_task_suspend) ==
+                   sizeof(llam_task_switch_hook_fn),
+               "llam_runtime_opts_t.on_task_suspend must retain callback type");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->switch_hook_context) ==
+                   sizeof(void *),
+               "llam_runtime_opts_t.switch_hook_context must be pointer-sized");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->experimental_flags) == sizeof(uint64_t),
                "llam_runtime_opts_t.experimental_flags must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns) == sizeof(uint64_t),
                "llam_runtime_opts_t.preempt_quantum_ns must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->task_prewarm_total) == sizeof(uint64_t),
+               "llam_runtime_opts_t.task_prewarm_total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_prewarm_total) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_prewarm_total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->timer_prewarm_total) == sizeof(uint64_t),
+               "llam_runtime_opts_t.timer_prewarm_total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_budget_bytes) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_budget_bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_high_watermark_bytes) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_high_watermark_bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_low_watermark_bytes) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_low_watermark_bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_idle_ns) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_idle_ns must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->sqpoll_cpu) == sizeof(int32_t),
                "llam_runtime_opts_t.sqpoll_cpu must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_signal) == sizeof(int32_t),
+               "llam_runtime_opts_t.preempt_signal must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->cpu_ids) == sizeof(const uint32_t *),
+               "llam_runtime_opts_t.cpu_ids must be pointer-sized");
+_Static_assert(LLAM_RUNTIME_OPTS_V2_2_SIZE ==
+                   offsetof(llam_runtime_opts_t, preempt_quantum_ns) +
+                       sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns),
+               "the legacy runtime option prefix must remain frozen");
+_Static_assert(LLAM_RUNTIME_DRIVER_INTERNAL == 0 &&
+                   LLAM_RUNTIME_DRIVER_EXTERNAL == 1,
+               "runtime driver mode values are an ABI contract");
+_Static_assert(LLAM_RUNTIME_DRIVE_PROGRESS == 0 &&
+                   LLAM_RUNTIME_DRIVE_IDLE == 1 &&
+                   LLAM_RUNTIME_DRIVE_DONE == 2,
+               "runtime drive result values are an ABI contract");
 ASSERT_FIELD_U32(llam_runtime_stats_t, active_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers_floor);
@@ -72,6 +127,44 @@ ASSERT_FIELD_U32(llam_runtime_stats_t, huge_alloc);
 ASSERT_FIELD_U32(llam_runtime_stats_t, sqpoll);
 ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_mode);
 ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_poll_period);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_worker_min);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_worker_count);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_worker_max);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_blocking_min);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_blocking_max);
+ASSERT_FIELD_U32(llam_runtime_stats_t, selected_cpu_count);
+ASSERT_FIELD_U32(llam_runtime_stats_t, affinity_policy);
+ASSERT_FIELD_U32(llam_runtime_stats_t, scheduler_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, blocking_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, io_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, controller_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, opaque_helper_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, runtime_owned_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, native_execution_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, task_prewarm_source);
+ASSERT_FIELD_U32(llam_runtime_stats_t, stack_prewarm_source);
+ASSERT_FIELD_U32(llam_runtime_stats_t, timer_prewarm_source);
+ASSERT_FIELD_U32(llam_runtime_stats_t, prewarm_reserved0);
+ASSERT_FIELD_U32(llam_runtime_stats_t, stack_cache_flags);
+ASSERT_FIELD_U32(llam_runtime_stats_t, stack_cache_resident_valid);
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->affinity_failures) == sizeof(uint64_t),
+               "llam_runtime_stats_t.affinity_failures must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->requested_task_prewarm_total) == sizeof(uint64_t),
+               "requested task prewarm total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->achieved_stack_prewarm_total) == sizeof(uint64_t),
+               "achieved stack prewarm total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->estimated_metadata_bytes) == sizeof(uint64_t),
+               "resource metadata estimate must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_cached_bytes) == sizeof(uint64_t),
+               "stack cache byte authority must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_cached_mappings) == sizeof(uint64_t),
+               "stack cache mapping authority must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_resident_sample_ns) == sizeof(uint64_t),
+               "stack cache resident sample timestamp must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_process_quarantine_bytes) == sizeof(uint64_t),
+               "stack cache process quarantine bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_process_quarantine_mappings) == sizeof(uint64_t),
+               "stack cache process quarantine mappings must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_class((const llam_task_t *)0), uint32_t,
                  "llam_task_class result must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_flags((const llam_task_t *)0), uint32_t,
@@ -150,6 +243,17 @@ static int test_llam_full_info(void) {
     if (info.platform_name == NULL || strcmp(info.platform_name, LLAM_PLATFORM_NAME) != 0) {
         return test_fail("llam platform_name does not match platform macro");
     }
+    if (info.task_context_slot_count != LLAM_TASK_CONTEXT_SLOT_COUNT ||
+        info.task_context_slot_count != 4U) {
+        return test_fail("llam ABI metadata did not advertise four task context slots");
+    }
+    if (info.runtime_readiness_size !=
+            LLAM_RUNTIME_READINESS_CURRENT_SIZE ||
+        info.runtime_readiness_size !=
+            sizeof(llam_runtime_readiness_t)) {
+        return test_fail(
+            "llam ABI metadata did not advertise readiness projection size");
+    }
     return 0;
 }
 
@@ -171,6 +275,8 @@ static int test_llam_prefix_info(void) {
 }
 
 static int test_invalid_arguments(void) {
+    uint64_t released_bytes = UINT64_MAX;
+
     errno = 0;
     if (llam_abi_get_info(NULL, LLAM_ABI_INFO_CURRENT_SIZE) != -1 || errno != EINVAL) {
         return test_fail("llam_abi_get_info(NULL) did not fail with EINVAL");
@@ -190,6 +296,15 @@ static int test_invalid_arguments(void) {
     errno = 0;
     if (llam_io_buffer_opts_init(NULL, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
         return test_fail("llam_io_buffer_opts_init(NULL) did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_stack_cache_trim_ex(NULL, 0U, &released_bytes) != -1 ||
+        errno != EINVAL || released_bytes != 0U) {
+        return test_fail("llam_runtime_stack_cache_trim_ex(NULL) contract failed");
+    }
+    errno = 0;
+    if (llam_runtime_notify_memory_pressure(NULL) != -1 || errno != EINVAL) {
+        return test_fail("llam_runtime_notify_memory_pressure(NULL) contract failed");
     }
     return 0;
 }
@@ -228,7 +343,32 @@ static int test_llam_option_initializers(void) {
     if (runtime_opts.deterministic != 0U ||
         runtime_opts.sqpoll_cpu != -1 ||
         runtime_opts.profile != LLAM_RUNTIME_PROFILE_BALANCED ||
-        runtime_opts.experimental_flags != 0U) {
+        runtime_opts.experimental_flags != 0U ||
+        runtime_opts.worker_min != 0U ||
+        runtime_opts.worker_count != 0U ||
+        runtime_opts.worker_max != 0U ||
+        runtime_opts.blocking_min != 0U ||
+        runtime_opts.blocking_max != 0U ||
+        runtime_opts.affinity_policy != LLAM_RUNTIME_AFFINITY_NONE ||
+        runtime_opts.cpu_count != 0U ||
+        runtime_opts.reserved1 != 0U ||
+        runtime_opts.cpu_ids != NULL ||
+        runtime_opts.task_prewarm_total != 0U ||
+        runtime_opts.stack_prewarm_total != 0U ||
+        runtime_opts.timer_prewarm_total != 0U ||
+        runtime_opts.stack_cache_budget_bytes != 0U ||
+        runtime_opts.stack_cache_high_watermark_bytes != 0U ||
+        runtime_opts.stack_cache_low_watermark_bytes != 0U ||
+        runtime_opts.stack_cache_idle_ns != 0U ||
+        runtime_opts.stack_cache_flags != 0U ||
+        runtime_opts.reserved2 != 0U ||
+        runtime_opts.on_task_resume != NULL ||
+        runtime_opts.on_task_suspend != NULL ||
+        runtime_opts.switch_hook_context != NULL ||
+        runtime_opts.driver_mode != LLAM_RUNTIME_DRIVER_INTERNAL ||
+        runtime_opts.reserved3 != 0U ||
+        runtime_opts.signal_flags != LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS ||
+        runtime_opts.preempt_signal != 0) {
         return test_fail("llam runtime option defaults are inconsistent");
     }
 
@@ -240,7 +380,8 @@ static int test_llam_option_initializers(void) {
         spawn_opts.stack_class != LLAM_STACK_CLASS_DEFAULT ||
         spawn_opts.flags != 0U ||
         spawn_opts.reserved0 != 0U ||
-        spawn_opts.cancel_token != NULL) {
+        spawn_opts.cancel_token != NULL ||
+        spawn_opts.user_context != NULL) {
         return test_fail("llam spawn option defaults are inconsistent");
     }
 

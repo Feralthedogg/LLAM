@@ -1,0 +1,220 @@
+{
+  "entries": [
+    {
+      "limit": 800,
+      "line_count": 2134,
+      "path": "experiments/lccf/lccf_model.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1349,
+      "path": "experiments/lccf/test_lccf_model.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 926,
+      "path": "experiments/lcwe/lcwe_model.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1842,
+      "path": "experiments/leir/bench_leir_native_pipeline.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1578,
+      "path": "experiments/leir/bench_leir_native_segment.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1277,
+      "path": "experiments/leir/bench_leir_phase0.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1252,
+      "path": "experiments/leir/leir_engine.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 878,
+      "path": "experiments/leir/leir_native_segment.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1080,
+      "path": "experiments/leir/leir_peer_process.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 3147,
+      "path": "experiments/leir/test_leir_native_linux.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 2886,
+      "path": "experiments/leir/test_leir_native_segment.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 3264,
+      "path": "experiments/leir/test_leir_phase0.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1032,
+      "path": "experiments/srem/bench_srem_model.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 2382,
+      "path": "experiments/srem/srem_model.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 852,
+      "path": "experiments/srem/test_srem_model.c"
+    },
+    {
+      "limit": 1400,
+      "line_count": 1477,
+      "path": "include/llam/runtime.h"
+    },
+    {
+      "limit": 800,
+      "line_count": 1036,
+      "path": "src/core/broker/broker_descriptor.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 819,
+      "path": "src/core/broker/transport/broker_transport_posix_message.c"
+    },
+    {
+      "limit": 750,
+      "line_count": 932,
+      "path": "src/core/debug/debug.c"
+    },
+    {
+      "limit": 1250,
+      "line_count": 1594,
+      "path": "src/core/lifecycle/init.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 823,
+      "path": "src/core/memory/alloc.c"
+    },
+    {
+      "limit": 650,
+      "line_count": 716,
+      "path": "src/core/platform/platform.c"
+    },
+    {
+      "limit": 700,
+      "line_count": 785,
+      "path": "src/core/sync/channel_select.c"
+    },
+    {
+      "limit": 1050,
+      "line_count": 1110,
+      "path": "src/core/task/yield_join_sleep.c"
+    },
+    {
+      "limit": 750,
+      "line_count": 891,
+      "path": "src/core/time/timer.c"
+    },
+    {
+      "limit": 900,
+      "line_count": 918,
+      "path": "src/engine/watchdog/watchdog_rehome.c"
+    },
+    {
+      "limit": 1200,
+      "line_count": 1660,
+      "path": "src/internal/runtime_types.h"
+    },
+    {
+      "limit": 850,
+      "line_count": 858,
+      "path": "src/io/api/direct.c"
+    },
+    {
+      "limit": 1200,
+      "line_count": 1327,
+      "path": "src/io/api/public.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 825,
+      "path": "src/io/darwin/watch/darwin_worker.c"
+    },
+    {
+      "limit": 650,
+      "line_count": 873,
+      "path": "src/io/linux/watch/cqe.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1059,
+      "path": "tests/test_connect_io.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 2694,
+      "path": "tests/test_io_buffers.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 4685,
+      "path": "tests/test_multi_runtime_core.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 6350,
+      "path": "tests/test_runtime_api_edges.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 6721,
+      "path": "tests/test_runtime_core.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 800,
+      "path": "tests/test_runtime_fuzz.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1115,
+      "path": "tests/test_runtime_group_local_edges.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 8063,
+      "path": "tests/test_runtime_shutdown_internal.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1017,
+      "path": "tests/test_runtime_stress.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 16422,
+      "path": "tests/test_security_capability.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1051,
+      "path": "tests/test_sync_primitives.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 1301,
+      "path": "tests/test_windows_iocp_io.c"
+    }
+  ],
+  "schema": "llam.c-structure-baseline.v1"
+}

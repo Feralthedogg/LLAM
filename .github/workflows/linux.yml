@@ -3,6 +3,10 @@
 
 name: linux
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+  LLAM_CI_VERSION: "2.2.1"
+
 on:
   push:
     branches:
@@ -21,9 +25,6 @@ on:
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
-env:
-  LLAM_CI_VERSION: "2.2.1"
-
 concurrency:
   group: linux-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -34,7 +35,19 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Verify C structure ratchet
+        run: make audit-c-structure
+
+      - name: Verify license headers
+        run: make audit-license-headers
+
+      - name: Audit build manifests
+        run: python3 scripts/audit_build_manifests.py --root . --check
+
+      - name: Verify CI supply-chain policy
+        run: make test-ci-supply-chain
 
       - name: Install packages
         run: |
@@ -104,7 +117,7 @@ jobs:
             package_target: linux-x86_64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install packages
         run: |
@@ -155,7 +168,7 @@ jobs:
       - name: CMake build
         if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: |
-          cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc
+          cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/linux
           # The Make-based Verify Linux step above owns the full runtime suite.
           # Keep CMake here as a build/package smoke so a single ctest hang does

@@ -179,7 +179,11 @@ def test_stress_rejects_parent_symlink(stress: Path) -> None:
         child_env.update(
             {
                 "LLAM_STRESS_ROUNDS": "1",
+                # Keep the workload alive for signal delivery without
+                # exercising unrelated dynamic-worker scaling assertions.
+                "LLAM_STRESS_DYNAMIC_PHASE": "1",
                 "LLAM_STRESS_DYNAMIC_ROUNDS": "1",
+                "LLAM_EXPERIMENTAL_DYNAMIC_WORKERS": "0",
                 "LLAM_RUNTIME_DUMP_ON_SIGNAL": str(diag_link / "dump.txt"),
             }
         )

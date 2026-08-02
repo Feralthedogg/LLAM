@@ -31,7 +31,9 @@
 #include <immintrin.h>
 #endif
 
-#if defined(__linux__) && LLAM_ARCH_X86_64 && (defined(__GNUC__) || defined(__clang__))
+#if defined(__linux__) && LLAM_ARCH_X86_64 && \
+    (defined(__GNUC__) || defined(__clang__)) && \
+    !LLAM_ASAN_FIBER_ENABLED
 #define LLAM_WATCHDOG_HAVE_AVX512 1
 #else
 #define LLAM_WATCHDOG_HAVE_AVX512 0
@@ -280,7 +282,12 @@ static bool llam_runtime_has_external_sync_waiters(llam_runtime_t *rt) {
  */
 void *llam_ctrl_worker_main(void *arg) {
     llam_runtime_t *rt = arg;
+    bool thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->controller_threads_live);
 
+    if (!thread_counted) {
+        return NULL;
+    }
     llam_tune_ctrl_thread();
 
     for (;;) {
@@ -316,6 +323,7 @@ void *llam_ctrl_worker_main(void *arg) {
             llam_watchdog_check_shard(&rt->shards[i], now_ns);
         }
 
+        llam_stack_cache_maintain(rt, now_ns);
         llam_runtime_nudge_marked_watch_migrations(rt);
         llam_runtime_adjust_online_shards(rt);
         llam_watchdog_autotune_tick(rt, now_ns);
@@ -363,5 +371,6 @@ void *llam_ctrl_worker_main(void *arg) {
         }
     }
 
+    llam_runtime_native_thread_exit(rt, &rt->controller_threads_live);
     return NULL;
 }

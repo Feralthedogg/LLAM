@@ -26,6 +26,42 @@
 
 #include "runtime_internal.h"
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static _Atomic(llam_io_inflight_owner_published_hook_fn)
+    g_llam_io_inflight_owner_published_hook;
+
+void llam_io_test_set_inflight_owner_published_hook(
+    llam_io_inflight_owner_published_hook_fn hook) {
+    atomic_store_explicit(
+        &g_llam_io_inflight_owner_published_hook,
+        hook,
+        memory_order_release);
+}
+
+static void llam_io_test_inflight_owner_published(
+    llam_io_req_t *req,
+    unsigned from_shard,
+    unsigned to_shard) {
+    llam_io_inflight_owner_published_hook_fn hook =
+        atomic_load_explicit(
+            &g_llam_io_inflight_owner_published_hook,
+            memory_order_acquire);
+
+    if (hook != NULL) {
+        hook(req, from_shard, to_shard);
+    }
+}
+#else
+static void llam_io_test_inflight_owner_published(
+    llam_io_req_t *req,
+    unsigned from_shard,
+    unsigned to_shard) {
+    (void)req;
+    (void)from_shard;
+    (void)to_shard;
+}
+#endif
+
 /*
  * Numeric descriptors are process-global and may be reused immediately after
  * close.  Serialize the short watch attach/migration critical sections with
@@ -123,13 +159,16 @@ void llam_io_control_op_destroy(llam_node_t *node, llam_io_control_op_t *op) {
     free(op);
 }
 
-void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta) {
+static bool llam_shard_try_note_inflight_io_waiter(
+    llam_runtime_t *rt,
+    unsigned owner_shard,
+    int delta) {
     atomic_uint *counter;
     unsigned amount;
     unsigned current;
 
     if (rt == NULL || delta == 0 || owner_shard >= rt->active_shards) {
-        return;
+        return delta == 0;
     }
     counter = &rt->shards[owner_shard].inflight_io_waiters;
     if (delta > 0) {
@@ -138,14 +177,14 @@ void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard
         for (;;) {
             if (UINT_MAX - current < amount) {
                 llam_record_fatal_deferred(rt, EOVERFLOW);
-                return;
+                return false;
             }
             if (atomic_compare_exchange_weak_explicit(counter,
                                                       &current,
                                                       current + amount,
                                                       memory_order_acq_rel,
                                                       memory_order_acquire)) {
-                return;
+                return true;
             }
         }
     }
@@ -160,16 +199,24 @@ void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard
              * instead of wrapping to UINT_MAX and poisoning later decisions.
              */
             llam_record_fatal_deferred(rt, EINVAL);
-            return;
+            return false;
         }
         if (atomic_compare_exchange_weak_explicit(counter,
                                                   &current,
                                                   current - amount,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
-            return;
+            return true;
         }
     }
+}
+
+void llam_shard_note_inflight_io_waiter(
+    llam_runtime_t *rt,
+    unsigned owner_shard,
+    int delta) {
+    (void)llam_shard_try_note_inflight_io_waiter(
+        rt, owner_shard, delta);
 }
 
 bool llam_node_note_pending_ops(llam_node_t *node, unsigned amount) {
@@ -264,6 +311,7 @@ bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrem
     return true;
 }
 
+#if LLAM_BUILD_RESEARCH
 bool llam_io_dispatch_completion_sink(llam_node_t *node,
                                       llam_io_req_t *req,
                                       unsigned completion_owner,
@@ -281,6 +329,7 @@ bool llam_io_dispatch_completion_sink(llam_node_t *node,
                 wake_reason,
                 req->completion_sink_context);
 }
+#endif
 
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard) {
     unsigned expected;
@@ -291,16 +340,38 @@ bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard
         return false;
     }
 
+    /*
+     * Completion may consume an owner as soon as it is published. Provision
+     * the target credit first so every observable owner has a counter unit
+     * available for that consumer.
+     */
+    if (!llam_shard_try_note_inflight_io_waiter(
+            rt, to_shard, 1)) {
+        return false;
+    }
     expected = from_shard;
     if (!atomic_compare_exchange_strong_explicit(&req->inflight_owner_shard,
                                                  &expected,
                                                  to_shard,
                                                  memory_order_acq_rel,
                                                  memory_order_acquire)) {
+        /*
+         * Completion or another owner transition won before publication.
+         * The provisional target credit was never externally spendable.
+         */
+        (void)llam_shard_try_note_inflight_io_waiter(
+            rt, to_shard, -1);
         return false;
     }
-    llam_shard_note_inflight_io_waiter(rt, from_shard, -1);
-    llam_shard_note_inflight_io_waiter(rt, to_shard, 1);
+    llam_io_test_inflight_owner_published(
+        req, from_shard, to_shard);
+    /*
+     * A post-publication source-accounting failure is fatal, but it is still a
+     * completed owner move. Returning false would make the caller retain stale
+     * source task ownership after the request already names the target.
+     */
+    (void)llam_shard_try_note_inflight_io_waiter(
+        rt, from_shard, -1);
     return true;
 }
 

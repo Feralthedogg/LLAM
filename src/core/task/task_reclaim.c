@@ -385,9 +385,14 @@ void llam_free_task(llam_task_t *task) {
         pthread_mutex_unlock(&task->cancel_token->lock);
         llam_cancel_token_release_task_ref(task->cancel_token);
     }
+    llam_sanitizer_task_fiber_destroy(task);
     llam_ctx_destroy_fp_state(&task->ctx);
     if (task->stack_mapping != NULL && task->mapping_size != 0U) {
-        (void)munmap(task->stack_mapping, task->mapping_size);
+        llam_stack_mapping_release_or_quarantine(task->owner_runtime,
+                                                 task->stack_mapping,
+                                                 task->mapping_size);
+        task->stack_mapping = NULL;
+        task->mapping_size = 0U;
     }
     llam_task_allocator_free(task);
 }

@@ -91,20 +91,200 @@ Operational knobs:
 - `LLAM_SAFEPOINT_CLOCK_PERIOD` controls cheap-safepoint clock sampling and can
   reduce timestamp overhead in very hot loops.
 
+`LLAM_SPAWN_F_PINNED` is a hard logical-shard affinity contract. A pinned task
+executes only on the home shard assigned at spawn; steal, overflow, rehome,
+opaque redirect, and direct handoff paths cannot move its execution elsewhere.
+The contract does not promise one stable pthread or physical CPU: an opaque
+helper may drive the same logical shard, and the runtime's CPU-affinity policy
+remains separately configurable. While a shard's primary worker is inside
+opaque foreign code, pinned work on that shard may wait until the same-shard
+helper takes over or the blocking region returns.
+
 ## 5. Memory and Stack Pressure
 
 Stackful tasks are fast only when task metadata and stacks are reused. For
 high-fanout workloads, prewarm caches during service startup:
 
 ```bash
-LLAM_TASK_CACHE_PREWARM=65536 \
-LLAM_STACK_CACHE_PREWARM=8192 \
+LLAM_TASK_CACHE_PREWARM_TOTAL=65536 \
+LLAM_STACK_CACHE_PREWARM_TOTAL=2048 \
+LLAM_TIMER_HEAP_PREWARM_TOTAL=65536 \
 ./service
 ```
+
+The `_TOTAL` variables are runtime-wide and best-effort. Check the requested
+and achieved prewarm counters in `llam_runtime_stats_t` before treating startup
+capacity as an operational guarantee. Embedders that require exact startup
+capacity should use the corresponding size-aware `llam_runtime_opts_t` fields;
+an allocation shortfall then fails initialization and rolls back the partial
+runtime. The older names remain compatibility inputs and should not be used in
+new deployment configuration.
 
 Use larger stack classes only for known deep C call chains. Enable
 `LLAM_STACK_SAMPLING=1` during staging to catch near-overflow behavior, then
 disable it for release benchmarking unless diagnostics are required.
+
+## 5.1 Runtime Resource Governance
+
+Every explicit runtime owns scheduler capacity, platform I/O/controller
+threads, a blocking pool, and prewarm allocations. Defaults are convenient for
+a single runtime but intentionally scale with the process-allowed CPU set.
+Hosts that create multiple runtimes should therefore budget each instance
+explicitly before initialization.
+
+```c
+uint32_t cpus[] = {6U, 2U}; /* Must be unique and process-allowed. */
+llam_runtime_opts_t opts;
+llam_runtime_t *runtime = NULL;
+
+llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+opts.worker_min = 2U;
+opts.worker_count = 2U;
+opts.worker_max = 2U;
+opts.blocking_min = 0U;
+opts.blocking_max = 8U;
+opts.affinity_policy = LLAM_RUNTIME_AFFINITY_PREFER;
+opts.cpu_count = 2U;
+opts.cpu_ids = cpus;
+opts.task_prewarm_total = 4096U;
+opts.stack_prewarm_total = 256U;
+opts.timer_prewarm_total = 4096U;
+
+if (llam_runtime_create(
+        &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    /* No initialized runtime was published; errno names the rejected plan. */
+}
+```
+
+The CPU array is copied synchronously, so it need not outlive
+`llam_runtime_create()`. CPU order becomes worker order. A nonzero
+`worker_count` with both bounds left at zero is shorthand for a fixed worker
+count. When all worker fields are zero, static mode uses every selected CPU;
+deterministic mode resolves to one worker; an explicit or experimental dynamic
+range starts at `worker_count`, never drops below `worker_min`, and allocates up
+to `worker_max`.
+
+When both blocking fields are zero, compatibility defaults are fixed:
+Linux uses `min(worker_count, 4)` with a floor of one; other platforms use
+`max(worker_count, 2)`. To avoid startup blocking threads, set
+`blocking_min=0` and a nonzero `blocking_max`. Each enqueue can grow the pool by
+at most one worker when queued pressure exceeds confirmed workers. If the first
+worker cannot be created, the submission is rolled back; after one worker
+exists, later growth failure leaves that worker to drain the queue.
+
+`LLAM_RUNTIME_AFFINITY_NONE` never changes the host. `PREFER` continues after
+unsupported/apply/restore errors and increments `affinity_failures`.
+`REQUIRE` rejects an unsupported platform during initialization or returns the
+exact affinity error from the run call. On Linux, the shard-0 driver mask is
+restored before every run return; affinity failures should still be treated as
+an operational incident because a failed restore can leave the host thread
+with a narrower mask.
+
+Export these fields per runtime:
+
+- configured worker/blocking min, initial count, and maximum;
+- live scheduler, blocking, I/O, controller, and opaque-helper threads;
+- `runtime_owned_threads` and host-inclusive `native_execution_threads`;
+- selected CPU count, affinity policy, and affinity failure count;
+- requested/achieved prewarm totals, source authority, and byte estimates.
+
+Before accepting an embedding budget, test the aggregate of all runtime
+instances, not just `configured_worker_max`. I/O/controller roles exist after
+initialization, blocking workers may grow later, and the host contributes one
+execution thread only while it drives shard 0.
+
+## 5.2 External Event-Loop Driving
+
+Set `driver_mode=LLAM_RUNTIME_DRIVER_EXTERNAL` when the host event loop must
+own scheduler progress. This mode resolves exactly one scheduler shard, rejects
+dynamic-worker and SQPOLL CPU-reservation policies, disables every direct
+task-to-task handoff, and makes `llam_runtime_run_handle()` fail with
+`ENOTSUP`. I/O, blocking-pool, and controller helper threads remain
+runtime-owned; only task-segment dispatch is host-driven.
+
+```c
+llam_runtime_opts_t opts;
+llam_runtime_t *runtime = NULL;
+
+llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+opts.driver_mode = LLAM_RUNTIME_DRIVER_EXTERNAL;
+opts.blocking_min = 0U;
+opts.blocking_max = 4U;
+llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime);
+
+for (;;) {
+    uint32_t result;
+    uint64_t deadline;
+    llam_runtime_readiness_t ready;
+
+    if (llam_runtime_drive_once(runtime, &result) != 0) {
+        /* EBUSY means another host thread currently owns the drive token. */
+        break;
+    }
+    if (result == LLAM_RUNTIME_DRIVE_DONE) {
+        break;
+    }
+    llam_runtime_next_deadline(runtime, &deadline);
+    llam_runtime_get_readiness(runtime, &ready, sizeof(ready));
+    host_wait(ready, deadline);
+}
+```
+
+Each successful `drive_once` avoids the scheduler's idle wait and executes at
+most one managed task segment. The bound ends at the task's next cooperative
+boundary, so opaque blocking code or a task that never yields can still occupy
+the host thread; use asynchronous I/O or the blocking-callback API when the
+host loop requires a wall-clock responsiveness bound. `PROGRESS` means
+scheduler state advanced, `IDLE` means live work exists but no task is currently
+runnable, and `DONE` means the live-task set is empty. A cleanly drained runtime
+is reusable: a later
+`llam_runtime_spawn_ex()` can publish work and the host can drive it again.
+
+`next_deadline` returns an absolute `llam_now_ns()` value or `UINT64_MAX`.
+The readiness value is a borrowed nonblocking fd on POSIX and a borrowed
+manual-reset event handle on Windows. The runtime owns and closes it; the host
+must never close, reset, duplicate ownership of, or use it after runtime
+destruction. The host should wait for either native readiness or the reported
+deadline, then call `drive_once` again. `llam_runtime_wake()` provides an
+explicit cross-thread notification.
+
+Only one host thread may drive a runtime at a time, but successive calls may
+come from different unmanaged threads. Tasks may therefore migrate between
+those host threads. `LLAM_SPAWN_F_PINNED` constrains logical-shard placement;
+it does not bind external drive calls to one native thread. Calls from a managed
+task or switch-hook/scheduler callback fail with `ENOTSUP`; concurrent
+unmanaged drive calls fail with `EBUSY`.
+
+## 5.3 Stack Cache Memory Governance
+
+Retained fiber stacks are charged to their owning runtime in mapping bytes,
+including guard pages. The defaults are a 512 MiB budget, 384 MiB automatic
+trim trigger, 256 MiB post-trigger target, and 30-second idle age. Multi-runtime
+hosts should set smaller per-instance values explicitly.
+
+```c
+opts.stack_cache_budget_bytes = 128ULL * 1024ULL * 1024ULL;
+opts.stack_cache_high_watermark_bytes = 96ULL * 1024ULL * 1024ULL;
+opts.stack_cache_low_watermark_bytes = 64ULL * 1024ULL * 1024ULL;
+opts.stack_cache_idle_ns = 10ULL * 1000ULL * 1000ULL * 1000ULL;
+opts.stack_cache_flags = LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN;
+```
+
+Call `llam_runtime_stack_cache_trim_ex(runtime, target, &released)` for an
+operator-requested ceiling. Forward a host/container memory-pressure event to
+`llam_runtime_notify_memory_pressure(runtime)` to trim currently retained
+mappings toward zero. Neither call cancels tasks or releases task-owned stacks.
+A platform release error leaves the detached mapping charged to the runtime;
+retry the trim after addressing the platform failure.
+
+Alert on sustained budget rejections or secure-return failures. Compare exact
+`stack_cache_cached_bytes`, `stack_cache_cached_mappings`, and
+`stack_cache_committed_bytes` with cumulative trim/discard/release counters.
+Resident bytes are sampled only when `stack_cache_resident_valid` is set; a
+zero value with validity unset means “not sampled,” not “zero RSS.”
+If shutdown cannot release a retained mapping, ownership moves to the
+process-wide quarantine and is retried at the next runtime initialization.
+Alert while `stack_cache_process_quarantine_mappings` remains nonzero.
 
 ## 6. Platform Differences
 
@@ -318,8 +498,10 @@ manual reproduction pass.
 
 Minimum production counters to export are `ctx_switches`, `parks`, `wakes`,
 `io_submits`, `io_submit_syscalls`, `io_completions`, `active_workers`,
-`online_workers`, `queue_overflows`, `overflow_depth`, and opaque blocking
-duration counters.
+`online_workers`, `configured_worker_max`, `runtime_owned_threads`,
+`native_execution_threads`, `affinity_failures`, requested/achieved prewarm
+totals, `queue_overflows`, `overflow_depth`, and opaque blocking duration
+counters.
 
 ## 8.1 Bug-Hunter Validation Profile
 

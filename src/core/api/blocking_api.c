@@ -224,6 +224,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_cancel_token_t *token;
     llam_block_job_t *job;
     llam_wait_node_t *node;
+    bool pending_reserved;
     int wake_error;
 
     llam_task_safepoint();
@@ -340,9 +341,16 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     }
 
     pthread_mutex_lock(&rt->block_lock);
-    if (!llam_runtime_note_block_pending(rt, 1U)) {
+    pending_reserved = llam_runtime_note_block_pending(rt, 1U);
+    if (!pending_reserved ||
+        llam_block_pool_ensure_capacity_locked(
+            rt,
+            atomic_load_explicit(&rt->block_pending, memory_order_acquire)) != 0) {
         int saved_errno = errno;
 
+        if (pending_reserved) {
+            (void)llam_runtime_complete_block_pending(rt, 1U);
+        }
         pthread_mutex_unlock(&rt->block_lock);
         if (token != NULL) {
             if (task->cancel_registered) {
@@ -460,12 +468,15 @@ int llam_enter_blocking(void) {
 
     if (task->opaque_blocking_depth == 0U) {
         timing = llam_opaque_timing_enabled();
-        task->opaque_block_started_ns = timing ? llam_now_ns() : 0U;
+        g_llam_tls_opaque_block_started_ns =
+            timing ? llam_now_ns() : 0U;
         task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
         task->wait_reason = LLAM_WAIT_BLOCKING;
         task->opaque_uses_helper = false;
         task->opaque_uses_redirect = false;
-        from_primary = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
+        from_primary =
+            !shard->runtime->external_driver.enabled &&
+            g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
         prefer_redirect = from_primary &&
                           shard->runtime->active_shards > 1U &&
                           (llam_opaque_redirect_fastpath_enabled() || g_llam_tls_opaque_redirect_hint != 0U);
@@ -585,19 +596,13 @@ int llam_leave_blocking(void) {
         uint64_t leave_wait_ns = 0U;
         uint64_t leave_wait_start_ns = 0U;
 
-        if (timing && task->opaque_block_started_ns > 0U && now_ns >= task->opaque_block_started_ns) {
-            block_ns = now_ns - task->opaque_block_started_ns;
+        if (timing && g_llam_tls_opaque_block_started_ns > 0U &&
+            now_ns >= g_llam_tls_opaque_block_started_ns) {
+            block_ns = now_ns - g_llam_tls_opaque_block_started_ns;
         }
-        task->opaque_block_started_ns = 0U;
+        g_llam_tls_opaque_block_started_ns = 0U;
         task->opaque_uses_helper = false;
         task->opaque_uses_redirect = false;
-        task->opaque_block_count += 1U;
-        if (timing) {
-            task->last_opaque_block_ns = block_ns;
-        }
-        if (timing && block_ns > task->max_opaque_block_ns) {
-            task->max_opaque_block_ns = block_ns;
-        }
 
         pthread_mutex_lock(&shard->opaque_lock);
         helper_started = shard->opaque_helper_thread_started;

@@ -27,10 +27,11 @@
 
 #ifndef LLAM_RUNTIME_TYPES_H
 #define LLAM_RUNTIME_TYPES_H
-
 #include "llam_internal.h"
+#include "runtime_external_driver.h"
 #include "runtime_platform.h"
-
+#include "runtime_resource_plan.h"
+#include "runtime_signal.h"
 #define LLAM_WAIT_RESOLVER_CLOSED_BIT (UINT_MAX - (UINT_MAX >> 1U))
 #define LLAM_WAIT_RESOLVER_REF_MASK (UINT_MAX >> 1U)
 
@@ -152,8 +153,6 @@ typedef struct llam_cpu_set {
 #define LLAM_TASK_SLAB_COUNT 16U
 /** Number of wait nodes allocated per wait-node slab. */
 #define LLAM_WAIT_NODE_SLAB_COUNT 64U
-/** Number of multi-channel select wait nodes embedded in each task. */
-#define LLAM_TASK_EMBEDDED_SELECT_NODES 4U
 /** Number of timer nodes allocated per timer-node slab. */
 #define LLAM_TIMER_NODE_SLAB_COUNT 64U
 /** Number of I/O requests allocated per request slab. */
@@ -207,8 +206,18 @@ typedef struct llam_task_local_entry llam_task_local_entry_t;
 typedef struct llam_channel_select_state llam_channel_select_state_t;
 /** @brief Synchronization wait node shared by wait/wake handshakes. */
 typedef struct llam_wait_node llam_wait_node_t;
+
 /** @brief One recyclable logical I/O operation. */
 struct llam_io_req;
+#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
+/** @brief One backend-native compiled Linux effect segment. */
+struct llam_linux_native_segment;
+/** @brief One owner ticket for a bounded native segment batch. */
+struct llam_linux_native_batch;
+#endif
+#endif
+#if LLAM_BUILD_RESEARCH
 /** @brief Trusted internal consumer for a normalized I/O completion. */
 typedef bool (*llam_io_completion_sink_fn)(
     llam_node_t *node,
@@ -216,6 +225,7 @@ typedef bool (*llam_io_completion_sink_fn)(
     unsigned completion_owner,
     llam_wait_reason_t *wake_reason,
     void *context);
+#endif
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
 typedef struct llam_queue {
@@ -231,26 +241,9 @@ typedef struct llam_cldeque {
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_task_t *) buffer[LLAM_NORM_QUEUE_CAP];
 } llam_cldeque_t;
 
-/** @brief Compact scheduler trace event stored in a per-shard ring buffer. */
-typedef struct llam_trace_event {
-    atomic_uint_fast64_t ts_ns;
-    atomic_uint_fast64_t task_id;
-    atomic_uint kind;
-    atomic_uint from_state;
-    atomic_uint to_state;
-    atomic_uint reason;
-    atomic_uint shard;
-} llam_trace_event_t;
+#include "runtime_trace_types.h"
 
-/** @brief Metadata for a cached stack mapping and its usable stack range. */
-struct llam_stack_cache_entry {
-    void *mapping;
-    size_t mapping_size;
-    void *stack_base;
-    size_t stack_size;
-    llam_stack_cache_entry_t *next;
-    bool heap_allocated;
-};
+#include "runtime_stack_cache_types.h"
 
 /** @brief Backing allocation tracked for allocator teardown. */
 typedef struct llam_alloc_chunk {
@@ -406,6 +399,11 @@ enum {
 typedef struct llam_autotune_control {
     atomic_uint mode;
     atomic_uint phase;
+    atomic_uint_fast64_t recognized_domains;
+    atomic_uint_fast64_t observable_domains;
+    atomic_uint_fast64_t controllable_domains;
+    atomic_uint_fast64_t active_observation_domains;
+    atomic_uint_fast64_t active_control_domains;
     atomic_uint_fast64_t supported_domains;
     atomic_uint_fast64_t active_domains;
     atomic_uint_fast64_t suspended_domains;
@@ -573,8 +571,15 @@ typedef struct llam_io_req {
     uint64_t deadline_ns;
     unsigned short provided_bid;
     void *platform_data;
+#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
+    _Atomic(struct llam_linux_native_batch *) linux_native_batch;
+#endif
+#endif
+#if LLAM_BUILD_RESEARCH
     llam_io_completion_sink_fn completion_sink;
     void *completion_sink_context;
+#endif
     atomic_uint wait_mode;
     atomic_uint abort_reason;
     /* Unique nonzero identity for this activation of recyclable request storage. */
@@ -775,7 +780,7 @@ struct llam_recv_watch {
     llam_recv_watch_t *next;
 };
 
-/** @brief Timer heap node embedded in tasks when possible and allocated otherwise. */
+/** @brief Timer heap node allocated from a shard-owned recyclable pool. */
 typedef struct llam_timer_node {
     llam_runtime_t *owner_runtime;
     llam_task_t *task;
@@ -972,11 +977,19 @@ struct llam_task {
     llam_task_group_t *owning_group;
     llam_task_fn entry;
     void *arg;
+    void *user_context;
+    void *context_slots[LLAM_TASK_CONTEXT_SLOT_COUNT];
     _Alignas(16) llam_ctx_t ctx;
     void *stack_mapping;
     size_t mapping_size;
     void *stack_base;
     size_t stack_size;
+#if LLAM_ASAN_FIBER_ENABLED
+    void *asan_fake_stack;
+#endif
+#if LLAM_TSAN_FIBER_ENABLED
+    void *tsan_fiber;
+#endif
     llam_stack_cache_entry_t stack_cache_entry;
     pthread_mutex_t lock;
     bool lock_initialized;
@@ -994,8 +1007,6 @@ struct llam_task {
     llam_task_t *wait_next;
     llam_task_t *cancel_next;
     llam_task_t *cancel_prev;
-    llam_wait_node_t embedded_wait_node;
-    llam_wait_node_t embedded_select_nodes[LLAM_TASK_EMBEDDED_SELECT_NODES];
     /*
      * Wait ownership is mutated by the scheduler thread that parked the task
      * and can be sampled or cleared by runtime-stop, timeout, cancellation, and
@@ -1022,20 +1033,16 @@ struct llam_task {
     atomic_uint_fast64_t active_io_generation;
     _Atomic(llam_block_job_t *) active_block_job;
     llam_task_local_entry_t *task_locals;
-    bool cancel_registered;
-    bool handoff_sample_current;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
+    bool cancel_registered;
+    bool public_owner_pinned;
+    bool handoff_sample_current;
     bool alloc_external_pool;
+    bool recent_explicit_yield;
+    bool opaque_uses_helper;
+    bool opaque_uses_redirect;
     uint64_t last_runnable_ns;
-    uint64_t last_yield_ns;
-    uint64_t last_started_ns;
-    uint64_t last_run_ns;
-    uint64_t total_run_ns;
-    uint64_t opaque_block_started_ns;
-    uint64_t last_opaque_block_ns;
-    uint64_t max_opaque_block_ns;
-    uint64_t opaque_block_count;
     void *blocking_result;
     int saved_errno;
     int blocking_errno;
@@ -1045,13 +1052,10 @@ struct llam_task {
      */
     atomic_int wake_error_code;
     atomic_uint opaque_blocking_depth;
-    bool opaque_uses_helper;
-    bool opaque_uses_redirect;
     unsigned safepoint_tick;
     unsigned preempt_poll_tick;
     _Atomic size_t last_stack_used;
     _Atomic size_t stack_high_water;
-    llam_timer_node_t embedded_timer_node;
     llam_timer_node_t *active_timer;
     atomic_uint preempt_requested;
     atomic_uint completed;
@@ -1062,6 +1066,11 @@ struct llam_task {
     unsigned join_waiter_count_at_exit;
     unsigned forced_yield_budget;
 };
+
+#define LLAM_TASK_LAYOUT_BUDGET_BYTES \
+    (LLAM_PLATFORM_WINDOWS ? 1280U : 1120U)
+_Static_assert(sizeof(llam_task_t) <= LLAM_TASK_LAYOUT_BUDGET_BYTES,
+               "llam_task_t exceeds its hot-task layout budget");
 
 /** @brief Intrusive task-local storage value linked from its owning task. */
 struct llam_task_local_entry {
@@ -1128,10 +1137,6 @@ struct llam_shard {
 #endif
     pthread_t opaque_helper_thread;
     pthread_t primary_thread;
-    void *signal_stack;
-    size_t signal_stack_size;
-    stack_t previous_sigaltstack;
-    bool sigaltstack_installed;
     bool opaque_helper_thread_started;
     bool opaque_helper_ready;
     bool opaque_helper_active;
@@ -1152,7 +1157,7 @@ struct llam_shard {
     atomic_uint inject_depth;
     llam_queue_t hot_q;
     llam_queue_t norm_q;
-    llam_cldeque_t norm_cldeque;
+    llam_cldeque_t *norm_cldeque;
     llam_task_t *all_tasks;
     llam_timer_node_t *timers;
     llam_timer_node_t **timer_heap;
@@ -1174,6 +1179,7 @@ struct llam_shard {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
     atomic_uint_fast64_t last_safepoint_ns;
     atomic_uint_fast64_t last_run_started_ns;
+    uint64_t current_started_ns;
     uint64_t last_idle_wake_ns;
     uint64_t next_task_seq;
     atomic_uint norm_depth;
@@ -1184,9 +1190,14 @@ struct llam_shard {
     bool autotune_handoff_sample_current;
     llam_allocator_t allocator;
     llam_metrics_t metrics;
-    llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
+    llam_trace_event_t *trace_ring;
     atomic_uint trace_head;
 };
+
+#define LLAM_SHARD_LAYOUT_BUDGET_BYTES \
+    (LLAM_PLATFORM_WINDOWS ? 8192U : 4096U)
+_Static_assert(sizeof(llam_shard_t) <= LLAM_SHARD_LAYOUT_BUDGET_BYTES,
+               "llam_shard_t exceeded its hot-layout budget");
 
 /**
  * @brief I/O node.  Nodes own the platform event backend (io_uring on Linux, kqueue
@@ -1235,13 +1246,16 @@ struct llam_node {
     unsigned windows_accept_socket_free_max;
     unsigned windows_accept_prepost;
     unsigned windows_poll_timeout_ms;
+    uint64_t windows_assoc_generation;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t submit_lock;
     pthread_mutex_t windows_assoc_lock;
+    pthread_mutex_t windows_op_pool_lock;
     pthread_mutex_t watch_lock;
     pthread_mutex_t recv_buf_lock;
     bool submit_lock_initialized;
     bool windows_assoc_lock_initialized;
+    bool windows_op_pool_lock_initialized;
     bool watch_lock_initialized;
     bool recv_buf_lock_initialized;
     llam_io_req_t *submit_head;
@@ -1251,6 +1265,35 @@ struct llam_node {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_io_control_op_t *linux_backend_control_head;
     llam_io_control_op_t *linux_backend_control_tail;
+#if LLAM_BUILD_RESEARCH
+    struct llam_linux_native_batch *native_batch_head;
+    struct llam_linux_native_batch *native_batch_tail;
+    struct llam_linux_native_batch *native_cancel_head;
+    struct llam_linux_native_batch *native_cancel_tail;
+    pthread_mutex_t native_resource_lock;
+    bool native_resource_lock_initialized;
+    bool supports_native_fixed_files;
+    bool supports_native_fixed_buffers;
+    bool native_fixed_files_registered;
+    bool native_fixed_buffers_registered;
+    uint64_t native_fixed_file_bitmap;
+    uint64_t native_fixed_buffer_bitmap;
+    struct llam_linux_native_resource_lease
+        *native_resource_leases;
+    int (*native_files_update_override)(
+        struct llam_node *node,
+        unsigned offset,
+        const int *files,
+        unsigned count,
+        void *arg);
+    int (*native_buffers_update_override)(
+        struct llam_node *node,
+        unsigned offset,
+        const struct iovec *buffers,
+        unsigned count,
+        void *arg);
+    void *native_resource_update_override_arg;
+#endif
 #endif
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;
@@ -1267,6 +1310,8 @@ struct llam_node {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint pending_ops;
     bool sqpoll_enabled;
 #if LLAM_RUNTIME_BACKEND_LINUX
+    uint32_t linux_ring_features;
+    bool linux_submit_all;
     bool linux_submit_retry;
     bool linux_submit_terminal;
     int (*linux_submit_override)(struct llam_node *node,
@@ -1304,6 +1349,10 @@ struct llam_node {
  */
 struct llam_runtime {
     llam_runtime_t *registry_next;
+    size_t public_handle_slot;
+    size_t public_owner_refs;
+    uint32_t public_handle_generation;
+    bool retired_storage;
     uint64_t runtime_id;
     uint64_t public_handle_secret;
     bool heap_allocated;
@@ -1311,6 +1360,19 @@ struct llam_runtime {
     _Atomic size_t active_ops;
     atomic_bool initialized;
     atomic_bool exec_started;
+    llam_external_driver_state_t external_driver;
+    llam_runtime_resource_plan_t resource_plan;
+    uint64_t requested_task_prewarm_total;
+    uint64_t achieved_task_prewarm_total;
+    uint64_t requested_stack_prewarm_total;
+    uint64_t achieved_stack_prewarm_total;
+    uint64_t requested_timer_prewarm_total;
+    uint64_t achieved_timer_prewarm_total;
+    uint64_t estimated_metadata_bytes;
+    uint64_t estimated_stack_mapping_bytes;
+    unsigned task_prewarm_source;
+    unsigned stack_prewarm_source;
+    unsigned timer_prewarm_source;
     unsigned observed_shards;
     unsigned active_shards;
     atomic_uint online_shards;
@@ -1320,6 +1382,11 @@ struct llam_runtime {
     unsigned active_nodes;
     unsigned deterministic;
     unsigned forced_yield_every;
+    llam_task_switch_hook_fn on_task_resume;
+    llam_task_switch_hook_fn on_task_suspend;
+    void *switch_hook_context;
+    unsigned signal_flags;
+    int preempt_signal;
     unsigned experimental_shard_rings;
     unsigned experimental_shard_rings_multishot;
     unsigned experimental_dynamic_shards;
@@ -1346,28 +1413,58 @@ struct llam_runtime {
     unsigned idle_spin_max_iters;
     atomic_uint next_spawn_shard;
     unsigned block_worker_count;
-    unsigned block_threads_started;
-    pthread_t init_thread;
-    llam_cpu_set_t init_thread_affinity;
-    bool init_thread_affinity_valid;
+    atomic_uint block_threads_started;
+    atomic_uint block_threads_entered;
+    atomic_uint block_threads_exited;
+    atomic_uint block_threads_live;
+    atomic_uint block_thread_create_failures;
+    atomic_uint scheduler_threads_live;
+    atomic_uint io_threads_live;
+    atomic_uint controller_threads_live;
+    atomic_uint opaque_helper_threads_live;
+    atomic_uint host_threads_live;
+    atomic_uint_fast64_t affinity_failures;
+    atomic_uint stack_cache_account_writer;
+    atomic_uint_fast64_t stack_cache_account_seq;
+    atomic_uint_fast64_t stack_cache_cached_bytes;
+    atomic_uint_fast64_t stack_cache_cached_mappings;
+    atomic_uint_fast64_t stack_cache_committed_bytes;
+    atomic_uint_fast64_t stack_cache_trim_requests;
+    atomic_uint_fast64_t stack_cache_discarded_bytes;
+    atomic_uint_fast64_t stack_cache_released_bytes;
+    atomic_uint_fast64_t stack_cache_budget_rejections;
+    atomic_uint_fast64_t stack_cache_secure_return_failures;
+    atomic_uint_fast64_t stack_cache_resident_bytes;
+    atomic_uint_fast64_t stack_cache_resident_sample_ns;
+    atomic_uint_fast64_t stack_cache_last_idle_scan_ns;
+    atomic_uint stack_cache_resident_valid;
+    pthread_t driver_thread;
+    llam_cpu_set_t driver_affinity;
+    bool driver_affinity_valid;
+    bool driver_affinity_capture_attempted;
     unsigned *allowed_cpus;
     unsigned *kernel_node_ids;
     llam_shard_t *shards;
+    llam_cldeque_t *norm_cldeques;
+    llam_trace_event_t *trace_events;
     llam_node_t *nodes;
     pthread_t *block_threads;
     pthread_t ctrl_thread;
     bool ctrl_thread_started;
     bool task_list_lock_initialized;
     bool stack_cache_lock_initialized;
+    bool stack_cache_trim_lock_initialized;
     bool block_lock_initialized;
     bool overflow_lock_initialized;
     pthread_mutex_t task_list_lock;
     pthread_mutex_t stack_cache_lock;
+    pthread_mutex_t stack_cache_trim_lock;
     llam_task_t *all_tasks;
     llam_stack_cache_entry_t *stack_cache_default;
     llam_stack_cache_entry_t *stack_cache_large;
     llam_stack_cache_entry_t *stack_cache_huge;
     llam_stack_cache_entry_t *stack_cache_entry_free;
+    llam_stack_cache_entry_t *stack_cache_release_pending;
     unsigned stack_cache_default_count;
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
@@ -1380,10 +1477,8 @@ struct llam_runtime {
     llam_alloc_chunk_t *block_job_chunks;
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_block_job_t *) block_job_free;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_wake_seq;
-    struct sigaction previous_preempt_action;
-    struct sigaction previous_segv_action;
     bool preempt_signal_installed;
-    bool segv_signal_installed;
+    bool fault_signal_installed;
     bool block_cv_initialized;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_pending;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active;

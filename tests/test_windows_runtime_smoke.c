@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-#include "llam/runtime.h"
+#include "runtime_internal.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -115,6 +115,26 @@ static void smoke_task(void *arg) {
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
+#if LLAM_PLATFORM_WINDOWS
+static int test_external_doorbell_waitable_handle(void) {
+    llam_runtime_t *runtime = llam_runtime_default_storage();
+    llam_external_doorbell_t *doorbell =
+        &runtime->external_driver.doorbell;
+
+    if (!doorbell->initialized || doorbell->handle == NULL ||
+        llam_external_doorbell_signal(doorbell) != 0 ||
+        WaitForSingleObject((HANDLE)doorbell->handle, 0U) !=
+            WAIT_OBJECT_0) {
+        return fail("external runtime doorbell was not waitable");
+    }
+    llam_external_doorbell_drain(doorbell);
+    if (WaitForSingleObject((HANDLE)doorbell->handle, 0U) != WAIT_TIMEOUT) {
+        return fail("external runtime doorbell did not reset");
+    }
+    return 0;
+}
+#endif
+
 int main(void) {
     windows_smoke_state_t state;
     llam_runtime_opts_t runtime_opts;
@@ -136,6 +156,12 @@ int main(void) {
     if (llam_runtime_init_ex(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return fail_errno("llam_runtime_init_ex failed");
     }
+#if LLAM_PLATFORM_WINDOWS
+    if (test_external_doorbell_waitable_handle() != 0) {
+        llam_runtime_shutdown();
+        return 1;
+    }
+#endif
 
     for (i = 0U; i < WINDOWS_SMOKE_TASKS; ++i) {
         tasks[i] = llam_spawn(smoke_task, &state, NULL);

@@ -3,8 +3,11 @@
 
 name: Release
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 permissions:
-  contents: write
+  contents: read
 
 on:
   workflow_dispatch:
@@ -14,8 +17,14 @@ on:
       - '[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
+  promotion-evidence:
+    uses: ./.github/workflows/leir-native-research.yml
+    with:
+      require_promotion: true
+
   build-artifacts:
     name: build-artifacts (${{ matrix.target }})
+    needs: promotion-evidence
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -38,8 +47,9 @@ jobs:
             cc: msvc
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Install Linux dependencies
@@ -140,7 +150,7 @@ jobs:
       - name: Configure Windows release build
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cmake -S . -B build/release-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/release-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLAM_BUILD_RESEARCH=OFF
 
       - name: Build and test Windows release
         if: runner.os == 'Windows'
@@ -311,7 +321,7 @@ jobs:
           }
 
       - name: Upload platform artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -323,6 +333,7 @@ jobs:
 
   build-bsd-artifacts:
     name: build-artifacts (${{ matrix.target }})
+    needs: promotion-evidence
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -349,12 +360,13 @@ jobs:
             arch: x86-64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Start BSD VM
-        uses: cross-platform-actions/action@v1.1.0
+        uses: cross-platform-actions/action@0c165ad7eb2d6a7e8552d6af5aad2bbedfc646b0 # v1.1.0
         timeout-minutes: 10
         with:
           operating_system: ${{ matrix.os }}
@@ -382,81 +394,41 @@ jobs:
           dragonfly_release_tools_available() {
             command -v gmake >/dev/null 2>&1 &&
               command -v cmake >/dev/null 2>&1 &&
-              command -v xz >/dev/null 2>&1
-          }
-          configure_dragonfly_pkg_repo() {
-            sudo mkdir -p /usr/local/etc/pkg/repos
-            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
-          AUTO: {
-            url             : "__LLAM_DRAGONFLY_REPO__"
-            mirror_type     : NONE
-            enabled         : yes
-          }
-          Avalon: {
-            enabled         : no
-          }
-          EOF
-            sudo sed -i.bak "s|__LLAM_DRAGONFLY_REPO__|$1|g" /usr/local/etc/pkg/repos/llam-auto.conf
-          }
-          retry_dragonfly_pkg_update() {
-            attempts=0
-            max_attempts="${LLAM_DRAGONFLY_PKG_UPDATE_RETRIES:-2}"
-            delay_seconds="${LLAM_DRAGONFLY_PKG_UPDATE_RETRY_DELAY:-5}"
-            while ! sudo pkg update -f; do
-              attempts=$((attempts + 1))
-              if [ "$attempts" -ge "$max_attempts" ]; then
-                return 1
-              fi
-              sleep "$delay_seconds"
-            done
-          }
-          install_dragonfly_release_tools() {
-            if dragonfly_release_tools_available; then
-              return 0
-            fi
-            for repo_url in \
-              "https://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
-              "http://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
-              "https://mirrors.nycbug.org/pub/DragonflyBSD/dports/\${ABI}/LATEST" \
-              "https://ftp.jaist.ac.jp/pub/DragonFly/dports/\${ABI}/LATEST" \
-              "https://ftp.kr.freebsd.org/pub/dragonflybsd/dports/\${ABI}/LATEST" \
-              "https://www.mirrorservice.org/sites/ftp.dragonflybsd.org/dports/\${ABI}/LATEST"
-            do
-              echo "Trying DragonFly pkg repo: $repo_url"
-              configure_dragonfly_pkg_repo "$repo_url"
-              pkg -vv | sed -n '/Repositories:/,$p' || true
-              if retry_dragonfly_pkg_update &&
-                 { command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake; } &&
-                 { command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake; } &&
-                 { command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz; } &&
-                 dragonfly_release_tools_available; then
-                return 0
-              fi
-            done
-            return 1
+              command -v xz >/dev/null 2>&1 &&
+              command -v python3 >/dev/null 2>&1
           }
           case "$(uname -s)" in
             FreeBSD)
               command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
+              command -v python3 >/dev/null 2>&1 || retry sudo pkg install -y python3
               ;;
             DragonFly)
-              pkg config ABI || true
-              install_dragonfly_release_tools
+              if ! dragonfly_release_tools_available; then
+                echo "DragonFlyBSD release tools are not preinstalled; unsigned package bootstrap is disabled." >&2
+                exit 1
+              fi
               ;;
             OpenBSD)
               sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
               command -v gmake >/dev/null 2>&1 || retry sudo pkg_add gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkg_add cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkg_add xz
+              command -v python3 >/dev/null 2>&1 || retry sudo pkg_add python%3
               ;;
             NetBSD)
               command -v gmake >/dev/null 2>&1 || retry sudo pkgin -y install gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkgin -y install cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkgin -y install xz
+              if ! command -v python3 >/dev/null 2>&1; then
+                command -v python3.12 >/dev/null 2>&1 || retry sudo pkgin -y install python312
+                test -x /usr/pkg/bin/python3.12
+                sudo ln -s /usr/pkg/bin/python3.12 /usr/pkg/bin/python3
+              fi
               ;;
           esac
+          command -v python3
 
       - name: Build, test, and package BSD
         run: |
@@ -492,7 +464,7 @@ jobs:
           ./test_runtime_select_edges
           ./test_io_buffers
           ./test_shared_load ./libllam_runtime.so."$version"
-          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
+          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/bsd --parallel 2 --target \
             test_abi_contract \
             test_abi_compat \
@@ -524,7 +496,7 @@ jobs:
         run: cpa.sh --sync-files vm-to-runner
 
       - name: Upload BSD platform artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -535,14 +507,19 @@ jobs:
   publish-release:
     name: publish-release
     needs:
+      - promotion-evidence
       - build-artifacts
       - build-bsd-artifacts
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-*
           path: release-artifacts
@@ -680,7 +657,7 @@ jobs:
           } > RELEASE_NOTES.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           name: LLAM ${{ github.ref_name }}
           body_path: release-artifacts/RELEASE_NOTES.md

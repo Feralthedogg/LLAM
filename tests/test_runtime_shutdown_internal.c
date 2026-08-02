@@ -23,11 +23,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #include "runtime_internal.h"
 #include "engine/runtime_watchdog_internal.h"
 #include "io/runtime_io_api_internal.h"
-
 #if LLAM_RUNTIME_BACKEND_KQUEUE
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
 #elif LLAM_RUNTIME_BACKEND_LINUX
@@ -35,11 +33,12 @@
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
 #include "io/windows/runtime_io_watch_windows_internal.h"
 #endif
-
 #include <errno.h>
 #include <limits.h>
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sched.h>
 #include <sys/socket.h>
@@ -49,17 +48,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include "test_stack_cache_cases.inc"
 static int fail_errno(const char *message) {
     fprintf(stderr, "test_runtime_shutdown_internal: %s: errno=%d (%s)\n", message, errno, strerror(errno));
     return 1;
 }
-
 static int fail_msg(const char *message) {
     fprintf(stderr, "test_runtime_shutdown_internal: %s\n", message);
     return 1;
 }
-
+#define SWITCH_HOOK_TEST_FAIL(message) fail_msg(message)
+#define SWITCH_HOOK_TEST_FAIL_ERRNO(message) fail_errno(message)
+#include "test_switch_hook_cases.inc"
+#undef SWITCH_HOOK_TEST_FAIL_ERRNO
+#undef SWITCH_HOOK_TEST_FAIL
+#include "test_stack_vm_cases.inc"
 static void *count_block_callback(void *arg) {
     atomic_uint *calls = arg;
 
@@ -68,6 +71,704 @@ static void *count_block_callback(void *arg) {
     }
     return arg;
 }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef struct block_pool_failure_state {
+    llam_runtime_t *runtime;
+    llam_task_t *tasks[2];
+    atomic_uint callback_calls;
+    atomic_uint callback_started;
+    atomic_uint release_callback;
+    atomic_uint task_returns;
+    atomic_uint failures;
+    unsigned confirmed_before_release;
+    int first_rc;
+    int first_errno;
+} block_pool_failure_state_t;
+
+static void *block_pool_failure_callback(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    struct timespec interval = {0, 1000000L};
+
+    atomic_fetch_add_explicit(&state->callback_calls, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&state->callback_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_callback, memory_order_acquire) == 0U) {
+        (void)nanosleep(&interval, NULL);
+    }
+    return state;
+}
+
+static void block_pool_first_create_failure_task(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    void *result = (void *)(uintptr_t)1U;
+
+    errno = 0;
+    state->first_rc =
+        llam_call_blocking_result(block_pool_failure_callback, state, &result);
+    state->first_errno = errno;
+    if (state->first_rc != -1 || state->first_errno != EAGAIN || result != NULL) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&state->task_returns, 1U, memory_order_release);
+}
+
+static void block_pool_second_create_failure_child(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    void *result = NULL;
+
+    if (llam_call_blocking_result(block_pool_failure_callback, state, &result) != 0 ||
+        result != state) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&state->task_returns, 1U, memory_order_release);
+}
+
+static void block_pool_second_create_failure_parent(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    unsigned i;
+
+    for (i = 0U; i < 2U; ++i) {
+        state->tasks[i] = llam_runtime_spawn_ex(
+            state->runtime,
+            block_pool_second_create_failure_child,
+            state,
+            NULL,
+            0U);
+        if (state->tasks[i] == NULL) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            break;
+        }
+    }
+
+    while (i == 2U &&
+           (atomic_load_explicit(&state->runtime->block_pending, memory_order_acquire) < 2U ||
+            atomic_load_explicit(&state->callback_started, memory_order_acquire) < 1U)) {
+        if (llam_now_ns() >= deadline_ns) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            break;
+        }
+        llam_yield();
+    }
+    state->confirmed_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_started, memory_order_acquire);
+    atomic_store_explicit(&state->release_callback, 1U, memory_order_release);
+    for (i = 0U; i < 2U; ++i) {
+        if (state->tasks[i] != NULL && llam_join(state->tasks[i]) != 0) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        }
+        state->tasks[i] = NULL;
+    }
+}
+
+static void init_block_pool_failure_state(block_pool_failure_state_t *state) {
+    memset(state, 0, sizeof(*state));
+    atomic_init(&state->callback_calls, 0U);
+    atomic_init(&state->callback_started, 0U);
+    atomic_init(&state->release_callback, 0U);
+    atomic_init(&state->task_returns, 0U);
+    atomic_init(&state->failures, 0U);
+}
+
+static int init_zero_min_block_pool_runtime(llam_runtime_t **runtime) {
+    llam_runtime_opts_t opts;
+
+    if (runtime == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 2U;
+    return llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, runtime);
+}
+
+static int exercise_first_block_worker_create_failure_rolls_back_submission(void) {
+    block_pool_failure_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    llam_task_t *task = NULL;
+    int rc = 1;
+
+    init_block_pool_failure_state(&state);
+    llam_block_pool_test_reset_create_hook();
+    llam_block_pool_test_fail_create_on(1U);
+    if (init_zero_min_block_pool_runtime(&runtime) != 0) {
+        rc = fail_errno("first-create failure runtime init failed");
+        goto cleanup;
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("first-create failure runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
+    task = llam_runtime_spawn_ex(
+        runtime, block_pool_first_create_failure_task, &state, NULL, 0U);
+    if (task == NULL) {
+        rc = fail_errno("first-create failure task spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        task = NULL;
+        rc = fail_errno("first-create failure task did not return");
+        goto cleanup;
+    }
+    task = NULL;
+
+    if (atomic_load_explicit(&state.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.task_returns, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.callback_calls, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->block_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire) != 0U ||
+        raw_runtime->block_head != NULL || raw_runtime->block_tail != NULL ||
+        llam_block_pool_test_create_calls() != 1U) {
+        rc = fail_msg("first block-worker create failure published or stranded a job");
+        goto cleanup;
+    }
+    rc = 0;
+cleanup:
+    atomic_store_explicit(&state.release_callback, 1U, memory_order_release);
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
+    llam_block_pool_test_reset_create_hook();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_second_block_worker_create_failure_uses_existing_worker(void) {
+    block_pool_failure_state_t state;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    llam_task_t *parent = NULL;
+    int rc = 1;
+
+    init_block_pool_failure_state(&state);
+    llam_block_pool_test_reset_create_hook();
+    llam_block_pool_test_fail_create_on(2U);
+    if (init_zero_min_block_pool_runtime(&runtime) != 0) {
+        rc = fail_errno("second-create failure runtime init failed");
+        goto cleanup;
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("second-create failure runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
+    parent = llam_runtime_spawn_ex(
+        runtime, block_pool_second_create_failure_parent, &state, NULL, 0U);
+    if (parent == NULL) {
+        rc = fail_errno("second-create failure parent spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(parent) != 0) {
+        parent = NULL;
+        rc = fail_errno("second-create failure workload did not drain");
+        goto cleanup;
+    }
+    parent = NULL;
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = fail_errno("second-create failure stats failed");
+        goto cleanup;
+    }
+
+    if (atomic_load_explicit(&state.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.task_returns, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&state.callback_calls, memory_order_acquire) != 2U ||
+        state.confirmed_before_release != 1U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&raw_runtime->block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&raw_runtime->block_threads_live, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&raw_runtime->block_pending, memory_order_acquire) != 0U ||
+        stats.blocking_threads != 1U ||
+        llam_block_pool_test_create_calls() != 2U) {
+        rc = fail_msg("second block-worker create failure did not drain on the confirmed worker");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.release_callback, 1U, memory_order_release);
+    if (parent != NULL) {
+        (void)llam_detach(parent);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
+    llam_block_pool_test_reset_create_hook();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_block_pool_min_partial_failure_unwinds(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("partial blocking-min opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 2U;
+    opts.blocking_max = 2U;
+
+    llam_block_pool_test_reset_create_hook();
+    llam_block_pool_test_fail_create_on(2U);
+    errno = 0;
+    if (llam_runtime_create(&opts,
+                            LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                            &runtime) != -1 ||
+        errno != EAGAIN || runtime != NULL ||
+        llam_block_pool_test_create_calls() != 2U) {
+        rc = fail_msg("partial blocking-min create failure did not unwind confirmed threads");
+        goto cleanup;
+    }
+
+    /*
+     * A clean retry proves that the successful first thread from the failed
+     * attempt was joined and its partial runtime handle was unregistered.
+     */
+    llam_block_pool_test_reset_create_hook();
+    if (llam_runtime_create(&opts,
+                            LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                            &runtime) != 0) {
+        rc = fail_errno("runtime create after partial blocking-min unwind failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_block_pool_test_reset_create_hook();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+typedef struct affinity_policy_case {
+    const char *name;
+    unsigned policy;
+    int capture_error;
+    int apply_error;
+    int restore_error;
+    int expected_run_rc;
+    int expected_errno;
+    uint64_t expected_failures;
+    unsigned expected_capture_calls;
+    unsigned expected_apply_calls;
+    unsigned expected_restore_calls;
+} affinity_policy_case_t;
+
+static int init_affinity_test_runtime(unsigned policy,
+                                      unsigned worker_count,
+                                      llam_runtime_t **runtime) {
+    llam_runtime_opts_t opts;
+
+    if (runtime == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 1U;
+    opts.affinity_policy = policy;
+    return llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, runtime);
+}
+
+static int run_affinity_policy_case(const affinity_policy_case_t *test_case) {
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int run_rc;
+    int run_errno;
+    int rc = 1;
+
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_set_affinity_supported(1);
+    llam_runtime_test_set_affinity_error(
+        LLAM_TEST_AFFINITY_CAPTURE, test_case->capture_error);
+    llam_runtime_test_set_affinity_error(
+        LLAM_TEST_AFFINITY_APPLY, test_case->apply_error);
+    llam_runtime_test_set_affinity_error(
+        LLAM_TEST_AFFINITY_RESTORE, test_case->restore_error);
+
+    if (init_affinity_test_runtime(test_case->policy, 1U, &runtime) != 0) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: affinity case '%s' init failed: "
+                "errno=%d (%s)\n",
+                test_case->name,
+                errno,
+                strerror(errno));
+        goto cleanup;
+    }
+    errno = 0;
+    run_rc = llam_runtime_run_handle(runtime);
+    run_errno = errno;
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: affinity case '%s' stats failed\n",
+                test_case->name);
+        goto cleanup;
+    }
+
+    if (run_rc != test_case->expected_run_rc ||
+        (run_rc != 0 && run_errno != test_case->expected_errno) ||
+        stats.affinity_failures != test_case->expected_failures ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) !=
+            test_case->expected_capture_calls ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) !=
+            test_case->expected_apply_calls ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) !=
+            test_case->expected_restore_calls) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: affinity case '%s' mismatch: "
+                "run=%d/%d failures=%llu calls=%u/%u/%u\n",
+                test_case->name,
+                run_rc,
+                run_errno,
+                (unsigned long long)stats.affinity_failures,
+                llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE),
+                llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY),
+                llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE));
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+static int exercise_affinity_policy_matrix(void) {
+    static const affinity_policy_case_t cases[] = {
+        {
+            .name = "none skips platform",
+            .policy = LLAM_RUNTIME_AFFINITY_NONE,
+            .capture_error = EIO,
+            .apply_error = EIO,
+            .restore_error = EIO,
+        },
+        {
+            .name = "prefer tolerates capture",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .capture_error = EACCES,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+        },
+        {
+            .name = "require rejects capture",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .capture_error = EACCES,
+            .expected_run_rc = -1,
+            .expected_errno = EACCES,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+        },
+        {
+            .name = "prefer tolerates apply",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .apply_error = EPERM,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "require rejects apply",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .apply_error = EPERM,
+            .expected_run_rc = -1,
+            .expected_errno = EPERM,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "prefer tolerates restore",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .restore_error = EBUSY,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "require rejects restore",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .restore_error = EBUSY,
+            .expected_run_rc = -1,
+            .expected_errno = EBUSY,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "prefer success",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "require success",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+    };
+
+    for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (run_affinity_policy_case(&cases[i]) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int exercise_affinity_unsupported_policy(void) {
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_set_affinity_supported(0);
+    errno = 0;
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_REQUIRE, 1U, &runtime) != -1 ||
+        errno != ENOTSUP || runtime != NULL) {
+        rc = fail_msg("required affinity did not fail init when unsupported");
+        goto cleanup;
+    }
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_PREFER, 1U, &runtime) != 0 ||
+        llam_runtime_run_handle(runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = fail_errno("preferred unsupported affinity did not continue");
+        goto cleanup;
+    }
+    if (stats.affinity_failures != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) != 0U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) != 0U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) != 0U) {
+        rc = fail_msg("unsupported preferred affinity diagnostics were not exact");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+typedef struct affinity_run_exit_state {
+    llam_runtime_t *runtime;
+    bool fatal;
+} affinity_run_exit_state_t;
+
+static void affinity_run_exit_task(void *arg) {
+    affinity_run_exit_state_t *state = arg;
+
+    if (state->fatal) {
+        llam_record_fatal(state->runtime, EIO);
+    } else {
+        (void)llam_runtime_request_stop();
+    }
+}
+
+static int exercise_affinity_restore_on_task_exit(bool fatal) {
+    affinity_run_exit_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    llam_task_t *task = NULL;
+    int join_rc;
+    int join_errno;
+    int run_rc;
+    int run_errno;
+    int rc = 1;
+
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_set_affinity_supported(1);
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_PREFER, 1U, &runtime) != 0) {
+        rc = fail_errno("affinity task-exit runtime init failed");
+        goto cleanup;
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("affinity task-exit runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
+    state.fatal = fatal;
+    task = llam_runtime_spawn_ex(runtime, affinity_run_exit_task, &state, NULL, 0U);
+    if (task == NULL) {
+        rc = fail_errno("affinity task-exit spawn failed");
+        goto cleanup;
+    }
+    errno = 0;
+    run_rc = llam_runtime_run_handle(runtime);
+    run_errno = errno;
+    errno = 0;
+    join_rc = llam_join(task);
+    join_errno = errno;
+    if ((fatal && (join_rc != -1 || join_errno != EIO)) ||
+        (!fatal && join_rc != 0)) {
+        rc = fail_errno("affinity task-exit join result was unexpected");
+        goto cleanup;
+    }
+    if (!fatal) {
+        task = NULL;
+    }
+    if ((fatal && (run_rc != -1 || run_errno != EIO)) ||
+        (!fatal && run_rc != 0) ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) != 1U) {
+        rc = fail_msg(fatal
+                          ? "fatal worker exit did not restore driver affinity"
+                          : "cooperative stop did not restore driver affinity");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+static int exercise_affinity_restore_on_worker_create_failure(void) {
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    int rc = 1;
+
+    free(allowed_cpus);
+    if (allowed_cpu_count < 2U) {
+        return 0;
+    }
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_reset_shard_create_hook();
+    llam_runtime_test_set_affinity_supported(1);
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_PREFER, 2U, &runtime) != 0) {
+        rc = fail_errno("affinity worker-create runtime init failed");
+        goto cleanup;
+    }
+    llam_runtime_test_fail_shard_create_on(1U);
+    errno = 0;
+    if (llam_runtime_run_handle(runtime) != -1 || errno != EAGAIN ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0 ||
+        stats.affinity_failures != 0U ||
+        llam_runtime_test_shard_create_calls() != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) != 0U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) != 1U) {
+        rc = fail_msg("worker-create failure did not restore driver affinity exactly once");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_test_reset_shard_create_hook();
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+static int exercise_native_thread_counter_saturates(void) {
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    int rc = 1;
+
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_NONE, 1U, &runtime) != 0) {
+        return fail_errno("native-thread overflow runtime init failed");
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("native-thread overflow runtime pin failed");
+        goto cleanup;
+    }
+    atomic_store_explicit(&raw_runtime->scheduler_threads_live,
+                          UINT_MAX,
+                          memory_order_release);
+    errno = 0;
+    if (llam_runtime_native_thread_enter(
+            raw_runtime, &raw_runtime->scheduler_threads_live) ||
+        errno != EOVERFLOW ||
+        atomic_load_explicit(&raw_runtime->scheduler_threads_live,
+                             memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&raw_runtime->fatal_errno,
+                             memory_order_acquire) != EOVERFLOW) {
+        rc = fail_msg("native-thread counter overflow did not saturate");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (raw_runtime != NULL) {
+        atomic_store_explicit(&raw_runtime->scheduler_threads_live,
+                              0U,
+                              memory_order_release);
+        llam_runtime_end_public_op(raw_runtime);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_native_thread_counter_rejects_underflow(void) {
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    int rc = 1;
+
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_NONE, 1U, &runtime) != 0) {
+        return fail_errno("native-thread underflow runtime init failed");
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("native-thread underflow runtime pin failed");
+        goto cleanup;
+    }
+    llam_runtime_native_thread_exit(raw_runtime,
+                                    &raw_runtime->scheduler_threads_live);
+    if (atomic_load_explicit(&raw_runtime->scheduler_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->fatal_errno,
+                             memory_order_acquire) != EINVAL) {
+        rc = fail_msg("native-thread counter underflow did not fail closed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+#endif
 
 static int init_runtime(void) {
     llam_runtime_opts_t opts;
@@ -78,6 +779,696 @@ static int init_runtime(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_RUNTIME_BACKEND_WINDOWS
+typedef struct blocking_result_disposal_state {
+    llam_cancel_token_t *token;
+    llam_blocking_result_test_kind_t kind;
+    atomic_uint gate_reached;
+    atomic_uint connection_ready;
+    atomic_uint created;
+    atomic_uint release_created;
+    atomic_uint discarded;
+    uintptr_t created_value;
+    uintptr_t discarded_value;
+    struct addrinfo *addrinfo_result;
+    llam_handle_t handle_result;
+    llam_fd_t accept_result;
+    int caller_result;
+    int caller_errno;
+    int gai_error;
+    int cancel_result;
+    int cancel_errno;
+    int listener;
+    int client;
+    int connect_result;
+    int connect_errno;
+    struct sockaddr_in listener_address;
+} blocking_result_disposal_state_t;
+
+static void blocking_result_disposal_hook(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value,
+    void *context) {
+    blocking_result_disposal_state_t *state = context;
+
+    if (state == NULL || kind != state->kind) {
+        return;
+    }
+    if (event == LLAM_BLOCKING_RESULT_TEST_DISCARDED) {
+        state->discarded_value = value;
+        atomic_store_explicit(
+            &state->discarded, 1U, memory_order_release);
+        return;
+    }
+    if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT &&
+        event == LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE) {
+        if (atomic_exchange_explicit(
+                &state->gate_reached,
+                1U,
+                memory_order_acq_rel) != 0U) {
+            return;
+        }
+        while (atomic_load_explicit(
+                   &state->connection_ready,
+                   memory_order_acquire) == 0U) {
+            sched_yield();
+        }
+        return;
+    }
+    if (event == LLAM_BLOCKING_RESULT_TEST_CREATED) {
+        state->created_value = value;
+        atomic_store_explicit(
+            &state->created, 1U, memory_order_release);
+        if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+            while (atomic_load_explicit(
+                       &state->release_created,
+                       memory_order_acquire) == 0U) {
+                sched_yield();
+            }
+            return;
+        }
+    } else {
+        return;
+    }
+
+    if (atomic_exchange_explicit(
+            &state->gate_reached,
+            1U,
+            memory_order_acq_rel) != 0U) {
+        return;
+    }
+    while (atomic_load_explicit(
+               &state->release_created,
+               memory_order_acquire) == 0U) {
+        sched_yield();
+    }
+}
+
+static void blocking_result_disposal_caller(void *context) {
+    blocking_result_disposal_state_t *state = context;
+
+    errno = 0;
+    switch (state->kind) {
+        case LLAM_BLOCKING_RESULT_TEST_GETADDRINFO:
+            state->caller_result = llam_getaddrinfo_result(
+                "localhost",
+                "80",
+                NULL,
+                &state->addrinfo_result,
+                &state->gai_error);
+            break;
+        case LLAM_BLOCKING_RESULT_TEST_OPEN:
+            state->caller_result = llam_open_async(
+                "/dev/null",
+                O_RDONLY,
+                0U,
+                &state->handle_result);
+            break;
+        case LLAM_BLOCKING_RESULT_TEST_ACCEPT: {
+            struct sockaddr_storage peer;
+            socklen_t peer_size = sizeof(peer);
+
+            state->accept_result = llam_accept(
+                (llam_fd_t)state->listener,
+                (struct sockaddr *)&peer,
+                &peer_size);
+            state->caller_result =
+                LLAM_FD_IS_INVALID(state->accept_result)
+                    ? -1
+                    : 0;
+            break;
+        }
+    }
+    state->caller_errno = errno;
+}
+
+static void blocking_result_disposal_canceller(void *context) {
+    blocking_result_disposal_state_t *state = context;
+
+    while (atomic_load_explicit(
+               &state->gate_reached,
+               memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    if (state->kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+        state->client = socket(AF_INET, SOCK_STREAM, 0);
+        if (state->client >= 0) {
+            errno = 0;
+            state->connect_result = connect(
+                state->client,
+                (const struct sockaddr *)
+                    &state->listener_address,
+                sizeof(state->listener_address));
+            state->connect_errno = errno;
+        } else {
+            state->connect_result = -1;
+            state->connect_errno = errno;
+        }
+        atomic_store_explicit(
+            &state->connection_ready, 1U, memory_order_release);
+        if (state->connect_result == 0) {
+            while (atomic_load_explicit(
+                       &state->created,
+                       memory_order_acquire) == 0U) {
+                llam_yield();
+            }
+        }
+    }
+    errno = 0;
+    state->cancel_result =
+        llam_cancel_token_cancel(state->token);
+    state->cancel_errno = errno;
+    atomic_store_explicit(
+        &state->release_created, 1U, memory_order_release);
+}
+
+static int blocking_result_disposal_listener_init(
+    blocking_result_disposal_state_t *state) {
+    socklen_t address_size =
+        sizeof(state->listener_address);
+    int one = 1;
+
+    if (setenv(
+            "LLAM_ACCEPT_DIRECT_BLOCKING", "1", 1) != 0) {
+        return -1;
+    }
+    state->listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (state->listener < 0) {
+        return -1;
+    }
+    (void)setsockopt(
+        state->listener,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        &one,
+        sizeof(one));
+    memset(
+        &state->listener_address,
+        0,
+        sizeof(state->listener_address));
+    state->listener_address.sin_family = AF_INET;
+    state->listener_address.sin_addr.s_addr =
+        htonl(INADDR_LOOPBACK);
+    if (bind(
+            state->listener,
+            (const struct sockaddr *)
+                &state->listener_address,
+            sizeof(state->listener_address)) != 0 ||
+        listen(state->listener, 8) != 0 ||
+        getsockname(
+            state->listener,
+            (struct sockaddr *)
+                &state->listener_address,
+            &address_size) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int run_blocking_result_disposal_case(
+    llam_blocking_result_test_kind_t kind) {
+    blocking_result_disposal_state_t state;
+    llam_runtime_opts_t runtime_options;
+    llam_spawn_opts_t spawn_options;
+    llam_task_t *caller = NULL;
+    llam_task_t *canceller = NULL;
+    bool runtime_started = false;
+    bool resource_still_live = false;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.kind = kind;
+    state.handle_result = LLAM_INVALID_HANDLE;
+    state.accept_result = LLAM_INVALID_FD;
+    state.caller_result = -2;
+    state.cancel_result = -2;
+    state.listener = -1;
+    state.client = -1;
+    state.connect_result = -2;
+    atomic_init(&state.gate_reached, 0U);
+    atomic_init(&state.connection_ready, 0U);
+    atomic_init(&state.created, 0U);
+    atomic_init(&state.release_created, 0U);
+    atomic_init(&state.discarded, 0U);
+    if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT &&
+        blocking_result_disposal_listener_init(&state) != 0) {
+        goto cleanup;
+    }
+    if (llam_runtime_opts_init(
+            &runtime_options,
+            LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0 ||
+        llam_spawn_opts_init(
+            &spawn_options,
+            LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup;
+    }
+    runtime_options.deterministic = 1U;
+    runtime_options.forced_yield_every = 1U;
+    if (llam_runtime_init(&runtime_options) != 0) {
+        goto cleanup;
+    }
+    runtime_started = true;
+    state.token = llam_cancel_token_create();
+    if (state.token == NULL) {
+        goto cleanup;
+    }
+    spawn_options.cancel_token = state.token;
+    llam_io_test_set_blocking_result_hook(
+        blocking_result_disposal_hook, &state);
+    caller = llam_spawn(
+        blocking_result_disposal_caller,
+        &state,
+        &spawn_options);
+    canceller = llam_spawn(
+        blocking_result_disposal_canceller,
+        &state,
+        NULL);
+    if (caller == NULL ||
+        canceller == NULL ||
+        llam_run() != 0 ||
+        llam_join(caller) != 0 ||
+        llam_join(canceller) != 0) {
+        goto cleanup;
+    }
+    llam_io_test_set_blocking_result_hook(NULL, NULL);
+
+    if (kind == LLAM_BLOCKING_RESULT_TEST_OPEN ||
+        kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+        int descriptor = (int)state.created_value;
+
+        errno = 0;
+        resource_still_live =
+            descriptor >= 0 &&
+            fcntl(descriptor, F_GETFD) != -1;
+    }
+    if (state.caller_result == -1 &&
+        state.caller_errno == ECANCELED &&
+        state.cancel_result == 0 &&
+        atomic_load_explicit(
+            &state.gate_reached,
+            memory_order_acquire) != 0U &&
+        atomic_load_explicit(
+            &state.created,
+            memory_order_acquire) != 0U &&
+        atomic_load_explicit(
+            &state.discarded,
+            memory_order_acquire) != 0U &&
+        state.discarded_value == state.created_value &&
+        !resource_still_live &&
+        (kind != LLAM_BLOCKING_RESULT_TEST_ACCEPT ||
+         state.connect_result == 0)) {
+        failed = 0;
+    } else {
+        fprintf(
+            stderr,
+            "blocking result disposal kind=%u "
+            "caller=%d/%d cancel=%d/%d connect=%d/%d "
+            "gate=%u created=%u discarded=%u live=%u\n",
+            (unsigned)kind,
+            state.caller_result,
+            state.caller_errno,
+            state.cancel_result,
+            state.cancel_errno,
+            state.connect_result,
+            state.connect_errno,
+            atomic_load_explicit(
+                &state.gate_reached,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &state.created,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &state.discarded,
+                memory_order_acquire),
+            resource_still_live ? 1U : 0U);
+    }
+
+cleanup:
+    atomic_store_explicit(
+        &state.connection_ready, 1U, memory_order_release);
+    atomic_store_explicit(
+        &state.release_created, 1U, memory_order_release);
+    llam_io_test_set_blocking_result_hook(NULL, NULL);
+    if (state.addrinfo_result != NULL) {
+        freeaddrinfo(state.addrinfo_result);
+        state.addrinfo_result = NULL;
+    } else if (
+        kind == LLAM_BLOCKING_RESULT_TEST_GETADDRINFO &&
+        state.created_value != 0U &&
+        atomic_load_explicit(
+            &state.discarded,
+            memory_order_acquire) == 0U) {
+        freeaddrinfo(
+            (struct addrinfo *)state.created_value);
+    }
+    if ((kind == LLAM_BLOCKING_RESULT_TEST_OPEN ||
+         kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) &&
+        atomic_load_explicit(
+            &state.created,
+            memory_order_acquire) != 0U) {
+        int descriptor = (int)state.created_value;
+
+        errno = 0;
+        if (fcntl(descriptor, F_GETFD) != -1) {
+            (void)close(descriptor);
+        }
+    }
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+    if (state.token != NULL &&
+        llam_cancel_token_destroy(state.token) != 0) {
+        failed = 1;
+    }
+    if (state.client >= 0) {
+        (void)close(state.client);
+    }
+    if (state.listener >= 0) {
+        (void)close(state.listener);
+    }
+    return failed;
+}
+
+static int exercise_canceled_blocking_results_are_disposed(void) {
+    int failed = 0;
+
+    if (run_blocking_result_disposal_case(
+            LLAM_BLOCKING_RESULT_TEST_GETADDRINFO) != 0) {
+        failed = 1;
+    }
+    if (run_blocking_result_disposal_case(
+            LLAM_BLOCKING_RESULT_TEST_OPEN) != 0) {
+        failed = 1;
+    }
+    if (run_blocking_result_disposal_case(
+            LLAM_BLOCKING_RESULT_TEST_ACCEPT) != 0) {
+        failed = 1;
+    }
+    return failed;
+}
+#else
+static int exercise_canceled_blocking_results_are_disposed(void) {
+    return 0;
+}
+#endif
+
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS && \
+    LLAM_BUILD_RESEARCH
+typedef enum close_watch_unpublish_kind {
+    CLOSE_WATCH_UNPUBLISH_POLL = 0,
+    CLOSE_WATCH_UNPUBLISH_ACCEPT = 1,
+    CLOSE_WATCH_UNPUBLISH_RECV = 2,
+} close_watch_unpublish_kind_t;
+
+typedef struct close_watch_unpublish_state {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t req;
+    void *watch;
+    close_watch_unpublish_kind_t kind;
+    atomic_uint hook_reached;
+    atomic_uint hook_release;
+    int close_result;
+} close_watch_unpublish_state_t;
+
+static bool close_watch_unpublish_completion_sink(
+    llam_node_t *node,
+    llam_io_req_t *req,
+    unsigned completion_owner,
+    llam_wait_reason_t *wake_reason,
+    void *context) {
+    (void)node;
+    (void)req;
+    (void)completion_owner;
+    (void)wake_reason;
+    (void)context;
+    return true;
+}
+
+static void close_watch_unpublish_hook(
+    llam_node_t *node,
+    void *context) {
+    close_watch_unpublish_state_t *state = context;
+
+    if (state == NULL || node != &state->node) {
+        return;
+    }
+    atomic_store_explicit(
+        &state->hook_reached, 1U, memory_order_release);
+    while (atomic_load_explicit(
+               &state->hook_release,
+               memory_order_acquire) == 0U) {
+        sched_yield();
+    }
+}
+
+static void *close_watch_unpublish_thread(void *context) {
+    close_watch_unpublish_state_t *state = context;
+
+    state->close_result =
+        llam_forget_closed_fd_watch_state(
+            &state->runtime,
+            state->req.fd);
+    return NULL;
+}
+
+static int run_close_watch_unpublish_case(
+    close_watch_unpublish_kind_t kind) {
+    close_watch_unpublish_state_t state;
+    pthread_t closer;
+    unsigned mode;
+    bool unpublished;
+    bool removed = true;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.kind = kind;
+    state.close_result = -2;
+    atomic_init(&state.hook_reached, 0U);
+    atomic_init(&state.hook_release, 0U);
+    state.runtime.nodes = &state.node;
+    state.runtime.active_nodes = 1U;
+    state.node.runtime = &state.runtime;
+    state.node.index = 0U;
+    state.node.watch_lock_initialized = true;
+    if (pthread_mutex_init(
+            &state.node.watch_lock, NULL) != 0) {
+        return 1;
+    }
+    llam_io_req_reset(
+        &state.req,
+        &state.runtime,
+        UINT_MAX,
+        UINT_MAX);
+    state.req.fd = (llam_fd_t)(41 + (int)kind);
+    state.req.completion_sink =
+        close_watch_unpublish_completion_sink;
+    atomic_store_explicit(
+        &state.req.attached_node_index,
+        0U,
+        memory_order_release);
+
+    pthread_mutex_lock(&state.node.watch_lock);
+    if (kind == CLOSE_WATCH_UNPUBLISH_POLL) {
+        llam_poll_watch_t *watch =
+            calloc(1U, sizeof(*watch));
+
+        if (watch == NULL) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+        state.watch = watch;
+        watch->fd = state.req.fd;
+        watch->migrate_target_node_index = UINT_MAX;
+        watch->accepts_waiters = true;
+        watch->activating = true;
+        watch->wait_head = &state.req;
+        watch->wait_tail = &state.req;
+        state.node.poll_watches = watch;
+        state.req.kind = LLAM_IO_KIND_POLL;
+        state.req.poll_watch = watch;
+        atomic_store_explicit(
+            &state.req.wait_mode,
+            LLAM_IO_WAIT_MODE_POLL_WATCH,
+            memory_order_release);
+        if (llam_node_queue_control_locked(
+                &state.node,
+                LLAM_IO_CONTROL_POLL_ACTIVATE,
+                watch) != 0) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            free(watch);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+    } else if (kind == CLOSE_WATCH_UNPUBLISH_ACCEPT) {
+        llam_accept_watch_t *watch =
+            calloc(1U, sizeof(*watch));
+
+        if (watch == NULL) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+        state.watch = watch;
+        watch->fd = state.req.fd;
+        watch->migrate_target_node_index = UINT_MAX;
+        watch->accepts_waiters = true;
+        watch->activating = true;
+        watch->wait_head = &state.req;
+        watch->wait_tail = &state.req;
+        state.node.accept_watches = watch;
+        state.req.kind = LLAM_IO_KIND_ACCEPT;
+        state.req.accept_watch = watch;
+        atomic_store_explicit(
+            &state.req.wait_mode,
+            LLAM_IO_WAIT_MODE_ACCEPT_WATCH,
+            memory_order_release);
+        if (llam_node_queue_control_locked(
+                &state.node,
+                LLAM_IO_CONTROL_ACCEPT_ACTIVATE,
+                watch) != 0) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            free(watch);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+    } else {
+        llam_recv_watch_t *watch =
+            calloc(1U, sizeof(*watch));
+
+        if (watch == NULL) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+        state.watch = watch;
+        watch->fd = state.req.fd;
+        watch->migrate_target_node_index = UINT_MAX;
+        watch->accepts_waiters = true;
+        watch->activating = true;
+        watch->wait_head = &state.req;
+        watch->wait_tail = &state.req;
+        state.node.recv_watches = watch;
+        state.req.kind = LLAM_IO_KIND_READ;
+        state.req.recv_watch = watch;
+        atomic_store_explicit(
+            &state.req.wait_mode,
+            LLAM_IO_WAIT_MODE_RECV_WATCH,
+            memory_order_release);
+        if (llam_node_queue_control_locked(
+                &state.node,
+                LLAM_IO_CONTROL_RECV_ACTIVATE,
+                watch) != 0) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            free(watch);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&state.node.watch_lock);
+
+    llam_io_test_set_close_watch_unlocked_hook(
+        close_watch_unpublish_hook, &state);
+    if (pthread_create(
+            &closer,
+            NULL,
+            close_watch_unpublish_thread,
+            &state) != 0) {
+        llam_io_test_set_close_watch_unlocked_hook(
+            NULL, NULL);
+        return 1;
+    }
+    for (unsigned attempt = 0U;
+         attempt < 1000000U &&
+         atomic_load_explicit(
+             &state.hook_reached,
+             memory_order_acquire) == 0U;
+         attempt += 1U) {
+        sched_yield();
+    }
+
+    mode = atomic_load_explicit(
+        &state.req.wait_mode, memory_order_acquire);
+    unpublished =
+        mode == LLAM_IO_WAIT_MODE_NONE &&
+        state.req.poll_watch == NULL &&
+        state.req.accept_watch == NULL &&
+        state.req.recv_watch == NULL;
+    if (unpublished) {
+        removed = llam_remove_watch_waiter_after_abort(
+            &state.node,
+            &state.req,
+            kind == CLOSE_WATCH_UNPUBLISH_POLL
+                ? LLAM_IO_WAIT_MODE_POLL_WATCH
+                : kind == CLOSE_WATCH_UNPUBLISH_ACCEPT
+                      ? LLAM_IO_WAIT_MODE_ACCEPT_WATCH
+                      : LLAM_IO_WAIT_MODE_RECV_WATCH,
+            true);
+    }
+    atomic_store_explicit(
+        &state.hook_release, 1U, memory_order_release);
+    (void)pthread_join(closer, NULL);
+    llam_io_test_set_close_watch_unlocked_hook(NULL, NULL);
+
+    if (atomic_load_explicit(
+            &state.hook_reached,
+            memory_order_acquire) != 0U &&
+        unpublished &&
+        !removed &&
+        state.close_result == 0 &&
+        state.node.poll_watches == NULL &&
+        state.node.accept_watches == NULL &&
+        state.node.recv_watches == NULL &&
+        state.node.control_head == NULL &&
+        state.node.control_tail == NULL) {
+        failed = 0;
+    } else {
+        fprintf(
+            stderr,
+            "close watch remained published kind=%u "
+            "hook=%u mode=%u raw=%p removed=%u close=%d\n",
+            (unsigned)kind,
+            atomic_load_explicit(
+                &state.hook_reached,
+                memory_order_acquire),
+            mode,
+            kind == CLOSE_WATCH_UNPUBLISH_POLL
+                ? (void *)state.req.poll_watch
+                : kind == CLOSE_WATCH_UNPUBLISH_ACCEPT
+                      ? (void *)state.req.accept_watch
+                      : (void *)state.req.recv_watch,
+            removed ? 1U : 0U,
+            state.close_result);
+    }
+    pthread_mutex_destroy(&state.node.watch_lock);
+    return failed;
+}
+
+static int exercise_close_unpublishes_detached_watch_waiters(void) {
+    int failed = 0;
+
+    if (run_close_watch_unpublish_case(
+            CLOSE_WATCH_UNPUBLISH_POLL) != 0) {
+        failed = 1;
+    }
+    if (run_close_watch_unpublish_case(
+            CLOSE_WATCH_UNPUBLISH_ACCEPT) != 0) {
+        failed = 1;
+    }
+    if (run_close_watch_unpublish_case(
+            CLOSE_WATCH_UNPUBLISH_RECV) != 0) {
+        failed = 1;
+    }
+    return failed;
+}
+#else
+static int exercise_close_unpublishes_detached_watch_waiters(void) {
+    return 0;
+}
+#endif
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 typedef struct park_completion_race_state {
@@ -440,6 +1831,7 @@ static int exercise_close_purges_accept_watch_ready_fds(void) {
 static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(void) {
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_node_t *node;
     llam_accept_watch_t *watch;
     int listener = -1;
@@ -450,27 +1842,35 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     if (llam_runtime_create(NULL, 0U, &runtime) != 0) {
         return fail_errno("explicit runtime init failed for host close watch purge");
     }
-    if (runtime == NULL || runtime->nodes == NULL || runtime->active_nodes == 0U) {
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return fail_errno("explicit runtime pin failed for host close watch purge");
+    }
+    if (raw_runtime->nodes == NULL || raw_runtime->active_nodes == 0U) {
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_msg("explicit runtime initialized without an I/O node for host close watch purge");
     }
     if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("listener setup failed for explicit host close watch purge");
     }
     if (pipe(ready_pipe) != 0) {
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("ready fd setup failed for explicit host close watch purge");
     }
 
-    node = &runtime->nodes[0];
+    node = &raw_runtime->nodes[0];
     lock_rc = pthread_mutex_lock(&node->watch_lock);
     if (lock_rc != 0) {
         errno = lock_rc;
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("watch lock failed for explicit host close watch purge");
     }
@@ -480,6 +1880,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("accept watch ready setup failed for explicit host close watch purge");
     }
@@ -495,6 +1896,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
         errno = lock_rc;
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("watch unlock failed for explicit host close watch purge");
     }
@@ -502,6 +1904,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     if (llam_close(listener) != 0) {
         close_if_valid(&ready_pipe[1]);
         listener = -1;
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("llam_close failed during explicit host close watch purge");
     }
@@ -510,11 +1913,13 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
         close_if_valid(&watch_ready_fd);
         close_if_valid(&ready_pipe[1]);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_msg("host llam_close did not purge explicit-runtime accept-watch ready fd");
     }
 
     close_if_valid(&ready_pipe[1]);
+    llam_runtime_end_public_op(raw_runtime);
     llam_runtime_destroy(runtime);
 #endif
     return 0;
@@ -542,6 +1947,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *closer_runtime = NULL;
     llam_runtime_t *watch_runtime = NULL;
+    llam_runtime_t *raw_watch_runtime = NULL;
     llam_node_t *node;
     llam_accept_watch_t *watch;
     llam_task_t *task = NULL;
@@ -560,30 +1966,39 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         llam_runtime_destroy(closer_runtime);
         return fail_errno("explicit runtime init failed for managed peer close purge");
     }
-    if (watch_runtime == NULL || watch_runtime->nodes == NULL || watch_runtime->active_nodes == 0U) {
+    if (llam_runtime_begin_public_op(watch_runtime, &raw_watch_runtime) != 0) {
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("watch runtime pin failed for managed peer close purge");
+    }
+    if (raw_watch_runtime->nodes == NULL || raw_watch_runtime->active_nodes == 0U) {
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_msg("explicit watch runtime initialized without an I/O node for managed peer close purge");
     }
     if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("listener setup failed for managed peer close purge");
     }
     if (pipe(ready_pipe) != 0) {
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("ready fd setup failed for managed peer close purge");
     }
 
-    node = &watch_runtime->nodes[0];
+    node = &raw_watch_runtime->nodes[0];
     lock_rc = pthread_mutex_lock(&node->watch_lock);
     if (lock_rc != 0) {
         errno = lock_rc;
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("watch lock failed for managed peer close purge");
@@ -594,6 +2009,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("accept watch ready setup failed for managed peer close purge");
@@ -611,6 +2027,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         errno = lock_rc;
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("watch unlock failed for managed peer close purge");
@@ -623,6 +2040,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         llam_join(task) != 0) {
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("managed close task failed for peer close purge");
@@ -632,6 +2050,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
     if (close_state.rc != 0) {
         errno = close_state.error;
         close_if_valid(&ready_pipe[1]);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("managed llam_close failed for peer close purge");
@@ -641,12 +2060,14 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
     if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
         close_if_valid(&watch_ready_fd);
         close_if_valid(&ready_pipe[1]);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_msg("managed llam_close did not purge peer-runtime accept-watch ready fd");
     }
 
     close_if_valid(&ready_pipe[1]);
+    llam_runtime_end_public_op(raw_watch_runtime);
     llam_runtime_destroy(watch_runtime);
     llam_runtime_destroy(closer_runtime);
 #endif
@@ -3695,6 +5116,9 @@ static int exercise_block_worker_rejects_pending_counter_underflow(void) {
     atomic_init(&runtime.block_pending, 0U);
     atomic_init(&runtime.block_active, 0U);
     atomic_init(&runtime.block_active_peak, 0U);
+    atomic_init(&runtime.block_threads_entered, 0U);
+    atomic_init(&runtime.block_threads_exited, 0U);
+    atomic_init(&runtime.block_threads_live, 0U);
     atomic_init(&runtime.block_job_free, NULL);
     atomic_init(&runtime.shutdown_requested, true);
     atomic_init(&runtime.fatal_errno, 0);
@@ -3710,7 +5134,10 @@ static int exercise_block_worker_rejects_pending_counter_underflow(void) {
 
     (void)llam_block_worker_main(&runtime);
     if (atomic_load_explicit(&runtime.block_pending, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL ||
+        atomic_load_explicit(&runtime.block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_exited, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_live, memory_order_acquire) != 0U) {
         (void)pthread_mutex_destroy(&runtime.block_lock);
         return fail_msg("block worker pending counter underflow was not rejected");
     }
@@ -3741,6 +5168,9 @@ static int exercise_block_worker_rejects_active_counter_overflow(void) {
     atomic_init(&runtime.block_pending, 1U);
     atomic_init(&runtime.block_active, UINT_MAX);
     atomic_init(&runtime.block_active_peak, UINT_MAX);
+    atomic_init(&runtime.block_threads_entered, 0U);
+    atomic_init(&runtime.block_threads_exited, 0U);
+    atomic_init(&runtime.block_threads_live, 0U);
     atomic_init(&runtime.block_job_free, NULL);
     atomic_init(&runtime.shutdown_requested, true);
     atomic_init(&runtime.fatal_errno, 0);
@@ -3772,7 +5202,10 @@ static int exercise_block_worker_rejects_active_counter_overflow(void) {
         atomic_load_explicit(&runtime.block_pending, memory_order_acquire) != 0U ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW ||
         atomic_load_explicit(&task.wake_error_code, memory_order_acquire) != EOVERFLOW ||
-        atomic_load_explicit(&job.state, memory_order_acquire) != LLAM_BLOCK_JOB_ABORTED) {
+        atomic_load_explicit(&job.state, memory_order_acquire) != LLAM_BLOCK_JOB_ABORTED ||
+        atomic_load_explicit(&runtime.block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_exited, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_live, memory_order_acquire) != 0U) {
         (void)pthread_mutex_destroy(&runtime.block_lock);
         return fail_msg("block worker active counter overflow was not rejected");
     }
@@ -3870,6 +5303,155 @@ static int exercise_norm_depth_counter_wrap_is_rejected(void) {
         return fail_msg("norm depth dequeue underflow was not rejected");
     }
     return 0;
+}
+
+typedef struct cldeque_delayed_thief_state {
+    pthread_mutex_t lock;
+    pthread_cond_t cv;
+    unsigned hook_reached;
+    unsigned release_hook;
+    llam_shard_t *victim;
+    llam_task_t *stolen;
+} cldeque_delayed_thief_state_t;
+
+static void cldeque_delayed_thief_hook(void *context) {
+    cldeque_delayed_thief_state_t *state = context;
+
+    pthread_mutex_lock(&state->lock);
+    state->hook_reached = 1U;
+    pthread_cond_broadcast(&state->cv);
+    while (state->release_hook == 0U) {
+        pthread_cond_wait(&state->cv, &state->lock);
+    }
+    pthread_mutex_unlock(&state->lock);
+}
+
+static void *cldeque_delayed_thief_thread_main(void *context) {
+    cldeque_delayed_thief_state_t *state = context;
+
+    state->stolen = llam_norm_queue_steal(state->victim);
+    return NULL;
+}
+
+static int exercise_cldeque_delayed_thief_preserves_wrapped_task(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+    llam_cldeque_t norm_cldeque;
+    cldeque_delayed_thief_state_t state;
+    llam_task_t *tasks = NULL;
+    pthread_t thief;
+    bool mutex_initialized = false;
+    bool cv_initialized = false;
+    bool thief_started = false;
+    const char *failure = NULL;
+    size_t i;
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    memset(&state, 0, sizeof(state));
+    tasks = calloc(LLAM_NORM_QUEUE_CAP + 1U, sizeof(*tasks));
+    if (tasks == NULL) {
+        return fail_errno("cldeque wraparound task allocation failed");
+    }
+    if (pthread_mutex_init(&state.lock, NULL) != 0) {
+        failure = "cldeque wraparound mutex init failed";
+        goto cleanup;
+    }
+    mutex_initialized = true;
+    if (pthread_cond_init(&state.cv, NULL) != 0) {
+        failure = "cldeque wraparound condition init failed";
+        goto cleanup;
+    }
+    cv_initialized = true;
+    runtime.experimental_lockfree_normq = 1U;
+    shard.runtime = &runtime;
+    shard.norm_cldeque = &norm_cldeque;
+    state.victim = &shard;
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&shard.norm_depth, 0U);
+    llam_cldeque_init(shard.norm_cldeque);
+    llam_sched_test_set_cldeque_steal_claimed_hook(
+        cldeque_delayed_thief_hook, &state);
+
+    if (!llam_norm_queue_push_owner_locked(&shard, &tasks[0])) {
+        failure = "cldeque initial task push failed";
+        goto cleanup;
+    }
+    if (pthread_create(
+            &thief,
+            NULL,
+            cldeque_delayed_thief_thread_main,
+            &state) != 0) {
+        failure = "cldeque delayed thief thread create failed";
+        goto cleanup;
+    }
+    thief_started = true;
+
+    pthread_mutex_lock(&state.lock);
+    while (state.hook_reached == 0U) {
+        pthread_cond_wait(&state.cv, &state.lock);
+    }
+    pthread_mutex_unlock(&state.lock);
+
+    for (i = 1U; i <= LLAM_NORM_QUEUE_CAP; ++i) {
+        if (!llam_norm_queue_push_owner_locked(&shard, &tasks[i])) {
+            failure = "cldeque replacement task push failed";
+            goto cleanup;
+        }
+    }
+    if (atomic_load_explicit(
+            &shard.norm_cldeque->buffer[0],
+            memory_order_acquire) != &tasks[LLAM_NORM_QUEUE_CAP]) {
+        failure = "cldeque final replacement did not wrap to slot zero";
+        goto cleanup;
+    }
+
+    pthread_mutex_lock(&state.lock);
+    state.release_hook = 1U;
+    pthread_cond_broadcast(&state.cv);
+    pthread_mutex_unlock(&state.lock);
+    pthread_join(thief, NULL);
+    thief_started = false;
+    llam_sched_test_set_cldeque_steal_claimed_hook(NULL, NULL);
+
+    if (state.stolen != &tasks[0]) {
+        failure = "cldeque thief returned the wrong claimed task";
+        goto cleanup;
+    }
+    for (i = LLAM_NORM_QUEUE_CAP; i > 0U; --i) {
+        llam_task_t *popped =
+            llam_norm_queue_pop_owner_locked(&shard);
+
+        if (popped != &tasks[i]) {
+            failure = i == LLAM_NORM_QUEUE_CAP
+                          ? "cldeque delayed thief erased wrapped task"
+                          : "cldeque replacement pop order was corrupted";
+            goto cleanup;
+        }
+    }
+    if (llam_norm_queue_pop_owner_locked(&shard) != NULL ||
+        atomic_load_explicit(
+            &shard.norm_depth,
+            memory_order_acquire) != 0U) {
+        failure = "cldeque wraparound drain did not finish empty";
+    }
+
+cleanup:
+    if (thief_started) {
+        pthread_mutex_lock(&state.lock);
+        state.release_hook = 1U;
+        pthread_cond_broadcast(&state.cv);
+        pthread_mutex_unlock(&state.lock);
+        pthread_join(thief, NULL);
+    }
+    llam_sched_test_set_cldeque_steal_claimed_hook(NULL, NULL);
+    if (cv_initialized) {
+        pthread_cond_destroy(&state.cv);
+    }
+    if (mutex_initialized) {
+        pthread_mutex_destroy(&state.lock);
+    }
+    free(tasks);
+    return failure != NULL ? fail_msg(failure) : 0;
 }
 
 static int exercise_channel_inflight_waiter_counter_overflow_is_rejected(void) {
@@ -4402,6 +5984,7 @@ typedef struct submit_rehome_fixture {
     llam_task_t task;
     llam_task_t caller;
     llam_io_req_t req;
+    bool runtime_registered;
 } submit_rehome_fixture_t;
 
 typedef struct public_cancel_call {
@@ -4423,6 +6006,34 @@ typedef struct submit_evacuation_call {
     bool rc;
 } submit_evacuation_call_t;
 
+typedef struct inflight_owner_transfer_call {
+    llam_io_req_t *req;
+    unsigned from_shard;
+    unsigned to_shard;
+    bool result;
+} inflight_owner_transfer_call_t;
+
+typedef struct inflight_reuse_fixture {
+    llam_runtime_t runtime;
+    llam_shard_t shards[4];
+    llam_node_t node;
+    llam_task_t task;
+} inflight_reuse_fixture_t;
+
+typedef struct inflight_rehome_call {
+    inflight_reuse_fixture_t *fixture;
+    unsigned source_id;
+    unsigned target_id;
+    unsigned migrated;
+    atomic_uint done;
+} inflight_rehome_call_t;
+
+typedef struct inflight_completion_call {
+    llam_node_t *node;
+    llam_io_req_t *req;
+    atomic_uint done;
+} inflight_completion_call_t;
+
 static pthread_mutex_t g_submit_detach_hook_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_submit_detach_hook_cv = PTHREAD_COND_INITIALIZER;
 static llam_io_req_t *g_submit_detach_hook_req;
@@ -4432,6 +6043,13 @@ static pthread_mutex_t g_submit_evacuation_hook_lock = PTHREAD_MUTEX_INITIALIZER
 static pthread_cond_t g_submit_evacuation_hook_cv = PTHREAD_COND_INITIALIZER;
 static bool g_submit_evacuation_hook_reached;
 static bool g_submit_evacuation_hook_release;
+static pthread_mutex_t g_inflight_owner_hook_lock =
+    PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_inflight_owner_hook_cv =
+    PTHREAD_COND_INITIALIZER;
+static llam_io_req_t *g_inflight_owner_hook_req;
+static bool g_inflight_owner_hook_reached;
+static bool g_inflight_owner_hook_release;
 
 static void submit_detach_snapshot_hook(llam_io_req_t *req,
                                         unsigned node_index) {
@@ -4525,6 +6143,119 @@ static void clear_submit_evacuation_hook(void) {
     pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
 }
 
+static void inflight_owner_published_hook(
+    llam_io_req_t *req,
+    unsigned from_shard,
+    unsigned to_shard) {
+    (void)from_shard;
+    (void)to_shard;
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    if (req == g_inflight_owner_hook_req) {
+        g_inflight_owner_hook_reached = true;
+        pthread_cond_broadcast(&g_inflight_owner_hook_cv);
+        while (!g_inflight_owner_hook_release) {
+            pthread_cond_wait(
+                &g_inflight_owner_hook_cv,
+                &g_inflight_owner_hook_lock);
+        }
+    }
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static void arm_inflight_owner_hook(llam_io_req_t *req) {
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    g_inflight_owner_hook_req = req;
+    g_inflight_owner_hook_reached = false;
+    g_inflight_owner_hook_release = false;
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+    llam_io_test_set_inflight_owner_published_hook(
+        inflight_owner_published_hook);
+}
+
+static void wait_inflight_owner_hook(void) {
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    while (!g_inflight_owner_hook_reached) {
+        pthread_cond_wait(
+            &g_inflight_owner_hook_cv,
+            &g_inflight_owner_hook_lock);
+    }
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static void release_inflight_owner_hook(void) {
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    g_inflight_owner_hook_release = true;
+    pthread_cond_broadcast(&g_inflight_owner_hook_cv);
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static void clear_inflight_owner_hook(void) {
+    llam_io_test_set_inflight_owner_published_hook(NULL);
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    g_inflight_owner_hook_req = NULL;
+    g_inflight_owner_hook_reached = false;
+    g_inflight_owner_hook_release = false;
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static bool wait_inflight_owner_hook_bounded(uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+    bool reached;
+
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    while (!g_inflight_owner_hook_reached &&
+           llam_now_ns() < deadline) {
+        struct timespec interval = {.tv_sec = 0, .tv_nsec = 1000000L};
+
+        pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+        (void)nanosleep(&interval, NULL);
+        pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    }
+    reached = g_inflight_owner_hook_reached;
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+    return reached;
+}
+
+static bool wait_atomic_uint_mask_bounded(atomic_uint *value,
+                                          unsigned mask,
+                                          unsigned expected,
+                                          uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+
+    while ((atomic_load_explicit(value, memory_order_acquire) & mask) !=
+           expected) {
+        if (llam_now_ns() >= deadline) {
+            return false;
+        }
+        sched_yield();
+    }
+    return true;
+}
+
+static bool wait_completion_or_resolver_close_bounded(
+    atomic_uint *completion_done,
+    atomic_uint *resolver_state,
+    uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+    unsigned state;
+
+    for (;;) {
+        if (atomic_load_explicit(completion_done,
+                                 memory_order_acquire) != 0U) {
+            return true;
+        }
+        state = atomic_load_explicit(resolver_state, memory_order_acquire);
+        if ((state & LLAM_WAIT_RESOLVER_CLOSED_BIT) != 0U &&
+            (state & LLAM_WAIT_RESOLVER_REF_MASK) != 0U) {
+            return true;
+        }
+        if (llam_now_ns() >= deadline) {
+            return false;
+        }
+        sched_yield();
+    }
+}
+
 static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
                                       bool published) {
     llam_runtime_t *rt;
@@ -4545,8 +6276,11 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
     rt->active_nodes = 2U;
     atomic_init(&rt->initialized, false);
     atomic_init(&rt->fatal_errno, 0);
+    atomic_init(&rt->deferred_fatal_pending, 0U);
     atomic_init(&rt->overflow_depth, 0U);
     atomic_init(&rt->active_io_waiters, 0U);
+    atomic_init(&rt->active_ops, 0U);
+    atomic_init(&rt->destroy_claimed, false);
 
     for (unsigned i = 0U; i < 2U; ++i) {
         llam_shard_t *shard = &fixture->shards[i];
@@ -4557,7 +6291,10 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
         shard->io_node_index = i;
         shard->event_fd = LLAM_INVALID_FD;
         atomic_init(&shard->online, 1U);
+        atomic_init(&shard->current, NULL);
+        atomic_init(&shard->inflight_io_waiters, 0U);
         atomic_init(&shard->merge_pause_requested, 0U);
+        atomic_init(&shard->merge_pause_ack, 0U);
         atomic_init(&shard->inject_depth, 0U);
         atomic_init(&shard->timer_count, 0U);
         atomic_init(&shard->timer_callbacks_active, 0U);
@@ -4630,10 +6367,243 @@ static void destroy_submit_rehome_fixture(submit_rehome_fixture_t *fixture) {
     if (fixture == NULL) {
         return;
     }
+    if (fixture->runtime_registered) {
+        llam_runtime_unregister_handle(&fixture->runtime);
+        fixture->runtime_registered = false;
+    }
     for (unsigned i = 0U; i < 2U; ++i) {
         pthread_mutex_destroy(&fixture->nodes[i].submit_lock);
         pthread_mutex_destroy(&fixture->shards[i].lock);
     }
+}
+
+static int init_inflight_reuse_fixture(inflight_reuse_fixture_t *fixture,
+                                       unsigned allocation_owner,
+                                       unsigned source_id) {
+    llam_runtime_t *rt;
+    llam_task_t *task;
+    llam_io_req_t *req;
+    uint64_t operation_generation;
+
+    if (fixture == NULL || allocation_owner >= 4U ||
+        source_id >= 4U) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(fixture, 0, sizeof(*fixture));
+    rt = &fixture->runtime;
+    task = &fixture->task;
+    req = &task->embedded_io_req;
+
+    rt->shards = fixture->shards;
+    rt->nodes = &fixture->node;
+    rt->active_shards = 4U;
+    rt->active_nodes = 1U;
+    atomic_init(&rt->initialized, false);
+    atomic_init(&rt->online_shards, 4U);
+    atomic_init(&rt->fatal_errno, 0);
+    atomic_init(&rt->deferred_fatal_pending, 0U);
+    atomic_init(&rt->overflow_depth, 0U);
+    atomic_init(&rt->active_io_waiters, 0U);
+
+    for (unsigned i = 0U; i < 4U; ++i) {
+        llam_shard_t *shard = &fixture->shards[i];
+
+        shard->runtime = rt;
+        shard->id = i;
+        shard->io_node_index = 0U;
+        shard->event_fd = LLAM_INVALID_FD;
+        atomic_init(&shard->online, 1U);
+        atomic_init(&shard->current, NULL);
+        atomic_init(&shard->inflight_io_waiters, 0U);
+        atomic_init(&shard->merge_pause_requested, 0U);
+        atomic_init(&shard->merge_pause_ack, 0U);
+        atomic_init(&shard->inject_depth, 0U);
+        atomic_init(&shard->timer_count, 0U);
+        atomic_init(&shard->timer_callbacks_active, 0U);
+        if (pthread_mutex_init(&shard->lock, NULL) != 0) {
+            return -1;
+        }
+    }
+
+    fixture->node.runtime = rt;
+    fixture->node.index = 0U;
+    fixture->node.event_fd = LLAM_INVALID_FD;
+    atomic_init(&fixture->node.pending_ops, 0U);
+    if (pthread_mutex_init(&fixture->node.watch_lock, NULL) != 0) {
+        return -1;
+    }
+
+    task->owner_runtime = rt;
+    task->home_shard = source_id;
+    task->live_shard = source_id;
+    task->alloc_owner_shard = allocation_owner;
+    atomic_init(&task->state, LLAM_TASK_STATE_PARKED);
+    atomic_init(&task->wait_reason, LLAM_WAIT_IO);
+    atomic_init(&task->last_shard, source_id);
+    atomic_init(&task->parked_shard, source_id);
+    atomic_init(&task->task_class, LLAM_TASK_CLASS_DEFAULT);
+    atomic_init(&task->base_task_class, LLAM_TASK_CLASS_DEFAULT);
+    atomic_init(&task->wake_error_code, 0);
+    atomic_init(&task->wait_resolver_state, 0U);
+    atomic_init(&task->wait_generation, 1U);
+    atomic_init(&task->scan_refs, 0U);
+    atomic_init(&task->active_wait_node, NULL);
+    atomic_init(&task->active_wait_queue, NULL);
+    atomic_init(&task->active_wait_queue_lock, NULL);
+    atomic_init(&task->active_select_state, NULL);
+    atomic_init(&task->active_wait_lifetime_ops, NULL);
+    atomic_init(&task->active_block_job, NULL);
+    atomic_init(&task->join_target, NULL);
+    atomic_init(&task->active_io_req, NULL);
+    atomic_init(&task->active_io_generation, 0U);
+    task->active_timer = NULL;
+
+    llam_io_req_reset(req, rt, source_id, UINT_MAX);
+    if (!llam_io_req_lifetime_activate(req)) {
+        return -1;
+    }
+    operation_generation = atomic_load_explicit(
+        &req->operation_generation, memory_order_acquire);
+    req->task = task;
+    atomic_store_explicit(&req->owner_shard,
+                          source_id,
+                          memory_order_release);
+    atomic_store_explicit(&req->inflight_owner_shard,
+                          source_id,
+                          memory_order_release);
+    atomic_store_explicit(&req->wait_mode,
+                          LLAM_IO_WAIT_MODE_INFLIGHT,
+                          memory_order_release);
+    atomic_store_explicit(&task->active_io_generation,
+                          operation_generation,
+                          memory_order_release);
+    atomic_store_explicit(&task->active_io_req,
+                          req,
+                          memory_order_release);
+    fixture->shards[allocation_owner].all_tasks = task;
+    atomic_store_explicit(
+        &fixture->shards[source_id].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    return 0;
+}
+
+static void destroy_inflight_reuse_fixture(
+    inflight_reuse_fixture_t *fixture) {
+    if (fixture == NULL) {
+        return;
+    }
+    pthread_mutex_destroy(&fixture->node.watch_lock);
+    for (unsigned i = 0U; i < 4U; ++i) {
+        pthread_mutex_destroy(&fixture->shards[i].lock);
+    }
+}
+
+static void *inflight_rehome_thread_main(void *opaque) {
+    inflight_rehome_call_t *call = opaque;
+
+    llam_rehome_inflight_io_waiters(
+        &call->fixture->runtime,
+        &call->fixture->shards[call->source_id],
+        &call->fixture->shards[call->target_id],
+        &call->migrated);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *inflight_completion_thread_main(void *opaque) {
+    inflight_completion_call_t *call = opaque;
+
+#if LLAM_RUNTIME_BACKEND_KQUEUE
+    llam_io_complete_req(call->node, call->req, 0, false);
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_complete_req(call->node, call->req, 0, 0U, false);
+#else
+#error "FR08-002 regression requires the kqueue or Linux backend"
+#endif
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void clear_inflight_reuse_inject_queue(
+    inflight_reuse_fixture_t *fixture,
+    unsigned shard_id) {
+    llam_shard_t *shard = &fixture->shards[shard_id];
+
+    pthread_mutex_lock(&shard->lock);
+    while (llam_queue_pop_head(&shard->inject_q) != NULL) {
+    }
+    atomic_store_explicit(&shard->inject_depth,
+                          0U,
+                          memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+    fixture->task.queue_next = NULL;
+    fixture->task.queue_prev = NULL;
+}
+
+static bool reuse_inflight_generation(inflight_reuse_fixture_t *fixture,
+                                      unsigned source_id,
+                                      unsigned completed_on,
+                                      unsigned reuse_id,
+                                      uint64_t old_generation,
+                                      uint64_t *new_generation_out) {
+    llam_task_t *task = &fixture->task;
+    llam_io_req_t *old_req = &task->embedded_io_req;
+    llam_io_req_t *new_req;
+    uint64_t new_generation;
+
+    if (llam_task_active_io_req_load(task) != NULL ||
+        atomic_load_explicit(&task->state,
+                             memory_order_acquire) !=
+            LLAM_TASK_STATE_RUNNABLE ||
+        fixture->shards[completed_on].inject_q.head != task) {
+        return false;
+    }
+
+    clear_inflight_reuse_inject_queue(fixture, completed_on);
+    atomic_store_explicit(&task->state,
+                          LLAM_TASK_STATE_RUNNING,
+                          memory_order_release);
+    atomic_store_explicit(&task->last_shard,
+                          reuse_id,
+                          memory_order_release);
+    /*
+     * A stolen task may retain its prior home while beginning the fresh wait.
+     * The old rehome must not rewrite this generation's placement metadata.
+     */
+    task->home_shard = source_id;
+    g_llam_tls_task = task;
+    g_llam_tls_shard = &fixture->shards[reuse_id];
+    llam_api_io_req_release(g_llam_tls_shard, old_req);
+    new_req = llam_api_io_req_acquire(g_llam_tls_shard);
+    if (new_req != old_req) {
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+        return false;
+    }
+    new_generation = atomic_load_explicit(
+        &new_req->operation_generation, memory_order_acquire);
+    if (new_generation == 0U || new_generation == old_generation ||
+        !llam_task_set_io_tracking(task, new_req, reuse_id)) {
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+        return false;
+    }
+    atomic_store_explicit(&new_req->wait_mode,
+                          LLAM_IO_WAIT_MODE_INFLIGHT,
+                          memory_order_release);
+    atomic_store_explicit(&new_req->inflight_owner_shard,
+                          reuse_id,
+                          memory_order_release);
+    atomic_store_explicit(
+        &fixture->shards[reuse_id].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+    *new_generation_out = new_generation;
+    return true;
 }
 
 static bool migrate_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
@@ -4688,6 +6658,772 @@ static void *submit_evacuation_thread_main(void *opaque) {
     return NULL;
 }
 
+static void *inflight_owner_transfer_thread_main(void *opaque) {
+    inflight_owner_transfer_call_t *call = opaque;
+
+    call->result = llam_io_req_transfer_inflight_owner(
+        call->req,
+        call->from_shard,
+        call->to_shard);
+    return NULL;
+}
+
+static void clear_fixture_task_queues(
+    submit_rehome_fixture_t *fixture) {
+    for (unsigned i = 0U; i < 2U; ++i) {
+        fixture->shards[i].inject_q.head = NULL;
+        fixture->shards[i].inject_q.tail = NULL;
+        fixture->shards[i].inject_q.depth = 0U;
+        fixture->shards[i].hot_q.head = NULL;
+        fixture->shards[i].hot_q.tail = NULL;
+        fixture->shards[i].hot_q.depth = 0U;
+        fixture->shards[i].norm_q.head = NULL;
+        fixture->shards[i].norm_q.tail = NULL;
+        fixture->shards[i].norm_q.depth = 0U;
+        atomic_store_explicit(
+            &fixture->shards[i].inject_depth,
+            0U,
+            memory_order_release);
+    }
+    fixture->task.queue_next = NULL;
+    fixture->task.queue_prev = NULL;
+}
+
+static int exercise_inflight_owner_credit_precedes_publication(void) {
+    submit_rehome_fixture_t fixture;
+    inflight_owner_transfer_call_t call;
+    pthread_t thread;
+    unsigned completion_owner;
+    bool published_with_credit;
+    int rc = 1;
+
+    if (init_submit_rehome_fixture(&fixture, false) != 0) {
+        return fail_errno(
+            "inflight owner transaction fixture init failed");
+    }
+    atomic_store_explicit(
+        &fixture.req.inflight_owner_shard,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[1].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    call.req = &fixture.req;
+    call.from_shard = 0U;
+    call.to_shard = 1U;
+    call.result = false;
+
+    arm_inflight_owner_hook(&fixture.req);
+    if (pthread_create(
+            &thread,
+            NULL,
+            inflight_owner_transfer_thread_main,
+            &call) != 0) {
+        clear_inflight_owner_hook();
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno(
+            "inflight owner transaction thread create failed");
+    }
+    wait_inflight_owner_hook();
+    published_with_credit =
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) == 1U &&
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) == 1U &&
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) == 1U;
+    completion_owner = atomic_exchange_explicit(
+        &fixture.req.inflight_owner_shard,
+        UINT_MAX,
+        memory_order_acq_rel);
+    if (completion_owner < fixture.runtime.active_shards) {
+        llam_shard_note_inflight_io_waiter(
+            &fixture.runtime,
+            completion_owner,
+            -1);
+    }
+    release_inflight_owner_hook();
+    pthread_join(thread, NULL);
+    clear_inflight_owner_hook();
+
+    if (!published_with_credit ||
+        !call.result ||
+        completion_owner != 1U ||
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != 0 ||
+        atomic_load_explicit(
+            &fixture.runtime.deferred_fatal_pending,
+            memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "inflight owner publication was uncredited: "
+            "credit=%u moved=%u owner=%u source=%u target=%u fatal=%d "
+            "deferred=%u\n",
+            published_with_credit ? 1U : 0U,
+            call.result ? 1U : 0U,
+            completion_owner,
+            atomic_load_explicit(
+                &fixture.shards[0].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.shards[1].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.runtime.fatal_errno,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.runtime.deferred_fatal_pending,
+                memory_order_acquire));
+        goto done;
+    }
+
+    /*
+     * If completion consumes the source before the CAS, the provisional
+     * target unit was never authoritative and must roll back exactly once.
+     */
+    atomic_store_explicit(
+        &fixture.req.inflight_owner_shard,
+        UINT_MAX,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[1].inflight_io_waiters,
+        7U,
+        memory_order_release);
+    if (llam_io_req_transfer_inflight_owner(
+            &fixture.req, 0U, 1U) ||
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) != 7U ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != 0) {
+        goto done;
+    }
+
+    /*
+     * Saturation must fail before the target owner is visible. Publishing
+     * first would leave a request owned by a counter that could not be
+     * credited.
+     */
+    atomic_store_explicit(
+        &fixture.req.inflight_owner_shard,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[1].inflight_io_waiters,
+        UINT_MAX,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.runtime.fatal_errno,
+        0,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.runtime.deferred_fatal_pending,
+        0U,
+        memory_order_release);
+    if (llam_io_req_transfer_inflight_owner(
+            &fixture.req, 0U, 1U) ||
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != EOVERFLOW) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    destroy_submit_rehome_fixture(&fixture);
+    return rc;
+}
+
+/*
+ * LLAM-DIFF-FR08-002: a rehome for generation N must pin that wait until all
+ * ownership stores finish.  The task allocation owner is deliberately
+ * distinct from its parked shard, matching a supported stolen-task state.
+ */
+static int exercise_inflight_rehome_is_generation_bound(void) {
+    enum {
+        allocation_owner = 0U,
+        source_id = 1U,
+        target_id = 2U,
+        reuse_id = 3U
+    };
+    const uint64_t timeout_ns = 2000000000ULL;
+    inflight_reuse_fixture_t fixture;
+    inflight_rehome_call_t rehome_call;
+    inflight_completion_call_t completion_call;
+    llam_task_t *task;
+    llam_io_req_t *req;
+    pthread_t rehome_thread;
+    pthread_t completion_thread;
+    uint64_t old_generation;
+    uint64_t old_wait_generation;
+    uint64_t new_generation = 0U;
+    bool completion_finished_while_paused;
+    bool rehome_started = false;
+    bool rehome_joined = false;
+    bool completion_started = false;
+    bool completion_joined = false;
+    bool hook_armed = false;
+    bool fresh_started = false;
+    int rc = 1;
+
+    if (init_inflight_reuse_fixture(
+            &fixture, allocation_owner, source_id) != 0) {
+        return fail_errno("FR08-002 fixture init failed");
+    }
+    task = &fixture.task;
+    req = &task->embedded_io_req;
+    old_generation = atomic_load_explicit(
+        &req->operation_generation, memory_order_acquire);
+    old_wait_generation = atomic_load_explicit(
+        &task->wait_generation, memory_order_acquire);
+
+    memset(&rehome_call, 0, sizeof(rehome_call));
+    rehome_call.fixture = &fixture;
+    rehome_call.source_id = source_id;
+    rehome_call.target_id = target_id;
+    atomic_init(&rehome_call.done, 0U);
+    memset(&completion_call, 0, sizeof(completion_call));
+    completion_call.node = &fixture.node;
+    completion_call.req = req;
+    atomic_init(&completion_call.done, 0U);
+
+    arm_inflight_owner_hook(req);
+    hook_armed = true;
+    if (pthread_create(&rehome_thread,
+                       NULL,
+                       inflight_rehome_thread_main,
+                       &rehome_call) != 0) {
+        (void)fail_errno("FR08-002 rehome thread create failed");
+        goto done;
+    }
+    rehome_started = true;
+    if (!wait_inflight_owner_hook_bounded(timeout_ns)) {
+        (void)fail_msg("FR08-002 owner publication hook timed out");
+        goto done;
+    }
+    if (atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != target_id ||
+        atomic_load_explicit(&task->parked_shard,
+                             memory_order_acquire) != source_id ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != source_id ||
+        task->home_shard != source_id) {
+        (void)fail_msg(
+            "FR08-002 fixture missed the post-publication metadata window");
+        goto done;
+    }
+
+    if (pthread_create(&completion_thread,
+                       NULL,
+                       inflight_completion_thread_main,
+                       &completion_call) != 0) {
+        (void)fail_errno("FR08-002 completion thread create failed");
+        goto done;
+    }
+    completion_started = true;
+    if (!wait_atomic_uint_mask_bounded(
+            &req->wait_mode,
+            UINT_MAX,
+            LLAM_IO_WAIT_MODE_NONE,
+            timeout_ns) ||
+        atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(
+            &fixture.shards[target_id].inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        (void)fail_msg(
+            "FR08-002 completion did not consume the transferred owner");
+        goto done;
+    }
+
+    if (!wait_completion_or_resolver_close_bounded(
+            &completion_call.done,
+            &task->wait_resolver_state,
+            timeout_ns)) {
+        (void)fail_msg(
+            "FR08-002 completion reached neither reuse nor resolver drain");
+        goto done;
+    }
+    completion_finished_while_paused =
+        atomic_load_explicit(&completion_call.done,
+                             memory_order_acquire) != 0U;
+    if (completion_finished_while_paused) {
+        if (pthread_join(completion_thread, NULL) != 0) {
+            (void)fail_msg("FR08-002 early completion join failed");
+            goto done;
+        }
+        completion_joined = true;
+        /*
+         * Vulnerable code reaches this branch: completion clears generation N,
+         * so publish N+1 at the same embedded address before old rehome resumes.
+         */
+        if (!reuse_inflight_generation(&fixture,
+                                       source_id,
+                                       target_id,
+                                       reuse_id,
+                                       old_generation,
+                                       &new_generation)) {
+            (void)fail_msg(
+                "FR08-002 could not reuse the prematurely cleared request");
+            goto done;
+        }
+        fresh_started = true;
+    } else if (!wait_atomic_uint_mask_bounded(
+                   &task->wait_resolver_state,
+                   LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                   LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                   timeout_ns) ||
+               (atomic_load_explicit(&task->wait_resolver_state,
+                                     memory_order_acquire) &
+                LLAM_WAIT_RESOLVER_REF_MASK) == 0U ||
+               llam_task_active_io_req_load(task) != req ||
+               atomic_load_explicit(&task->active_io_generation,
+                                    memory_order_acquire) != old_generation ||
+               atomic_load_explicit(&task->wait_generation,
+                                    memory_order_acquire) !=
+                   old_wait_generation) {
+        (void)fail_msg(
+            "FR08-002 completion was blocked without retaining generation N");
+        goto done;
+    }
+
+    release_inflight_owner_hook();
+    if (pthread_join(rehome_thread, NULL) != 0) {
+        (void)fail_msg("FR08-002 rehome join failed");
+        goto done;
+    }
+    rehome_joined = true;
+    clear_inflight_owner_hook();
+    hook_armed = false;
+
+    if (completion_started && !completion_joined) {
+        if (pthread_join(completion_thread, NULL) != 0) {
+            (void)fail_msg("FR08-002 completion join failed");
+            goto done;
+        }
+        completion_joined = true;
+    }
+    if (!fresh_started) {
+        if (!reuse_inflight_generation(&fixture,
+                                       source_id,
+                                       target_id,
+                                       reuse_id,
+                                       old_generation,
+                                       &new_generation)) {
+            (void)fail_msg(
+                "FR08-002 could not start a fresh post-rehome generation");
+            goto done;
+        }
+        fresh_started = true;
+    }
+
+    if (rehome_call.migrated != 1U ||
+        atomic_load_explicit(&rehome_call.done,
+                             memory_order_acquire) != 1U ||
+        llam_task_active_io_req_load(task) != req ||
+        atomic_load_explicit(&task->active_io_generation,
+                             memory_order_acquire) != new_generation ||
+        atomic_load_explicit(&req->operation_generation,
+                             memory_order_acquire) != new_generation ||
+        atomic_load_explicit(&task->wait_generation,
+                             memory_order_acquire) ==
+            old_wait_generation ||
+        atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != reuse_id ||
+        atomic_load_explicit(&task->parked_shard,
+                             memory_order_acquire) != reuse_id ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != reuse_id ||
+        task->home_shard != source_id ||
+        atomic_load_explicit(
+            &fixture.shards[reuse_id].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != 0 ||
+        atomic_load_explicit(&fixture.runtime.deferred_fatal_pending,
+                             memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "test_runtime_shutdown_internal: FR08-002 old generation "
+            "overwrote fresh ownership: old_gen=%llu new_gen=%llu "
+            "parked=%u owner=%u home=%u inflight=%u\n",
+            (unsigned long long)old_generation,
+            (unsigned long long)new_generation,
+            atomic_load_explicit(&task->parked_shard,
+                                 memory_order_acquire),
+            atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire),
+            task->home_shard,
+            atomic_load_explicit(&req->inflight_owner_shard,
+                                 memory_order_acquire));
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+    if (hook_armed) {
+        release_inflight_owner_hook();
+    }
+    if (rehome_started && !rehome_joined) {
+        (void)pthread_join(rehome_thread, NULL);
+    }
+    if (completion_started && !completion_joined) {
+        (void)pthread_join(completion_thread, NULL);
+    }
+    if (hook_armed) {
+        clear_inflight_owner_hook();
+    }
+
+    for (unsigned i = 0U; i < 4U; ++i) {
+        atomic_store_explicit(&fixture.shards[i].inflight_io_waiters,
+                              0U,
+                              memory_order_release);
+        clear_inflight_reuse_inject_queue(&fixture, i);
+    }
+    atomic_store_explicit(&req->inflight_owner_shard,
+                          UINT_MAX,
+                          memory_order_release);
+    atomic_store_explicit(&req->wait_mode,
+                          LLAM_IO_WAIT_MODE_NONE,
+                          memory_order_release);
+    if (llam_task_active_io_req_load(task) == req) {
+        (void)llam_task_clear_wait_tracking(task);
+    }
+    if (atomic_load_explicit(&req->lifetime_refs,
+                             memory_order_acquire) != 0U) {
+        g_llam_tls_task = task;
+        g_llam_tls_shard = &fixture.shards[reuse_id];
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+    }
+    destroy_inflight_reuse_fixture(&fixture);
+    return rc;
+}
+
+static int exercise_inflight_rehome_generation_mismatch_fails_closed(void) {
+    enum {
+        allocation_owner = 0U,
+        source_id = 1U,
+        target_id = 2U
+    };
+    const uint64_t timeout_ns = 2000000000ULL;
+    inflight_reuse_fixture_t fixture;
+    inflight_rehome_call_t rehome_call;
+    llam_task_t *task;
+    llam_io_req_t *req;
+    pthread_t rehome_thread;
+    uint64_t operation_generation;
+    uint64_t mismatched_generation;
+    uint64_t wait_generation;
+    bool rehome_started = false;
+    bool rehome_joined = false;
+    bool hook_armed = false;
+    int rc = 1;
+
+    if (init_inflight_reuse_fixture(
+            &fixture, allocation_owner, source_id) != 0) {
+        return fail_errno("FR08-002 mismatch fixture init failed");
+    }
+    task = &fixture.task;
+    req = &task->embedded_io_req;
+    operation_generation = atomic_load_explicit(
+        &req->operation_generation, memory_order_acquire);
+    wait_generation = atomic_load_explicit(
+        &task->wait_generation, memory_order_acquire);
+    mismatched_generation = operation_generation + 1U;
+
+    memset(&rehome_call, 0, sizeof(rehome_call));
+    rehome_call.fixture = &fixture;
+    rehome_call.source_id = source_id;
+    rehome_call.target_id = target_id;
+    atomic_init(&rehome_call.done, 0U);
+
+    arm_inflight_owner_hook(req);
+    hook_armed = true;
+    if (pthread_create(&rehome_thread,
+                       NULL,
+                       inflight_rehome_thread_main,
+                       &rehome_call) != 0) {
+        (void)fail_errno(
+            "FR08-002 mismatch rehome thread create failed");
+        goto done;
+    }
+    rehome_started = true;
+    if (!wait_inflight_owner_hook_bounded(timeout_ns)) {
+        (void)fail_msg(
+            "FR08-002 mismatch owner publication hook timed out");
+        goto done;
+    }
+    if (atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != target_id ||
+        atomic_load_explicit(
+            &fixture.shards[source_id].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shards[target_id].inflight_io_waiters,
+            memory_order_acquire) != 1U) {
+        (void)fail_msg(
+            "FR08-002 mismatch missed credited publication window");
+        goto done;
+    }
+
+    /*
+     * operation_generation is immutable for a valid activation. Corrupt it
+     * only at the deterministic post-publication hook to exercise the
+     * fail-closed invariant branch after the owner move is irreversible.
+     */
+    atomic_store_explicit(&req->operation_generation,
+                          mismatched_generation,
+                          memory_order_release);
+    release_inflight_owner_hook();
+    if (pthread_join(rehome_thread, NULL) != 0) {
+        (void)fail_msg("FR08-002 mismatch rehome join failed");
+        goto done;
+    }
+    rehome_joined = true;
+    clear_inflight_owner_hook();
+    hook_armed = false;
+
+    if (rehome_call.migrated != 0U ||
+        atomic_load_explicit(&rehome_call.done,
+                             memory_order_acquire) != 1U ||
+        atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != target_id ||
+        atomic_load_explicit(
+            &fixture.shards[source_id].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[target_id].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(&task->parked_shard,
+                             memory_order_acquire) != source_id ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != source_id ||
+        task->home_shard != source_id ||
+        llam_task_active_io_req_load(task) != req ||
+        atomic_load_explicit(&task->active_io_generation,
+                             memory_order_acquire) !=
+            operation_generation ||
+        atomic_load_explicit(&task->wait_generation,
+                             memory_order_acquire) != wait_generation ||
+        atomic_load_explicit(&req->operation_generation,
+                             memory_order_acquire) !=
+            mismatched_generation ||
+        atomic_load_explicit(&task->wait_resolver_state,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != EPROTO ||
+        atomic_load_explicit(&fixture.runtime.deferred_fatal_pending,
+                             memory_order_acquire) != 1U) {
+        fprintf(
+            stderr,
+            "test_runtime_shutdown_internal: FR08-002 post-publication "
+            "mismatch did not fail closed: migrated=%u inflight=%u "
+            "source_count=%u target_count=%u parked=%u owner=%u home=%u "
+            "resolver=%u fatal=%d deferred=%u\n",
+            rehome_call.migrated,
+            atomic_load_explicit(&req->inflight_owner_shard,
+                                 memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.shards[source_id].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.shards[target_id].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(&task->parked_shard,
+                                 memory_order_acquire),
+            atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire),
+            task->home_shard,
+            atomic_load_explicit(&task->wait_resolver_state,
+                                 memory_order_acquire),
+            atomic_load_explicit(&fixture.runtime.fatal_errno,
+                                 memory_order_acquire),
+            atomic_load_explicit(&fixture.runtime.deferred_fatal_pending,
+                                 memory_order_acquire));
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (hook_armed) {
+        release_inflight_owner_hook();
+    }
+    if (rehome_started && !rehome_joined) {
+        (void)pthread_join(rehome_thread, NULL);
+    }
+    if (hook_armed) {
+        clear_inflight_owner_hook();
+    }
+    atomic_store_explicit(&req->operation_generation,
+                          operation_generation,
+                          memory_order_release);
+    atomic_store_explicit(&req->inflight_owner_shard,
+                          UINT_MAX,
+                          memory_order_release);
+    atomic_store_explicit(&req->wait_mode,
+                          LLAM_IO_WAIT_MODE_NONE,
+                          memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[source_id].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[target_id].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    if (llam_task_active_io_req_load(task) == req) {
+        (void)llam_task_clear_wait_tracking(task);
+    }
+    if (atomic_load_explicit(&req->lifetime_refs,
+                             memory_order_acquire) != 0U) {
+        g_llam_tls_task = task;
+        g_llam_tls_shard = &fixture.shards[source_id];
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+    }
+    destroy_inflight_reuse_fixture(&fixture);
+    return rc;
+}
+
+static int exercise_merge_request_before_ack_keeps_wake_on_source(void) {
+    submit_rehome_fixture_t fixture;
+    llam_task_t *task;
+    llam_runtime_t *rt;
+    bool request_before_ack_stayed;
+    bool acknowledged_request_moved;
+    int rc = 1;
+
+    if (init_submit_rehome_fixture(&fixture, false) != 0) {
+        return fail_errno(
+            "merge admission transaction fixture init failed");
+    }
+    task = &fixture.task;
+    rt = &fixture.runtime;
+    rt->experimental_dynamic_shards = 1U;
+    atomic_store_explicit(
+        &fixture.shards[0].current,
+        task,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].merge_pause_requested,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].merge_pause_ack,
+        0U,
+        memory_order_release);
+    if (!llam_task_set_join_tracking(
+            task, &fixture.caller, 0U)) {
+        goto done;
+    }
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+    llam_reinject_task_on_shard(
+        rt,
+        task,
+        0U,
+        true,
+        LLAM_TRACE_WAKE,
+        LLAM_WAIT_JOIN);
+    request_before_ack_stayed =
+        fixture.shards[0].inject_q.head == task &&
+        fixture.shards[1].inject_q.head == NULL;
+
+    clear_fixture_task_queues(&fixture);
+    atomic_store_explicit(
+        &fixture.shards[0].current,
+        NULL,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].merge_pause_ack,
+        1U,
+        memory_order_release);
+    if (!llam_task_set_join_tracking(
+            task, &fixture.caller, 0U)) {
+        goto done;
+    }
+    llam_reinject_task_on_shard(
+        rt,
+        task,
+        0U,
+        true,
+        LLAM_TRACE_WAKE,
+        LLAM_WAIT_JOIN);
+    acknowledged_request_moved =
+        fixture.shards[0].inject_q.head == NULL &&
+        fixture.shards[1].inject_q.head == task;
+
+    if (!request_before_ack_stayed ||
+        !acknowledged_request_moved ||
+        atomic_load_explicit(
+            &rt->fatal_errno,
+            memory_order_acquire) != 0) {
+        fprintf(
+            stderr,
+            "merge admission rerouted an executing waiter: "
+            "before_ack_source=%u after_ack_target=%u fatal=%d\n",
+            request_before_ack_stayed ? 1U : 0U,
+            acknowledged_request_moved ? 1U : 0U,
+            atomic_load_explicit(
+                &rt->fatal_errno,
+                memory_order_acquire));
+        goto done;
+    }
+    rc = 0;
+
+done:
+    clear_fixture_task_queues(&fixture);
+    atomic_store_explicit(
+        &fixture.shards[0].current,
+        NULL,
+        memory_order_release);
+    destroy_submit_rehome_fixture(&fixture);
+    return rc;
+}
+
 static int run_public_cancel_submit_case(bool migrate) {
     submit_rehome_fixture_t fixture;
     llam_cancel_token_t *token;
@@ -4702,6 +7438,11 @@ static int run_public_cancel_submit_case(bool migrate) {
     if (init_submit_rehome_fixture(&fixture, true) != 0) {
         return fail_errno("submit rehome fixture init failed");
     }
+    if (llam_runtime_register_handle(&fixture.runtime, false) != 0) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno("submit rehome fixture registration failed");
+    }
+    fixture.runtime_registered = true;
     g_llam_tls_task = &fixture.caller;
     g_llam_tls_shard = &fixture.shards[1];
     token = llam_cancel_token_create();
@@ -4978,15 +7719,29 @@ static int exercise_evacuation_pending_transfer_is_atomic(void) {
 }
 
 static int exercise_submit_cancel_rehome_regressions(void) {
+    int failed = 0;
+
+    if (exercise_inflight_owner_credit_precedes_publication() != 0) {
+        failed = 1;
+    }
+    if (exercise_inflight_rehome_is_generation_bound() != 0) {
+        failed = 1;
+    }
+    if (exercise_inflight_rehome_generation_mismatch_fails_closed() != 0) {
+        failed = 1;
+    }
+    if (exercise_merge_request_before_ack_keeps_wake_on_source() != 0) {
+        failed = 1;
+    }
     if (run_public_cancel_submit_case(false) != 0 ||
         run_public_cancel_submit_case(true) != 0 ||
         run_setup_abort_submit_case(false) != 0 ||
         run_setup_abort_submit_case(true) != 0 ||
         exercise_prepublication_cancel_rejects_late_submit() != 0 ||
         exercise_evacuation_pending_transfer_is_atomic() != 0) {
-        return 1;
+        failed = 1;
     }
-    return 0;
+    return failed;
 }
 #else
 static int exercise_submit_cancel_rehome_regressions(void) {
@@ -4994,7 +7749,164 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 }
 #endif
 
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+static int exercise_exact_prewarm_failure_unwinds(void) {
+    const char *current = getenv("LLAM_TASK_CACHE_PREWARM");
+    char *saved = current != NULL ? strdup(current) : NULL;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (current != NULL && saved == NULL) {
+        return fail_errno("saving task prewarm environment failed");
+    }
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = fail_errno("prewarm rollback opts init failed");
+        goto cleanup;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 1U;
+    opts.task_prewarm_total = 17U;
+    opts.stack_prewarm_total = 3U;
+    opts.timer_prewarm_total = 3U;
+
+    for (unsigned kind = 0U; kind < LLAM_TEST_PREWARM_KIND_COUNT; ++kind) {
+        uint64_t successful_objects =
+            kind == LLAM_TEST_PREWARM_TASK ? 16U : 1U;
+
+        llam_runtime_test_reset_prewarm_allocation_limits();
+        llam_runtime_test_set_prewarm_allocation_limit(
+            (llam_test_prewarm_kind_t)kind,
+            successful_objects);
+        errno = 0;
+        if (llam_runtime_create(&opts,
+                                LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                                &runtime) != -1 ||
+            errno != ENOMEM || runtime != NULL) {
+            rc = fail_msg("exact prewarm allocation failure did not unwind initialization");
+            goto cleanup;
+        }
+    }
+
+    llam_runtime_test_reset_prewarm_allocation_limits();
+    if (setenv("LLAM_TASK_CACHE_PREWARM", "1", 1) != 0) {
+        rc = fail_errno("setting legacy task prewarm environment failed");
+        goto cleanup;
+    }
+    opts.task_prewarm_total = 0U;
+    opts.stack_prewarm_total = 1U;
+    opts.timer_prewarm_total = 1U;
+    llam_runtime_test_set_prewarm_allocation_limit(LLAM_TEST_PREWARM_TASK, 0U);
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = fail_errno("best-effort legacy prewarm did not survive allocation exhaustion");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != 1U ||
+        stats.achieved_task_prewarm_total != 0U ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY) {
+        rc = fail_msg("best-effort legacy prewarm diagnostics were inconsistent");
+        goto cleanup;
+    }
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+
+    /*
+     * A failed exact request was registered before allocation. A later create
+     * proves teardown removed that partial handle and all prewarmed timer/task
+     * storage rather than poisoning the process registry.
+     */
+    llam_runtime_test_reset_prewarm_allocation_limits();
+    opts.task_prewarm_total = 1U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        rc = fail_errno("runtime create after exact prewarm rollback failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_prewarm_allocation_limits();
+    if (saved != NULL) {
+        (void)setenv("LLAM_TASK_CACHE_PREWARM", saved, 1);
+    } else {
+        (void)unsetenv("LLAM_TASK_CACHE_PREWARM");
+    }
+    free(saved);
+    return rc;
+}
+#endif
+#include "test_signal_stack_cases.inc"
+#include "test_hard_affinity_cases.inc"
+#include "test_external_doorbell_cases.inc"
+#include "test_external_drive_cases.inc"
+#include "test_handoff_policy_cases.inc"
 int main(void) {
+    if (exercise_handoff_policy_cases() != 0 || test_external_drive_contract() != 0 || exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0 || exercise_thread_signal_stack_ownership() != 0) {
+        return 1;
+    }
+    if (exercise_stack_cache_vm_cases() != 0) {
+        return 1;
+    }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (exercise_first_block_worker_create_failure_rolls_back_submission() != 0) {
+        return 1;
+    }
+    if (exercise_second_block_worker_create_failure_uses_existing_worker() != 0) {
+        return 1;
+    }
+    if (exercise_block_pool_min_partial_failure_unwinds() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_policy_matrix() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_unsupported_policy() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_restore_on_worker_create_failure() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_restore_on_task_exit(false) != 0) {
+        return 1;
+    }
+    if (exercise_affinity_restore_on_task_exit(true) != 0) {
+        return 1;
+    }
+    if (exercise_native_thread_counter_saturates() != 0) {
+        return 1;
+    }
+    if (exercise_native_thread_counter_rejects_underflow() != 0) {
+        return 1;
+    }
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+    const char *fr08_mode = getenv("LLAM_VALIDATE_FR08_002_ONLY");
+
+    if (fr08_mode != NULL &&
+        strcmp(fr08_mode, "mismatch") == 0) {
+        return exercise_inflight_rehome_generation_mismatch_fails_closed();
+    }
+    if (fr08_mode != NULL && strcmp(fr08_mode, "all") == 0) {
+        if (exercise_inflight_rehome_is_generation_bound() != 0) {
+            return 1;
+        }
+        return exercise_inflight_rehome_generation_mismatch_fails_closed();
+    }
+    if (fr08_mode != NULL) {
+        return exercise_inflight_rehome_is_generation_bound();
+    }
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+    if (exercise_exact_prewarm_failure_unwinds() != 0) {
+        return 1;
+    }
+#endif
     if (exercise_io_lifetime_invariants_are_lock_safe() != 0) {
         return 1;
     }
@@ -5108,6 +8020,9 @@ int main(void) {
     if (exercise_norm_depth_counter_wrap_is_rejected() != 0) {
         return 1;
     }
+    if (exercise_cldeque_delayed_thief_preserves_wrapped_task() != 0) {
+        return 1;
+    }
     if (exercise_channel_inflight_waiter_counter_overflow_is_rejected() != 0) {
         return 1;
     }
@@ -5138,6 +8053,11 @@ int main(void) {
     if (exercise_dynamic_scaler_live_saturation_fails_closed() != 0) {
         return 1;
     }
-    printf("test_runtime_shutdown_internal ok\n");
-    return 0;
+    if (exercise_canceled_blocking_results_are_disposed() != 0) {
+        return 1;
+    }
+    if (exercise_close_unpublishes_detached_watch_waiters() != 0) {
+        return 1;
+    }
+    printf("test_runtime_shutdown_internal ok\n"); return 0;
 }

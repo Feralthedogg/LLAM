@@ -95,6 +95,62 @@ opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
 | `preempt_mode` | One of `LLAM_PREEMPT_*`. |
 | `preempt_poll_period` | Safepoint flag-poll period; `0` selects a profile default. |
 | `preempt_quantum_ns` | Global preemption slice override; `0` uses task-class budgets. |
+| `worker_min` | Minimum online scheduler workers; `0` selects compatibility policy. |
+| `worker_count` | Initial online scheduler workers; a lone nonzero value selects a fixed count. |
+| `worker_max` | Allocated scheduler-worker capacity. |
+| `blocking_min` | Blocking workers requested at initialization. |
+| `blocking_max` | Hard blocking-worker capacity. |
+| `affinity_policy` | One of `LLAM_RUNTIME_AFFINITY_*`. |
+| `cpu_count` / `cpu_ids` | Ordered process-allowed CPU IDs copied during initialization. |
+| `task_prewarm_total` | Exact runtime-total logical task-object target; `0` selects compatibility policy. |
+| `stack_prewarm_total` | Exact runtime-total default-stack target, capped at 4096; `0` selects compatibility policy. |
+| `timer_prewarm_total` | Exact runtime-total timer-slot target; `0` selects compatibility policy. |
+| `stack_cache_budget_bytes` | Runtime-wide retained mapping-byte ceiling, including guard pages; `0` selects 512 MiB. |
+| `stack_cache_high_watermark_bytes` | Automatic-trim trigger; `0` selects 384 MiB. |
+| `stack_cache_low_watermark_bytes` | Target after crossing the high watermark; `0` selects 256 MiB. |
+| `stack_cache_idle_ns` | Minimum idle age for opportunistic release; `0` selects 30 seconds. |
+| `stack_cache_flags` | Bitwise OR of `LLAM_RUNTIME_STACK_CACHE_F_*`. |
+| `signal_flags` | Bitwise OR of `LLAM_RUNTIME_SIGNAL_F_*`; `0` leaves all host process actions untouched. |
+| `preempt_signal` | POSIX cooperative-preemption signal; `0` selects the platform default and is ignored when preemption signal integration is disabled. |
+
+Explicit worker bounds must satisfy
+`1 <= worker_min <= worker_count <= worker_max <= cpu_count`. Prewarm fields
+are exact only through size-aware lifecycle APIs: an allocation shortfall
+fails initialization and unwinds the partial runtime. Environment compatibility
+controls remain best-effort.
+
+Stack-cache byte values must be page aligned and satisfy
+`low <= high <= budget`. An exact stack prewarm must fit both the budget and
+the high watermark, so initialization cannot immediately trim away its own
+prewarm contract. The disabled flag requires zero explicit thresholds and
+cannot be combined with a nonzero exact stack prewarm.
+
+| Stack-cache flag | Effect |
+| --- | --- |
+| `LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB` | Zero usable stack bytes before reuse. |
+| `LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN` | Discard/decommit usable pages before retention and reactivate them after pop. |
+| `LLAM_RUNTIME_STACK_CACHE_F_DISABLED` | Release every returned stack mapping instead of caching it. |
+
+`SECURE_SCRUB` and `DISCARD_ON_RETURN` may be combined. A required scrub,
+discard, or reactivation failure fails closed by releasing that mapping.
+
+The option initializer selects `LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS`, which
+enables preemption and guard-fault integration for compatibility. On POSIX,
+all runtimes that install signal actions must use exactly the same flags and
+resolved preemption signal; otherwise initialization fails with `EBUSY`.
+Opted-out runtimes do not participate in that process-wide compatibility
+check. Custom preemption signals must be catchable and must not overlap
+`SIGSEGV` or another platform guard-fault signal. See
+[Embedding LLAM](../guides/embedding.md#own-the-process-signal-policy) for
+handler chaining, replacement, and per-thread alternate-stack ownership.
+
+Affinity policies:
+
+| Value | Use |
+| --- | --- |
+| `LLAM_RUNTIME_AFFINITY_NONE` | Do not change native thread affinity. |
+| `LLAM_RUNTIME_AFFINITY_PREFER` | Attempt placement and continue if it fails. |
+| `LLAM_RUNTIME_AFFINITY_REQUIRE` | Fail unless placement is supported and succeeds. |
 
 Runtime profiles:
 
@@ -163,7 +219,7 @@ Spawn flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `LLAM_SPAWN_F_PINNED` | Prefer keeping the task on its home worker. |
+| `LLAM_SPAWN_F_PINNED` | Execute only on the task's logical home shard. This does not promise one stable pthread or CPU; a same-shard opaque helper is allowed. |
 | `LLAM_SPAWN_F_NO_PREEMPT` | Restrict cooperative preemption checks. |
 | `LLAM_SPAWN_F_SYS_TASK` | Mark runtime-owned helper work. |
 | `LLAM_SPAWN_F_LATENCY_CRITICAL` | Promote wakeup and dispatch priority. |

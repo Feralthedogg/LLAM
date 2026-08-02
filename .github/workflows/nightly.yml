@@ -3,6 +3,9 @@
 
 name: Nightly Deep CI
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 on:
   schedule:
     - cron: "30 17 * * *"
@@ -72,7 +75,7 @@ jobs:
       OUT_DIR: .artifacts/nightly/${{ matrix.name }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
@@ -101,6 +104,7 @@ jobs:
         run: |
           cmake -S . -B build/nightly \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=OFF \
             -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
             -DCMAKE_ASM_COMPILER="${{ matrix.cc }}"
 
@@ -201,7 +205,7 @@ jobs:
 
       - name: Upload nightly diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: nightly-diagnostics-${{ matrix.name }}
           path: .artifacts/nightly/${{ matrix.name }}
@@ -216,7 +220,7 @@ jobs:
       SERVER_SEED: ${{ github.event.inputs.server_seed || '424242' }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
@@ -263,7 +267,7 @@ jobs:
 
       - name: Upload sanitizer diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: nightly-diagnostics-linux-x86_64-asan-ubsan
           path: .artifacts/nightly/linux-x86_64-asan-ubsan
@@ -278,7 +282,7 @@ jobs:
       OUT_DIR: .artifacts/nightly/linux-x86_64-tsan-experimental
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
@@ -330,7 +334,7 @@ jobs:
 
       - name: Upload TSan diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: nightly-diagnostics-linux-x86_64-tsan-experimental
           path: .artifacts/nightly/linux-x86_64-tsan-experimental
@@ -350,13 +354,13 @@ jobs:
             runner: windows-2025
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build/nightly-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/nightly-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLAM_BUILD_RESEARCH=OFF
 
       - name: Build
         shell: pwsh
@@ -437,7 +441,7 @@ jobs:
 
       - name: Upload nightly Windows diagnostics
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: nightly-diagnostics-${{ matrix.name }}
           path: .artifacts/nightly/${{ matrix.name }}

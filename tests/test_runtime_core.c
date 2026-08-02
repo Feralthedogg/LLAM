@@ -19,6 +19,7 @@
  */
 
 #include "llam/runtime.h"
+#include "runtime_resource_plan.h"
 #include "runtime_internal.h"
 
 #include <errno.h>
@@ -85,6 +86,30 @@ typedef struct nested_runtime_create_state {
     core_state_t core;
     llam_runtime_t *created_runtime;
 } nested_runtime_create_state_t;
+
+#define BLOCK_POOL_GROWTH_TASKS 3U
+
+typedef struct block_pool_growth_state {
+    core_state_t core;
+    llam_runtime_t *runtime;
+    llam_task_t *tasks[BLOCK_POOL_GROWTH_TASKS];
+    atomic_uint callbacks_started;
+    atomic_uint callbacks_active;
+    atomic_uint callbacks_active_peak;
+    atomic_uint callbacks_completed;
+    atomic_uint release_callbacks;
+    unsigned confirmed_before_release;
+    unsigned entered_before_release;
+    unsigned live_before_release;
+} block_pool_growth_state_t;
+
+typedef struct native_thread_stats_state {
+    core_state_t core;
+    llam_runtime_t *runtime;
+    llam_runtime_stats_t running_stats;
+    unsigned expected_scheduler_threads;
+    unsigned expected_io_threads;
+} native_thread_stats_state_t;
 
 typedef struct signal_wait_state {
     core_state_t core;
@@ -191,6 +216,149 @@ static void *blocking_callback(void *arg) {
 static void *blocking_null_callback(void *arg) {
     (void)arg;
     return NULL;
+}
+
+static void test_atomic_update_peak(atomic_uint *peak, unsigned value) {
+    unsigned observed = atomic_load_explicit(peak, memory_order_relaxed);
+
+    while (observed < value &&
+           !atomic_compare_exchange_weak_explicit(peak,
+                                                  &observed,
+                                                  value,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed)) {
+    }
+}
+
+static void *block_pool_growth_callback(void *arg) {
+    block_pool_growth_state_t *state = arg;
+    struct timespec interval = {0, 1000000L};
+    unsigned active;
+
+    active = atomic_fetch_add_explicit(&state->callbacks_active,
+                                       1U,
+                                       memory_order_acq_rel) +
+             1U;
+    test_atomic_update_peak(&state->callbacks_active_peak, active);
+    atomic_fetch_add_explicit(&state->callbacks_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_callbacks, memory_order_acquire) == 0U) {
+        (void)nanosleep(&interval, NULL);
+    }
+    atomic_fetch_sub_explicit(&state->callbacks_active, 1U, memory_order_acq_rel);
+    atomic_fetch_add_explicit(&state->callbacks_completed, 1U, memory_order_release);
+    return state;
+}
+
+static void block_pool_growth_child(void *arg) {
+    block_pool_growth_state_t *state = arg;
+    void *result = NULL;
+
+    if (llam_call_blocking_result(block_pool_growth_callback, state, &result) != 0 ||
+        result != state) {
+        task_fail(&state->core, "lazy blocking worker callback failed", errno);
+    }
+}
+
+static void block_pool_growth_parent(void *arg) {
+    block_pool_growth_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    unsigned i;
+
+    for (i = 0U; i < BLOCK_POOL_GROWTH_TASKS; ++i) {
+        state->tasks[i] = llam_runtime_spawn_ex(
+            state->runtime, block_pool_growth_child, state, NULL, 0U);
+        if (state->tasks[i] == NULL) {
+            task_fail(&state->core, "lazy blocking worker child spawn failed", errno);
+            break;
+        }
+    }
+
+    while (i == BLOCK_POOL_GROWTH_TASKS &&
+           (atomic_load_explicit(&state->runtime->block_pending, memory_order_acquire) <
+                BLOCK_POOL_GROWTH_TASKS ||
+            atomic_load_explicit(&state->callbacks_started, memory_order_acquire) < 2U)) {
+        if (llam_now_ns() >= deadline_ns) {
+            task_fail(&state->core, "lazy blocking pool did not reach two workers", ETIMEDOUT);
+            break;
+        }
+        llam_yield();
+    }
+
+    state->confirmed_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_started, memory_order_acquire);
+    state->entered_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_entered, memory_order_acquire);
+    state->live_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_live, memory_order_acquire);
+    atomic_store_explicit(&state->release_callbacks, 1U, memory_order_release);
+
+    for (i = 0U; i < BLOCK_POOL_GROWTH_TASKS; ++i) {
+        if (state->tasks[i] != NULL && llam_join(state->tasks[i]) != 0) {
+            task_fail(&state->core, "lazy blocking worker child join failed", errno);
+        }
+        state->tasks[i] = NULL;
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
+}
+
+static void native_thread_stats_task(void *arg) {
+    native_thread_stats_state_t *state = arg;
+    llam_runtime_t *rt = state->runtime;
+    llam_shard_t *shard = g_llam_tls_shard;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    unsigned runtime_owned;
+
+    if (shard == NULL || shard->runtime != rt) {
+        task_fail(&state->core, "native thread stats task lost its runtime", EINVAL);
+        return;
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (llam_ensure_opaque_helper_locked(shard) != 0) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&shard->opaque_lock);
+        task_fail(&state->core, "native thread stats opaque helper failed", saved_errno);
+        return;
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    while (atomic_load_explicit(&rt->scheduler_threads_live, memory_order_acquire) !=
+               state->expected_scheduler_threads ||
+           atomic_load_explicit(&rt->block_threads_live, memory_order_acquire) != 1U ||
+           atomic_load_explicit(&rt->io_threads_live, memory_order_acquire) !=
+               state->expected_io_threads ||
+           atomic_load_explicit(&rt->controller_threads_live, memory_order_acquire) != 1U ||
+           atomic_load_explicit(&rt->opaque_helper_threads_live, memory_order_acquire) != 1U ||
+           atomic_load_explicit(&rt->host_threads_live, memory_order_acquire) != 1U) {
+        if (llam_now_ns() >= deadline_ns) {
+            task_fail(&state->core, "native thread counters did not converge", ETIMEDOUT);
+            return;
+        }
+        llam_yield();
+    }
+
+    if (llam_runtime_collect_stats_ex(
+            &state->running_stats, sizeof(state->running_stats)) != 0) {
+        task_fail(&state->core, "native thread running stats failed", errno);
+        return;
+    }
+    runtime_owned = state->expected_scheduler_threads + 1U +
+                    state->expected_io_threads + 1U + 1U;
+    if (state->running_stats.scheduler_threads != state->expected_scheduler_threads ||
+        state->running_stats.blocking_threads != 1U ||
+        state->running_stats.io_threads != state->expected_io_threads ||
+        state->running_stats.controller_threads != 1U ||
+        state->running_stats.opaque_helper_threads != 1U ||
+        state->running_stats.runtime_owned_threads != runtime_owned ||
+        state->running_stats.native_execution_threads != runtime_owned + 1U ||
+        state->running_stats.configured_worker_max != rt->resource_plan.worker_max ||
+        state->running_stats.configured_blocking_max != 2U ||
+        state->running_stats.affinity_failures != 0U) {
+        task_fail(&state->core, "native thread running stats were not truthful", EINVAL);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
 }
 
 #if LLAM_PLATFORM_POSIX
@@ -574,13 +742,11 @@ static int test_preinit_contracts(void) {
         int pipe_fds[2];
         char json[8192];
         ssize_t nread;
-
         if (pipe(pipe_fds) != 0) {
             return test_fail_errno("pipe for pre-init stats json failed");
         }
         if (llam_runtime_write_stats_json(pipe_fds[1]) != 0) {
             int saved_errno = errno;
-
             close(pipe_fds[0]);
             close(pipe_fds[1]);
             errno = saved_errno;
@@ -595,7 +761,18 @@ static int test_preinit_contracts(void) {
         json[nread] = '\0';
         if (json[0] != '{' ||
             strstr(json, "\"ctx_switches\":0") == NULL ||
-            strstr(json, "\"active_workers\":0") == NULL) {
+            strstr(json, "\"active_workers\":0") == NULL ||
+            strstr(json, "\"scheduler_threads\":0") == NULL ||
+            strstr(json, "\"runtime_owned_threads\":0") == NULL ||
+            strstr(json, "\"native_execution_threads\":0") == NULL ||
+            strstr(json, "\"affinity_failures\":0") == NULL ||
+            strstr(json, "\"stack_cache_budget_bytes\":0") == NULL ||
+            strstr(json, "\"stack_cache_cached_bytes\":0") == NULL ||
+            strstr(json, "\"stack_cache_trim_requests\":0") == NULL ||
+            strstr(json, "\"stack_cache_resident_valid\":0") == NULL ||
+            strstr(json, "\"stack_cache_resident_sample_ns\":0") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_bytes\":0") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_mappings\":0") == NULL) {
             return test_fail("pre-init stats json was not an empty snapshot");
         }
     }
@@ -702,6 +879,794 @@ static int test_runtime_registered_init_failure_rolls_back(void) {
     }
     llam_runtime_destroy(runtime);
     return 0;
+}
+
+static int test_legacy_runtime_init_ignores_resource_tail(void) {
+    llam_runtime_opts_t opts;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("resource-tail opts init failed");
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.affinity_policy = UINT32_MAX;
+
+    /*
+     * The source-compatible convenience wrapper is frozen at the 2.2 prefix:
+     * old source that recompiles with a newer header must not silently opt into
+     * newly appended resource policy.  The size-aware entry point is the only
+     * path that may observe and reject this invalid tail.
+     */
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("legacy runtime init consumed the resource tail");
+    }
+    llam_runtime_shutdown();
+
+    errno = 0;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 ||
+        errno != EINVAL) {
+        llam_runtime_shutdown();
+        return test_fail("size-aware runtime init did not reject invalid affinity policy");
+    }
+    return 0;
+}
+
+typedef struct resource_plan_case {
+    const char *name;
+    llam_runtime_opts_t opts;
+    size_t opts_size;
+    const unsigned *allowed_cpus;
+    unsigned allowed_cpu_count;
+    bool affinity_supported;
+    bool sqpoll_supported;
+    int expected_errno;
+    unsigned worker_min;
+    unsigned worker_count;
+    unsigned worker_max;
+    unsigned blocking_min;
+    unsigned blocking_max;
+    unsigned selected_cpu_count;
+    const unsigned *selected_cpus;
+    bool sqpoll_reserved;
+    int sqpoll_cpu;
+} resource_plan_case_t;
+
+#include "test_runtime_stack_cache_plan.inc"
+
+#if defined(__linux__)
+#define TEST_LEGACY_BLOCKING_ONE_CPU 1U
+#else
+#define TEST_LEGACY_BLOCKING_ONE_CPU 2U
+#endif
+
+static int test_runtime_resource_plan_resolver(void) {
+    static const unsigned cpus_1[] = {7U};
+    static const unsigned cpus_8[] = {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
+    static const unsigned cpus_64[] = {
+        0U,  1U,  2U,  3U,  4U,  5U,  6U,  7U,  8U,  9U,  10U, 11U, 12U,
+        13U, 14U, 15U, 16U, 17U, 18U, 19U, 20U, 21U, 22U, 23U, 24U, 25U,
+        26U, 27U, 28U, 29U, 30U, 31U, 32U, 33U, 34U, 35U, 36U, 37U, 38U,
+        39U, 40U, 41U, 42U, 43U, 44U, 45U, 46U, 47U, 48U, 49U, 50U, 51U,
+        52U, 53U, 54U, 55U, 56U, 57U, 58U, 59U, 60U, 61U, 62U, 63U,
+    };
+    static const unsigned cpus_sparse[] = {11U, 3U, 29U, 7U};
+    static const uint32_t requested_sparse[] = {29U, 7U, 11U};
+    static const unsigned expected_sparse[] = {29U, 7U, 11U};
+    static const uint32_t requested_duplicate[] = {3U, 3U};
+    static const uint32_t requested_disallowed[] = {3U, 99U};
+    static const unsigned cpus_sqpoll[] = {0U, 2U, 4U, 6U};
+    static const unsigned expected_sqpoll[] = {0U, 2U, 4U};
+    static const resource_plan_case_t cases[] = {
+        {
+            .name = "one-cpu automatic",
+            .opts = {.sqpoll_cpu = -1, .blocking_max = 1U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 1U,
+            .worker_count = 1U,
+            .worker_max = 1U,
+            .blocking_min = 0U,
+            .blocking_max = 1U,
+            .selected_cpu_count = 1U,
+            .selected_cpus = cpus_1,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "eight-cpu fixed",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 4U, .blocking_min = 1U, .blocking_max = 4U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 4U,
+            .worker_count = 4U,
+            .worker_max = 4U,
+            .blocking_min = 1U,
+            .blocking_max = 4U,
+            .selected_cpu_count = 4U,
+            .selected_cpus = cpus_8,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "sixty-four-cpu dynamic",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_min = 4U,
+                .worker_count = 16U,
+                .worker_max = 32U,
+                .blocking_min = 2U,
+                .blocking_max = 8U,
+                .affinity_policy = LLAM_RUNTIME_AFFINITY_PREFER,
+                .task_prewarm_total = 64U,
+                .stack_prewarm_total = 32U,
+                .timer_prewarm_total = 128U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_64,
+            .allowed_cpu_count = 64U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 4U,
+            .worker_count = 16U,
+            .worker_max = 32U,
+            .blocking_min = 2U,
+            .blocking_max = 8U,
+            .selected_cpu_count = 32U,
+            .selected_cpus = cpus_64,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "sparse caller order",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 3U,
+                .blocking_max = 2U,
+                .cpu_count = 3U,
+                .cpu_ids = requested_sparse,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sparse,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 3U,
+            .worker_count = 3U,
+            .worker_max = 3U,
+            .blocking_min = 0U,
+            .blocking_max = 2U,
+            .selected_cpu_count = 3U,
+            .selected_cpus = expected_sparse,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "duplicate caller CPUs",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 2U,
+                .blocking_max = 1U,
+                .cpu_count = 2U,
+                .cpu_ids = requested_duplicate,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sparse,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "disallowed caller CPU",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 2U,
+                .blocking_max = 1U,
+                .cpu_count = 2U,
+                .cpu_ids = requested_disallowed,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sparse,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "deterministic worker conflict",
+            .opts = {.deterministic = 1U, .sqpoll_cpu = -1, .worker_count = 2U, .blocking_max = 1U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "reversed blocking bounds",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 2U, .blocking_min = 5U, .blocking_max = 4U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "required affinity unsupported",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 2U,
+                .blocking_max = 1U,
+                .affinity_policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = false,
+            .sqpoll_supported = true,
+            .expected_errno = ENOTSUP,
+        },
+        {
+            .name = "automatic SQPOLL reservation",
+            .opts = {
+                .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL,
+                .sqpoll_cpu = -1,
+                .worker_count = 3U,
+                .blocking_max = 1U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = expected_sqpoll,
+            .allowed_cpu_count = 3U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "four-CPU SQPOLL reservation",
+            .opts = {
+                .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL,
+                .sqpoll_cpu = -1,
+                .worker_count = 3U,
+                .blocking_max = 1U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sqpoll,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 3U,
+            .worker_count = 3U,
+            .worker_max = 3U,
+            .blocking_min = 0U,
+            .blocking_max = 1U,
+            .selected_cpu_count = 3U,
+            .selected_cpus = expected_sqpoll,
+            .sqpoll_reserved = true,
+            .sqpoll_cpu = 6,
+        },
+        {
+            .name = "SQPOLL unsupported",
+            .opts = {
+                .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL,
+                .sqpoll_cpu = -1,
+                .worker_count = 1U,
+                .blocking_max = 1U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = false,
+            .expected_errno = ENOTSUP,
+        },
+        {
+            .name = "stack prewarm above hard cap",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 1U, .blocking_max = 1U, .stack_prewarm_total = 4097U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = E2BIG,
+        },
+        {
+            .name = "metadata estimate overflow",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 1U, .blocking_max = 1U, .task_prewarm_total = UINT64_MAX},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EOVERFLOW,
+        },
+        {
+            .name = "ambiguous worker bounds",
+            .opts = {.sqpoll_cpu = -1, .worker_min = 1U, .blocking_max = 1U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "legacy prefix ignores new tail",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = UINT32_MAX,
+                .blocking_max = UINT32_MAX,
+                .affinity_policy = UINT32_MAX,
+                .stack_cache_budget_bytes = UINT64_MAX,
+                .stack_cache_high_watermark_bytes = UINT64_MAX,
+                .stack_cache_low_watermark_bytes = UINT64_MAX,
+                .stack_cache_idle_ns = UINT64_MAX,
+                .stack_cache_flags = UINT32_MAX,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_V2_2_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 1U,
+            .worker_count = 1U,
+            .worker_max = 1U,
+            .blocking_min = TEST_LEGACY_BLOCKING_ONE_CPU,
+            .blocking_max = TEST_LEGACY_BLOCKING_ONE_CPU,
+            .selected_cpu_count = 1U,
+            .selected_cpus = cpus_1,
+            .sqpoll_cpu = -1,
+        },
+    };
+    unsigned cpus_257[257];
+    uint32_t requested_257[257];
+    unsigned i;
+    size_t case_index;
+
+    for (i = 0U; i < 257U; ++i) {
+        cpus_257[i] = i;
+        requested_257[i] = i;
+    }
+
+    for (case_index = 0U; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+        const resource_plan_case_t *test_case = &cases[case_index];
+        llam_runtime_resource_plan_input_t input = {
+            .opts = &test_case->opts,
+            .opts_size = test_case->opts_size,
+            .allowed_cpus = test_case->allowed_cpus,
+            .allowed_cpu_count = test_case->allowed_cpu_count,
+            .affinity_supported = test_case->affinity_supported,
+            .sqpoll_supported = test_case->sqpoll_supported,
+            .page_size = 4096U,
+        };
+        llam_runtime_resource_plan_t plan;
+        int rc;
+
+        memset(&plan, 0xA5, sizeof(plan));
+        errno = 0;
+        rc = llam_runtime_resource_plan_resolve(&input, &plan);
+        if (test_case->expected_errno != 0) {
+            if (rc != -1 || errno != test_case->expected_errno) {
+                fprintf(stderr,
+                        "[test_runtime_core] resource plan case '%s' returned rc=%d errno=%d, expected errno=%d\n",
+                        test_case->name,
+                        rc,
+                        errno,
+                        test_case->expected_errno);
+                return 1;
+            }
+            if (plan.worker_max != 0U || plan.selected_cpu_count != 0U ||
+                plan.estimated_metadata_bytes != 0U) {
+                return test_fail("failed resource plan exposed a partial result");
+            }
+            continue;
+        }
+        if (rc != 0) {
+            fprintf(stderr,
+                    "[test_runtime_core] resource plan case '%s' failed: errno=%d (%s)\n",
+                    test_case->name,
+                    errno,
+                    strerror(errno));
+            return 1;
+        }
+        if (plan.worker_min != test_case->worker_min ||
+            plan.worker_count != test_case->worker_count ||
+            plan.worker_max != test_case->worker_max ||
+            plan.blocking_min != test_case->blocking_min ||
+            plan.blocking_max != test_case->blocking_max ||
+            plan.selected_cpu_count != test_case->selected_cpu_count ||
+            plan.sqpoll_reserved != test_case->sqpoll_reserved ||
+            plan.sqpoll_cpu != test_case->sqpoll_cpu ||
+            plan.stack_cache_budget_bytes !=
+                LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES ||
+            plan.stack_cache_high_watermark_bytes !=
+                LLAM_RUNTIME_STACK_CACHE_DEFAULT_HIGH_WATERMARK_BYTES ||
+            plan.stack_cache_low_watermark_bytes !=
+                LLAM_RUNTIME_STACK_CACHE_DEFAULT_LOW_WATERMARK_BYTES ||
+            plan.stack_cache_idle_ns != LLAM_RUNTIME_STACK_CACHE_DEFAULT_IDLE_NS ||
+            plan.stack_cache_flags != 0U) {
+            fprintf(stderr, "[test_runtime_core] resource plan case '%s' resolved wrong bounds\n", test_case->name);
+            return 1;
+        }
+        for (i = 0U; i < plan.selected_cpu_count; ++i) {
+            if (plan.selected_cpus[i] != test_case->selected_cpus[i]) {
+                fprintf(stderr,
+                        "[test_runtime_core] resource plan case '%s' reordered CPU %u\n",
+                        test_case->name,
+                        i);
+                return 1;
+            }
+        }
+        if (plan.estimated_metadata_bytes == 0U ||
+            plan.estimated_stack_mapping_bytes !=
+                plan.stack_prewarm_total * LLAM_RUNTIME_STACK_MAPPING_ESTIMATE_BYTES) {
+            return test_fail("resource plan estimates were not resolved exactly");
+        }
+    }
+
+    {
+        llam_runtime_opts_t opts = {.sqpoll_cpu = -1, .blocking_max = 1U};
+        llam_runtime_resource_plan_input_t input = {
+            .opts = &opts,
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_257,
+            .allowed_cpu_count = 257U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .page_size = 4096U,
+        };
+        llam_runtime_resource_plan_t plan;
+
+        if (llam_runtime_resource_plan_resolve(&input, &plan) != 0 ||
+            plan.worker_max != LLAM_RUNTIME_MAX_WORKERS ||
+            plan.selected_cpu_count != LLAM_RUNTIME_MAX_WORKERS ||
+            plan.selected_cpus[LLAM_RUNTIME_MAX_WORKERS - 1U] != 255U) {
+            return test_fail_errno("257-CPU automatic resource plan did not cap safely");
+        }
+    }
+
+    {
+        llam_runtime_opts_t opts = {
+            .sqpoll_cpu = -1,
+            .worker_count = 1U,
+            .blocking_max = 1U,
+            .cpu_count = 257U,
+            .cpu_ids = requested_257,
+        };
+        llam_runtime_resource_plan_input_t input = {
+            .opts = &opts,
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_257,
+            .allowed_cpu_count = 257U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .page_size = 4096U,
+        };
+        llam_runtime_resource_plan_t plan;
+
+        errno = 0;
+        if (llam_runtime_resource_plan_resolve(&input, &plan) != -1 || errno != E2BIG) {
+            return test_fail("257-entry explicit CPU list did not fail with E2BIG");
+        }
+    }
+
+    if (test_stack_cache_resource_plan(cpus_1) != 0) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int test_runtime_total_prewarm_distribution(void) {
+    static const unsigned shard_counts[] = {1U, 8U, 64U};
+    static const uint64_t totals[] = {UINT64_C(257), UINT64_C(129), UINT64_C(1025)};
+    uint64_t storage_objects = 0U;
+
+    for (size_t resource = 0U;
+         resource < sizeof(totals) / sizeof(totals[0]);
+         ++resource) {
+        for (size_t count_index = 0U;
+             count_index < sizeof(shard_counts) / sizeof(shard_counts[0]);
+             ++count_index) {
+            unsigned count = shard_counts[count_index];
+            uint64_t total = totals[resource];
+            uint64_t base = total / count;
+            uint64_t remainder = total % count;
+            uint64_t sum = 0U;
+
+            for (unsigned index = 0U; index < count; ++index) {
+                uint64_t share = llam_runtime_prewarm_share(total, count, index);
+                uint64_t expected = base + (index < remainder ? 1U : 0U);
+
+                if (share != expected) {
+                    fprintf(stderr,
+                            "[test_runtime_core] prewarm resource=%zu total=%llu count=%u index=%u share=%llu expected=%llu\n",
+                            resource,
+                            (unsigned long long)total,
+                            count,
+                            index,
+                            (unsigned long long)share,
+                            (unsigned long long)expected);
+                    return 1;
+                }
+                sum += share;
+            }
+            if (sum != total ||
+                llam_runtime_prewarm_share(total, count, count) != 0U ||
+                llam_runtime_prewarm_share(total, 0U, 0U) != 0U) {
+                return test_fail("runtime-total prewarm distribution did not preserve its aggregate");
+            }
+        }
+    }
+    if (!llam_runtime_task_prewarm_storage_objects(1U, 64U, &storage_objects) ||
+        storage_objects != LLAM_TASK_SLAB_COUNT ||
+        !llam_runtime_task_prewarm_storage_objects(65U, 64U, &storage_objects) ||
+        storage_objects != UINT64_C(64) * LLAM_TASK_SLAB_COUNT ||
+        llam_runtime_task_prewarm_storage_objects(UINT64_MAX,
+                                                  1U,
+                                                  &storage_objects)) {
+        return test_fail("task prewarm slab rounding was not checked exactly");
+    }
+    return 0;
+}
+
+static int test_runtime_resource_plan_initialization(void) {
+    llam_runtime_opts_t bad_opts;
+    llam_runtime_t *runtime = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count;
+
+    if (llam_runtime_opts_init(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("invalid resource opts init failed");
+    }
+    bad_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    bad_opts.worker_min = 2U;
+    bad_opts.worker_count = 1U;
+    bad_opts.worker_max = 2U;
+    bad_opts.blocking_min = 1U;
+    bad_opts.blocking_max = 1U;
+
+    errno = 0;
+    if (llam_runtime_create(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != -1 ||
+        errno != EINVAL ||
+        runtime != NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("invalid exact resource plan published a runtime");
+    }
+
+    if (assert_fixed_runtime_resource_stats(1U) != 0) {
+        return 1;
+    }
+    allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    free(allowed_cpus);
+    if (allowed_cpu_count >= 2U &&
+        assert_fixed_runtime_resource_stats(2U) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int test_blocking_pool_grows_lazily_within_bounds(void) {
+    block_pool_growth_state_t state;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
+    llam_task_t *parent = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    atomic_init(&state.callbacks_started, 0U);
+    atomic_init(&state.callbacks_active, 0U);
+    atomic_init(&state.callbacks_active_peak, 0U);
+    atomic_init(&state.callbacks_completed, 0U);
+    atomic_init(&state.release_callbacks, 0U);
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("lazy blocking pool opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 2U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("lazy blocking pool runtime create failed");
+    }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = test_fail_errno("lazy blocking pool runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
+
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("lazy blocking pool initial stats failed");
+        goto cleanup;
+    }
+    if (stats.configured_blocking_min != 0U ||
+        stats.configured_blocking_max != 2U ||
+        stats.blocking_threads != 0U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started,
+                             memory_order_acquire) != 0U) {
+        rc = test_fail("zero-min blocking pool eagerly created workers");
+        goto cleanup;
+    }
+
+    parent = llam_runtime_spawn_ex(runtime, block_pool_growth_parent, &state, NULL, 0U);
+    if (parent == NULL) {
+        rc = test_fail_errno("lazy blocking pool parent spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(parent) != 0) {
+        parent = NULL;
+        rc = test_fail_errno("lazy blocking pool run/join failed");
+        goto cleanup;
+    }
+    parent = NULL;
+
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("lazy blocking pool final stats failed");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.core.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_acquire) != 1U ||
+        state.confirmed_before_release != 2U ||
+        state.entered_before_release != 2U ||
+        state.live_before_release != 2U ||
+        atomic_load_explicit(&state.callbacks_started, memory_order_acquire) !=
+            BLOCK_POOL_GROWTH_TASKS ||
+        atomic_load_explicit(&state.callbacks_completed, memory_order_acquire) !=
+            BLOCK_POOL_GROWTH_TASKS ||
+        atomic_load_explicit(&state.callbacks_active, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.callbacks_active_peak, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&raw_runtime->block_threads_entered, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&raw_runtime->block_threads_exited, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->block_threads_live, memory_order_acquire) != 2U ||
+        stats.blocking_threads != 2U) {
+        fprintf(stderr,
+                "[test_runtime_core] lazy blocking pool mismatch: failures=%u ran=%u "
+                "confirmed=%u/%u entered=%u/%u live=%u/%u exited=%u "
+                "callbacks=%u/%u active=%u peak=%u stats_live=%u\n",
+                atomic_load_explicit(&state.core.failures, memory_order_acquire),
+                atomic_load_explicit(&state.core.ran, memory_order_acquire),
+                state.confirmed_before_release,
+                atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire),
+                state.entered_before_release,
+                atomic_load_explicit(&raw_runtime->block_threads_entered, memory_order_acquire),
+                state.live_before_release,
+                atomic_load_explicit(&raw_runtime->block_threads_live, memory_order_acquire),
+                atomic_load_explicit(&raw_runtime->block_threads_exited, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_started, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_completed, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_active, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_active_peak, memory_order_acquire),
+                stats.blocking_threads);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.release_callbacks, 1U, memory_order_release);
+    if (parent != NULL) {
+        (void)llam_detach(parent);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_native_thread_diagnostics_are_live_counts(void) {
+    native_thread_stats_state_t state;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_task_t *task = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count;
+    unsigned worker_count;
+    unsigned runtime_owned_after_run;
+    int rc = 1;
+
+    allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    free(allowed_cpus);
+    if (allowed_cpu_count == 0U) {
+        return test_fail_errno("native thread diagnostics CPU discovery failed");
+    }
+    worker_count = allowed_cpu_count >= 2U ? 2U : 1U;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    state.runtime = &g_llam_runtime;
+    state.expected_scheduler_threads = worker_count - 1U;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("native thread diagnostics opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 2U;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("native thread diagnostics runtime init failed");
+    }
+    for (unsigned i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].thread_started) {
+            state.expected_io_threads += 1U;
+        }
+    }
+
+    task = llam_spawn(native_thread_stats_task, &state, NULL);
+    if (task == NULL) {
+        rc = test_fail_errno("native thread diagnostics task spawn failed");
+        goto cleanup;
+    }
+    if (llam_run() != 0 || llam_join(task) != 0) {
+        task = NULL;
+        rc = test_fail_errno("native thread diagnostics run/join failed");
+        goto cleanup;
+    }
+    task = NULL;
+    if (atomic_load_explicit(&state.core.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_acquire) != 1U) {
+        rc = test_fail("native thread diagnostics managed checks failed");
+        goto cleanup;
+    }
+
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("native thread post-run stats failed");
+        goto cleanup;
+    }
+    runtime_owned_after_run =
+        1U + state.expected_io_threads + 1U + 1U;
+    if (stats.scheduler_threads != 0U ||
+        stats.blocking_threads != 1U ||
+        stats.io_threads != state.expected_io_threads ||
+        stats.controller_threads != 1U ||
+        stats.opaque_helper_threads != 1U ||
+        stats.runtime_owned_threads != runtime_owned_after_run ||
+        stats.native_execution_threads != runtime_owned_after_run ||
+        atomic_load_explicit(&g_llam_runtime.host_threads_live,
+                             memory_order_acquire) != 0U) {
+        rc = test_fail("native thread post-run stats retained a host scheduler");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&g_llam_runtime.scheduler_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.block_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.io_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.controller_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.opaque_helper_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.host_threads_live,
+                             memory_order_acquire) != 0U) {
+        return test_fail("native thread counters survived runtime shutdown");
+    }
+    return rc;
 }
 
 static void nested_runtime_create_task(void *arg) {
@@ -1032,12 +1997,45 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
         if (json[0] != '{' ||
             strstr(json, "\"ctx_switches\":") == NULL ||
             strstr(json, "\"active_workers\":") == NULL ||
+            strstr(json, "\"configured_worker_max\":") == NULL ||
+            strstr(json, "\"configured_blocking_max\":") == NULL ||
+            strstr(json, "\"scheduler_threads\":") == NULL ||
+            strstr(json, "\"blocking_threads\":") == NULL ||
+            strstr(json, "\"io_threads\":") == NULL ||
+            strstr(json, "\"controller_threads\":") == NULL ||
+            strstr(json, "\"opaque_helper_threads\":") == NULL ||
+            strstr(json, "\"runtime_owned_threads\":") == NULL ||
+            strstr(json, "\"native_execution_threads\":") == NULL ||
+            strstr(json, "\"affinity_failures\":") == NULL ||
+            strstr(json, "\"stack_cache_budget_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_high_watermark_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_low_watermark_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_idle_ns\":") == NULL ||
+            strstr(json, "\"stack_cache_flags\":") == NULL ||
+            strstr(json, "\"stack_cache_cached_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_cached_mappings\":") == NULL ||
+            strstr(json, "\"stack_cache_committed_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_trim_requests\":") == NULL ||
+            strstr(json, "\"stack_cache_discarded_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_released_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_budget_rejections\":") == NULL ||
+            strstr(json, "\"stack_cache_secure_return_failures\":") == NULL ||
+            strstr(json, "\"stack_cache_resident_valid\":") == NULL ||
+            strstr(json, "\"stack_cache_resident_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_resident_sample_ns\":") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_mappings\":") == NULL ||
             strstr(json, "\"io_submit_syscalls\":") == NULL ||
             strstr(json, "\"yield_direct_attempts\":") == NULL ||
             strstr(json, "\"yield_direct_fail_push\":") == NULL ||
             strstr(json, "\"wake_handoff_attempts\":") == NULL ||
             strstr(json, "\"wake_handoff_fail_race\":") == NULL ||
             strstr(json, "\"autotune\":") == NULL ||
+            strstr(json, "\"recognized_domains\":") == NULL ||
+            strstr(json, "\"observable_domains\":") == NULL ||
+            strstr(json, "\"controllable_domains\":") == NULL ||
+            strstr(json, "\"active_observation_domains\":") == NULL ||
+            strstr(json, "\"active_control_domains\":") == NULL ||
             strstr(json, "\"sample_period\":") == NULL ||
             strstr(json, "\"sampled_yield_handoff_fail_policy\":") == NULL ||
             strstr(json, "\"sampled_wake_handoff_hits\":") == NULL ||
@@ -1099,7 +2097,11 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
             strstr(dump, "inflight_io_waiters=") == NULL ||
             strstr(dump, "wait_owner=") == NULL ||
             strstr(dump, "io_req=") == NULL ||
-            strstr(dump, "block_job=") == NULL) {
+            strstr(dump, "block_job=") == NULL ||
+            strstr(dump, "stack_cache:") == NULL ||
+            strstr(dump, "cached_bytes=") == NULL ||
+            strstr(dump, "resident_valid=") == NULL ||
+            strstr(dump, "process_quarantine_mappings=") == NULL) {
             free(dump);
             llam_runtime_shutdown();
             return test_fail("runtime dump did not contain ownership diagnostics");
@@ -2303,6 +3305,145 @@ static void test_restore_env_value(const char *name, char *value) {
     }
 }
 
+#include "test_runtime_stack_cache_authority.inc"
+
+static int test_runtime_total_prewarm_authority(void) {
+    static const char *const names[] = {
+        "LLAM_TASK_CACHE_PREWARM",
+        "LLAM_STACK_CACHE_PREWARM",
+        "LLAM_TIMER_HEAP_PREWARM",
+        "LLAM_TASK_CACHE_PREWARM_TOTAL",
+        "LLAM_STACK_CACHE_PREWARM_TOTAL",
+        "LLAM_TIMER_HEAP_PREWARM_TOTAL",
+    };
+    char *saved[sizeof(names) / sizeof(names[0])];
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    unsigned *cpus = NULL;
+    unsigned worker_count;
+    size_t saved_count = 0U;
+    int rc = 1;
+
+    memset(saved, 0, sizeof(saved));
+    for (size_t i = 0U; i < sizeof(names) / sizeof(names[0]); ++i) {
+        saved[i] = test_dup_env_value(names[i]);
+        saved_count = i + 1U;
+        if (unsetenv(names[i]) != 0) {
+            rc = test_fail_errno("clearing prewarm authority environment failed");
+            goto cleanup;
+        }
+    }
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("exact prewarm opts init failed");
+        goto cleanup;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 1U;
+    opts.task_prewarm_total = 17U;
+    opts.stack_prewarm_total = 3U;
+    opts.timer_prewarm_total = 7U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("exact runtime-total prewarm create/stats failed");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != 17U ||
+        stats.achieved_task_prewarm_total != 17U ||
+        stats.requested_stack_prewarm_total != 3U ||
+        stats.achieved_stack_prewarm_total != 3U ||
+        stats.requested_timer_prewarm_total != 7U ||
+        stats.achieved_timer_prewarm_total != 7U ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT ||
+        stats.stack_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT ||
+        stats.timer_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT) {
+        rc = test_fail("exact runtime-total prewarm diagnostics were inconsistent");
+        goto cleanup;
+    }
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+
+    if (setenv("LLAM_TASK_CACHE_PREWARM", "11", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "11", 1) != 0 ||
+        setenv("LLAM_TIMER_HEAP_PREWARM", "11", 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM_TOTAL", "5", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM_TOTAL", "3", 1) != 0 ||
+        setenv("LLAM_TIMER_HEAP_PREWARM_TOTAL", "7", 1) != 0) {
+        rc = test_fail_errno("setting prewarm authority environment failed");
+        goto cleanup;
+    }
+    opts.task_prewarm_total = 9U;
+    opts.stack_prewarm_total = 0U;
+    opts.timer_prewarm_total = 0U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("mixed prewarm authority create/stats failed");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != 9U ||
+        stats.achieved_task_prewarm_total != 9U ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT ||
+        stats.requested_stack_prewarm_total != 3U ||
+        stats.achieved_stack_prewarm_total != 3U ||
+        stats.stack_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_TOTAL ||
+        stats.requested_timer_prewarm_total != 7U ||
+        stats.achieved_timer_prewarm_total != 7U ||
+        stats.timer_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_TOTAL) {
+        rc = test_fail("public and _TOTAL prewarm authority precedence regressed");
+        goto cleanup;
+    }
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+
+    if (unsetenv("LLAM_TASK_CACHE_PREWARM_TOTAL") != 0 ||
+        unsetenv("LLAM_STACK_CACHE_PREWARM_TOTAL") != 0 ||
+        unsetenv("LLAM_TIMER_HEAP_PREWARM_TOTAL") != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", "2", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "3", 1) != 0 ||
+        setenv("LLAM_TIMER_HEAP_PREWARM", "4", 1) != 0) {
+        rc = test_fail_errno("setting legacy prewarm environment failed");
+        goto cleanup;
+    }
+    worker_count = llam_count_allowed_cpus(&cpus) >= 2U ? 2U : 1U;
+    free(cpus);
+    cpus = NULL;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.task_prewarm_total = 0U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("legacy prewarm authority create/stats failed");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != UINT64_C(2) * worker_count ||
+        stats.achieved_task_prewarm_total != UINT64_C(2) * worker_count ||
+        stats.requested_stack_prewarm_total != 3U ||
+        stats.achieved_stack_prewarm_total != 3U ||
+        stats.requested_timer_prewarm_total != UINT64_C(4) * worker_count ||
+        stats.achieved_timer_prewarm_total != UINT64_C(4) * worker_count ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY ||
+        stats.stack_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY ||
+        stats.timer_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY) {
+        rc = test_fail("legacy prewarm inputs lost historical scope or reporting");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    free(cpus);
+    for (size_t i = 0U; i < saved_count; ++i) {
+        test_restore_env_value(names[i], saved[i]);
+    }
+    return rc;
+}
+
 static int collect_runtime_env_snapshot(runtime_env_snapshot_t *snapshot) {
     llam_runtime_opts_t opts;
     llam_runtime_stats_t stats;
@@ -2621,7 +3762,7 @@ static int test_autotune_handoff_budget_actuates(void) {
     if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1000000", 1) != 0 ||
-        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0 ||
         setenv("LLAM_YIELD_DIRECT_HANDOFF", "2", 1) != 0 ||
@@ -2685,7 +3826,7 @@ static int test_autotune_handoff_budget_actuates(void) {
         decisions == 0U ||
         commits == 0U ||
         budget <= 1U ||
-        min_hold_ns != LLAM_AUTOTUNE_DEFAULT_MIN_HOLD_NS ||
+        min_hold_ns != 1U ||
         stats.yield_direct_attempts < 32U ||
         stats.yield_direct_fast_hits < 16U) {
         fprintf(stderr,
@@ -2871,7 +4012,7 @@ static int test_autotune_handoff_probe_defers_low_sample(void) {
     if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1", 1) != 0 ||
-        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0) {
         rc = test_fail_errno("setenv for autotune low-sample probe failed");
@@ -2990,7 +4131,7 @@ static int test_autotune_handoff_wake_guardrail_rolls_back(void) {
     if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1000000", 1) != 0 ||
-        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0 ||
         setenv("LLAM_YIELD_DIRECT_HANDOFF", "2", 1) != 0 ||
@@ -3863,7 +5004,7 @@ static int test_concurrent_trace_ring_contract(void) {
     test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
     return 0;
 }
-
+#include "test_optional_shard_storage_cases.inc"
 static int test_concurrent_run_contract(void) {
     /*
      * llam_run() is the single scheduler driver for shard zero.  Concurrent
@@ -4281,13 +5422,12 @@ static void timer_ownership_contract_task(void *opaque) {
     } else {
         bool valid;
         bool removed;
-
         pthread_mutex_lock(&shard->lock);
         timer = task->active_timer;
         generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
                                                     memory_order_acquire);
-        valid = timer != NULL && timer != &task->embedded_timer_node &&
-                timer->task == task && timer->wait_generation == generation &&
+        valid = timer != NULL && timer->task == task &&
+                timer->wait_generation == generation &&
                 timer->wait_lifetime_ops == &channel->active_ops &&
                 timer->select_state == NULL && !timer->holds_task_ref &&
                 llam_public_active_op_count(&channel->active_ops) == 2U;
@@ -5495,9 +6635,27 @@ static int test_wait_resolver_block_job_recycle_drain(void) {
 }
 #endif
 
+#include "test_task_context_cases.inc"
+#define SWITCH_HOOK_TEST_FAIL(message) test_fail(message)
+#define SWITCH_HOOK_TEST_FAIL_ERRNO(message) test_fail_errno(message)
+#include "test_switch_hook_cases.inc"
+#undef SWITCH_HOOK_TEST_FAIL_ERRNO
+#undef SWITCH_HOOK_TEST_FAIL
+#include "test_autotune_domain_cases.inc"
+
 int main(void) {
+    RUN_RUNTIME_CORE_TEST(test_task_context_unmanaged_contract);
+    RUN_RUNTIME_CORE_TEST(test_task_context_lifecycle_and_prefix);
+    RUN_RUNTIME_CORE_TEST(test_task_context_survives_forced_queue_migration);
+    RUN_RUNTIME_CORE_TEST(exercise_switch_hook_cases);
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_legacy_runtime_init_ignores_resource_tail);
+    RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_resolver);
+    RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_distribution);
+    RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_initialization);
+    RUN_RUNTIME_CORE_TEST(test_blocking_pool_grows_lazily_within_bounds);
+    RUN_RUNTIME_CORE_TEST(test_native_thread_diagnostics_are_live_counts);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
@@ -5506,6 +6664,10 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_freezes_no_work_low_hit);
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_probe_defers_low_sample);
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_wake_guardrail_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_autotune_domain_capabilities);
+    RUN_RUNTIME_CORE_TEST(test_autotune_handoff_min_hold);
+    RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_authority);
+    RUN_RUNTIME_CORE_TEST(test_stack_cache_runtime_byte_authority);
     RUN_RUNTIME_CORE_TEST(test_unsigned_runtime_env_rejects_malformed_input);
     RUN_RUNTIME_CORE_TEST(test_runtime_env_flags_accept_false_tokens);
 #endif
@@ -5535,6 +6697,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_stats_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_dump_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_sleep_contract);
+    RUN_RUNTIME_CORE_TEST(test_optional_shard_storage_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_trace_ring_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_run_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_spawn_contract);

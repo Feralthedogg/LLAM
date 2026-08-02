@@ -45,3 +45,5 @@ _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 _Thread_local unsigned g_llam_tls_io_handoff_yield;
 /** @brief Thread-local redirect target hint while leaving opaque blocking. */
 _Thread_local unsigned g_llam_tls_opaque_redirect_hint;
+/** @brief Start time for the outermost opaque block on this native thread. */
+_Thread_local uint64_t g_llam_tls_opaque_block_started_ns;

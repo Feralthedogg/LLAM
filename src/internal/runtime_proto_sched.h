@@ -29,6 +29,55 @@
 
 #include "runtime_state.h"
 
+/** @brief Fine-grained reason that a direct handoff cannot be attempted. */
+typedef enum llam_handoff_reject {
+    LLAM_HANDOFF_REJECT_NONE = 0,
+    LLAM_HANDOFF_REJECT_CONTEXT,
+    LLAM_HANDOFF_REJECT_EXTERNAL_DRIVER,
+    LLAM_HANDOFF_REJECT_INSTRUMENTATION,
+    LLAM_HANDOFF_REJECT_QUEUE_MODE,
+    LLAM_HANDOFF_REJECT_SHARD_STATE,
+    LLAM_HANDOFF_REJECT_OPAQUE_REDIRECT,
+    LLAM_HANDOFF_REJECT_DEADLINE,
+    LLAM_HANDOFF_REJECT_TIMER,
+    LLAM_HANDOFF_REJECT_LIVE_LIMIT,
+    LLAM_HANDOFF_REJECT_BUDGET,
+    LLAM_HANDOFF_REJECT_AFFINITY,
+    LLAM_HANDOFF_REJECT_NO_WORK,
+    LLAM_HANDOFF_REJECT_SELF,
+    LLAM_HANDOFF_REJECT_PUSH,
+    LLAM_HANDOFF_REJECT_RACE,
+} llam_handoff_reject_t;
+
+/** @brief Stable metric class derived from a fine-grained rejection reason. */
+typedef enum llam_handoff_result_class {
+    LLAM_HANDOFF_RESULT_NONE = 0,
+    LLAM_HANDOFF_RESULT_CONTEXT,
+    LLAM_HANDOFF_RESULT_POLICY,
+    LLAM_HANDOFF_RESULT_BUDGET,
+    LLAM_HANDOFF_RESULT_NO_WORK,
+    LLAM_HANDOFF_RESULT_SELF,
+    LLAM_HANDOFF_RESULT_PUSH,
+    LLAM_HANDOFF_RESULT_RACE,
+} llam_handoff_result_class_t;
+
+/** @brief Immutable snapshots consumed by the pure handoff policy guard. */
+typedef struct llam_handoff_policy_input {
+    const llam_runtime_t *runtime;
+    const llam_shard_t *shard;
+    const llam_task_t *current;
+    const llam_task_t *next;
+    unsigned target_id;
+    bool target_deadline_active;
+    bool honor_timer_allowance;
+    bool require_lockfree_queue;
+} llam_handoff_policy_input_t;
+
+llam_handoff_reject_t llam_direct_handoff_policy(
+    const llam_handoff_policy_input_t *input);
+llam_handoff_result_class_t llam_handoff_reject_classify(
+    llam_handoff_reject_t reject);
+
 /*
  * Opaque-block redirect and helper compensation.
  */
@@ -42,10 +91,18 @@ void *llam_opaque_helper_main(void *arg);
  * Worker loops and idle handling.
  */
 void *llam_block_worker_main(void *arg);
+int llam_block_pool_start_min(llam_runtime_t *rt);
+int llam_block_pool_ensure_capacity_locked(llam_runtime_t *rt,
+                                           unsigned pending_after_enqueue);
 bool llam_runtime_note_block_pending(llam_runtime_t *rt, unsigned amount);
 bool llam_runtime_complete_block_pending(llam_runtime_t *rt, unsigned amount);
 bool llam_runtime_note_block_active(llam_runtime_t *rt, unsigned amount);
 bool llam_runtime_complete_block_active(llam_runtime_t *rt, unsigned amount);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_block_pool_test_fail_create_on(unsigned call_index);
+void llam_block_pool_test_reset_create_hook(void);
+unsigned llam_block_pool_test_create_calls(void);
+#endif
 void llam_autotune_init(llam_runtime_t *rt);
 void *llam_ctrl_worker_main(void *arg);
 void llam_idle_wait(llam_shard_t *shard);
@@ -56,6 +113,12 @@ void *llam_shard_worker_main(void *arg);
  * Normal queue and deque primitives.
  */
 void llam_cldeque_init(llam_cldeque_t *deque);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_cldeque_steal_claimed_hook_fn)(void *context);
+void llam_sched_test_set_cldeque_steal_claimed_hook(
+    llam_cldeque_steal_claimed_hook_fn hook,
+    void *context);
+#endif
 bool llam_lockfree_normq_enabled(const llam_runtime_t *rt);
 unsigned llam_norm_queue_depth(const llam_shard_t *shard);
 bool llam_norm_queue_note_enqueue(llam_shard_t *shard);
@@ -85,6 +148,16 @@ void llam_queue_push_tail(llam_queue_t *queue, llam_task_t *task);
 void llam_drain_inject_queue(llam_shard_t *shard);
 void llam_enqueue_overflow_task(llam_runtime_t *rt, llam_task_t *task);
 unsigned llam_hot_streak_cap_locked(llam_shard_t *shard, bool pressure);
+unsigned llam_task_required_shard(const llam_runtime_t *rt,
+                                  const llam_task_t *task);
+bool llam_task_may_run_on_shard(const llam_task_t *task,
+                                const llam_shard_t *shard);
+bool llam_requeue_task_to_required_shard(llam_runtime_t *rt,
+                                         llam_task_t *task,
+                                         bool hot);
+llam_task_t *llam_take_handoff_task_unlocked(llam_shard_t *shard);
+llam_task_t *llam_take_handoff_task_locked(llam_shard_t *shard);
+bool llam_prepare_task_dispatch(llam_shard_t *shard, llam_task_t *task);
 void llam_mark_runnable_locked(llam_shard_t *shard,
                              llam_task_t *task,
                              bool hot,
@@ -99,7 +172,10 @@ bool llam_should_enqueue_hot_locked(llam_shard_t *shard,
                                   bool pressure);
 llam_task_t *llam_take_local_task(llam_shard_t *shard);
 llam_task_t *llam_take_local_task_with_pressure(llam_shard_t *shard, bool pressure);
-llam_task_t *llam_take_overflow_task(llam_runtime_t *rt);
+llam_task_t *llam_take_overflow_task_for_shard(llam_runtime_t *rt,
+                                                llam_shard_t *shard);
+unsigned llam_steal_from_victim(llam_shard_t *thief,
+                                llam_shard_t *victim);
 llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard);
 
 /*
@@ -124,6 +200,29 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
                                                  llam_trace_kind_t kind,
                                                  llam_wait_reason_t reason);
 bool llam_yield_to_local_runnable(void);
+
+/** @brief Outcome of one non-waiting scheduler iteration. */
+typedef enum llam_scheduler_quantum_result {
+    LLAM_SCHEDULER_QUANTUM_PROGRESS = 0,
+    LLAM_SCHEDULER_QUANTUM_IDLE = 1,
+    LLAM_SCHEDULER_QUANTUM_DONE = 2,
+} llam_scheduler_quantum_result_t;
+
+int llam_scheduler_try_install_signal_stack(
+    llam_shard_t *shard,
+    llam_thread_signal_stack_t *scope);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+void llam_shard_publish_preempt_thread(llam_shard_t *shard,
+                                       pthread_t thread);
+#endif
+int llam_scheduler_thread_enter(llam_shard_t *shard,
+                                atomic_uint *thread_counter,
+                                llam_thread_signal_stack_t *signal_stack);
+void llam_scheduler_thread_leave(llam_shard_t *shard,
+                                 atomic_uint *thread_counter,
+                                 llam_thread_signal_stack_t *signal_stack);
+llam_scheduler_quantum_result_t
+llam_scheduler_run_quantum(llam_shard_t *shard);
 
 /*
  * Runtime online-shard counters and pressure predicates.
@@ -182,6 +281,7 @@ void llam_disarm_task_wait_deadline(llam_task_t *task);
 void llam_fire_expired_timers(llam_shard_t *shard);
 bool llam_task_wait_deadline_active(llam_task_t *task);
 bool llam_join_waiter_remove_locked(llam_task_t *target, llam_task_t *waiter);
+llam_runtime_t *llam_wait_task_runtime(const llam_task_t *task);
 void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind);
 bool llam_task_clear_wait_tracking(llam_task_t *task);
 void llam_task_clear_wait_tracking_or_abort(llam_task_t *task);

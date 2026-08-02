@@ -124,6 +124,8 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
                       g_llam_tls_scheduler_ctx != &target->scheduler_ctx ||
                       rt->trace_events_enabled != 0U ||
                       !llam_shard_accepts_new_work(target) ||
+                      (target->opaque_redirect_active &&
+                       (task->flags & LLAM_TASK_FLAG_PINNED) == 0U) ||
                       !llam_lockfree_normq_enabled(rt))) {
         return false;
     }
@@ -282,6 +284,9 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, cancel_token)) {
             opts_storage.cancel_token = raw_opts.cancel_token;
         }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, user_context)) {
+            opts_storage.user_context = raw_opts.user_context;
+        }
         opts = &opts_storage;
         if (LLAM_UNLIKELY(!llam_public_task_class_valid(opts->task_class) ||
                           !llam_public_stack_class_valid(opts->stack_class))) {
@@ -321,6 +326,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
     atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
+    task->user_context = opts != NULL ? opts->user_context : NULL;
     /*
      * Group-owned tasks must be marked before publication.  Marking after the
      * runnable enqueue lets a concurrently running child consume its borrowed
@@ -390,7 +396,9 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
                                           atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
         }
         task->state = LLAM_TASK_STATE_RUNNABLE;
-        if (target->opaque_redirect_active) {
+        if (target->opaque_redirect_active &&
+            !((task->flags & LLAM_TASK_FLAG_PINNED) != 0U &&
+              llam_task_may_run_on_shard(task, target))) {
             target->metrics.migrations += 1U;
             task->enqueue_hot = 0U;
             if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {

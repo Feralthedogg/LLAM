@@ -41,14 +41,12 @@ typedef struct llam_debug_io_wait_snapshot {
     short poll_events;
     void *owned_buffer;
 } llam_debug_io_wait_snapshot_t;
-
 typedef struct llam_debug_block_wait_snapshot {
     void *address;
     unsigned state;
     int error_code;
     void *result;
 } llam_debug_block_wait_snapshot_t;
-
 /** @brief Copy recyclable wait-owner fields while a short resolver claim pins them. */
 static const char *llam_debug_snapshot_wait_owners(
     llam_task_t *task,
@@ -177,6 +175,8 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     llam_node_t *nodes = rt->nodes;
     unsigned active_shards = rt->active_shards;
     unsigned active_nodes = rt->active_nodes;
+    uint64_t runtime_owned_threads;
+    uint64_t native_execution_threads;
     unsigned i;
 
     memset(stats, 0, sizeof(*stats));
@@ -195,6 +195,54 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->preempt_mode = rt->preempt_mode;
     stats->preempt_poll_period = rt->preempt_poll_period;
     stats->preempt_quantum_ns = rt->preempt_quantum_ns;
+    stats->configured_worker_min = rt->resource_plan.worker_min;
+    stats->configured_worker_count = rt->resource_plan.worker_count;
+    stats->configured_worker_max = rt->resource_plan.worker_max;
+    stats->configured_blocking_min = rt->resource_plan.blocking_min;
+    stats->configured_blocking_max = rt->resource_plan.blocking_max;
+    stats->selected_cpu_count = rt->resource_plan.selected_cpu_count;
+    stats->affinity_policy = rt->resource_plan.affinity_policy;
+    stats->scheduler_threads =
+        atomic_load_explicit(&rt->scheduler_threads_live, memory_order_acquire);
+    stats->blocking_threads =
+        atomic_load_explicit(&rt->block_threads_live, memory_order_acquire);
+    stats->io_threads =
+        atomic_load_explicit(&rt->io_threads_live, memory_order_acquire);
+    stats->controller_threads =
+        atomic_load_explicit(&rt->controller_threads_live, memory_order_acquire);
+    stats->opaque_helper_threads =
+        atomic_load_explicit(&rt->opaque_helper_threads_live, memory_order_acquire);
+    runtime_owned_threads =
+        (uint64_t)stats->scheduler_threads +
+        (uint64_t)stats->blocking_threads +
+        (uint64_t)stats->io_threads +
+        (uint64_t)stats->controller_threads +
+        (uint64_t)stats->opaque_helper_threads;
+    stats->runtime_owned_threads =
+        runtime_owned_threads > UINT32_MAX
+            ? UINT32_MAX
+            : (uint32_t)runtime_owned_threads;
+    native_execution_threads =
+        runtime_owned_threads +
+        atomic_load_explicit(&rt->host_threads_live, memory_order_acquire);
+    stats->native_execution_threads =
+        native_execution_threads > UINT32_MAX
+            ? UINT32_MAX
+            : (uint32_t)native_execution_threads;
+    stats->affinity_failures =
+        atomic_load_explicit(&rt->affinity_failures, memory_order_acquire);
+    stats->requested_task_prewarm_total = rt->requested_task_prewarm_total;
+    stats->achieved_task_prewarm_total = rt->achieved_task_prewarm_total;
+    stats->requested_stack_prewarm_total = rt->requested_stack_prewarm_total;
+    stats->achieved_stack_prewarm_total = rt->achieved_stack_prewarm_total;
+    stats->requested_timer_prewarm_total = rt->requested_timer_prewarm_total;
+    stats->achieved_timer_prewarm_total = rt->achieved_timer_prewarm_total;
+    stats->estimated_metadata_bytes = rt->estimated_metadata_bytes;
+    stats->estimated_stack_mapping_bytes = rt->estimated_stack_mapping_bytes;
+    stats->task_prewarm_source = rt->task_prewarm_source;
+    stats->stack_prewarm_source = rt->stack_prewarm_source;
+    stats->timer_prewarm_source = rt->timer_prewarm_source;
+    llam_runtime_collect_stack_cache_stats(rt, stats);
     stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
     /*
@@ -351,6 +399,16 @@ void llam_dump_runtime_state(int fd) {
     unsigned active_nodes;
     unsigned block_pending;
     unsigned block_active;
+    unsigned block_confirmed;
+    unsigned block_entered;
+    unsigned block_exited;
+    unsigned block_live;
+    unsigned scheduler_threads;
+    unsigned io_threads;
+    unsigned controller_threads;
+    unsigned opaque_helper_threads;
+    unsigned host_threads;
+    unsigned runtime_owned_threads;
     unsigned overflow_depth;
     unsigned online_shards;
     unsigned online_floor;
@@ -379,6 +437,26 @@ void llam_dump_runtime_state(int fd) {
     active_nodes = rt->active_nodes;
     block_pending = atomic_load(&rt->block_pending);
     block_active = atomic_load(&rt->block_active);
+    block_confirmed =
+        atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
+    block_entered =
+        atomic_load_explicit(&rt->block_threads_entered, memory_order_acquire);
+    block_exited =
+        atomic_load_explicit(&rt->block_threads_exited, memory_order_acquire);
+    block_live =
+        atomic_load_explicit(&rt->block_threads_live, memory_order_acquire);
+    scheduler_threads =
+        atomic_load_explicit(&rt->scheduler_threads_live, memory_order_acquire);
+    io_threads =
+        atomic_load_explicit(&rt->io_threads_live, memory_order_acquire);
+    controller_threads =
+        atomic_load_explicit(&rt->controller_threads_live, memory_order_acquire);
+    opaque_helper_threads =
+        atomic_load_explicit(&rt->opaque_helper_threads_live, memory_order_acquire);
+    host_threads =
+        atomic_load_explicit(&rt->host_threads_live, memory_order_acquire);
+    runtime_owned_threads = scheduler_threads + block_live + io_threads +
+                            controller_threads + opaque_helper_threads;
     overflow_depth = llam_runtime_overflow_depth(rt);
     online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
     online_floor = llam_runtime_online_shards_floor(rt);
@@ -438,12 +516,39 @@ void llam_dump_runtime_state(int fd) {
             atomic_load_explicit(&rt->fatal_errno, memory_order_acquire),
             (unsigned long long)atomic_load_explicit(&rt->global_epoch, memory_order_acquire));
 
+    dprintf(fd,
+            "threads:\n"
+            "  configured_scheduler=%u scheduler=%u blocking=%u io=%u "
+            "controller=%u opaque_helper=%u runtime_owned=%u host=%u "
+            "native_execution=%u affinity_policy=%u affinity_failures=%llu\n",
+            rt->resource_plan.worker_max,
+            scheduler_threads,
+            block_live,
+            io_threads,
+            controller_threads,
+            opaque_helper_threads,
+            runtime_owned_threads,
+            host_threads,
+            runtime_owned_threads + host_threads,
+            rt->resource_plan.affinity_policy,
+            (unsigned long long)atomic_load_explicit(&rt->affinity_failures,
+                                                     memory_order_acquire));
+    llam_runtime_dump_stack_cache(fd, rt);
+
     // The dump format is intentionally text-first for bug reports and benchmark
     // logs; machine consumers should use llam_runtime_collect_stats().
     dprintf(fd,
             "block:\n"
-            "  workers=%u pending=%u active=%u queued=%u peak_active=%u wake_seq=%u\n",
+            "  capacity=%u confirmed=%u entered=%u exited=%u live=%u "
+            "create_failures=%u pending=%u active=%u queued=%u "
+            "peak_active=%u wake_seq=%u\n",
             rt->block_worker_count,
+            block_confirmed,
+            block_entered,
+            block_exited,
+            block_live,
+            atomic_load_explicit(&rt->block_thread_create_failures,
+                                 memory_order_relaxed),
             block_pending,
             block_active,
             block_pending > block_active ? block_pending - block_active : 0U,
@@ -579,7 +684,7 @@ void llam_dump_runtime_state(int fd) {
                     (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire));
             continue;
         }
-        trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
+        trace_head = shard->trace_ring != NULL ? atomic_load_explicit(&shard->trace_head, memory_order_acquire) : 0U;
         trace_count = trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : trace_head;
         begin = trace_head > LLAM_TRACE_RING_CAP ? trace_head - LLAM_TRACE_RING_CAP : 0U;
         current = atomic_load_explicit(&shard->current, memory_order_acquire);
@@ -730,7 +835,7 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->allocator.io_buffer_remote_frees,
                 (unsigned long long)shard->allocator.io_buffer_remote_drains);
         dprintf(fd, "    trace:\n");
-        for (j = begin; j < begin + (unsigned)trace_count; ++j) {
+        for (j = begin; shard->trace_ring != NULL && j < begin + (unsigned)trace_count; ++j) {
             const llam_trace_event_t *event = &shard->trace_ring[j % LLAM_TRACE_RING_CAP];
             unsigned kind = atomic_load_explicit(&event->kind, memory_order_acquire);
             unsigned from_state = atomic_load_explicit(&event->from_state, memory_order_relaxed);

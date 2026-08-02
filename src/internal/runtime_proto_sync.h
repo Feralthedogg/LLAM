@@ -140,8 +140,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
 /*
  * Wait-node allocation and task tracking.
  *
- * The current task's embedded wait node is preferred; heap nodes are only used
- * when the embedded slot is already occupied.
+ * Nodes come from the current shard's recyclable wait-node pool.
  */
 llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard);
 void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node);

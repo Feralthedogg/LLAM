@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if LLAM_PLATFORM_POSIX
 #include <pthread.h>
@@ -86,15 +87,14 @@ typedef struct cross_spawn_token_state {
     llam_cancel_token_t *token;
     atomic_uint failures;
 } cross_spawn_token_state_t;
-
 typedef struct cross_allocator_free_state {
     llam_runtime_t *foreign_runtime;
+    llam_runtime_t *foreign_runtime_internal;
     llam_cancel_token_t *local_token;
     atomic_uint failures;
     int first_errno;
     char first_case[64];
 } cross_allocator_free_state_t;
-
 typedef struct explicit_group_state {
     llam_task_group_t *group;
     atomic_uint failures;
@@ -124,6 +124,7 @@ typedef struct post_destroy_cleanup_state {
     llam_cond_t *cond;
     llam_cancel_token_t *token;
     llam_task_group_t *group;
+    llam_timer_t *timer;
     atomic_uint failures;
     int first_errno;
 } post_destroy_cleanup_state_t;
@@ -439,6 +440,142 @@ static int test_idle_block_workers_destroy_repeat(void) {
     return 0;
 }
 
+static unsigned runtime_started_io_threads(const llam_runtime_t *runtime) {
+    llam_runtime_t *pinned_runtime = NULL;
+    unsigned count = 0U;
+
+    if (runtime == NULL ||
+        llam_runtime_begin_public_op((llam_runtime_t *)runtime,
+                                     &pinned_runtime) != 0) {
+        return 0U;
+    }
+    if (pinned_runtime->nodes == NULL) {
+        llam_runtime_end_public_op(pinned_runtime);
+        return 0U;
+    }
+    for (unsigned i = 0U; i < pinned_runtime->active_nodes; ++i) {
+        if (pinned_runtime->nodes[i].thread_started) {
+            count += 1U;
+        }
+    }
+    llam_runtime_end_public_op(pinned_runtime);
+    return count;
+}
+
+static bool wait_for_initialized_native_threads(llam_runtime_t *runtime,
+                                                unsigned expected_io_threads) {
+    struct timespec interval = {0, 1000000L};
+    llam_runtime_t *pinned_runtime = NULL;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    bool initialized = true;
+
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        return false;
+    }
+    while (atomic_load_explicit(&pinned_runtime->block_threads_live,
+                                memory_order_acquire) != 1U ||
+           atomic_load_explicit(&pinned_runtime->io_threads_live,
+                                memory_order_acquire) != expected_io_threads ||
+           atomic_load_explicit(&pinned_runtime->controller_threads_live,
+                                memory_order_acquire) != 1U) {
+        if (llam_now_ns() >= deadline_ns) {
+            initialized = false;
+            break;
+        }
+        (void)nanosleep(&interval, NULL);
+    }
+    llam_runtime_end_public_op(pinned_runtime);
+    return initialized;
+}
+
+static int test_runtime_resource_plan_isolation(void) {
+    llam_runtime_opts_t opts_a;
+    llam_runtime_opts_t opts_b;
+    llam_runtime_stats_t stats_a;
+    llam_runtime_stats_t stats_b;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count;
+    unsigned worker_b;
+    unsigned io_a;
+    unsigned io_b;
+    unsigned owned_a;
+    unsigned owned_b;
+    int rc = 1;
+
+    allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    free(allowed_cpus);
+    if (allowed_cpu_count == 0U) {
+        return test_fail_errno("CPU discovery for resource-plan isolation failed");
+    }
+    worker_b = allowed_cpu_count >= 2U ? 2U : 1U;
+
+    if (init_runtime_opts(&opts_a) != 0 || init_runtime_opts(&opts_b) != 0) {
+        return test_fail_errno("resource-plan isolation opts init failed");
+    }
+    opts_a.worker_min = 1U;
+    opts_a.worker_count = 1U;
+    opts_a.worker_max = 1U;
+    opts_a.blocking_min = 1U;
+    opts_a.blocking_max = 1U;
+    opts_b.deterministic = worker_b == 1U ? 1U : 0U;
+    opts_b.worker_min = worker_b;
+    opts_b.worker_count = worker_b;
+    opts_b.worker_max = worker_b;
+    opts_b.blocking_min = 1U;
+    opts_b.blocking_max = 1U;
+
+    if (llam_runtime_create(&opts_a, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts_b, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("isolated resource runtimes failed to create");
+        goto cleanup;
+    }
+    io_a = runtime_started_io_threads(runtime_a);
+    io_b = runtime_started_io_threads(runtime_b);
+    if (!wait_for_initialized_native_threads(runtime_a, io_a) ||
+        !wait_for_initialized_native_threads(runtime_b, io_b)) {
+        rc = test_fail("isolated runtime native thread counters did not converge");
+        goto cleanup;
+    }
+    if (llam_runtime_collect_stats_ex_handle(runtime_a, &stats_a, sizeof(stats_a)) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime_b, &stats_b, sizeof(stats_b)) != 0) {
+        rc = test_fail_errno("isolated resource stats failed");
+        goto cleanup;
+    }
+    owned_a = io_a + 2U;
+    owned_b = io_b + 2U;
+    if (stats_a.active_workers != 1U ||
+        stats_a.selected_cpu_count != 1U ||
+        stats_b.active_workers != worker_b ||
+        stats_b.selected_cpu_count != worker_b ||
+        stats_a.configured_worker_max != 1U ||
+        stats_b.configured_worker_max != worker_b ||
+        stats_a.scheduler_threads != 0U ||
+        stats_b.scheduler_threads != 0U ||
+        stats_a.blocking_threads != 1U ||
+        stats_b.blocking_threads != 1U ||
+        stats_a.io_threads != io_a ||
+        stats_b.io_threads != io_b ||
+        stats_a.controller_threads != 1U ||
+        stats_b.controller_threads != 1U ||
+        stats_a.opaque_helper_threads != 0U ||
+        stats_b.opaque_helper_threads != 0U ||
+        stats_a.runtime_owned_threads != owned_a ||
+        stats_b.runtime_owned_threads != owned_b ||
+        stats_a.native_execution_threads != owned_a ||
+        stats_b.native_execution_threads != owned_b) {
+        rc = test_fail("explicit runtimes did not retain isolated resource plans");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime_b);
+    llam_runtime_destroy(runtime_a);
+    return rc;
+}
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_multi_runtime_core] %s\n", message);
     return 1;
@@ -513,11 +650,15 @@ static void post_destroy_cleanup_task(void *arg) {
     state->cond = llam_cond_create();
     state->token = llam_cancel_token_create();
     state->group = llam_task_group_create();
+    if (llam_timer_create(UINT64_C(1000000000), &state->timer) != 0) {
+        state->timer = NULL;
+    }
     if (state->channel == NULL ||
         state->mutex == NULL ||
         state->cond == NULL ||
         state->token == NULL ||
-        state->group == NULL) {
+        state->group == NULL ||
+        state->timer == NULL) {
         post_destroy_cleanup_task_fail(state, errno);
     }
 }
@@ -688,7 +829,8 @@ static void cross_allocator_free_task(void *arg) {
     if (state == NULL) {
         return;
     }
-    if (state->foreign_runtime == NULL || state->foreign_runtime->active_shards == 0U) {
+    if (state->foreign_runtime_internal == NULL ||
+        state->foreign_runtime_internal->active_shards == 0U) {
         state->first_errno = EINVAL;
         (void)snprintf(state->first_case, sizeof(state->first_case), "foreign runtime unavailable");
         atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
@@ -700,7 +842,7 @@ static void cross_allocator_free_task(void *arg) {
      * them must use B's remote-free queues, not B's owner-local free lists, even
      * when both runtimes use shard id 0.
      */
-    foreign = &state->foreign_runtime->shards[0];
+    foreign = &state->foreign_runtime_internal->shards[0];
 
     wait_node = llam_wait_node_alloc(foreign);
     if (wait_node == NULL) {
@@ -1318,9 +1460,13 @@ static void *destroy_runtime_thread(void *arg) {
 
 static void *claim_destroy_runtime_thread(void *arg) {
     runtime_destroy_claim_sentinel_state_t *state = arg;
+    llam_runtime_t *claimed_runtime = NULL;
 
     errno = 0;
-    state->rc = llam_runtime_claim_destroy_handle(state->runtime, &state->heap_allocated);
+    state->rc = llam_runtime_claim_destroy_handle(
+        state->runtime,
+        &claimed_runtime,
+        &state->heap_allocated);
     state->err = errno;
     return NULL;
 }
@@ -1419,6 +1565,27 @@ static void *default_runtime_toggle_thread(void *arg) {
             break;
         }
         llam_runtime_shutdown();
+    }
+    return NULL;
+}
+
+static void *default_runtime_reinit_reject_thread(void *arg) {
+    host_try_default_race_state_t *state = arg;
+
+    for (unsigned i = 0U;
+         i < HOST_TRY_RACE_ITERS &&
+         atomic_load_explicit(&state->failures,
+                              memory_order_acquire) == 0U;
+         ++i) {
+        errno = 0;
+        if (llam_runtime_init_ex(
+                &state->opts,
+                LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 ||
+            errno != EBUSY) {
+            atomic_fetch_add_explicit(
+                &state->failures, 1U, memory_order_relaxed);
+            break;
+        }
     }
     return NULL;
 }
@@ -2084,6 +2251,7 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime_a = NULL;
     llam_runtime_t *runtime_b = NULL;
+    llam_runtime_t *runtime_b_internal = NULL;
     llam_task_t *task = NULL;
     cross_allocator_free_state_t state;
     llam_allocator_t *allocator;
@@ -2102,6 +2270,11 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
     }
 
     state.foreign_runtime = runtime_b;
+    if (llam_runtime_begin_public_op(runtime_b, &runtime_b_internal) != 0) {
+        rc = test_fail_errno("foreign runtime pin for cross-allocator test failed");
+        goto cleanup;
+    }
+    state.foreign_runtime_internal = runtime_b_internal;
     task = llam_runtime_spawn_ex(runtime_a, cross_allocator_free_task, &state, NULL, 0U);
     if (task == NULL ||
         llam_runtime_run_handle(runtime_a) != 0 ||
@@ -2120,7 +2293,7 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
     }
     task = NULL;
 
-    allocator = &runtime_b->shards[0].allocator;
+    allocator = &runtime_b_internal->shards[0].allocator;
     errno = 0;
     {
         bool task_returned_to_external_cache;
@@ -2160,11 +2333,14 @@ cleanup:
     if (state.local_token != NULL) {
         (void)llam_cancel_token_destroy(state.local_token);
     }
+    if (runtime_b_internal != NULL) {
+        llam_runtime_end_public_op(runtime_b_internal);
+    }
     llam_runtime_destroy(runtime_b);
     llam_runtime_destroy(runtime_a);
     return rc;
 }
-
+#include "test_multi_runtime_stack_cache.inc"
 static int test_task_group_host_spawn_uses_group_runtime(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
@@ -2594,7 +2770,6 @@ static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
 #if LLAM_PLATFORM_POSIX
     pid_t pid;
     int status = 0;
-
     pid = fork();
     if (pid < 0) {
         return test_fail_errno("signal handler isolation fork failed");
@@ -2656,7 +2831,7 @@ static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
     return 0;
 #endif
 }
-
+#include "test_signal_policy_cases.inc"
 static int test_process_fp_globals_survive_peer_runtime_destroy(void) {
 #if LLAM_PLATFORM_POSIX && LLAM_ARCH_X86_64
     llam_runtime_opts_t opts;
@@ -2858,7 +3033,7 @@ cleanup:
 #endif
 }
 
-static int test_default_channel_host_try_ops_ignore_default_runtime_reinit(void) {
+static int test_default_runtime_reinit_rejects_live_owner(void) {
 #if LLAM_PLATFORM_POSIX
     host_try_default_race_state_t state;
     pthread_t toggle_thread;
@@ -2872,13 +3047,23 @@ static int test_default_channel_host_try_ops_ignore_default_runtime_reinit(void)
     if (init_runtime_opts(&state.opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-
+    if (llam_runtime_init_ex(
+            &state.opts,
+            LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("default runtime setup failed");
+    }
     state.channel = llam_channel_create(1U);
     if (state.channel == NULL) {
+        llam_runtime_shutdown();
         return test_fail_errno("default-owned channel create failed");
     }
+    llam_runtime_shutdown();
 
-    err = pthread_create(&toggle_thread, NULL, default_runtime_toggle_thread, &state);
+    err = pthread_create(
+        &toggle_thread,
+        NULL,
+        default_runtime_reinit_reject_thread,
+        &state);
     if (err != 0) {
         errno = err;
         rc = test_fail_errno("default toggle thread create failed");
@@ -2895,7 +3080,8 @@ static int test_default_channel_host_try_ops_ignore_default_runtime_reinit(void)
     pthread_join(toggle_thread, NULL);
     pthread_join(try_thread, NULL);
     if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
-        rc = test_fail("default channel host try/default runtime reinit race observed an API failure");
+        rc = test_fail(
+            "default runtime accepted reinit while an old owner survived");
         goto cleanup;
     }
     rc = 0;
@@ -2905,6 +3091,14 @@ cleanup:
         while (llam_channel_try_recv_result(state.channel, &out) == 0) {
         }
         (void)llam_channel_destroy(state.channel);
+        state.channel = NULL;
+    }
+    if (rc == 0 &&
+        llam_runtime_init_ex(
+            &state.opts,
+            LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno(
+            "default runtime stayed blocked after owner cleanup");
     }
     llam_runtime_shutdown();
     return rc;
@@ -2993,6 +3187,7 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
     }
     if (pid == 0) {
         llam_runtime_t *runtime = NULL;
+        llam_runtime_t *raw_runtime = NULL;
 
         /*
          * Runtime active_ops is the host-side handle destruction gate. Before
@@ -3003,7 +3198,12 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
         if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
             _exit(10);
         }
-        atomic_store_explicit(&runtime->active_ops, SIZE_MAX, memory_order_release);
+        if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+            _exit(11);
+        }
+        llam_runtime_end_public_op(raw_runtime);
+        atomic_store_explicit(
+            &raw_runtime->active_ops, SIZE_MAX, memory_order_release);
         errno = 0;
         llam_runtime_destroy(runtime);
         if (errno != EBUSY) {
@@ -3012,6 +3212,9 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
         if (llam_runtime_check_handle(runtime) != 0) {
             _exit(11);
         }
+        atomic_store_explicit(
+            &raw_runtime->active_ops, 0U, memory_order_release);
+        llam_runtime_destroy(runtime);
         _exit(0);
     }
 
@@ -3067,22 +3270,25 @@ static int test_runtime_destroy_detects_sentinel_after_claim(void) {
             _exit(10);
         }
         if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0 ||
-            pinned_runtime != runtime) {
+            pinned_runtime == runtime) {
             llam_runtime_destroy(runtime);
             _exit(11);
         }
         state.runtime = runtime;
         err = pthread_create(&thread, NULL, claim_destroy_runtime_thread, &state);
         if (err != 0) {
-            atomic_store_explicit(&runtime->active_ops, 1U, memory_order_release);
+            atomic_store_explicit(
+                &pinned_runtime->active_ops, 1U, memory_order_release);
             llam_runtime_end_public_op(pinned_runtime);
             llam_runtime_destroy(runtime);
             _exit(12);
         }
-        while (!atomic_load_explicit(&runtime->destroy_claimed, memory_order_acquire)) {
+        while (!atomic_load_explicit(
+            &pinned_runtime->destroy_claimed, memory_order_acquire)) {
             llam_pause_cpu();
         }
-        atomic_store_explicit(&runtime->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(
+            &pinned_runtime->active_ops, SIZE_MAX, memory_order_release);
         pthread_join(thread, NULL);
         if (state.rc == 0) {
             _exit(13);
@@ -3090,13 +3296,16 @@ static int test_runtime_destroy_detects_sentinel_after_claim(void) {
         if (state.err != EBUSY) {
             _exit(14);
         }
-        if (atomic_load_explicit(&runtime->destroy_claimed, memory_order_acquire)) {
+        if (atomic_load_explicit(
+                &pinned_runtime->destroy_claimed,
+                memory_order_acquire)) {
             _exit(15);
         }
         if (state.heap_allocated) {
             _exit(16);
         }
-        atomic_store_explicit(&runtime->active_ops, 1U, memory_order_release);
+        atomic_store_explicit(
+            &pinned_runtime->active_ops, 1U, memory_order_release);
         llam_runtime_end_public_op(pinned_runtime);
         llam_runtime_destroy(runtime);
         _exit(0);
@@ -3140,12 +3349,18 @@ static int test_runtime_destroy_detects_sentinel_after_claim(void) {
 static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
     llam_runtime_t *runtime = NULL;
     llam_runtime_t *pinned_runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     size_t active_ops;
     int saved_errno;
 
     if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
         return test_fail_errno("runtime active-op near-sentinel setup failed");
     }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("runtime active-op raw resolve failed");
+    }
+    llam_runtime_end_public_op(raw_runtime);
 
     /*
      * The final low-half value and the high half of active_ops are reserved as
@@ -3153,19 +3368,25 @@ static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
      * before arithmetic can produce a non-canonical sentinel that later end paths
      * decrement back into apparently-valid counts.
      */
-    atomic_store_explicit(&runtime->active_ops, (SIZE_MAX / 2U) - 1U, memory_order_release);
+    atomic_store_explicit(
+        &raw_runtime->active_ops,
+        (SIZE_MAX / 2U) - 1U,
+        memory_order_release);
     errno = 0;
     if (llam_runtime_begin_public_op(runtime, &pinned_runtime) == 0) {
         if (pinned_runtime != NULL) {
             llam_runtime_end_public_op(pinned_runtime);
         }
-        atomic_store_explicit(&runtime->active_ops, 0U, memory_order_release);
+        atomic_store_explicit(
+            &raw_runtime->active_ops, 0U, memory_order_release);
         llam_runtime_destroy(runtime);
         return test_fail("runtime public op accepted near-sentinel active_ops");
     }
     saved_errno = errno;
-    active_ops = atomic_load_explicit(&runtime->active_ops, memory_order_acquire);
-    atomic_store_explicit(&runtime->active_ops, 0U, memory_order_release);
+    active_ops = atomic_load_explicit(
+        &raw_runtime->active_ops, memory_order_acquire);
+    atomic_store_explicit(
+        &raw_runtime->active_ops, 0U, memory_order_release);
     llam_runtime_destroy(runtime);
 
     if (saved_errno != EBUSY) {
@@ -3606,6 +3827,10 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
         rc = test_fail_errno("post-destroy task group cancel did not fail with EXDEV");
         goto cleanup;
     }
+    if (llam_timer_cancel(state.timer) != -1 || errno != EXDEV) {
+        rc = test_fail_errno("post-destroy timer cancel did not fail with EXDEV");
+        goto cleanup;
+    }
     /*
      * Cleanup is allowed after owner-runtime teardown, but spawning would need
      * scheduler queues from the retired runtime.  Keep this as an explicit
@@ -3620,7 +3845,8 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
         goto cleanup;
     }
 
-    if (llam_task_group_destroy(state.group) != 0 ||
+    if (llam_timer_destroy(state.timer) != 0 ||
+        llam_task_group_destroy(state.group) != 0 ||
         llam_cancel_token_destroy(state.token) != 0 ||
         llam_cond_destroy(state.cond) != 0 ||
         llam_mutex_destroy(state.mutex) != 0 ||
@@ -3629,6 +3855,7 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
         goto cleanup;
     }
     state.group = NULL;
+    state.timer = NULL;
     state.token = NULL;
     state.cond = NULL;
     state.mutex = NULL;
@@ -3644,6 +3871,9 @@ cleanup:
     }
     if (state.group != NULL) {
         (void)llam_task_group_destroy(state.group);
+    }
+    if (state.timer != NULL) {
+        (void)llam_timer_destroy(state.timer);
     }
     if (state.token != NULL) {
         (void)llam_cancel_token_destroy(state.token);
@@ -4374,12 +4604,19 @@ cleanup:
     llam_runtime_destroy(runtime_a);
     return rc;
 }
-
+#include "test_external_drive_cases.inc"
+#include "test_runtime_handle_generation_cases.inc"
 int main(void) {
     static const multi_runtime_named_test_t tests[] = {
         {"sync_handle_family_confusion", test_sync_handle_family_confusion},
         {"runtime_run_handle_rejects_null", test_runtime_run_handle_rejects_null},
+        {"runtime_handle_generation_contract",
+         test_runtime_handle_generation_contract},
+        {"runtime_finalize_preserves_public_owner_refs",
+         test_runtime_finalize_preserves_public_owner_refs},
         {"idle_block_workers_destroy_repeat", test_idle_block_workers_destroy_repeat},
+        {"runtime_resource_plan_isolation", test_runtime_resource_plan_isolation},
+        {"external_drive_contract", test_external_drive_contract},
         {"concurrent_spawn_join", test_concurrent_spawn_join},
         {"sequential_runtime_host_join_owner_cleanup", test_sequential_runtime_host_join_owner_cleanup},
         {"cross_runtime_task_owner", test_cross_runtime_task_owner},
@@ -4387,17 +4624,22 @@ int main(void) {
         {"cross_runtime_spawn_cancel_token_owner", test_cross_runtime_spawn_cancel_token_owner},
         {"task_group_spawn_rejects_foreign_cancel_token", test_task_group_spawn_rejects_foreign_cancel_token},
         {"cross_runtime_allocator_returns_are_remote", test_cross_runtime_allocator_returns_are_remote},
+        {"cross_runtime_stack_cache_uses_task_owner",
+         test_cross_runtime_stack_cache_uses_task_owner},
         {"task_group_host_spawn_uses_group_runtime", test_task_group_host_spawn_uses_group_runtime},
         {"concurrent_runtime_io", test_concurrent_runtime_io},
         {"explicit_owned_buffers_survive_runtime_destroy", test_explicit_owned_buffers_survive_runtime_destroy},
         {"destroyed_runtime_io_cancel_does_not_stop_peer_runtime", test_destroyed_runtime_io_cancel_does_not_stop_peer_runtime},
         {"process_signal_handler_survives_peer_runtime_destroy",
          test_process_signal_handler_survives_peer_runtime_destroy},
+        {"signal_policy_embedding_contract", test_signal_policy_embedding_contract},
+        {"host_process_fork_exec_contract", test_host_process_fork_exec_contract},
         {"process_fp_globals_survive_peer_runtime_destroy",
          test_process_fp_globals_survive_peer_runtime_destroy},
         {"host_try_ops_ignore_default_runtime_race", test_host_try_ops_ignore_default_runtime_race},
         {"explicit_channel_host_try_races_runtime_destroy", test_explicit_channel_host_try_races_runtime_destroy},
-        {"default_channel_host_try_ops_ignore_default_runtime_reinit", test_default_channel_host_try_ops_ignore_default_runtime_reinit},
+        {"default_runtime_reinit_rejects_live_owner",
+         test_default_runtime_reinit_rejects_live_owner},
         {"concurrent_runtime_destroy_is_single_owner", test_concurrent_runtime_destroy_is_single_owner},
 #if LLAM_PLATFORM_POSIX
         {"runtime_destroy_active_op_sentinel_does_not_hang",
@@ -4425,9 +4667,7 @@ int main(void) {
         {"explicit_embedding_blocking_helper", test_explicit_embedding_blocking_helper},
         {"explicit_embedding_io_ownership", test_explicit_embedding_io_ownership},
         {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
-    };
-    size_t i;
-
+    }; size_t i;
     /*
      * CI timeout diagnostics depend on seeing the last completed subcase.
      * Keep progress lines visible even when the process is killed externally.

@@ -1,0 +1,685 @@
+{
+  "schema": "llam.build-manifest.v1",
+  "stable": {
+    "common_sources": [
+      "src/core/lifecycle/runtime.c",
+      "src/core/lifecycle/resource_plan.c",
+      "src/core/lifecycle/runtime_layout.c",
+      "src/core/lifecycle/external_drive.c",
+      "src/core/base/abi.c",
+      "src/core/base/errno.c",
+      "src/core/base/util.c",
+      "src/core/base/io_udata.c",
+      "src/core/registry/capability.c",
+      "src/core/broker/broker.c",
+      "src/core/broker/broker_lifecycle.c",
+      "src/core/broker/broker_ops.c",
+      "src/core/broker/broker_validate.c",
+      "src/core/broker/broker_buffer.c",
+      "src/core/broker/broker_descriptor.c",
+      "src/core/broker/broker_channel.c",
+      "src/core/broker/broker_revoke.c",
+      "src/core/broker/broker_task.c",
+      "src/core/broker/broker_windows_security.c",
+      "src/core/broker/transport/broker_transport_dispatch.c",
+      "src/core/broker/transport/broker_transport_ops.c",
+      "src/core/broker/transport/broker_transport_response.c",
+      "src/core/broker/transport/broker_transport_rollback.c",
+      "src/core/broker/transport/broker_transport_ring.c",
+      "src/core/broker/transport/broker_transport.c",
+      "src/core/broker/transport/broker_transport_windows.c",
+      "src/core/broker/transport/broker_transport_windows_fd_stubs.c",
+      "src/core/broker/transport/broker_transport_windows_pipe.c",
+      "src/core/broker/transport/broker_transport_windows_session.c",
+      "src/core/broker/transport/broker_transport_posix.c",
+      "src/core/broker/transport/broker_transport_posix_message.c",
+      "src/core/broker/transport/broker_transport_posix_socket.c",
+      "src/core/broker/transport/broker_transport_unix.c",
+      "src/core/broker/transport/broker_transport_selftest.c",
+      "src/core/broker/ring/broker_ring.c",
+      "src/core/broker/ring/broker_ring_buffer_grant.c",
+      "src/core/broker/ring/broker_ring_doorbell.c",
+      "src/core/broker/ring/broker_ring_dispatch.c",
+      "src/core/broker/ring/broker_ring_ops.c",
+      "src/core/broker/ring/broker_ring_queue.c",
+      "src/core/broker/ring/broker_ring_stats.c",
+      "src/core/broker/ring/broker_ring_shm.c",
+      "src/core/broker/ring/broker_ring_shm_posix.c",
+      "src/core/broker/ring/broker_ring_shm_windows.c",
+      "src/core/debug/fault.c",
+      "src/core/base/names.c",
+      "src/core/time/time.c",
+      "src/core/context/fp.c",
+      "src/core/context/stack_sample.c",
+      "src/core/context/sanitizer_fiber.c",
+      "src/core/context/context_portable.c",
+      "src/core/sched/queue_base.c",
+      "src/core/sched/norm_queue_depth.c",
+      "src/core/sched/norm_queue.c",
+      "src/core/sched/affinity.c",
+      "src/core/sched/external_doorbell.c",
+      "src/core/sched/core_queue.c",
+      "src/core/sched/handoff_policy.c",
+      "src/core/memory/alloc.c",
+      "src/core/memory/allocator_quiescent.c",
+      "src/core/task/task_alloc.c",
+      "src/core/task/task_handle_registry.c",
+      "src/core/task/task_handle_claim.c",
+      "src/core/memory/io_object_alloc.c",
+      "src/core/wait/wait_timer_alloc.c",
+      "src/core/debug/trace.c",
+      "src/core/sched/wake.c",
+      "src/core/platform/platform.c",
+      "src/core/platform/signal.c",
+      "src/core/platform/stack_vm.c",
+      "src/core/platform/windows_policy.c",
+      "src/core/sched/safepoint.c",
+      "src/core/wait/wait.c",
+      "src/core/task/task_reclaim.c",
+      "src/core/task/stack_cache.c",
+      "src/core/task/stack_cache_lists.c",
+      "src/core/task/stack_cache_trim.c",
+      "src/core/task/task_stack.c",
+      "src/core/sched/reinject.c",
+      "src/core/wait/wait_accounting.c",
+      "src/core/wait/wait_deadline.c",
+      "src/core/wait/wait_io_abort.c",
+      "src/core/wait/wait_owner.c",
+      "src/core/wait/wait_tracking.c",
+      "src/core/time/timer_heap.c",
+      "src/core/time/timer.c",
+      "src/core/api/timer_api.c",
+      "src/core/api/signal_api.c",
+      "src/engine/scheduler/scheduler_engine.c",
+      "src/engine/scheduler/block.c",
+      "src/io/engine/io_engine.c",
+      "src/engine/watchdog/watchdog.c",
+      "src/engine/watchdog/watchdog_probe.c",
+      "src/engine/watchdog/watchdog_merge.c",
+      "src/engine/watchdog/watchdog_rehome.c",
+      "src/engine/watchdog/watchdog_scale.c",
+      "src/engine/watchdog/watchdog_worker.c",
+      "src/engine/watchdog/watchdog_autotune.c",
+      "src/engine/watchdog/watchdog_autotune_config.c",
+      "src/core/api/core_api.c",
+      "src/core/task/spawn.c",
+      "src/core/task/yield_join_sleep.c",
+      "src/core/api/blocking_api.c",
+      "src/core/api/cancel_api.c",
+      "src/core/lifecycle/lifecycle.c",
+      "src/core/sched/scheduler_thread.c",
+      "src/core/sched/scheduler.c",
+      "src/core/lifecycle/init.c",
+      "src/core/lifecycle/shutdown.c",
+      "src/core/lifecycle/run.c",
+      "src/core/sync/sync.c",
+      "src/core/sync/mutex_lifecycle.c",
+      "src/core/sync/mutex.c",
+      "src/core/sync/cond_lifecycle.c",
+      "src/core/sync/cond.c",
+      "src/core/sync/channel_cache.c",
+      "src/core/sync/channel_lifecycle.c",
+      "src/core/sync/channel_fast.c",
+      "src/core/sync/channel.c",
+      "src/core/sync/channel_select_fast.c",
+      "src/core/sync/channel_select.c",
+      "src/core/registry/handle.c",
+      "src/core/registry/owner.c",
+      "src/core/registry/registry.c",
+      "src/core/task/task_group.c",
+      "src/core/task/task_group_registry.c",
+      "src/core/task/task_local.c",
+      "src/core/task/task_context.c",
+      "src/io/api/io_api.c",
+      "src/io/api/direct.c",
+      "src/io/api/direct_tuning.c",
+      "src/io/api/issue.c",
+      "src/io/api/task_bootstrap.c",
+      "src/io/api/issue_wait.c",
+      "src/io/api/issue_watch.c",
+      "src/io/api/blocking_ops.c",
+      "src/io/api/blocking_file_ops.c",
+      "src/io/api/blocking_wrappers.c",
+      "src/io/buffer/buffer_registry.c",
+      "src/io/api/owned.c",
+      "src/io/api/datagram.c",
+      "src/io/api/handle_positional.c",
+      "src/io/api/positional.c",
+      "src/io/api/positional_util.c",
+      "src/io/api/public.c",
+      "src/io/windows/watch/iocp.c",
+      "src/core/debug/debug_dump_helpers.c",
+      "src/core/debug/debug_stats_json.c",
+      "src/core/debug/debug_stack_cache.c",
+      "src/core/debug/debug.c",
+      "src/io/watch/watch.c",
+      "src/io/watch/close.c",
+      "src/io/watch/watch_lookup.c",
+      "src/io/watch/migration.c",
+      "src/io/watch/watch_queue.c",
+      "src/io/watch/waiter.c"
+    ],
+    "platform_sources": {
+      "linux": [
+        "src/io/linux/watch/prelude.c",
+        "src/io/linux/watch/linux_state.c",
+        "src/io/linux/watch/linux_lookup.c",
+        "src/io/linux/watch/linux_migration_live.c",
+        "src/io/linux/watch/linux_migration_rehome.c",
+        "src/io/linux/watch/linux_control.c",
+        "src/io/linux/watch/linux_submit.c",
+        "src/io/linux/watch/cqe.c",
+        "src/io/linux/watch/linux_worker.c"
+      ],
+      "kqueue": [
+        "src/io/darwin/watch/darwin_state.c",
+        "src/io/darwin/watch/darwin_migration_live.c",
+        "src/io/darwin/watch/darwin_migration_rehome.c",
+        "src/io/darwin/watch/darwin_control.c",
+        "src/io/darwin/watch/darwin_completion.c",
+        "src/io/darwin/watch/events.c",
+        "src/io/darwin/watch/darwin_worker.c"
+      ],
+      "windows": [
+        "src/io/windows/watch/windows_state.c",
+        "src/io/windows/watch/socket.c",
+        "src/io/windows/watch/pool.c",
+        "src/io/windows/watch/windows_control.c",
+        "src/io/windows/watch/windows_submit.c",
+        "src/io/windows/watch/windows_completion.c",
+        "src/io/windows/watch/fallback.c",
+        "src/io/windows/watch/windows_watch.c"
+      ],
+      "context_arm64": [
+        "src/core/context/context_arm64.c"
+      ],
+      "linux_x86_64": [
+        "src/asm/linux/x86_64/linux_context_x86_64.S"
+      ],
+      "linux_x86_64_wake": [
+        "src/asm/linux/x86_64/wake_syscalls_x86_64.S"
+      ],
+      "linux_arm64": [
+        "src/asm/linux/arm64/linux_context_arm64.S"
+      ],
+      "darwin_x86_64": [
+        "src/asm/darwin/x86_64/darwin_context_x86_64.S"
+      ],
+      "darwin_arm64": [
+        "src/asm/darwin/arm64/darwin_context_arm64.S"
+      ],
+      "windows_gnu_x86_64": [
+        "src/asm/windows/x86_64/windows_context_x86_64.S"
+      ],
+      "windows_msvc_x86_64": [
+        "src/asm/windows/x86_64/context_x86_64.asm"
+      ]
+    }
+  },
+  "tests": {
+    "public": [
+      {
+        "name": "test_abi_contract",
+        "platforms": ["all"],
+        "sources": ["tests/test_abi_contract.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_connect_io",
+        "platforms": ["linux", "darwin", "bsd"],
+        "sources": ["tests/test_connect_io.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_group_local_edges",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_group_local_edges.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_fuzz",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_fuzz.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_invariants",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_invariants.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_io_dump",
+        "platforms": ["linux", "darwin", "bsd"],
+        "sources": ["tests/test_runtime_io_dump.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_select_edges",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_select_edges.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_stress",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_stress.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_unmanaged_join",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_unmanaged_join.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_sync_primitives",
+        "platforms": ["all"],
+        "sources": ["tests/test_sync_primitives.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_windows_iocp_dump",
+        "platforms": ["windows"],
+        "sources": ["tests/test_windows_iocp_dump.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_windows_runtime_smoke",
+        "platforms": ["all"],
+        "sources": ["tests/test_windows_runtime_smoke.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_shared_load",
+        "platforms": ["linux", "darwin", "bsd"],
+        "sources": ["tests/test_shared_load.c"],
+        "link_dependencies": ["system_dynamic_loader", "Threads::Threads"]
+      }
+    ],
+    "internal": [
+      {
+        "name": "test_abi_compat",
+        "platforms": ["all"],
+        "sources": ["tests/test_abi_compat.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_io_buffers",
+        "platforms": ["linux", "darwin", "bsd"],
+        "sources": ["tests/test_io_buffers.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_multi_runtime_core",
+        "platforms": ["all"],
+        "sources": ["tests/test_multi_runtime_core.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_api_edges",
+        "platforms": ["linux", "darwin", "bsd"],
+        "sources": ["tests/test_runtime_api_edges.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_runtime_core",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_core.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_norm_queue_wrap",
+        "platforms": ["all"],
+        "sources": ["tests/test_norm_queue_wrap.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_windows_handle_io",
+        "platforms": ["windows"],
+        "sources": ["tests/test_windows_handle_io.c"],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "name": "test_windows_policy",
+        "platforms": ["all"],
+        "sources": ["tests/test_windows_policy.c"],
+        "link_dependencies": ["llam_runtime"]
+      }
+    ],
+    "test_hook": [
+      {
+        "name": "test_runtime_shutdown_internal",
+        "platforms": ["all"],
+        "sources": ["tests/test_runtime_shutdown_internal.c"],
+        "link_dependencies": ["llam_runtime_testhooks"]
+      },
+      {
+        "name": "test_security_capability",
+        "platforms": ["all"],
+        "sources": ["tests/test_security_capability.c"],
+        "link_dependencies": ["llam_runtime_testhooks"]
+      },
+      {
+        "name": "test_windows_iocp_io",
+        "platforms": ["windows"],
+        "sources": ["tests/test_windows_iocp_io.c"],
+        "link_dependencies": ["llam_runtime_testhooks"]
+      }
+    ]
+  },
+  "research": {
+    "runtime_platform_sources": {
+      "linux": [
+        "src/io/linux/research_ring_profile.c",
+        "src/io/linux/watch/linux_segment.c",
+        "src/io/linux/watch/linux_segment_cancel.c",
+        "src/io/linux/watch/linux_segment_complete.c",
+        "src/io/linux/watch/linux_segment_queue.c",
+        "src/io/linux/watch/linux_segment_reducer.c",
+        "src/io/linux/watch/linux_segment_resources.c",
+        "src/io/linux/watch/linux_segment_submit.c"
+      ]
+    },
+    "private_headers": [
+      "src/io/linux/runtime_io_segment_linux_internal.h",
+      "src/io/linux/runtime_io_ring_profile_linux_internal.h"
+    ],
+    "targets": [
+      {
+        "family": "leir",
+        "name": "test_leir_phase0",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_bindings.c",
+          "experiments/leir/leir_engine.c",
+          "experiments/leir/leir_peer_process.c",
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/test_leir_phase0.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_connect",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_bindings.c",
+          "experiments/leir/leir_engine.c",
+          "experiments/leir/leir_peer_process.c",
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/test_leir_connect.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "bench_leir_phase0",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_bindings.c",
+          "experiments/leir/leir_engine.c",
+          "experiments/leir/leir_peer_process.c",
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/bench_leir_phase0.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_plan",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_aot_plan.c",
+          "experiments/leir/test_leir_aot_plan.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_module",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/test_leir_aot_module.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_c_consumer",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/fixtures/leir_aot_c_consumer.c"
+        ],
+        "link_dependencies": []
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_integration",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/leir_aot_linux.c",
+          "experiments/leir/test_leir_aot_integration.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_linux_unit",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_aot_connect_bench_support.c",
+          "experiments/leir/test_leir_aot_linux_unit.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_ownership",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_native_test_fixture.c",
+          "experiments/leir/test_leir_aot_ownership.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_aot_ring_profile",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/test_leir_aot_ring_profile.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "bench_leir_aot_connect",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/generated/leir_aot_connect_write.c",
+          "experiments/leir/leir_aot_linux.c",
+          "experiments/leir/leir_aot_connect_bench_support.c",
+          "experiments/leir/leir_bindings.c",
+          "experiments/leir/leir_engine.c",
+          "experiments/leir/leir_program.c",
+          "experiments/leir/bench_leir_aot_connect.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_native_plan",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_native_plan.c",
+          "experiments/leir/test_leir_native_plan.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_native_segment",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_native_plan.c",
+          "experiments/leir/leir_native_segment.c",
+          "experiments/leir/leir_native_linux_state.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/test_leir_native_fixture.c",
+          "experiments/leir/test_leir_native_segment.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "test_leir_native_linux",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_native_test_fixture.c",
+          "experiments/leir/test_leir_native_linux.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "bench_leir_native_segment",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_native_plan.c",
+          "experiments/leir/leir_native_segment.c",
+          "experiments/leir/leir_native_linux_state.c",
+          "experiments/leir/leir_peer_process.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/bench_leir_native_segment.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "leir",
+        "name": "bench_leir_native_pipeline",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/leir/leir_program.c",
+          "experiments/leir/leir_native_plan.c",
+          "experiments/leir/leir_native_segment.c",
+          "experiments/leir/leir_native_linux_state.c",
+          "experiments/leir/leir_peer_process.c",
+          "experiments/leir/leir_test_support.c",
+          "experiments/leir/bench_leir_native_pipeline.c"
+        ],
+        "link_dependencies": ["llam_runtime"]
+      },
+      {
+        "family": "lcwe",
+        "name": "test_lcwe_model",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/lcwe/lcwe_model.c",
+          "experiments/lcwe/lcwe_workloads.c",
+          "experiments/lcwe/test_lcwe_model.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      },
+      {
+        "family": "lcwe",
+        "name": "bench_lcwe_model",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/lcwe/lcwe_model.c",
+          "experiments/lcwe/lcwe_workloads.c",
+          "experiments/lcwe/bench_lcwe_model.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      },
+      {
+        "family": "lccf",
+        "name": "test_lccf_model",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/lccf/lccf_platform.c",
+          "experiments/lccf/lccf_model.c",
+          "experiments/lccf/lccf_workloads.c",
+          "experiments/lccf/test_lccf_model.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      },
+      {
+        "family": "lccf",
+        "name": "bench_lccf_model",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/lccf/lccf_platform.c",
+          "experiments/lccf/lccf_model.c",
+          "experiments/lccf/lccf_workloads.c",
+          "experiments/lccf/bench_lccf_model.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      },
+      {
+        "family": "srem",
+        "name": "test_srem_model",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/srem/srem_platform.c",
+          "experiments/srem/srem_model.c",
+          "experiments/srem/srem_workloads.c",
+          "experiments/srem/test_srem_model.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      },
+      {
+        "family": "srem",
+        "name": "bench_srem_model",
+        "platforms": ["all"],
+        "sources": [
+          "experiments/srem/srem_platform.c",
+          "experiments/srem/srem_model.c",
+          "experiments/srem/srem_workloads.c",
+          "experiments/srem/bench_srem_model.c"
+        ],
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
+      }
+    ]
+  }
+}

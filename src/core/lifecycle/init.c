@@ -33,6 +33,10 @@
 
 #include "runtime_internal.h"
 
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+#include "io/linux/runtime_io_ring_profile_linux_internal.h"
+#endif
+
 /**
  * @brief Initialize per-shard diagnostic counters after runtime storage reset.
  *
@@ -160,6 +164,9 @@ static void llam_trace_ring_init(llam_shard_t *shard) {
         return;
     }
     atomic_init(&shard->trace_head, 0U);
+    if (shard->trace_ring == NULL) {
+        return;
+    }
     for (i = 0U; i < LLAM_TRACE_RING_CAP; ++i) {
         atomic_init(&shard->trace_ring[i].ts_ns, 0U);
         atomic_init(&shard->trace_ring[i].task_id, 0U);
@@ -299,6 +306,350 @@ static uint64_t llam_runtime_env_u64(const char *name, uint64_t default_value, u
 }
 
 /**
+ * @brief Parse a present unsigned environment value and expose its authority.
+ *
+ * Missing, empty, signed, whitespace-prefixed, malformed, and overflowing
+ * values are ignored so a malformed newer compatibility name can still fall
+ * back to the historical name or profile default.
+ */
+static bool llam_runtime_env_u64_present(const char *name,
+                                         uint64_t max_value,
+                                         uint64_t *out_value) {
+    const char *env = llam_env_get(name);
+    char *end = NULL;
+    unsigned long long parsed;
+
+    if (out_value == NULL || env == NULL || env[0] == '\0' ||
+        llam_ascii_is_space((unsigned char)env[0]) ||
+        env[0] == '-' || env[0] == '+') {
+        return false;
+    }
+    errno = 0;
+    parsed = strtoull(env, &end, 10);
+    if (errno != 0 || end == env || *end != '\0') {
+        return false;
+    }
+    if ((uint64_t)parsed > max_value) {
+        parsed = (unsigned long long)max_value;
+    }
+    *out_value = (uint64_t)parsed;
+    return true;
+}
+
+/** @brief Multiply a per-shard compatibility target and clamp its total. */
+static uint64_t llam_runtime_prewarm_per_shard_total(uint64_t per_shard,
+                                                     unsigned shard_count,
+                                                     uint64_t max_total) {
+    if (shard_count == 0U || per_shard == 0U) {
+        return 0U;
+    }
+    if (per_shard > max_total / shard_count) {
+        return max_total;
+    }
+    return per_shard * shard_count;
+}
+
+/** @brief Clamp a logical task target to the bytes its rounded slabs consume. */
+static uint64_t llam_runtime_bound_task_prewarm_total(uint64_t requested,
+                                                      unsigned shard_count,
+                                                      uint64_t available_bytes,
+                                                      uint64_t *storage_objects) {
+    uint64_t low = 0U;
+    uint64_t high = requested;
+    uint64_t max_objects = available_bytes / sizeof(llam_task_t);
+
+    while (low < high) {
+        uint64_t delta = high - low;
+        uint64_t candidate = low + delta / 2U + delta % 2U;
+        uint64_t candidate_storage = 0U;
+
+        if (llam_runtime_task_prewarm_storage_objects(candidate,
+                                                      shard_count,
+                                                      &candidate_storage) &&
+            candidate_storage <= max_objects) {
+            low = candidate;
+        } else {
+            high = candidate - 1U;
+        }
+    }
+    if (!llam_runtime_task_prewarm_storage_objects(low,
+                                                   shard_count,
+                                                   storage_objects)) {
+        *storage_objects = 0U;
+        return 0U;
+    }
+    return low;
+}
+
+/**
+ * @brief Resolve exact public and best-effort compatibility prewarm authority.
+ *
+ * The immutable resource plan retains only caller-supplied exact totals.
+ * Effective profile/environment totals and their source are stored separately
+ * on the runtime so diagnostics do not rewrite the planner's semantic input.
+ */
+static int llam_runtime_resolve_prewarm_authority(llam_runtime_t *rt) {
+    const uint64_t task_max =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_task_t);
+    const uint64_t timer_max =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_timer_node_t);
+    uint64_t task_total;
+    uint64_t stack_total;
+    uint64_t timer_total;
+    uint64_t value;
+    uint64_t estimated_metadata;
+    uint64_t task_storage_objects = 0U;
+
+    if (rt == NULL || rt->active_shards == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    task_total = rt->resource_plan.task_prewarm_total;
+    rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_PUBLIC_EXACT;
+    if (task_total == 0U) {
+        if (llam_runtime_env_u64_present("LLAM_TASK_CACHE_PREWARM_TOTAL",
+                                         task_max,
+                                         &task_total)) {
+            rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_TOTAL;
+        } else if (llam_runtime_env_u64_present("LLAM_TASK_CACHE_PREWARM",
+                                                4096U,
+                                                &value)) {
+            task_total = llam_runtime_prewarm_per_shard_total(
+                value,
+                rt->active_shards,
+                task_max);
+            rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_LEGACY;
+        } else {
+            task_total = llam_runtime_prewarm_per_shard_total(
+                128U,
+                rt->active_shards,
+                task_max);
+            rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_DEFAULT;
+        }
+    }
+
+    stack_total = rt->resource_plan.stack_prewarm_total;
+    rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_PUBLIC_EXACT;
+    if (stack_total == 0U) {
+        if (llam_runtime_env_u64_present("LLAM_STACK_CACHE_PREWARM_TOTAL",
+                                         LLAM_RUNTIME_MAX_STACK_PREWARM,
+                                         &stack_total)) {
+            rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_TOTAL;
+        } else if (llam_runtime_env_u64_present("LLAM_STACK_CACHE_PREWARM",
+                                                LLAM_RUNTIME_MAX_STACK_PREWARM,
+                                                &stack_total)) {
+            /*
+             * Unlike the two historical metadata knobs, the old stack knob
+             * was already runtime-total. Only its best-effort/source status is
+             * deprecated.
+             */
+            rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_LEGACY;
+        } else {
+            stack_total =
+                rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 256U : 128U;
+            rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_DEFAULT;
+        }
+    }
+
+    timer_total = rt->resource_plan.timer_prewarm_total;
+    rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_PUBLIC_EXACT;
+    if (timer_total == 0U) {
+        if (llam_runtime_env_u64_present("LLAM_TIMER_HEAP_PREWARM_TOTAL",
+                                         timer_max,
+                                         &timer_total)) {
+            rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_TOTAL;
+        } else if (llam_runtime_env_u64_present("LLAM_TIMER_HEAP_PREWARM",
+                                                1048576U,
+                                                &value)) {
+            timer_total = llam_runtime_prewarm_per_shard_total(
+                value,
+                rt->active_shards,
+                timer_max);
+            rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_LEGACY;
+        } else {
+            value = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
+                        ? 1024U
+                        : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE
+                               ? 0U
+                               : 512U);
+            timer_total = llam_runtime_prewarm_per_shard_total(
+                value,
+                rt->active_shards,
+                timer_max);
+            rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_DEFAULT;
+        }
+    }
+
+    /*
+     * Exact public components are already included in the pure plan estimate.
+     * Clamp only best-effort components to the remaining aggregate metadata
+     * budget, in stable task-then-timer order.
+     */
+    estimated_metadata = rt->resource_plan.estimated_metadata_bytes;
+    if (rt->task_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT) {
+        uint64_t available =
+            LLAM_RUNTIME_METADATA_BUDGET_BYTES - estimated_metadata;
+
+        task_total = llam_runtime_bound_task_prewarm_total(
+            task_total,
+            rt->active_shards,
+            available,
+            &task_storage_objects);
+        estimated_metadata += task_storage_objects * sizeof(llam_task_t);
+    }
+    if (rt->timer_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT) {
+        uint64_t available =
+            LLAM_RUNTIME_METADATA_BUDGET_BYTES - estimated_metadata;
+        uint64_t bounded = available / sizeof(llam_timer_node_t);
+
+        if (timer_total > bounded) {
+            timer_total = bounded;
+        }
+        estimated_metadata += timer_total * sizeof(llam_timer_node_t);
+    }
+
+    rt->requested_task_prewarm_total = task_total;
+    rt->requested_stack_prewarm_total = stack_total;
+    rt->requested_timer_prewarm_total = timer_total;
+    rt->achieved_task_prewarm_total = 0U;
+    rt->achieved_stack_prewarm_total = 0U;
+    rt->achieved_timer_prewarm_total = 0U;
+    rt->estimated_metadata_bytes = estimated_metadata;
+    rt->estimated_stack_mapping_bytes =
+        stack_total * LLAM_RUNTIME_STACK_MAPPING_ESTIMATE_BYTES;
+    return 0;
+}
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+/** Internal-only deterministic allocation budgets for exact rollback tests. */
+static atomic_uint_fast64_t g_llam_test_prewarm_limits[LLAM_TEST_PREWARM_KIND_COUNT] = {
+    UINT64_MAX,
+    UINT64_MAX,
+    UINT64_MAX,
+};
+
+void llam_runtime_test_set_prewarm_allocation_limit(
+    llam_test_prewarm_kind_t kind,
+    uint64_t successful_objects) {
+    if ((unsigned)kind >= LLAM_TEST_PREWARM_KIND_COUNT) {
+        return;
+    }
+    atomic_store_explicit(&g_llam_test_prewarm_limits[kind],
+                          successful_objects,
+                          memory_order_release);
+}
+
+void llam_runtime_test_reset_prewarm_allocation_limits(void) {
+    for (unsigned kind = 0U; kind < LLAM_TEST_PREWARM_KIND_COUNT; ++kind) {
+        atomic_store_explicit(&g_llam_test_prewarm_limits[kind],
+                              UINT64_MAX,
+                              memory_order_release);
+    }
+}
+
+bool llam_runtime_test_prewarm_allocation_permitted(
+    llam_test_prewarm_kind_t kind,
+    uint64_t objects) {
+    uint64_t remaining;
+
+    if ((unsigned)kind >= LLAM_TEST_PREWARM_KIND_COUNT) {
+        return true;
+    }
+    remaining = atomic_load_explicit(&g_llam_test_prewarm_limits[kind],
+                                     memory_order_acquire);
+    for (;;) {
+        if (remaining == UINT64_MAX) {
+            return true;
+        }
+        if (objects > remaining) {
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &g_llam_test_prewarm_limits[kind],
+                &remaining,
+                remaining - objects,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+#endif
+
+/**
+ * @brief Preallocate timer heap slots from one runtime-total authority.
+ *
+ * Each shard receives its quotient/remainder share in stable order. Legacy and
+ * environment totals may complete partially; exact public requests instead
+ * make initialization unwind through normal runtime teardown.
+ */
+int llam_runtime_prewarm_timer_heaps(llam_runtime_t *rt,
+                                     uint64_t total,
+                                     bool exact,
+                                     uint64_t *achieved) {
+    const uint64_t max_total =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_timer_node_t);
+    uint64_t completed = 0U;
+    int saved_errno = errno;
+
+    if (achieved != NULL) {
+        *achieved = 0U;
+    }
+    if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U ||
+        achieved == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (total > max_total) {
+        errno = E2BIG;
+        return -1;
+    }
+
+    for (unsigned shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
+        uint64_t share =
+            llam_runtime_prewarm_share(total, rt->active_shards, shard_id);
+        llam_timer_node_t **heap;
+
+        if (share == 0U) {
+            continue;
+        }
+        if (share > SIZE_MAX / sizeof(*heap)) {
+            errno = E2BIG;
+            goto exhausted;
+        }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        if (!llam_runtime_test_prewarm_allocation_permitted(
+                LLAM_TEST_PREWARM_TIMER,
+                share)) {
+            errno = ENOMEM;
+            goto exhausted;
+        }
+#endif
+        heap = calloc((size_t)share, sizeof(*heap));
+        if (heap == NULL) {
+            errno = ENOMEM;
+            goto exhausted;
+        }
+        rt->shards[shard_id].timer_heap = heap;
+        rt->shards[shard_id].timer_heap_cap = (size_t)share;
+        completed += share;
+    }
+
+    *achieved = completed;
+    errno = saved_errno;
+    return 0;
+
+exhausted:
+    *achieved = completed;
+    if (exact) {
+        return -1;
+    }
+    errno = saved_errno;
+    return 0;
+}
+
+/**
  * @brief Parse the automatic preemption policy from an environment override.
  */
 static unsigned llam_runtime_preempt_mode_from_env(unsigned default_mode) {
@@ -332,102 +683,17 @@ static bool llam_public_preempt_mode_valid(uint32_t mode) {
            mode == LLAM_PREEMPT_STRICT;
 }
 
-/**
- * @brief Find a CPU id inside a discovered CPU list.
- *
- * @param cpus       CPU id array.
- * @param count      Number of entries in @p cpus.
- * @param target_cpu CPU id to locate.
- *
- * @return Zero-based index on success, or -1 when not found.
- */
-static int llam_find_cpu_index(const unsigned *cpus, unsigned count, unsigned target_cpu) {
-    unsigned i;
-
-    if (cpus == NULL) {
-        return -1;
-    }
-    for (i = 0; i < count; ++i) {
-        if (cpus[i] == target_cpu) {
-            return (int)i;
-        }
-    }
-    return -1;
+/** @brief Validate a public scheduler-thread CPU affinity policy. */
+static bool llam_public_affinity_policy_valid(uint32_t policy) {
+    return policy == LLAM_RUNTIME_AFFINITY_NONE ||
+           policy == LLAM_RUNTIME_AFFINITY_PREFER ||
+           policy == LLAM_RUNTIME_AFFINITY_REQUIRE;
 }
 
-/**
- * @brief Reserve a CPU for io_uring SQPOLL when the runtime is configured for it.
- *
- * SQPOLL runs a kernel submission thread. Keeping scheduler workers off that CPU
- * prevents the kernel SQ thread and a user scheduler worker from fighting over
- * the same core. If the caller does not choose a CPU explicitly, the last
- * discovered allowed CPU is reserved.
- *
- * @param rt             Runtime being initialized.
- * @param cpus_inout     In/out pointer to the allowed CPU list. Replaced with a
- *                       filtered allocation when a CPU is reserved.
- * @param observed_inout In/out count for @p cpus_inout.
- *
- * @return 0 on success.
- * @return -1 with @c errno set on invalid arguments, allocation failure, or an
- *         explicit SQPOLL CPU outside the allowed CPU set.
- */
-static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_inout, unsigned *observed_inout) {
-    unsigned *cpus;
-    unsigned observed;
-    unsigned reserved_cpu;
-    int reserved_index;
-    unsigned *filtered;
-    unsigned src;
-    unsigned dst = 0U;
-
-    if (rt == NULL || cpus_inout == NULL || observed_inout == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if (rt->experimental_sqpoll_requested == 0U || rt->experimental_shard_rings != 0U) {
-        return 0;
-    }
-
-    cpus = *cpus_inout;
-    observed = *observed_inout;
-    if (observed <= 1U) {
-        rt->sqpoll_cpu_reserved = 0U;
-        return 0;
-    }
-
-    if (rt->sqpoll_cpu >= 0) {
-        reserved_cpu = (unsigned)rt->sqpoll_cpu;
-        reserved_index = llam_find_cpu_index(cpus, observed, reserved_cpu);
-        if (reserved_index < 0) {
-            errno = EINVAL;
-            return -1;
-        }
-    } else {
-        reserved_index = (int)(observed - 1U);
-        reserved_cpu = cpus[reserved_index];
-        rt->sqpoll_cpu = (int)reserved_cpu;
-    }
-
-    filtered = calloc(observed - 1U, sizeof(*filtered));
-    if (filtered == NULL) {
-        errno = ENOMEM;
-        return -1;
-    }
-
-    for (src = 0; src < observed; ++src) {
-        if ((int)src == reserved_index) {
-            continue;
-        }
-        filtered[dst++] = cpus[src];
-    }
-
-    free(cpus);
-    *cpus_inout = filtered;
-    *observed_inout = observed - 1U;
-    rt->sqpoll_cpu_reserved = 1U;
-    return 0;
+/** @brief Validate the public scheduler-driver authority. */
+static bool llam_public_driver_mode_valid(uint32_t mode) {
+    return mode == LLAM_RUNTIME_DRIVER_INTERNAL ||
+           mode == LLAM_RUNTIME_DRIVER_EXTERNAL;
 }
 
 /**
@@ -452,11 +718,13 @@ static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_i
  * @see llam_run
  */
 static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
-                                            const llam_runtime_opts_t *opts,
-                                            size_t opts_size,
-                                            bool heap_allocated) {
+                                             const llam_runtime_opts_t *opts,
+                                             size_t opts_size,
+                                             bool heap_allocated) {
     llam_runtime_opts_t raw_opts;
     llam_runtime_opts_t opts_storage;
+    llam_runtime_resource_plan_input_t resource_input;
+    llam_runtime_resource_plan_t resource_plan;
     unsigned i;
     unsigned observed;
     unsigned observed_total;
@@ -465,15 +733,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     unsigned *cpus = NULL;
     unsigned *locality_node_ids;
     unsigned *io_node_ids = NULL;
-    size_t altstack_size;
     const char *light_safepoint_env;
     const char *spawn_fanout_env;
     const char *task_list_eager_env;
     unsigned cheap_safepoint_default;
     unsigned task_list_eager_default;
+    unsigned *selected_cpus;
     size_t opts_copy_size;
     uint64_t experimental_flags;
-    unsigned timer_heap_prewarm;
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
     unsigned windows_unsafe_skip_scheduler_simd;
     unsigned windows_unsafe_skip_task_simd;
@@ -487,6 +754,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         errno = EINVAL;
         return -1;
     }
+
+    /*
+     * Shutdown release failures outlive their former runtime handle. A later
+     * lifecycle opportunity retries one bounded process-quarantine batch.
+     */
+    llam_stack_cache_quarantine_retry();
 
     if (opts != NULL) {
         /*
@@ -502,44 +775,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         opts_copy_size = opts_size < sizeof(raw_opts) ? opts_size : sizeof(raw_opts);
         memcpy(&raw_opts, opts, opts_copy_size);
 
-        memset(&opts_storage, 0, sizeof(opts_storage));
-        opts_storage.deterministic = 0U;
-        opts_storage.sqpoll_cpu = -1;
-        opts_storage.profile = LLAM_RUNTIME_PROFILE_BALANCED;
-        opts_storage.preempt_mode = LLAM_PREEMPT_AUTO;
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, deterministic)) {
-            opts_storage.deterministic = raw_opts.deterministic;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, forced_yield_every)) {
-            opts_storage.forced_yield_every = raw_opts.forced_yield_every;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, experimental_flags)) {
-            opts_storage.experimental_flags = raw_opts.experimental_flags;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, idle_spin_ns)) {
-            opts_storage.idle_spin_ns = raw_opts.idle_spin_ns;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, idle_spin_max_iters)) {
-            opts_storage.idle_spin_max_iters = raw_opts.idle_spin_max_iters;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, sqpoll_cpu)) {
-            opts_storage.sqpoll_cpu = raw_opts.sqpoll_cpu;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, profile)) {
-            opts_storage.profile = raw_opts.profile;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, reserved0)) {
-            opts_storage.reserved0 = raw_opts.reserved0;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_mode)) {
-            opts_storage.preempt_mode = raw_opts.preempt_mode;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_poll_period)) {
-            opts_storage.preempt_poll_period = raw_opts.preempt_poll_period;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_quantum_ns)) {
-            opts_storage.preempt_quantum_ns = raw_opts.preempt_quantum_ns;
-        }
+        llam_runtime_opts_copy_prefix(&raw_opts, opts_size, &opts_storage);
         opts = &opts_storage;
         if (!llam_public_runtime_profile_valid(opts->profile)) {
             errno = EINVAL;
@@ -549,26 +785,30 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             errno = EINVAL;
             return -1;
         }
+        if (!llam_public_affinity_policy_valid(opts->affinity_policy)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!llam_public_driver_mode_valid(opts->driver_mode)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!llam_runtime_signal_options_valid(opts->signal_flags,
+                                               opts->preempt_signal)) {
+            errno = EINVAL;
+            return -1;
+        }
     }
 
-    if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
-        errno = EBUSY;
+    if (llam_runtime_reset_storage_for_init(rt) != 0) {
         return -1;
     }
-
-    memset(rt, 0, sizeof(*rt));
     if (llam_runtime_register_handle(rt, heap_allocated) != 0) {
         return -1;
     }
     g_llam_tls_shard = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
-    rt->init_thread = pthread_self();
-#if defined(__linux__)
-    if (pthread_getaffinity_np(rt->init_thread, sizeof(rt->init_thread_affinity), &rt->init_thread_affinity) == 0) {
-        rt->init_thread_affinity_valid = true;
-    }
-#endif
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     {
         WSADATA wsa_data;
@@ -576,13 +816,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 
         if (wsa_rc != 0) {
             errno = llam_windows_wsa_error_to_errno(wsa_rc);
-            llam_runtime_unregister_handle(rt);
-            memset(rt, 0, sizeof(*rt));
+            llam_runtime_finalize_handle(rt, false);
             return -1;
         }
         rt->winsock_started = true;
     }
 #endif
+    if (llam_external_doorbell_init(&rt->external_driver.doorbell) != 0) {
+        int saved_errno = errno != 0 ? errno : EIO;
+
+        return llam_runtime_init_fail_registered(rt, saved_errno);
+    }
 
     errno = 0;
     observed = llam_count_allowed_cpus(&cpus);
@@ -595,6 +839,57 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return llam_runtime_init_fail_registered(rt, saved_errno);
     }
     observed_total = observed;
+    memset(&resource_input, 0, sizeof(resource_input));
+    resource_input.opts = opts;
+    resource_input.opts_size = opts != NULL ? opts_size : 0U;
+    resource_input.allowed_cpus = cpus;
+    resource_input.allowed_cpu_count = observed;
+    resource_input.affinity_supported = llam_runtime_affinity_supported();
+#if LLAM_RUNTIME_BACKEND_LINUX
+    resource_input.sqpoll_supported = true;
+#else
+    resource_input.sqpoll_supported = false;
+#endif
+    resource_input.page_size = (size_t)llam_page_size();
+    if (llam_runtime_resource_plan_resolve(&resource_input, &resource_plan) != 0) {
+        int saved_errno = errno;
+
+        free(cpus);
+        return llam_runtime_init_fail_registered(rt, saved_errno);
+    }
+    selected_cpus = calloc(resource_plan.selected_cpu_count, sizeof(*selected_cpus));
+    if (selected_cpus == NULL) {
+        free(cpus);
+        return llam_runtime_init_fail_registered(rt, ENOMEM);
+    }
+    for (i = 0U; i < resource_plan.selected_cpu_count; ++i) {
+        selected_cpus[i] = resource_plan.selected_cpus[i];
+    }
+    free(cpus);
+    cpus = selected_cpus;
+    rt->resource_plan = resource_plan;
+    rt->external_driver.enabled =
+        resource_plan.driver_mode == LLAM_RUNTIME_DRIVER_EXTERNAL;
+    atomic_init(&rt->scheduler_threads_live, 0U);
+    atomic_init(&rt->io_threads_live, 0U);
+    atomic_init(&rt->controller_threads_live, 0U);
+    atomic_init(&rt->opaque_helper_threads_live, 0U);
+    atomic_init(&rt->host_threads_live, 0U);
+    atomic_init(&rt->affinity_failures, 0U);
+    atomic_init(&rt->stack_cache_account_writer, 0U);
+    atomic_init(&rt->stack_cache_account_seq, 0U);
+    atomic_init(&rt->stack_cache_cached_bytes, 0U);
+    atomic_init(&rt->stack_cache_cached_mappings, 0U);
+    atomic_init(&rt->stack_cache_committed_bytes, 0U);
+    atomic_init(&rt->stack_cache_trim_requests, 0U);
+    atomic_init(&rt->stack_cache_discarded_bytes, 0U);
+    atomic_init(&rt->stack_cache_released_bytes, 0U);
+    atomic_init(&rt->stack_cache_budget_rejections, 0U);
+    atomic_init(&rt->stack_cache_secure_return_failures, 0U);
+    atomic_init(&rt->stack_cache_resident_bytes, 0U);
+    atomic_init(&rt->stack_cache_resident_sample_ns, 0U);
+    atomic_init(&rt->stack_cache_last_idle_scan_ns, llam_now_ns());
+    atomic_init(&rt->stack_cache_resident_valid, 0U);
 
     /*
      * From this point on, runtime policy is resolved once and stored on the
@@ -604,12 +899,22 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     experimental_flags = opts != NULL ? opts->experimental_flags : 0U;
     rt->deterministic = opts != NULL ? (opts->deterministic != 0U) : 0U;
     rt->forced_yield_every = opts != NULL ? opts->forced_yield_every : 0U;
+    rt->on_task_resume = opts != NULL ? opts->on_task_resume : NULL;
+    rt->on_task_suspend = opts != NULL ? opts->on_task_suspend : NULL;
+    rt->switch_hook_context =
+        opts != NULL ? opts->switch_hook_context : NULL;
+    rt->signal_flags =
+        opts != NULL ? opts->signal_flags : LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS;
+    rt->preempt_signal =
+        opts != NULL && opts->preempt_signal != 0
+            ? opts->preempt_signal
+            : LLAM_PREEMPT_SIGNAL;
     rt->experimental_shard_rings =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) != 0U ? 1U : 0U;
     rt->experimental_shard_rings_multishot =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT) != 0U ? 1U : 0U;
     rt->experimental_dynamic_shards =
-        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS) != 0U ? 1U : 0U;
+        resource_plan.worker_min < resource_plan.worker_max ? 1U : 0U;
     rt->experimental_lockfree_normq =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ) != 0U ? 1U : 0U;
     rt->experimental_huge_alloc_requested =
@@ -618,7 +923,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->idle_spin_max_iters = opts != NULL ? opts->idle_spin_max_iters : 0U;
     rt->experimental_sqpoll_requested =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL) != 0U ? 1U : 0U;
-    rt->sqpoll_cpu = opts != NULL ? opts->sqpoll_cpu : -1;
+    rt->sqpoll_cpu_reserved = resource_plan.sqpoll_reserved ? 1U : 0U;
+    rt->sqpoll_cpu = resource_plan.sqpoll_cpu;
     rt->profile =
         llam_runtime_profile_from_env(opts != NULL ? (llam_runtime_profile_t)opts->profile : LLAM_RUNTIME_PROFILE_BALANCED);
     rt->preempt_mode = llam_runtime_preempt_mode_from_env(opts != NULL ? opts->preempt_mode : LLAM_PREEMPT_AUTO);
@@ -736,10 +1042,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     if (rt->channel_safepoint_interval == 0U) {
         rt->channel_safepoint_interval = 1U;
     }
-    timer_heap_prewarm = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
-                             ? 1024U
-                             : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 512U);
-    timer_heap_prewarm = llam_runtime_env_u32("LLAM_TIMER_HEAP_PREWARM", timer_heap_prewarm, 1048576U);
     /*
      * Some experimental policies are mutually exclusive because they assume a
      * specific ownership model for workers or kernel submission threads.  Resolve
@@ -748,17 +1050,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     if (rt->experimental_shard_rings != 0U) {
         rt->experimental_sqpoll_requested = 0U;
     }
-    if (rt->deterministic != 0U || observed <= 2U) {
-        rt->experimental_dynamic_shards = 0U;
-    }
-    if (llam_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
+    rt->observed_shards = observed_total;
+    rt->active_shards = resource_plan.worker_max;
+    if (llam_runtime_resolve_prewarm_authority(rt) != 0) {
         int saved_errno = errno;
 
         free(cpus);
         return llam_runtime_init_fail_registered(rt, saved_errno);
     }
-    rt->observed_shards = observed_total;
-    rt->active_shards = rt->deterministic != 0U ? 1U : observed;
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_live_limit =
         llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT",
@@ -768,6 +1067,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->direct_handoff_live_limit =
         llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", 0U, 1048576U);
 #endif
+    if (rt->external_driver.enabled) {
+        rt->experimental_dynamic_shards = 0U;
+        rt->direct_handoff_burst = 0U;
+        atomic_store_explicit(&rt->direct_handoff_budget,
+                              0U,
+                              memory_order_relaxed);
+        rt->direct_handoff_live_limit = 0U;
+        rt->direct_handoff_allow_timers = 0U;
+        rt->wake_handoff_enabled = 0U;
+        rt->channel_local_handoff_enabled = 0U;
+    }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     /* Windows needs earlier kicks to avoid lock-free fanout starvation. */
     rt->spawn_fanout_wake_interval =
@@ -782,25 +1092,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         spawn_fanout_env != NULL && spawn_fanout_env[0] != '\0' ? 1U : 0U;
     rt->spawn_fanout_wake_interval =
         llam_runtime_env_u32("LLAM_SPAWN_FANOUT_WAKE_INTERVAL", rt->spawn_fanout_wake_interval, 65535U);
-    initial_online_shards = rt->active_shards;
-    rt->dynamic_online_floor = rt->active_shards;
-    if (rt->experimental_dynamic_shards != 0U) {
-        unsigned floor_basis = (rt->sqpoll_cpu_reserved != 0U && rt->observed_shards > rt->active_shards)
-                                   ? rt->observed_shards
-                                   : rt->active_shards;
-
-        if (floor_basis > 8U) {
-            rt->dynamic_online_floor = llam_max_unsigned(4U, floor_basis / 2U);
-        } else if (floor_basis > 4U) {
-            rt->dynamic_online_floor = 4U;
-        } else {
-            rt->dynamic_online_floor = rt->active_shards;
-        }
-        if (rt->dynamic_online_floor > rt->active_shards) {
-            rt->dynamic_online_floor = rt->active_shards;
-        }
-        initial_online_shards = rt->dynamic_online_floor;
-    }
+    initial_online_shards = resource_plan.worker_count;
+    rt->dynamic_online_floor = resource_plan.worker_min;
     atomic_store(&rt->online_shards, initial_online_shards);
     atomic_store(&rt->online_shards_min, initial_online_shards);
     atomic_store(&rt->online_shards_max, initial_online_shards);
@@ -812,30 +1105,9 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_store_explicit(&rt->next_spawn_shard, 0U, memory_order_relaxed);
     rt->allowed_cpus = cpus;
     (void)llam_detect_xsave_support(rt);
-    altstack_size = LLAM_ALTSTACK_BYTES;
-    if (altstack_size < (size_t)SIGSTKSZ) {
-        altstack_size = (size_t)SIGSTKSZ;
-    }
 
-    rt->shards = calloc(rt->active_shards, sizeof(*rt->shards));
-    if (rt->shards == NULL) {
-        /*
-         * rt->allowed_cpus was already published for partial-init cleanup.
-         * Let shutdown consume it exactly once; freeing @c cpus directly here
-         * leaves a dangling runtime pointer and makes caller cleanup double-free.
-         */
-        llam_runtime_shutdown_rt(rt);
-        errno = ENOMEM;
+    if (llam_runtime_allocate_layout_storage(rt) != 0) {
         return -1;
-    }
-    /*
-     * Shutdown always walks the full published shard array. Prime every wake
-     * descriptor before any later allocation can fail; otherwise untouched
-     * calloc-backed entries look like fd 0 and partial-init cleanup can close
-     * the caller's stdin.
-     */
-    for (i = 0; i < rt->active_shards; ++i) {
-        rt->shards[i].event_fd = -1;
     }
 
     locality_node_ids = calloc(rt->active_shards, sizeof(*locality_node_ids));
@@ -868,6 +1140,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->shards[i].cpu_id = rt->allowed_cpus[i];
         rt->shards[i].node_index = node_index;
         rt->shards[i].io_node_index = rt->experimental_shard_rings != 0U ? i : node_index;
+        rt->shards[i].norm_cldeque =
+            rt->norm_cldeques != NULL ? &rt->norm_cldeques[i] : NULL;
+        rt->shards[i].trace_ring =
+            rt->trace_events != NULL
+                ? &rt->trace_events[(size_t)i * LLAM_TRACE_RING_CAP]
+                : NULL;
         llam_metrics_init(&rt->shards[i].metrics);
         llam_trace_ring_init(&rt->shards[i]);
         atomic_init(&rt->shards[i].online, i < initial_online_shards ? 1U : 0U);
@@ -876,22 +1154,11 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->shards[i].merge_pause_ack, 0U);
         atomic_init(&rt->shards[i].steal_pause_ack, 0U);
         atomic_init(&rt->shards[i].live_tasks, 0U);
-        llam_cldeque_init(&rt->shards[i].norm_cldeque);
+        llam_cldeque_init(rt->shards[i].norm_cldeque);
         atomic_init(&rt->shards[i].inject_depth, 0U);
         atomic_init(&rt->shards[i].norm_depth, 0U);
         atomic_init(&rt->shards[i].timer_count, 0U);
         atomic_init(&rt->shards[i].timer_callbacks_active, 0U);
-        if (timer_heap_prewarm > 0U) {
-            rt->shards[i].timer_heap = calloc(timer_heap_prewarm, sizeof(*rt->shards[i].timer_heap));
-            if (rt->shards[i].timer_heap == NULL) {
-                free(io_node_ids);
-                free(locality_node_ids);
-                errno = ENOMEM;
-                llam_runtime_shutdown_rt(rt);
-                return -1;
-            }
-            rt->shards[i].timer_heap_cap = timer_heap_prewarm;
-        }
         atomic_init(&rt->shards[i].current, NULL);
         atomic_init(&rt->shards[i].opaque_helper_active_hint, 0U);
 #if defined(__linux__)
@@ -953,21 +1220,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             llam_runtime_shutdown_rt(rt);
             return -1;
         }
-        rt->shards[i].signal_stack = mmap(NULL,
-                                          altstack_size,
-                                          PROT_READ | PROT_WRITE,
-                                          MAP_PRIVATE | MAP_ANONYMOUS,
-                                          -1,
-                                          0);
-        if (rt->shards[i].signal_stack == MAP_FAILED) {
-            rt->shards[i].signal_stack = NULL;
-            free(io_node_ids);
-            free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
-            return -1;
-        }
-        rt->shards[i].signal_stack_size = altstack_size;
-        rt->shards[i].previous_sigaltstack.ss_flags = SS_DISABLE;
         if (llam_allocator_init(&rt->shards[i].allocator) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
@@ -1008,8 +1260,26 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 #endif
         atomic_store_explicit(&rt->shards[i].last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
         atomic_store(&rt->shards[i].last_run_started_ns, 0U);
+        rt->shards[i].current_started_ns = 0U;
     }
-    llam_runtime_prewarm_task_allocators(rt);
+    if (llam_runtime_prewarm_timer_heaps(
+            rt,
+            rt->requested_timer_prewarm_total,
+            rt->timer_prewarm_source == LLAM_RUNTIME_PREWARM_PUBLIC_EXACT,
+            &rt->achieved_timer_prewarm_total) != 0 ||
+        llam_runtime_prewarm_task_allocators(
+            rt,
+            rt->requested_task_prewarm_total,
+            rt->task_prewarm_source == LLAM_RUNTIME_PREWARM_PUBLIC_EXACT,
+            &rt->achieved_task_prewarm_total) != 0) {
+        int saved_errno = errno != 0 ? errno : ENOMEM;
+
+        free(io_node_ids);
+        free(locality_node_ids);
+        llam_runtime_shutdown_rt(rt);
+        errno = saved_errno;
+        return -1;
+    }
 
     rt->active_nodes = rt->experimental_shard_rings != 0U ? rt->active_shards : locality_nodes;
     llam_autotune_init(rt);
@@ -1022,7 +1292,10 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         errno = ENOMEM;
         return -1;
     }
-    rt->nodes = calloc(rt->active_nodes, sizeof(*rt->nodes));
+    rt->nodes = llam_aligned_zalloc(
+        _Alignof(llam_node_t),
+        rt->active_nodes,
+        sizeof(*rt->nodes));
     if (rt->nodes == NULL) {
         free(io_node_ids);
         free(locality_node_ids);
@@ -1094,6 +1367,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             return -1;
         }
         rt->nodes[i].windows_assoc_lock_initialized = true;
+        rc = pthread_mutex_init(
+            &rt->nodes[i].windows_op_pool_lock, NULL);
+        if (rc != 0) {
+            errno = rc;
+            llam_runtime_shutdown_rt(rt);
+            return -1;
+        }
+        rt->nodes[i].windows_op_pool_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].watch_lock, NULL);
         if (rc != 0) {
             errno = rc;
@@ -1108,10 +1389,25 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             return -1;
         }
         rt->nodes[i].recv_buf_lock_initialized = true;
-        if (llam_node_init_ring(rt, &rt->nodes[i]) == 0) {
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+        rc = pthread_mutex_init(
+            &rt->nodes[i].native_resource_lock, NULL);
+        if (rc != 0) {
+            errno = rc;
+            llam_runtime_shutdown_rt(rt);
+            return -1;
+        }
+        rt->nodes[i].native_resource_lock_initialized = true;
+#endif
+        rc = llam_node_init_ring(rt, &rt->nodes[i]);
+        if (rc == 0) {
             rt->nodes[i].ring_ready = true;
             llam_probe_ring_support(&rt->nodes[i]);
             (void)llam_node_setup_recv_buf_ring(&rt->nodes[i]);
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+            (void)llam_linux_native_resources_setup(
+                &rt->nodes[i]);
+#endif
             if (rt->experimental_shard_rings != 0U && rt->experimental_shard_rings_multishot == 0U) {
                 rt->nodes[i].supports_multishot_recv = false;
                 rt->nodes[i].supports_multishot_accept = false;
@@ -1120,9 +1416,28 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             if (pthread_create(&rt->nodes[i].thread, NULL, llam_io_worker_main, &rt->nodes[i]) == 0) {
                 rt->nodes[i].thread_started = true;
             } else {
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+                llam_linux_native_resources_before_ring_exit(
+                    &rt->nodes[i]);
+#endif
                 io_uring_queue_exit(&rt->nodes[i].ring);
                 rt->nodes[i].ring_ready = false;
+#if LLAM_RUNTIME_BACKEND_LINUX
+                rt->nodes[i].linux_ring_features = 0U;
+#if LLAM_BUILD_RESEARCH
+                llam_linux_native_resources_after_ring_exit(
+                    &rt->nodes[i]);
+#endif
+#endif
             }
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
+        } else if (llam_linux_research_ring_profile_request() != NULL) {
+            int saved_errno = errno != 0 ? errno : EIO;
+
+            llam_runtime_shutdown_rt(rt);
+            errno = saved_errno;
+            return -1;
+#endif
         }
     }
 
@@ -1140,7 +1455,24 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
     rt->stack_cache_lock_initialized = true;
-    llam_runtime_prewarm_stack_cache(rt);
+    rc = pthread_mutex_init(&rt->stack_cache_trim_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        llam_runtime_shutdown_rt(rt);
+        return -1;
+    }
+    rt->stack_cache_trim_lock_initialized = true;
+    if (llam_runtime_prewarm_stack_cache(
+            rt,
+            rt->requested_stack_prewarm_total,
+            rt->stack_prewarm_source == LLAM_RUNTIME_PREWARM_PUBLIC_EXACT,
+            &rt->achieved_stack_prewarm_total) != 0) {
+        int saved_errno = errno != 0 ? errno : ENOMEM;
+
+        llam_runtime_shutdown_rt(rt);
+        errno = saved_errno;
+        return -1;
+    }
 
     rc = pthread_mutex_init(&rt->block_lock, NULL);
     if (rc != 0) {
@@ -1168,18 +1500,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->overflow_lock_initialized = true;
     atomic_store(&rt->overflow_depth, 0U);
 
-    rt->block_worker_count = rt->active_shards < 4U ? rt->active_shards : 4U;
-#if !defined(__linux__)
-    rt->block_worker_count = rt->active_shards;
-#endif
-    if (rt->block_worker_count == 0U) {
-        rt->block_worker_count = 1U;
-    }
-#if !defined(__linux__)
-    if (rt->block_worker_count < 2U) {
-        rt->block_worker_count = 2U;
-    }
-#endif
+    rt->block_worker_count = resource_plan.blocking_max;
+    atomic_init(&rt->block_threads_started, 0U);
+    atomic_init(&rt->block_threads_entered, 0U);
+    atomic_init(&rt->block_threads_exited, 0U);
+    atomic_init(&rt->block_threads_live, 0U);
+    atomic_init(&rt->block_thread_create_failures, 0U);
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
         llam_runtime_shutdown_rt(rt);
@@ -1187,16 +1513,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
 
-    for (i = 0; i < rt->block_worker_count; ++i) {
-        rc = pthread_create(&rt->block_threads[i], NULL, llam_block_worker_main, rt);
-        if (rc != 0) {
-            errno = rc;
-            llam_runtime_shutdown_rt(rt);
-            return -1;
-        }
-        // pthread_create does not promise to leave the output slot untouched on
-        // failure, so shutdown must only join threads after confirmed starts.
-        rt->block_threads_started = i + 1U;
+    if (llam_block_pool_start_min(rt) != 0) {
+        int saved_errno = errno;
+
+        llam_runtime_shutdown_rt(rt);
+        errno = saved_errno;
+        return -1;
     }
 
     if (llam_install_process_signal_handlers(rt) != 0) {
@@ -1257,5 +1579,5 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
 }
 
 int llam_runtime_init(const llam_runtime_opts_t *opts) {
-    return llam_runtime_init_ex(opts, opts != NULL ? sizeof(*opts) : 0U);
+    return llam_runtime_init_ex(opts, opts != NULL ? LLAM_RUNTIME_OPTS_V2_2_SIZE : 0U);
 }

@@ -154,8 +154,20 @@ void llam_preempt_signal_handler(int signo) {
     }
 }
 
+/** @brief Return whether a fault signal can represent a task guard hit. */
+static bool llam_is_guard_fault_signal(int signo) {
+    if (signo == SIGSEGV) {
+        return true;
+    }
+#if LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD
+    return signo == SIGBUS;
+#else
+    return false;
+#endif
+}
+
 /**
- * @brief SIGSEGV handler for task guard-page diagnostics.
+ * @brief Platform fault-signal handler for task guard-page diagnostics.
  *
  * Guard-page faults are reported with task/shard state and then terminate the
  * process. Non-guard faults are restored to the default handler and re-raised.
@@ -171,7 +183,9 @@ void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
 
     (void)ucontext;
 
-    if (signo == SIGSEGV && task != NULL && llam_fault_in_task_guard_page(task, fault_addr)) {
+    if (llam_is_guard_fault_signal(signo) &&
+        task != NULL &&
+        llam_fault_in_task_guard_page(task, fault_addr)) {
         char buf[1024];
         size_t off = 0U;
 
@@ -205,7 +219,7 @@ void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
                                         off,
                                         (uintptr_t)task->stack_base + (uintptr_t)task->stack_size);
         off = llam_buf_append_str(buf, sizeof(buf), off, ")\n");
-        if (shard != NULL) {
+        if (shard != NULL && shard->trace_ring != NULL) {
             unsigned trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
 
             if (trace_head > 0U) {
@@ -231,14 +245,5 @@ void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
         _exit(128 + signo);
     }
 
-    {
-        struct sigaction action;
-
-        // Not a runtime guard-page fault: restore default behavior and re-raise.
-        memset(&action, 0, sizeof(action));
-        action.sa_handler = SIG_DFL;
-        sigemptyset(&action.sa_mask);
-        (void)sigaction(signo, &action, NULL);
-    }
-    raise(signo);
+    llam_chain_previous_fault_signal(signo, info, ucontext);
 }

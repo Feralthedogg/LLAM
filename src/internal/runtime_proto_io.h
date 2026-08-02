@@ -46,10 +46,22 @@ bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta);
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 bool llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_io_inflight_owner_published_hook_fn)(
+    llam_io_req_t *req,
+    unsigned from_shard,
+    unsigned to_shard);
+void llam_io_test_set_inflight_owner_published_hook(
+    llam_io_inflight_owner_published_hook_fn hook);
 typedef void (*llam_io_submit_detach_snapshot_hook_fn)(llam_io_req_t *req,
                                                         unsigned node_index);
 void llam_io_test_set_submit_detach_snapshot_hook(
     llam_io_submit_detach_snapshot_hook_fn hook);
+typedef void (*llam_io_close_watch_unlocked_hook_fn)(
+    llam_node_t *node,
+    void *context);
+void llam_io_test_set_close_watch_unlocked_hook(
+    llam_io_close_watch_unlocked_hook_fn hook,
+    void *context);
 #endif
 
 static inline bool llam_io_req_abort_requested(const llam_io_req_t *req) {
@@ -133,10 +145,12 @@ void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard
 bool llam_node_note_pending_ops(llam_node_t *node, unsigned amount);
 bool llam_node_complete_pending_ops(llam_node_t *node, unsigned amount);
 bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrement_pending);
+#if LLAM_BUILD_RESEARCH
 bool llam_io_dispatch_completion_sink(llam_node_t *node,
                                       llam_io_req_t *req,
                                       unsigned completion_owner,
                                       llam_wait_reason_t *wake_reason);
+#endif
 bool llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_node_submit_io_req(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
@@ -150,6 +164,30 @@ void llam_linux_track_backend_control(llam_node_t *node, llam_io_control_op_t *o
 bool llam_linux_untrack_backend_control(llam_node_t *node, llam_io_control_op_t *op);
 void llam_linux_retire_backend_controls(llam_node_t *node);
 void llam_linux_retire_backend_watch_refs(llam_node_t *node);
+#if LLAM_BUILD_RESEARCH
+bool llam_linux_native_batch_enqueue(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
+struct llam_linux_native_batch *
+llam_linux_native_batch_take_all(llam_node_t *node);
+unsigned llam_linux_native_batch_submit_one(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch);
+bool llam_linux_native_batch_abort_queued(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
+bool llam_linux_native_batch_request_cancel(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
+struct llam_linux_native_batch *
+llam_linux_native_cancel_take_all(llam_node_t *node);
+unsigned llam_linux_native_batch_submit_cancel(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch);
+#endif
 #endif
 
 /*
@@ -215,6 +253,15 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind);
 void llam_io_queue_shutdown_controls_common(llam_node_t *node);
 void llam_probe_ring_support(llam_node_t *node);
 void llam_io_buffer_public_detach_runtime_storage(llam_runtime_t *rt);
+#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
+int llam_linux_native_resources_setup(llam_node_t *node);
+void llam_linux_native_resources_before_ring_exit(
+    llam_node_t *node);
+void llam_linux_native_resources_after_ring_exit(
+    llam_node_t *node);
+#endif
+#endif
 
 /*
  * io_uring/kqueue user-data tagging. Pointers are encoded with small type tags

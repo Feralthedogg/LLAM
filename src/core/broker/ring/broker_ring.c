@@ -29,6 +29,7 @@ static llam_broker_ring_session_t *llam_broker_ring_session_get(llam_broker_t *b
                                                                 uint64_t subject_id,
                                                                 llam_broker_ring_mapping_t *out_reclaimed_mapping) {
     llam_broker_ring_session_t *free_session = NULL;
+    size_t subject_sessions = 0U;
     size_t i;
 
     if (LLAM_UNLIKELY(out_reclaimed_mapping == NULL)) {
@@ -46,9 +47,17 @@ static llam_broker_ring_session_t *llam_broker_ring_session_get(llam_broker_t *b
             }
             return session;
         }
+        if (session->active && session->subject_id == subject_id) {
+            ++subject_sessions;
+        }
         if (!session->active && free_session == NULL) {
             free_session = session;
         }
+    }
+    if (subject_id != 0U &&
+        subject_sessions >= LLAM_BROKER_RINGS_PER_SUBJECT) {
+        errno = LLAM_BROKER_QUOTA_ERRNO;
+        return NULL;
     }
     if (free_session == NULL) {
         errno = ENOSPC;
@@ -315,11 +324,12 @@ bool llam_broker_reclaim_subject_rings(llam_broker_t *broker, uint64_t subject_i
     return deferred;
 }
 
-int llam_broker_ring_serve_session_batch(llam_broker_t *broker,
-                                         uint64_t session_id,
-                                         uint64_t subject_id,
-                                         size_t max_requests,
-                                         size_t *out_served) {
+int llam_broker_ring_serve_session_batch_until(llam_broker_t *broker,
+                                               uint64_t session_id,
+                                               uint64_t subject_id,
+                                               size_t max_requests,
+                                               size_t *out_served,
+                                               uint64_t deadline_ns) {
     llam_broker_ring_t *ring;
     llam_broker_ring_session_t *session;
 
@@ -343,7 +353,27 @@ int llam_broker_ring_serve_session_batch(llam_broker_t *broker,
         errno = EBUSY;
         return -1;
     }
-    return llam_broker_ring_serve_locked_session_batch(broker, ring, session, max_requests, out_served);
+    return llam_broker_ring_serve_locked_session_batch_until(
+        broker,
+        ring,
+        session,
+        max_requests,
+        out_served,
+        deadline_ns);
+}
+
+int llam_broker_ring_serve_session_batch(llam_broker_t *broker,
+                                         uint64_t session_id,
+                                         uint64_t subject_id,
+                                         size_t max_requests,
+                                         size_t *out_served) {
+    return llam_broker_ring_serve_session_batch_until(
+        broker,
+        session_id,
+        subject_id,
+        max_requests,
+        out_served,
+        llam_broker_descriptor_io_deadline());
 }
 
 int llam_broker_ring_serve_session(llam_broker_t *broker, uint64_t session_id, uint64_t subject_id) {

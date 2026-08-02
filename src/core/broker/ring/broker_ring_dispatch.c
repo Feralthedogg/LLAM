@@ -210,11 +210,13 @@ static void llam_broker_ring_rollback_unpublished_tasks(llam_broker_t *broker,
     }
 }
 
-int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
-                                                llam_broker_ring_t *ring,
-                                                llam_broker_ring_session_t *session,
-                                                size_t max_requests,
-                                                size_t *out_served) {
+int llam_broker_ring_serve_locked_session_batch_until(
+    llam_broker_t *broker,
+    llam_broker_ring_t *ring,
+    llam_broker_ring_session_t *session,
+    size_t max_requests,
+    size_t *out_served,
+    uint64_t deadline_ns) {
     llam_broker_ring_submission_t submissions[LLAM_BROKER_RING_SERVE_BATCH_MAX];
     llam_broker_ring_completion_t completions[LLAM_BROKER_RING_SERVE_BATCH_MAX];
     llam_capability_token_t created_task_tokens[LLAM_BROKER_RING_SERVE_BATCH_MAX];
@@ -224,6 +226,7 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
     uint64_t completion_tail;
     uint64_t serve_start_ns;
     uint64_t serve_end_ns;
+    size_t selected_count;
     size_t count;
     size_t i;
 
@@ -257,21 +260,39 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
+    selected_count = count;
     session->busy = true;
     llam_broker_unlock(broker);
 
     memset(created_task_tokens, 0, sizeof(created_task_tokens));
     memset(created_task, 0, sizeof(created_task));
     for (i = 0U; i < count; ++i) {
-        llam_broker_ring_execute_submission(broker,
-                                            ring,
-                                            &submissions[i],
-                                            &completions[i],
-                                            &created_task_tokens[i]);
+        /*
+         * A batch owns one blocking budget. Always execute its first item so a
+         * ready or terminal request can make progress, but leave the suffix
+         * pending once that aggregate budget is exhausted.
+         */
+        if (i != 0U) {
+            uint64_t now_ns = llam_now_ns();
+
+            if (deadline_ns == 0U ||
+                now_ns == 0U ||
+                now_ns >= deadline_ns) {
+                break;
+            }
+        }
+        llam_broker_ring_execute_submission_until(
+            broker,
+            ring,
+            &submissions[i],
+            &completions[i],
+            &created_task_tokens[i],
+            deadline_ns);
         created_task[i] = llam_broker_ring_created_task_is_private(&submissions[i],
                                                                    &completions[i],
                                                                    &created_task_tokens[i]);
     }
+    count = i;
 
     if (llam_broker_lock(broker) != 0) {
         llam_broker_end_op(broker);
@@ -282,7 +303,7 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
         uint64_t reclaim_subject_id = session->reclaim_pending ? session->subject_id : 0U;
         bool unmap_mapping;
 
-        for (i = 0U; i < count; ++i) {
+        for (i = 0U; i < selected_count; ++i) {
             llam_broker_ring_clear_submission_output(ring, &submissions[i]);
         }
         /*
@@ -337,6 +358,21 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
     llam_broker_unlock(broker);
     llam_broker_end_op(broker);
     return 0;
+}
+
+int llam_broker_ring_serve_locked_session_batch(
+    llam_broker_t *broker,
+    llam_broker_ring_t *ring,
+    llam_broker_ring_session_t *session,
+    size_t max_requests,
+    size_t *out_served) {
+    return llam_broker_ring_serve_locked_session_batch_until(
+        broker,
+        ring,
+        session,
+        max_requests,
+        out_served,
+        llam_broker_descriptor_io_deadline());
 }
 
 int llam_broker_ring_serve_locked_session(llam_broker_t *broker,

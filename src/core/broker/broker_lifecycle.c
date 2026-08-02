@@ -39,6 +39,7 @@ static void llam_broker_clear_session_state(llam_broker_t *broker) {
 
 void llam_broker_destroy(llam_broker_t *broker) {
     llam_runtime_t *runtime;
+    llam_runtime_t *pinned_runtime = NULL;
 
     if (broker == NULL || !broker->lock_initialized) {
         return;
@@ -94,8 +95,10 @@ void llam_broker_destroy(llam_broker_t *broker) {
      * Broker task slots are trampoline arguments. Request cooperative stop
      * before draining them so long broker task sleeps cannot pin teardown.
      */
-    if (runtime != NULL) {
-        llam_request_stop(runtime);
+    if (runtime != NULL &&
+        llam_runtime_begin_public_op(runtime, &pinned_runtime) == 0) {
+        llam_request_stop(pinned_runtime);
+        llam_runtime_end_public_op(pinned_runtime);
     }
 
     /* Keep task slot storage valid until broker-owned trampoline work drains. */
@@ -105,6 +108,7 @@ void llam_broker_destroy(llam_broker_t *broker) {
     }
     broker->initialized = false;
     broker->runtime = NULL;
+    broker->runtime_id = 0U;
     if (broker->idle_cond_initialized) {
         (void)pthread_cond_broadcast(&broker->idle_cond);
     }

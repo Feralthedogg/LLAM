@@ -1,3 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
+/**
+ * @file experiments/leir/leir_program.c
+ * @brief Validated, immutable ownership boundary for LEIR phase-0 programs.
+ *
+ * @details
+ * Creation copies node and slot descriptors before validation, so a successful
+ * program does not borrow the descriptor arrays. The output stays @c NULL on
+ * every failure and is published only after the owned copy is fully valid.
+ */
+
 #include "leir_phase0_internal.h"
 
 #include <errno.h>
@@ -61,6 +74,20 @@ static bool validate_io_node(const leir_phase0_program_t *program,
            slot_is(program, node->result_slot, LEIR_PHASE0_SLOT_I64) &&
            edge_is_valid(program, node->on_success) &&
            edge_is_valid(program, node->on_eof) &&
+           edge_is_valid(program, node->on_error);
+}
+
+static bool validate_connect_node(
+    const leir_phase0_program_t *program,
+    const leir_phase0_node_desc_t *node) {
+    return slot_is(program, node->fd_slot, LEIR_PHASE0_SLOT_FD) &&
+           slot_is(program,
+                   node->buffer_slot,
+                   LEIR_PHASE0_SLOT_CONST_BUFFER) &&
+           slot_is(program, node->length_slot, LEIR_PHASE0_SLOT_U64) &&
+           slot_is(program, node->result_slot, LEIR_PHASE0_SLOT_I64) &&
+           edge_is_valid(program, node->on_success) &&
+           node->on_eof == LEIR_PHASE0_NODE_NONE &&
            edge_is_valid(program, node->on_error);
 }
 
@@ -134,6 +161,12 @@ static bool validate_program(leir_phase0_program_t *program) {
             case LEIR_PHASE0_OP_WRITE:
             case LEIR_PHASE0_OP_WRITE_ALL:
                 if (!validate_io_node(program, node, true)) {
+                    return false;
+                }
+                program->io_node_count += 1U;
+                break;
+            case LEIR_PHASE0_OP_CONNECT:
+                if (!validate_connect_node(program, node)) {
                     return false;
                 }
                 program->io_node_count += 1U;

@@ -215,10 +215,17 @@ static int test_runtime_live_iter_alloc_failure_releases_pins(void) {
         goto cleanup;
     }
     for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
-        if (llam_public_active_op_count(&runtimes[i]->active_ops) != 0U) {
+        llam_runtime_t *pinned_runtime = NULL;
+
+        if (llam_runtime_begin_public_op(runtimes[i], &pinned_runtime) != 0) {
             leaked += 1U;
-            atomic_store_explicit(&runtimes[i]->active_ops, 0U, memory_order_release);
+            continue;
         }
+        if (llam_public_active_op_count(&pinned_runtime->active_ops) != 1U) {
+            leaked += 1U;
+            atomic_store_explicit(&pinned_runtime->active_ops, 1U, memory_order_release);
+        }
+        llam_runtime_end_public_op(pinned_runtime);
     }
     if (leaked != 0U) {
         (void)fprintf(stderr,
@@ -2749,6 +2756,392 @@ done_unwind:
     }
     llam_broker_destroy(&broker);
     return rc;
+}
+
+#if defined(EDQUOT)
+#define LLAM_TEST_BROKER_QUOTA_ERRNO EDQUOT
+#else
+#define LLAM_TEST_BROKER_QUOTA_ERRNO ENOSPC
+#endif
+
+static int test_broker_buffer_subject_quota_reserves_peer_capacity(void) {
+    enum { SUBJECT_BUFFER_LIMIT = 16 };
+    const uint64_t subject_a = UINT64_C(1001);
+    const uint64_t subject_b = UINT64_C(1002);
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    bool subject_op = false;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    if (llam_broker_begin_op_subject(&broker, subject_a) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    for (size_t i = 0U; i < SUBJECT_BUFFER_LIMIT; ++i) {
+        if (llam_broker_register_buffer(
+                &broker, NULL, 1U, LLAM_CAP_RIGHT_READ, &token) != 0) {
+            goto done;
+        }
+    }
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(
+            llam_broker_register_buffer(
+                &broker, NULL, 1U, LLAM_CAP_RIGHT_READ, &token),
+            LLAM_TEST_BROKER_QUOTA_ERRNO,
+            "one subject consumed peer buffer reserve") != 0 ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+
+    if (llam_broker_begin_op_subject(&broker, subject_b) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    if (llam_broker_register_buffer(
+            &broker, NULL, 1U, LLAM_CAP_RIGHT_READ, &token) != 0 ||
+        token.subject_id != subject_b) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+
+    llam_broker_reclaim_subject_objects(&broker, subject_a);
+    if (llam_broker_begin_op_subject(&broker, subject_a) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    if (llam_broker_register_buffer(
+            &broker, NULL, 1U, LLAM_CAP_RIGHT_READ, &token) != 0 ||
+        token.subject_id != subject_a) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+    rc = 0;
+
+done:
+    if (subject_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_channel_subject_quota_reserves_peer_capacity(void) {
+    enum { SUBJECT_CHANNEL_LIMIT = 16 };
+    const uint64_t subject_a = UINT64_C(2001);
+    const uint64_t subject_b = UINT64_C(2002);
+    const uint64_t rights =
+        LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_RECV | LLAM_CAP_RIGHT_CLOSE;
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t tokens[SUBJECT_CHANNEL_LIMIT];
+    llam_capability_token_t token;
+    bool subject_op = false;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    memset(tokens, 0, sizeof(tokens));
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    if (llam_broker_begin_op_subject(&broker, subject_a) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    for (size_t i = 0U; i < SUBJECT_CHANNEL_LIMIT; ++i) {
+        if (llam_broker_create_channel(
+                &broker, 1U, rights, &tokens[i]) != 0) {
+            goto done;
+        }
+    }
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(
+            llam_broker_create_channel(&broker, 1U, rights, &token),
+            LLAM_TEST_BROKER_QUOTA_ERRNO,
+            "one subject consumed peer channel reserve") != 0 ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+
+    if (llam_broker_begin_op_subject(&broker, subject_b) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    if (llam_broker_create_channel(&broker, 1U, rights, &token) != 0 ||
+        token.subject_id != subject_b) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+
+    if (llam_broker_begin_op_subject(&broker, subject_a) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    if (llam_broker_channel_close(&broker, &tokens[0]) != 0 ||
+        llam_broker_create_channel(&broker, 1U, rights, &token) != 0 ||
+        token.subject_id != subject_a) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+    rc = 0;
+
+done:
+    if (subject_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_descriptor_subject_quota_reserves_peer_capacity(void) {
+    enum { SUBJECT_DESCRIPTOR_LIMIT = 16 };
+    const uint64_t subject_a = UINT64_C(3001);
+    const uint64_t subject_b = UINT64_C(3002);
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+#if LLAM_PLATFORM_WINDOWS
+    llam_handle_t handle = LLAM_INVALID_HANDLE;
+#else
+    int sockets[2] = {-1, -1};
+    llam_handle_t handle = LLAM_INVALID_HANDLE;
+#endif
+    bool subject_op = false;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+#if LLAM_PLATFORM_WINDOWS
+    handle = (llam_handle_t)CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (LLAM_HANDLE_IS_INVALID(handle)) {
+        goto done;
+    }
+#else
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+        goto done;
+    }
+    handle = (llam_handle_t)sockets[0];
+#endif
+
+    if (llam_broker_begin_op_subject(&broker, subject_a) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    for (size_t i = 0U; i < SUBJECT_DESCRIPTOR_LIMIT; ++i) {
+        if (llam_broker_register_handle(
+                &broker, handle, LLAM_CAP_RIGHT_READ, false, &token) != 0) {
+            goto done;
+        }
+    }
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(
+            llam_broker_register_handle(
+                &broker, handle, LLAM_CAP_RIGHT_READ, false, &token),
+            LLAM_TEST_BROKER_QUOTA_ERRNO,
+            "one subject consumed peer descriptor reserve") != 0 ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+
+    if (llam_broker_begin_op_subject(&broker, subject_b) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    if (llam_broker_register_handle(
+            &broker, handle, LLAM_CAP_RIGHT_READ, false, &token) != 0 ||
+        token.subject_id != subject_b) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+
+    llam_broker_reclaim_subject_objects(&broker, subject_a);
+    if (llam_broker_begin_op_subject(&broker, subject_a) != 0) {
+        goto done;
+    }
+    subject_op = true;
+    if (llam_broker_register_handle(
+            &broker, handle, LLAM_CAP_RIGHT_READ, false, &token) != 0 ||
+        token.subject_id != subject_a) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    subject_op = false;
+    rc = 0;
+
+done:
+    if (subject_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+#if LLAM_PLATFORM_WINDOWS
+    if (!LLAM_HANDLE_IS_INVALID(handle)) {
+        (void)CloseHandle((HANDLE)handle);
+    }
+#else
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    if (sockets[1] >= 0) {
+        close(sockets[1]);
+    }
+#endif
+    return rc;
+}
+
+static int test_register_private_ring_for_subject(
+    llam_broker_t *broker,
+    uint64_t subject_id,
+    uint64_t *out_session_id) {
+    llam_broker_ring_mapping_t mapping;
+    int saved_errno;
+    int rc;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.fd = -1;
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    /*
+     * Broker-session mappings must have an immutable extent. On Linux, named
+     * POSIX shm remains deliberately shrinkable and is rejected by
+     * llam_broker_ring_register_mapping(); use the sealed private-fd/unnamed
+     * HANDLE transport fixture that production broker sessions use.
+     */
+#if LLAM_PLATFORM_WINDOWS
+    if (llam_broker_ring_create_private_handle(&mapping) != 0) {
+#else
+    if (llam_broker_ring_create_private_fd(&mapping) != 0) {
+#endif
+        return -1;
+    }
+    rc = llam_broker_ring_register_mapping(
+        broker, &mapping, subject_id, out_session_id);
+    saved_errno = errno;
+    llam_broker_ring_unmap(&mapping);
+    errno = saved_errno;
+    return rc;
+}
+
+static int test_broker_ring_subject_quota_reserves_peer_capacity(void) {
+    enum { SUBJECT_RING_LIMIT = 8 };
+    const uint64_t subject_a = UINT64_C(4001);
+    const uint64_t subject_b = UINT64_C(4002);
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    uint64_t sessions[SUBJECT_RING_LIMIT];
+    uint64_t session_id = 0U;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    memset(sessions, 0, sizeof(sessions));
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    for (size_t i = 0U; i < SUBJECT_RING_LIMIT; ++i) {
+        if (test_register_private_ring_for_subject(
+                &broker, subject_a, &sessions[i]) != 0 ||
+            sessions[i] == 0U) {
+            goto done;
+        }
+    }
+    session_id = UINT64_MAX;
+    errno = 0;
+    if (expect_errno(
+            test_register_private_ring_for_subject(
+                &broker, subject_a, &session_id),
+            LLAM_TEST_BROKER_QUOTA_ERRNO,
+            "one subject consumed peer ring reserve") != 0 ||
+        session_id != 0U) {
+        goto done;
+    }
+    if (test_register_private_ring_for_subject(
+            &broker, subject_b, &session_id) != 0 ||
+        session_id == 0U) {
+        goto done;
+    }
+    if (llam_broker_ring_forget_session(
+            &broker, sessions[0], subject_a) != 0 ||
+        test_register_private_ring_for_subject(
+            &broker, subject_a, &session_id) != 0 ||
+        session_id == 0U) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_subject_quotas_reserve_peer_capacity(void) {
+    int failed = 0;
+
+    if (test_broker_buffer_subject_quota_reserves_peer_capacity() != 0) {
+        failed = 1;
+    }
+    if (test_broker_channel_subject_quota_reserves_peer_capacity() != 0) {
+        failed = 1;
+    }
+    if (test_broker_descriptor_subject_quota_reserves_peer_capacity() != 0) {
+        failed = 1;
+    }
+    if (test_broker_ring_subject_quota_reserves_peer_capacity() != 0) {
+        failed = 1;
+    }
+    return failed == 0 ? 0 : -1;
 }
 
 static int test_broker_object_revocation_rotates_generation(void) {
@@ -9833,6 +10226,7 @@ static int test_runtime_destroy_cancels_signal_wait_active_op(void) {
     if (pid == 0) {
         runtime_signal_destroy_state_t state;
         llam_runtime_opts_t opts;
+        llam_runtime_t *raw_runtime = NULL;
         llam_task_t *creator;
         pthread_t waiter;
         bool waiter_started = false;
@@ -9869,14 +10263,18 @@ static int test_runtime_destroy_cancels_signal_wait_active_op(void) {
             _exit(15);
         }
         waiter_started = true;
+        if (llam_runtime_begin_public_op(state.runtime, &raw_runtime) != 0) {
+            _exit(16);
+        }
+        llam_runtime_end_public_op(raw_runtime);
         for (unsigned i = 0U; i < 1000000U; ++i) {
             if (atomic_load_explicit(&state.waiter_started, memory_order_acquire) != 0 &&
-                atomic_load_explicit(&state.runtime->active_ops, memory_order_acquire) != 0U) {
+                atomic_load_explicit(&raw_runtime->active_ops, memory_order_acquire) != 0U) {
                 break;
             }
             sched_yield();
         }
-        if (atomic_load_explicit(&state.runtime->active_ops, memory_order_acquire) == 0U) {
+        if (atomic_load_explicit(&raw_runtime->active_ops, memory_order_acquire) == 0U) {
             _exit(16);
         }
         (void)alarm(2U);
@@ -10420,6 +10818,565 @@ static int test_fill_fd_until_eagain(int fd) {
 
         (void)fcntl(fd, F_SETFL, flags);
         errno = saved_errno;
+    }
+    return rc;
+}
+
+static int run_broker_ring_descriptor_batch_deadline_case(bool write_op) {
+    enum { BATCH_WIDTH = 8 };
+    static const uint64_t MAX_BATCH_NS =
+        UINT64_C(1250) * UINT64_C(1000000);
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_t ring;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completions[BATCH_WIDTH];
+    llam_capability_token_t token;
+    size_t completion_count = 0U;
+    size_t served = 0U;
+    uint64_t started_ns;
+    uint64_t elapsed_ns;
+    int sockets[2] = {-1, -1};
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_ring_init(&ring) != 0 ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+        goto done;
+    }
+    if (write_op && test_fill_fd_until_eagain(sockets[0]) != 0) {
+        goto done;
+    }
+    if (llam_broker_register_fd(
+            &broker,
+            sockets[0],
+            write_op ? LLAM_CAP_RIGHT_WRITE : LLAM_CAP_RIGHT_READ,
+            false,
+            &token) != 0) {
+        goto done;
+    }
+    for (size_t i = 0U; i < BATCH_WIDTH; ++i) {
+        memset(&submission, 0, sizeof(submission));
+        submission.request_id = (uint64_t)i + 1U;
+        submission.op = write_op
+            ? LLAM_BROKER_RING_OP_DESCRIPTOR_WRITE
+            : LLAM_BROKER_RING_OP_DESCRIPTOR_READ;
+        submission.arg1 = 1U;
+        submission.arg2 = (uint64_t)i;
+        submission.token = token;
+        ring.data[i] = (unsigned char)(0x40U + i);
+        if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+            goto done;
+        }
+    }
+
+    started_ns = llam_now_ns();
+    if (llam_broker_ring_serve_batch(
+            &broker, &ring, BATCH_WIDTH, &served) != 0) {
+        goto done;
+    }
+    elapsed_ns = llam_now_ns() - started_ns;
+    if (llam_broker_ring_complete_drain(
+            &ring,
+            completions,
+            BATCH_WIDTH,
+            &completion_count) != 0) {
+        goto done;
+    }
+    if (served == 0U ||
+        served >= BATCH_WIDTH ||
+        completion_count != served ||
+        elapsed_ns > MAX_BATCH_NS ||
+        atomic_load_explicit(
+            &ring.submit_head.value,
+            memory_order_acquire) != (uint64_t)served ||
+        atomic_load_explicit(
+            &ring.submit_tail.value,
+            memory_order_acquire) != BATCH_WIDTH) {
+        fprintf(
+            stderr,
+            "[test_security_capability] descriptor %s batch multiplied "
+            "deadlines served=%zu completions=%zu elapsed_ms=%.3f "
+            "submit=%llu/%d\n",
+            write_op ? "write" : "read",
+            served,
+            completion_count,
+            (double)elapsed_ns / 1000000.0,
+            (unsigned long long)atomic_load_explicit(
+                &ring.submit_head.value,
+                memory_order_acquire),
+            BATCH_WIDTH);
+        goto done;
+    }
+    for (size_t i = 0U; i < completion_count; ++i) {
+        if (completions[i].request_id != (uint64_t)i + 1U ||
+            completions[i].status == 0 ||
+            completions[i].error_code != EAGAIN) {
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    if (sockets[1] >= 0) {
+        close(sockets[1]);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int run_broker_ring_descriptor_ready_batch_case(void) {
+    enum { BATCH_WIDTH = 8 };
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_t ring;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completions[BATCH_WIDTH];
+    llam_capability_token_t token;
+    unsigned char bytes[BATCH_WIDTH];
+    size_t completion_count = 0U;
+    size_t served = 0U;
+    int sockets[2] = {-1, -1};
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_ring_init(&ring) != 0 ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 ||
+        llam_broker_register_fd(
+            &broker,
+            sockets[0],
+            LLAM_CAP_RIGHT_READ,
+            false,
+            &token) != 0) {
+        goto done;
+    }
+    for (size_t i = 0U; i < BATCH_WIDTH; ++i) {
+        bytes[i] = (unsigned char)(0x70U + i);
+    }
+    if (send(sockets[1], bytes, sizeof(bytes), 0) !=
+        (ssize_t)sizeof(bytes)) {
+        goto done;
+    }
+    for (size_t i = 0U; i < BATCH_WIDTH; ++i) {
+        memset(&submission, 0, sizeof(submission));
+        submission.request_id = (uint64_t)i + 1U;
+        submission.op = LLAM_BROKER_RING_OP_DESCRIPTOR_READ;
+        submission.arg1 = 1U;
+        submission.arg2 = (uint64_t)i;
+        submission.token = token;
+        if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+            goto done;
+        }
+    }
+    if (llam_broker_ring_serve_batch(
+            &broker, &ring, BATCH_WIDTH, &served) != 0 ||
+        served != BATCH_WIDTH ||
+        llam_broker_ring_complete_drain(
+            &ring,
+            completions,
+            BATCH_WIDTH,
+            &completion_count) != 0 ||
+        completion_count != BATCH_WIDTH) {
+        goto done;
+    }
+    for (size_t i = 0U; i < BATCH_WIDTH; ++i) {
+        if (completions[i].request_id != (uint64_t)i + 1U ||
+            completions[i].status != 0 ||
+            completions[i].result0 != 1U ||
+            ring.data[i] != bytes[i]) {
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    if (sockets[1] >= 0) {
+        close(sockets[1]);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_ring_descriptor_batches_share_one_deadline(void) {
+    int failed = 0;
+
+    if (run_broker_ring_descriptor_batch_deadline_case(false) != 0) {
+        failed = 1;
+    }
+    if (run_broker_ring_descriptor_batch_deadline_case(true) != 0) {
+        failed = 1;
+    }
+    if (run_broker_ring_descriptor_ready_batch_case() != 0) {
+        failed = 1;
+    }
+    return failed == 0 ? 0 : -1;
+}
+
+static llam_broker_descriptor_slot_t *broker_descriptor_slot_for_token(
+    llam_broker_t *broker,
+    const llam_capability_token_t *token) {
+    if (broker == NULL || token == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        llam_broker_descriptor_slot_t *slot = &broker->descriptors[i];
+
+        if (slot->active &&
+            slot->id == token->slot &&
+            slot->generation == token->generation) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static int run_broker_borrowed_fd_identity_case(bool write_op) {
+    static const unsigned char original_read[] = "original-read-authority";
+    static const unsigned char replacement_read[] = "replacement-read-authority";
+    static const unsigned char write_payload[] = "original-write-authority";
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    llam_broker_descriptor_slot_t *slot;
+    int original[2] = {-1, -1};
+    int replacement[2] = {-1, -1};
+    int reused_fd = -1;
+    int original_number = -1;
+    int original_flags;
+    int pinned_flags;
+    int caller_flags;
+    unsigned char received[64];
+    unsigned char replacement_received[64];
+    bool broker_initialized = false;
+    bool metadata_bound = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, original) != 0 ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, replacement) != 0) {
+        goto done;
+    }
+
+    original_flags = fcntl(original[0], F_GETFD);
+    if (original_flags < 0 ||
+        fcntl(original[0], F_SETFD, original_flags & ~FD_CLOEXEC) != 0 ||
+        llam_broker_register_fd(
+            &broker,
+            original[0],
+            write_op ? LLAM_CAP_RIGHT_WRITE : LLAM_CAP_RIGHT_READ,
+            false,
+            &token) != 0) {
+        goto done;
+    }
+    slot = broker_descriptor_slot_for_token(&broker, &token);
+    pinned_flags = slot != NULL && slot->fd >= 0
+                       ? fcntl(slot->fd, F_GETFD)
+                       : -1;
+    caller_flags = fcntl(original[0], F_GETFD);
+    metadata_bound =
+        slot != NULL &&
+        slot->fd >= 0 &&
+        slot->fd != original[0] &&
+        slot->close_on_destroy &&
+        pinned_flags >= 0 &&
+        (pinned_flags & FD_CLOEXEC) != 0 &&
+        caller_flags >= 0 &&
+        (caller_flags & FD_CLOEXEC) == 0;
+
+    if (!write_op &&
+        send(
+            original[1],
+            original_read,
+            sizeof(original_read),
+            0) != (ssize_t)sizeof(original_read)) {
+        goto done;
+    }
+    original_number = original[0];
+    if (close(original[0]) != 0) {
+        goto done;
+    }
+    original[0] = -1;
+    if (dup2(replacement[0], original_number) != original_number) {
+        goto done;
+    }
+    reused_fd = original_number;
+
+    memset(received, 0, sizeof(received));
+    memset(replacement_received, 0, sizeof(replacement_received));
+    if (write_op) {
+        ssize_t original_result;
+        ssize_t replacement_result;
+
+        if (llam_broker_write_fd(
+                &broker,
+                &token,
+                write_payload,
+                sizeof(write_payload)) !=
+            (ssize_t)sizeof(write_payload)) {
+            goto done;
+        }
+        original_result = recv(
+            original[1],
+            received,
+            sizeof(received),
+            MSG_DONTWAIT);
+        errno = 0;
+        replacement_result = recv(
+            replacement[1],
+            replacement_received,
+            sizeof(replacement_received),
+            MSG_DONTWAIT);
+        if (original_result != (ssize_t)sizeof(write_payload) ||
+            memcmp(received, write_payload, sizeof(write_payload)) != 0 ||
+            replacement_result != -1 ||
+            (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            goto done;
+        }
+    } else {
+        ssize_t replacement_result;
+
+        if (send(
+                replacement[1],
+                replacement_read,
+                sizeof(replacement_read),
+                0) != (ssize_t)sizeof(replacement_read) ||
+            llam_broker_read_fd(
+                &broker,
+                &token,
+                received,
+                sizeof(original_read)) !=
+                (ssize_t)sizeof(original_read) ||
+            memcmp(received, original_read, sizeof(original_read)) != 0) {
+            goto done;
+        }
+        replacement_result = recv(
+            reused_fd,
+            replacement_received,
+            sizeof(replacement_received),
+            MSG_DONTWAIT);
+        if (replacement_result != (ssize_t)sizeof(replacement_read) ||
+            memcmp(
+                replacement_received,
+                replacement_read,
+                sizeof(replacement_read)) != 0) {
+            goto done;
+        }
+    }
+    if (!metadata_bound) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed descriptor did not pin "
+            "registration-time identity write=%u\n",
+            write_op ? 1U : 0U);
+        goto done;
+    }
+
+    llam_broker_destroy(&broker);
+    broker_initialized = false;
+    if (fcntl(reused_fd, F_GETFD) < 0 ||
+        fcntl(replacement[0], F_GETFD) < 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed descriptor cleanup closed "
+            "caller-owned fd write=%u\n",
+            write_op ? 1U : 0U);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (reused_fd >= 0) {
+        close(reused_fd);
+    }
+    if (original[0] >= 0) {
+        close(original[0]);
+    }
+    if (original[1] >= 0) {
+        close(original[1]);
+    }
+    if (replacement[0] >= 0) {
+        close(replacement[0]);
+    }
+    if (replacement[1] >= 0) {
+        close(replacement[1]);
+    }
+    return rc;
+}
+
+static int test_broker_borrowed_fd_identity_is_registration_bound(void) {
+    int failed = 0;
+
+    if (run_broker_borrowed_fd_identity_case(false) != 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed read authority retargeted "
+            "after fd reuse\n");
+        failed = 1;
+    }
+    if (run_broker_borrowed_fd_identity_case(true) != 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed write authority retargeted "
+            "after fd reuse\n");
+        failed = 1;
+    }
+    return failed != 0 ? -1 : 0;
+}
+
+static int test_broker_borrowed_fd_registration_failure_releases_pin(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    int sockets[2] = {-1, -1};
+    int before_fds;
+    int after_fds;
+    int flags;
+    bool entropy_forced = false;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+        goto done;
+    }
+    flags = fcntl(sockets[0], F_GETFD);
+    if (flags < 0 ||
+        fcntl(sockets[0], F_SETFD, flags & ~FD_CLOEXEC) != 0) {
+        goto done;
+    }
+    before_fds = broker_count_open_fds();
+    if (before_fds < 0) {
+        goto done;
+    }
+
+    memset(&token, 0xa5, sizeof(token));
+    llam_capability_test_force_entropy_failure(true);
+    entropy_forced = true;
+    errno = 0;
+    if (expect_errno(
+            llam_broker_register_fd(
+                &broker,
+                sockets[0],
+                LLAM_CAP_RIGHT_READ,
+                false,
+                &token),
+            EIO,
+            "borrowed descriptor registration entropy failure") != 0) {
+        goto done;
+    }
+    llam_capability_test_force_entropy_failure(false);
+    entropy_forced = false;
+    after_fds = broker_count_open_fds();
+    if (after_fds != before_fds ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U) ||
+        fcntl(sockets[0], F_GETFD) < 0 ||
+        (fcntl(sockets[0], F_GETFD) & FD_CLOEXEC) != 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] failed borrowed registration leaked "
+            "a pin or mutated caller fd before=%d after=%d\n",
+            before_fds,
+            after_fds);
+        goto done;
+    }
+
+    /*
+     * Ownership transfer commits only when token issuance succeeds. On a
+     * post-slot failure the caller still owns the supplied descriptor and the
+     * transport layer may close it exactly once.
+     */
+    memset(&token, 0xa5, sizeof(token));
+    llam_capability_test_force_entropy_failure(true);
+    entropy_forced = true;
+    errno = 0;
+    if (expect_errno(
+            llam_broker_register_fd(
+                &broker,
+                sockets[0],
+                LLAM_CAP_RIGHT_READ,
+                true,
+                &token),
+            EIO,
+            "transferred descriptor registration entropy failure") != 0) {
+        goto done;
+    }
+    llam_capability_test_force_entropy_failure(false);
+    entropy_forced = false;
+    after_fds = broker_count_open_fds();
+    if (after_fds != before_fds ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U) ||
+        fcntl(sockets[0], F_GETFD) < 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] failed transferred registration "
+            "consumed or leaked caller fd before=%d after=%d\n",
+            before_fds,
+            after_fds);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (entropy_forced) {
+        llam_capability_test_force_entropy_failure(false);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    if (sockets[1] >= 0) {
+        close(sockets[1]);
     }
     return rc;
 }
@@ -12767,11 +13724,12 @@ done:
     return rc;
 }
 
-static int test_broker_register_handle_clears_inherit_flag(void) {
+static int test_broker_register_handle_pins_noninheritable_duplicate(void) {
     SECURITY_ATTRIBUTES attrs;
     llam_runtime_opts_t opts;
     llam_broker_t broker;
     llam_capability_token_t token;
+    llam_broker_descriptor_slot_t *slot = NULL;
     HANDLE read_pipe_read = INVALID_HANDLE_VALUE;
     HANDLE read_pipe_write = INVALID_HANDLE_VALUE;
     DWORD flags = 0U;
@@ -12800,10 +13758,9 @@ static int test_broker_register_handle_clears_inherit_flag(void) {
     broker_initialized = true;
 
     /*
-     * POSIX descriptor registration clears FD_CLOEXEC.  Windows must clear the
-     * equivalent HANDLE_FLAG_INHERIT bit too; otherwise broker-registered
-     * HANDLE authority can leak into child processes created with handle
-     * inheritance enabled.
+     * Borrowed registration must not mutate caller-owned HANDLE flags. The
+     * broker pins a private duplicate and only that stored authority must be
+     * non-inheritable.
      */
     if (llam_broker_register_handle(&broker,
                                     (llam_handle_t)read_pipe_read,
@@ -12812,10 +13769,27 @@ static int test_broker_register_handle_clears_inherit_flag(void) {
                                     &token) != 0) {
         goto done;
     }
-    flags = HANDLE_FLAG_INHERIT;
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        if (broker.descriptors[i].active &&
+            broker.descriptors[i].id == token.slot &&
+            broker.descriptors[i].generation == token.generation) {
+            slot = &broker.descriptors[i];
+            break;
+        }
+    }
+    flags = 0U;
     if (!GetHandleInformation(read_pipe_read, &flags) ||
+        (flags & HANDLE_FLAG_INHERIT) == 0U ||
+        slot == NULL ||
+        slot->handle == (llam_handle_t)read_pipe_read ||
+        !slot->close_on_destroy) {
+        fprintf(stderr, "[test_security_capability] borrowed HANDLE was not pinned independently\n");
+        goto done;
+    }
+    flags = HANDLE_FLAG_INHERIT;
+    if (!GetHandleInformation((HANDLE)slot->handle, &flags) ||
         (flags & HANDLE_FLAG_INHERIT) != 0U) {
-        fprintf(stderr, "[test_security_capability] broker registered HANDLE remained inheritable\n");
+        fprintf(stderr, "[test_security_capability] broker HANDLE duplicate remained inheritable\n");
         goto done;
     }
     rc = 0;
@@ -13506,94 +14480,7 @@ done:
     return rc;
 }
 
-static int test_broker_pipe_session_request_budget_returns_to_listener(void) {
-    char name[128];
-    llam_runtime_opts_t opts;
-    llam_broker_t broker;
-    broker_pipe_local_server_state_t state;
-    HANDLE server_thread = NULL;
-    llam_handle_t attacker = LLAM_INVALID_HANDLE;
-    llam_handle_t victim = LLAM_INVALID_HANDLE;
-    bool broker_initialized = false;
-    bool server_stopped = false;
-    int rc = -1;
-
-    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        return -1;
-    }
-    opts.deterministic = 1U;
-    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        return -1;
-    }
-    broker_initialized = true;
-    (void)snprintf(name,
-                   sizeof(name),
-                   "llam-broker-session-budget-%lu-%llu",
-                   (unsigned long)GetCurrentProcessId(),
-                   (unsigned long long)GetTickCount64());
-    memset(&state, 0, sizeof(state));
-    state.broker = &broker;
-    state.name = name;
-    state.max_connections = 2U;
-    state.rc = -1;
-    server_thread = CreateThread(NULL, 0U, broker_pipe_local_server_thread, &state, 0U, NULL);
-    if (server_thread == NULL || llam_broker_connect_pipe(name, &attacker) != 0) {
-        fprintf(stderr, "[test_security_capability] session-budget server setup failed errno=%d\n", errno);
-        goto done;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_SESSION_REQUEST_MAX; ++i) {
-        if (broker_pipe_request_ok(attacker, LLAM_BROKER_WIRE_OP_PING) != 0) {
-            fprintf(stderr,
-                    "[test_security_capability] Windows session budget rejected request %zu errno=%d\n",
-                    i,
-                    errno);
-            goto done;
-        }
-    }
-    /* Keep the first client handle open. A vulnerable unbounded serve loop
-     * remains parked on it and never makes the exclusive pipe available to the
-     * victim. The fixed loop disconnects after the bounded request count. */
-    if (llam_broker_connect_pipe(name, &victim) != 0 ||
-        broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_PING) != 0 ||
-        broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_STOP) != 0) {
-        fprintf(stderr,
-                "[test_security_capability] Windows session budget did not return to listener errno=%d\n",
-                errno);
-        goto done;
-    }
-    llam_broker_close_handle(victim);
-    victim = LLAM_INVALID_HANDLE;
-    if (WaitForSingleObject(server_thread, 5000U) != WAIT_OBJECT_0 || state.rc != 0) {
-        goto done;
-    }
-    server_stopped = true;
-    rc = 0;
-
-done:
-    if (!llam_handle_is_invalid(attacker)) {
-        llam_broker_close_handle(attacker);
-    }
-    if (!llam_handle_is_invalid(victim)) {
-        llam_broker_close_handle(victim);
-    }
-    if (server_thread != NULL) {
-        if (!server_stopped) {
-            for (unsigned i = 0U; i < 3U; ++i) {
-                (void)broker_pipe_connect_and_close(name);
-            }
-            if (WaitForSingleObject(server_thread, 5000U) != WAIT_OBJECT_0) {
-                (void)TerminateThread(server_thread, 1U);
-                broker_initialized = false;
-            }
-        }
-        CloseHandle(server_thread);
-    }
-    if (broker_initialized) {
-        llam_broker_destroy(&broker);
-    }
-    return rc;
-}
+#include "test_security_capability_windows_session.inc"
 
 typedef struct broker_pipe_slow_frame_state {
     llam_handle_t handle;
@@ -15258,6 +16145,7 @@ int main(int argc, char **argv) {
 #endif
 
     if (getenv("LLAM_BROKER_SECURITY_FOCUSED") != NULL) {
+        LLAM_RUN_SECURITY_TEST(test_broker_subject_quotas_reserve_peer_capacity);
 #if LLAM_PLATFORM_WINDOWS
         LLAM_RUN_SECURITY_TEST(test_broker_descriptor_rejects_synchronous_handles);
         LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_data_plane);
@@ -15267,11 +16155,14 @@ int main(int argc, char **argv) {
         LLAM_RUN_SECURITY_TEST(test_broker_pipe_session_request_budget_returns_to_listener);
         LLAM_RUN_SECURITY_TEST(test_broker_pipe_slow_frame_has_absolute_deadline);
 #else
+        LLAM_RUN_SECURITY_TEST(test_broker_ring_descriptor_batches_share_one_deadline);
         LLAM_RUN_SECURITY_TEST(test_broker_subject_disconnect_reclaims_grants);
         LLAM_RUN_SECURITY_TEST(test_broker_revoke_response_failure_reclaims_rotated_grant);
         LLAM_RUN_SECURITY_TEST(test_broker_channel_close_releases_slot);
         LLAM_RUN_SECURITY_TEST(test_broker_sleep_task_budget_reserves_quick_capacity);
         LLAM_RUN_SECURITY_TEST(test_broker_overauthorized_descriptor_array_closes_all_received_fds);
+        LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_identity_is_registration_bound);
+        LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_registration_failure_releases_pin);
         LLAM_RUN_SECURITY_TEST(test_broker_descriptor_io_is_per_call_nonblocking);
         LLAM_RUN_SECURITY_TEST(test_broker_descriptor_sigpipe_toggle_is_process_safe);
         LLAM_RUN_SECURITY_TEST(test_broker_forget_subject_pins_destroy_reclaim);
@@ -15313,6 +16204,10 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_scope_restores_outer);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_conflict_preserves_outer);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_depth_overflow_preserves_scope);
+    LLAM_RUN_SECURITY_TEST(test_broker_buffer_subject_quota_reserves_peer_capacity);
+    LLAM_RUN_SECURITY_TEST(test_broker_channel_subject_quota_reserves_peer_capacity);
+    LLAM_RUN_SECURITY_TEST(test_broker_descriptor_subject_quota_reserves_peer_capacity);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_subject_quota_reserves_peer_capacity);
     LLAM_RUN_SECURITY_TEST(test_broker_object_revocation_rotates_generation);
     LLAM_RUN_SECURITY_TEST(test_broker_revoke_cannot_expand_object_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_drains_unjoined_task_slots);
@@ -15400,7 +16295,10 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_end_op_requires_thread_local_owner);
     LLAM_RUN_SECURITY_TEST(test_broker_begin_active_op_sentinel_fails_busy);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
+    LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_identity_is_registration_bound);
+    LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_registration_failure_releases_pin);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_io_is_per_call_nonblocking);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_descriptor_batches_share_one_deadline);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_sigpipe_toggle_is_process_safe);
     LLAM_RUN_SECURITY_TEST(test_broker_forget_subject_pins_destroy_reclaim);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);
@@ -15418,7 +16316,7 @@ int main(int argc, char **argv) {
 #else
     LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_data_plane);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_rejects_synchronous_handles);
-    LLAM_RUN_SECURITY_TEST(test_broker_register_handle_clears_inherit_flag);
+    LLAM_RUN_SECURITY_TEST(test_broker_register_handle_pins_noninheritable_duplicate);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_mapping_flood);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_flood);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_session_replay_guard);

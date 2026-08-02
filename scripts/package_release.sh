@@ -4,13 +4,21 @@
 
 set -eu
 
+if [ "${LLAM_BUILD_RESEARCH:-0}" != 0 ]; then
+    echo "research-enabled builds cannot be packaged" >&2
+    exit 2
+fi
+
+script_dir="$(dirname "$0")"
+root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
+
 target="${1:-}"
+# Audited package projections of config/llam-version.json.
 version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.1}}"
 version="${version#v}"
 abi_major="${LLAM_ABI_MAJOR:-2}"
 library_version="${LLAM_VERSION:-2.2.1}"
-script_dir="$(dirname "$0")"
-root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
+readonly version abi_major library_version
 out_dir="$root_dir/target/dist"
 host_os="$(uname -s)"
 
@@ -59,6 +67,26 @@ if [ "$target" != "$host_target" ]; then
     echo "target $target must be packaged on $host_target, not $host_os/$host_arch" >&2
     exit 1
 fi
+
+set -- \
+    "$root_dir/demo.llam-build-provenance" \
+    "$root_dir/stress.llam-build-provenance" \
+    "$root_dir/bench.llam-build-provenance" \
+    "$root_dir/server.llam-build-provenance" \
+    "$root_dir/server_lossless.llam-build-provenance" \
+    "$root_dir/server_flood.llam-build-provenance" \
+    "$root_dir/libllam_runtime.a.llam-build-provenance"
+case "$host_os" in
+    Darwin)
+        set -- "$@" \
+            "$root_dir/libllam_runtime.$abi_major.dylib.llam-build-provenance"
+        ;;
+    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+        set -- "$@" \
+            "$root_dir/libllam_runtime.so.$library_version.llam-build-provenance"
+        ;;
+esac
+python3 "$script_dir/check_release_provenance.py" "$@"
 
 missing_inputs=0
 require_input() {
@@ -208,6 +236,55 @@ validate_packaged_archive_links() (
             ;;
     esac
 )
+
+# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR
+read_packaged_metadata_file() {
+    metadata_path="$1"
+
+    if [ -L "$metadata_path" ] || [ ! -f "$metadata_path" ]; then
+        return 1
+    fi
+    cat "$metadata_path"
+}
+
+validate_packaged_archive_metadata() (
+    archive_path="$1"
+    package_root="$2"
+    validate_safe_output_path "$archive_path"
+    validate_release_component "archive package root" "$package_root"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-metadata.XXXXXX")"
+
+    trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+    extract_release_archive "$archive_path" "$tmp_dir"
+
+    if ! archive_version="$(
+        read_packaged_metadata_file "$tmp_dir/$package_root/VERSION"
+    )"; then
+        echo "cannot read packaged VERSION metadata" >&2
+        exit 1
+    fi
+    if ! archive_abi_major="$(
+        read_packaged_metadata_file "$tmp_dir/$package_root/ABI_MAJOR"
+    )"; then
+        echo "cannot read packaged ABI_MAJOR metadata" >&2
+        exit 1
+    fi
+    if ! archive_library_version="$(
+        read_packaged_metadata_file \
+            "$tmp_dir/$package_root/LIBRARY_VERSION"
+    )"; then
+        echo "cannot read packaged LIBRARY_VERSION metadata" >&2
+        exit 1
+    fi
+
+    if [ "$archive_version" != "$version" ] || \
+       [ "$archive_abi_major" != "$abi_major" ] || \
+       [ "$archive_library_version" != "$library_version" ]; then
+        echo "packaged release version metadata mismatch" >&2
+        exit 1
+    fi
+)
+# AUDIT:END PACKAGE ARCHIVE METADATA VALIDATOR
 
 validate_release_input_file() {
     path="$1"
@@ -383,9 +460,6 @@ mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/l
 validate_safe_output_path "$stage" 0
 validate_safe_stage_tree "$stage"
 
-printf '%s\n' "$version" > "$stage/VERSION"
-printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
-printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
 cp "$root_dir/LICENSE" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
 cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
 cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" "$stage/scripts/"
@@ -414,10 +488,21 @@ case "$host_os" in
         ;;
 esac
 
+# AUDIT:BEGIN PACKAGE FINALIZATION
 LLAM_VERSION="$library_version" LLAM_ABI_MAJOR="$abi_major" \
     "$root_dir/scripts/generate_sdk_metadata.sh" "$stage" "$target"
 
+printf '%s\n' "$version" > "$stage/VERSION"
+printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
+printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
 validate_safe_stage_tree "$stage"
+
+if [ "$(cat "$stage/VERSION")" != "$version" ] || \
+   [ "$(cat "$stage/ABI_MAJOR")" != "$abi_major" ] || \
+   [ "$(cat "$stage/LIBRARY_VERSION")" != "$library_version" ]; then
+    echo "staged release version metadata mismatch" >&2
+    exit 1
+fi
 
 if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
     rm -f "$archive"
@@ -429,7 +514,9 @@ if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
 fi
 
 validate_packaged_archive_links "$archive" "$package_name"
-
+validate_packaged_archive_metadata "$archive" "$package_name"
+# AUDIT:END PACKAGE FINALIZATION
+# AUDIT:BEGIN PACKAGE CHECKSUM OUTPUT
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v sha256 >/dev/null 2>&1; then
@@ -450,3 +537,4 @@ else
 fi
 
 printf '%s\n' "$archive"
+# AUDIT:END PACKAGE CHECKSUM OUTPUT

@@ -49,6 +49,9 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
                                     llam_wait_reason_t reason,
                                     bool direct_local) {
     llam_task_state_id_t from = task->state;
+    bool may_run_here;
+    bool pinned_home;
+
     if (shard->runtime->experimental_dynamic_shards != 0U &&
         atomic_load_explicit(&shard->online, memory_order_relaxed) == 0U) {
         // Waking work onto an offline dynamic shard brings it back online and
@@ -64,7 +67,18 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
     task->last_runnable_ns =
         llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
-    if (shard->opaque_redirect_active) {
+    may_run_here = llam_task_may_run_on_shard(task, shard);
+    pinned_home =
+        (task->flags & LLAM_TASK_FLAG_PINNED) != 0U && may_run_here;
+    if (!may_run_here) {
+        /*
+         * Producer paths normally select the required home before this point.
+         * Overflow is the lock-order-safe containment path if corrupt or stale
+         * routing reaches a foreign shard while its lock is held.
+         */
+        task->enqueue_hot = 0U;
+        llam_enqueue_overflow_task(shard->runtime, task);
+    } else if (shard->opaque_redirect_active && !pinned_home) {
         // A shard in opaque-block redirect mode should not receive local work;
         // send the task to its redirect target or spill to overflow.
         shard->metrics.migrations += 1U;
@@ -109,6 +123,9 @@ void llam_reinject_task(llam_runtime_t *rt,
                              llam_wait_reason_t reason) {
     unsigned target_id = llam_pick_runnable_shard(rt, task);
 
+    if (target_id == UINT_MAX) {
+        return;
+    }
     llam_reinject_task_on_shard(rt, task, target_id, hot, kind, reason);
 }
 
@@ -132,12 +149,26 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     bool pressure;
     bool effective_hot;
     bool direct_local;
+    unsigned required;
 
     if (rt == NULL || task == NULL || rt->active_shards == 0U) {
         return;
     }
-    if (target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
+    required = llam_task_required_shard(rt, task);
+    if (task->owner_runtime != rt) {
+        return;
+    }
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
+        if (required == UINT_MAX) {
+            return;
+        }
+        target_id = required;
+    } else if (target_id >= rt->active_shards ||
+               !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         target_id = llam_pick_runnable_shard(rt, task);
+        if (target_id == UINT_MAX) {
+            return;
+        }
     }
 
     target = &rt->shards[target_id];
@@ -178,21 +209,52 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_shard_t *target;
     llam_task_t *current = g_llam_tls_task;
     llam_task_state_id_t task_from;
+    llam_handoff_policy_input_t input;
+    llam_handoff_reject_t reject;
     bool effective_hot;
+    unsigned required;
     int caller_errno = llam_thread_errno_load();
 
-    if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
-        target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
+    if (rt == NULL || task == NULL || current == NULL ||
+        rt->active_shards == 0U || rt->shards == NULL) {
+        return false;
+    }
+    if (task->owner_runtime != rt) {
+        return false;
+    }
+    required = llam_task_required_shard(rt, task);
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
+        if (required == UINT_MAX) {
+            return false;
+        }
+        target_id = required;
+    }
+    if (target_id >= rt->active_shards ||
+        !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         return false;
     }
 
     target = &rt->shards[target_id];
-    if (g_llam_tls_shard != target || current == task) {
+    if (g_llam_tls_shard != target || current == task ||
+        !llam_task_may_run_on_shard(current, target) ||
+        !llam_task_may_run_on_shard(task, target)) {
         return false;
     }
 
-    if (rt->run_timing_enabled != 0U || rt->wake_latency_metrics_enabled != 0U ||
-        llam_task_wait_deadline_active(task)) {
+    input.runtime = rt;
+    input.shard = target;
+    input.current = current;
+    input.next = task;
+    input.target_id = target_id;
+    input.target_deadline_active = llam_task_wait_deadline_active(task);
+    input.honor_timer_allowance = true;
+    input.require_lockfree_queue = true;
+    reject = llam_direct_handoff_policy(&input);
+    if (reject != LLAM_HANDOFF_REJECT_NONE) {
+        if (reject == LLAM_HANDOFF_REJECT_LIVE_LIMIT ||
+            reject == LLAM_HANDOFF_REJECT_BUDGET) {
+            target->direct_handoff_streak = 0U;
+        }
         return false;
     }
 
@@ -203,14 +265,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
 #if LLAM_REINJECT_DIRECT_OWNER_HANDOFF
-    if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx &&
-        rt->trace_events_enabled == 0U &&
-        rt->run_timing_enabled == 0U &&
-        rt->wake_latency_metrics_enabled == 0U &&
-        llam_lockfree_normq_enabled(rt) &&
-        !target->opaque_redirect_active &&
-        (rt->direct_handoff_allow_timers != 0U ||
-         atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U)) {
+    if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx) {
         if (llam_norm_queue_push_yield_unlocked(target, current)) {
             uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
 
@@ -223,7 +278,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             current->forced_yield_budget = rt->forced_yield_every;
             current->state = LLAM_TASK_STATE_RUNNABLE;
             current->wait_reason = LLAM_WAIT_NONE;
-            current->last_yield_ns = 0U;
+            current->recent_explicit_yield = false;
             current->last_runnable_ns = now_ns;
             llam_task_clear_wait_tracking_or_abort(task);
             task_from = task->state;
@@ -231,7 +286,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             task->wait_reason = LLAM_WAIT_NONE;
             task->enqueue_hot = effective_hot ? 1U : 0U;
             atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
-            task->last_started_ns = 0U;
+            target->current_started_ns = 0U;
             if (now_ns != 0U) {
                 llam_runtime_record_autotune_wake_latency(target, 0U);
             }
@@ -277,7 +332,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         current->forced_yield_budget = rt->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = 0U;
+        current->recent_explicit_yield = false;
         current->last_runnable_ns = now_ns;
         llam_task_clear_wait_tracking_or_abort(task);
         task_from = task->state;
@@ -285,7 +340,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         task->wait_reason = LLAM_WAIT_NONE;
         task->enqueue_hot = effective_hot ? 1U : 0U;
         atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
-        task->last_started_ns = 0U;
+        target->current_started_ns = 0U;
         if (now_ns != 0U) {
             llam_runtime_record_autotune_wake_latency(target, 0U);
         }

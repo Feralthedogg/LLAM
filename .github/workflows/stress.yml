@@ -3,6 +3,9 @@
 
 name: Stress
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 on:
   push:
     branches:
@@ -89,7 +92,7 @@ jobs:
       OUT_DIR: .artifacts/stress/${{ matrix.name }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
@@ -118,6 +121,7 @@ jobs:
         run: |
           cmake -S . -B build/stress \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=OFF \
             -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
             -DCMAKE_ASM_COMPILER="${{ matrix.cc }}"
 
@@ -256,10 +260,10 @@ jobs:
             exit 0
           fi
           if [ "${{ matrix.name }}" = "linux-aarch64-stress" ]; then
-            # Hosted arm64 can drift below generic select thresholds under
-            # shared CI load. Keep this as a catastrophic gate; scheduled
-            # benchmarks own precise cross-platform performance tracking.
-            export LLAM_BENCH_GUARD_MIN_OPS="select_recv_ready=3000000,select_timeout=6000000"
+            # Hosted arm64 can drift below generic microbenchmark thresholds
+            # under shared CI load. Keep this as a catastrophic gate;
+            # scheduled benchmarks own precise cross-platform tracking.
+            export LLAM_BENCH_GUARD_MIN_OPS="channel_pingpong=1000000,select_recv_ready=3000000,select_timeout=6000000"
           fi
           if [ "${{ matrix.name }}" = "linux-x86_64-stress" ]; then
             # Shared Linux/x86_64 runners occasionally starve short
@@ -273,7 +277,7 @@ jobs:
             # and spawn throughput while runtime stress and server correctness
             # stay clean. Keep this as a catastrophic smoke guard; scheduled
             # benchmark jobs own precise Darwin performance tracking.
-            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,channel_pingpong=1000000,select_recv_ready=1500000,io_echo=100000,poll_wake=100000"
+            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,channel_pingpong=1000000,select_recv_ready=1500000,select_park_wake=500000,io_echo=100000,poll_wake=100000"
           fi
           python3 scripts/bench_guard.py \
             --bench ./build/stress/bench \
@@ -344,7 +348,7 @@ jobs:
       - name: Upload stress diagnostics
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: stress-diagnostics-${{ matrix.name }}
           path: .artifacts/stress/${{ matrix.name }}
@@ -365,13 +369,23 @@ jobs:
       SERVER_SEED: ${{ github.event.inputs.server_seed || '1234' }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Native Windows evidence security contract
+        shell: pwsh
+        env:
+          LLAM_NATIVE_WINDOWS_EVIDENCE: "1"
+        run: python -W error -m unittest -v scripts.test_evidence_bundle_windows_native
+
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build/windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLAM_BUILD_RESEARCH=OFF
 
       - name: Build native Windows backend
         shell: pwsh
@@ -525,7 +539,7 @@ jobs:
       - name: Upload stress diagnostics
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: stress-diagnostics-${{ matrix.name }}
           path: .artifacts/stress/${{ matrix.name }}

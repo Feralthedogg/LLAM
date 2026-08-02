@@ -28,6 +28,30 @@
 
 #define LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST 8U
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_cldeque_steal_claimed_hook_fn g_cldeque_steal_claimed_hook;
+static void *g_cldeque_steal_claimed_hook_context;
+
+void llam_sched_test_set_cldeque_steal_claimed_hook(
+    llam_cldeque_steal_claimed_hook_fn hook,
+    void *context) {
+    g_cldeque_steal_claimed_hook = hook;
+    g_cldeque_steal_claimed_hook_context = context;
+}
+
+static void llam_cldeque_test_after_steal_claim(void) {
+    llam_cldeque_steal_claimed_hook_fn hook =
+        g_cldeque_steal_claimed_hook;
+
+    if (hook != NULL) {
+        hook(g_cldeque_steal_claimed_hook_context);
+    }
+}
+#else
+static void llam_cldeque_test_after_steal_claim(void) {
+}
+#endif
+
 /**
  * @brief Return the best-effort normal queue depth for a shard.
  *
@@ -58,6 +82,22 @@ void llam_cldeque_init(llam_cldeque_t *deque) {
     }
 }
 
+/*
+ * top and bottom are logical counters, not ordered array indices. Unsigned
+ * subtraction preserves their bounded distance when either counter crosses
+ * SIZE_MAX. Every valid snapshot is in [0, LLAM_NORM_QUEUE_CAP]; larger
+ * modular distances represent an empty/lost-race snapshot, not queued work.
+ */
+static size_t llam_cldeque_distance(size_t top, size_t bottom) {
+    return bottom - top;
+}
+
+static bool llam_cldeque_snapshot_has_work(size_t top, size_t bottom) {
+    size_t distance = llam_cldeque_distance(top, bottom);
+
+    return distance != 0U && distance <= LLAM_NORM_QUEUE_CAP;
+}
+
 /**
  * @brief Push a task onto the owner side of a Chase-Lev deque.
  *
@@ -67,6 +107,7 @@ void llam_cldeque_init(llam_cldeque_t *deque) {
  */
 bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
     size_t bottom;
+    size_t distance;
     size_t top;
 
     if (deque == NULL || task == NULL) {
@@ -75,7 +116,8 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
-    if (bottom - top >= LLAM_NORM_QUEUE_CAP) {
+    distance = llam_cldeque_distance(top, bottom);
+    if (distance >= LLAM_NORM_QUEUE_CAP) {
         return false;
     }
 
@@ -96,6 +138,7 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
  */
 static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     size_t bottom;
+    size_t distance;
     size_t top;
     llam_task_t *task;
 
@@ -104,15 +147,12 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     }
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
-    if (bottom == 0U) {
-        return NULL;
-    }
-
     bottom -= 1U;
     atomic_store_explicit(&deque->bottom, bottom, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     top = atomic_load_explicit(&deque->top, memory_order_relaxed);
-    if (top > bottom) {
+    distance = llam_cldeque_distance(top, bottom);
+    if (distance >= LLAM_NORM_QUEUE_CAP) {
         atomic_store_explicit(&deque->bottom, top, memory_order_relaxed);
         return NULL;
     }
@@ -159,7 +199,7 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
     atomic_thread_fence(memory_order_seq_cst);
     bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
-    if (top >= bottom) {
+    if (!llam_cldeque_snapshot_has_work(top, bottom)) {
         return NULL;
     }
 
@@ -180,7 +220,14 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
         }
     }
 
-    atomic_store_explicit(&deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)], NULL, memory_order_release);
+    llam_cldeque_test_after_steal_claim();
+    /*
+     * Advancing top releases this logical slot immediately.  Do not clear its
+     * physical cell: the owner can reuse the released capacity, wrap the ring,
+     * and publish a new task here before this thief returns.  A stale pointer
+     * outside [top, bottom) is ignored and the owner overwrites it before
+     * publishing a wrapped logical index through bottom.
+     */
     return task;
 }
 
@@ -199,7 +246,7 @@ static bool llam_cldeque_has_work(llam_cldeque_t *deque) {
     }
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
     bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
-    return top < bottom;
+    return llam_cldeque_snapshot_has_work(top, bottom);
 }
 
 /**
@@ -220,7 +267,7 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
     }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        pushed = llam_cldeque_push_bottom(&shard->norm_cldeque, task);
+        pushed = llam_cldeque_push_bottom(shard->norm_cldeque, task);
     } else {
         pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
     }
@@ -261,7 +308,7 @@ bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task)
         return false;
     }
 
-    if (llam_cldeque_push_bottom(&shard->norm_cldeque, task)) {
+    if (llam_cldeque_push_bottom(shard->norm_cldeque, task)) {
         shard->metrics.norm_enqueues += 1U;
         return true;
     }
@@ -289,7 +336,7 @@ llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
         return NULL;
     }
 
-    task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+    task = llam_cldeque_pop_bottom(shard->norm_cldeque);
     if (task == NULL) {
         task = llam_queue_pop_head(&shard->norm_q);
     }
@@ -402,37 +449,54 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
      * its first blocking/I/O operation. Periodically pull from the owner deque
      * to keep direct handoff fair without forcing a scheduler round trip.
      */
-    prefer_owner_deque =
-        shard->direct_handoff_streak >= LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
-        llam_cldeque_has_work(&shard->norm_cldeque);
-    if (!prefer_owner_deque) {
-        next = llam_queue_pop_head(&shard->norm_q);
-    }
-    if (next == NULL) {
-        if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
-            if (out_push_failed != NULL) {
-                *out_push_failed = true;
+    for (;;) {
+        prefer_owner_deque =
+            shard->direct_handoff_streak >=
+                LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
+            llam_cldeque_has_work(shard->norm_cldeque);
+        if (!prefer_owner_deque) {
+            next = llam_queue_pop_head(&shard->norm_q);
+        }
+        if (next == NULL) {
+            if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+                if (out_push_failed != NULL) {
+                    *out_push_failed = true;
+                }
+                return false;
+            }
+            next = llam_cldeque_pop_bottom(shard->norm_cldeque);
+            if (next == NULL) {
+                return false;
+            }
+        }
+        if (prefer_owner_deque) {
+            shard->direct_handoff_streak = 0U;
+        }
+        if (next == current) {
+            /*
+             * The running task should never already be present in runnable
+             * queues. Treat that as a failed direct exchange rather than
+             * queueing a second reference and corrupting task ownership.
+             */
+            if (out_next != NULL) {
+                *out_next = current;
             }
             return false;
         }
-        next = llam_cldeque_pop_bottom(&shard->norm_cldeque);
-        if (next == NULL) {
-            return false;
-        }
-    }
-    if (prefer_owner_deque) {
-        shard->direct_handoff_streak = 0U;
-    }
-    if (next == current) {
         /*
-         * The running task should never already be present in runnable queues.
-         * Treat that as a failed direct exchange rather than queueing a second
-         * reference and corrupting task ownership.
+         * Producer paths should prevent a foreign pinned task from entering
+         * this owner lane. Filter defensively before the exchange commits: the
+         * current task is not queued until an eligible peer has been found.
          */
-        if (out_next != NULL) {
-            *out_next = current;
+        if (llam_task_may_run_on_shard(next, shard)) {
+            break;
         }
-        return false;
+        (void)llam_norm_queue_note_dequeue(shard);
+        if (!llam_requeue_task_to_required_shard(
+                shard->runtime, next, next->enqueue_hot != 0U)) {
+            llam_enqueue_overflow_task(shard->runtime, next);
+        }
+        next = NULL;
     }
 
     llam_queue_push_tail(&shard->norm_q, current);
@@ -457,7 +521,7 @@ llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard) {
     }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+        task = llam_cldeque_pop_bottom(shard->norm_cldeque);
         if (task == NULL) {
             task = llam_queue_pop_head(&shard->norm_q);
         }
@@ -484,7 +548,7 @@ llam_task_t *llam_norm_queue_steal(llam_shard_t *victim) {
         return NULL;
     }
 
-    task = llam_cldeque_steal_top(&victim->norm_cldeque);
+    task = llam_cldeque_steal_top(victim->norm_cldeque);
     if (task != NULL) {
         (void)llam_norm_queue_note_dequeue(victim);
     }

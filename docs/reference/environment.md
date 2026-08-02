@@ -28,7 +28,13 @@ diagnostics, benchmarks, and CI.
 | `LLAM_SQPOLL_CPU` | CPU number | Select SQPOLL CPU. |
 | `LLAM_IDLE_SPIN_NS` | nanoseconds | Idle spin time before kernel sleep. |
 | `LLAM_IDLE_SPIN_ITERS` | iteration count | Idle spin iteration limit. |
-| `LLAM_BIND_WORKERS` | `0`, `1` | Bind worker threads to platform CPUs when supported. |
+
+Worker bounds, blocking-pool bounds, ordered CPU selection, and affinity policy
+have no environment-variable authority. Embedders must set them through the
+size-aware `llam_runtime_opts_t` contract so each runtime instance has an
+immutable, inspectable resource plan. This also prevents a process-wide
+environment override from silently multiplying resources across independent
+runtimes.
 
 ## I/O Policy
 
@@ -63,11 +69,38 @@ diagnostics, benchmarks, and CI.
 
 | Variable | Values | Meaning |
 | --- | --- | --- |
-| `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata slabs. |
-| `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm stack caches. |
-| `LLAM_TIMER_HEAP_PREWARM` | timer slots | Preallocate timer heap capacity. |
+| `LLAM_TASK_CACHE_PREWARM_TOTAL` | task count | Best-effort runtime-total task metadata target. |
+| `LLAM_STACK_CACHE_PREWARM_TOTAL` | `0`-`4096` stacks | Best-effort runtime-total default-stack target. |
+| `LLAM_TIMER_HEAP_PREWARM_TOTAL` | timer slots | Best-effort runtime-total timer heap target. |
+| `LLAM_TASK_CACHE_PREWARM` | tasks per worker | Deprecated best-effort compatibility input; capped at 4096 per selected worker. |
+| `LLAM_STACK_CACHE_PREWARM` | stack count | Deprecated best-effort compatibility input; historically already runtime-total. |
+| `LLAM_TIMER_HEAP_PREWARM` | slots per worker | Deprecated best-effort compatibility input; capped at 1048576 per selected worker. |
 | `LLAM_STACK_SAMPLING` | `0`, `1` | Enable stack high-water diagnostics. |
 | `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for opaque blocking. |
+
+The size-aware C options `task_prewarm_total`, `stack_prewarm_total`, and
+`timer_prewarm_total` have highest precedence and are exact: initialization
+fails and unwinds if the requested resources cannot be allocated. `_TOTAL`
+environment inputs take precedence over deprecated names but remain
+best-effort. Zero public fields select environment/profile compatibility
+policy. All metadata targets share a checked 1 GiB planning ceiling; stack
+prewarm is capped at 4096 mappings.
+
+Without an explicit public or environment target, task metadata defaults to 128
+logical task objects per selected worker. Timer slots default per worker to
+1,024 in `release-fast`, 0 in `debug-safe`, and 512 otherwise. Stack mappings
+are runtime-total and default to 256 in `release-fast` or 128 otherwise.
+Best-effort task and timer totals are clamped in task-then-timer order to the
+remaining metadata budget.
+
+The deprecated task and timer variables retain their historical per-worker
+meaning before conversion to a runtime total. Their per-worker inputs are
+capped at 4,096 tasks and 1,048,576 timer slots respectively. The deprecated
+stack variable was already runtime-total. New deployments should use `_TOTAL`
+names and inspect achieved counts.
+
+`llam_runtime_stats_t` reports the resolved request, achieved total, and
+`llam_runtime_prewarm_source_t` authority independently for each resource.
 
 ## Diagnostics
 

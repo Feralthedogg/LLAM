@@ -82,7 +82,8 @@ static int llam_signal_register_live_locked(llam_signal_set_t *set, size_t *out_
                                                   LLAM_SIGNAL_PUBLIC_INITIAL_CAPACITY,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_SIGNAL_SET,
                                                   set->owner_runtime != NULL
-                                                      ? set->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            set->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -302,15 +303,21 @@ int llam_signal_set_create_ex(const int *signos,
         set->signos[i] = signos[i];
         sigaddset(&set->mask, signos[i]);
     }
+    if (llam_runtime_public_owner_acquire(set->owner_runtime) != 0) {
+        free(set);
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_signal_registry_lock);
     if (llam_signal_reserve_signos_locked(signos, signo_count) != 0) {
         pthread_mutex_unlock(&g_llam_signal_registry_lock);
+        llam_runtime_public_owner_release(set->owner_runtime);
         free(set);
         return -1;
     }
     if (llam_signal_register_live_locked(set, &slot) != 0) {
         llam_signal_release_signos_locked(set);
         pthread_mutex_unlock(&g_llam_signal_registry_lock);
+        llam_runtime_public_owner_release(set->owner_runtime);
         free(set);
         return -1;
     }
@@ -320,10 +327,13 @@ int llam_signal_set_create_ex(const int *signos,
     g_llam_signal_registry = set;
     *out = llam_signal_public_handle(set);
     if (*out == NULL) {
+        llam_runtime_t *owner_runtime = set->owner_runtime;
+
         llam_signal_unregister_live_locked(set);
         llam_signal_release_signos_locked(set);
         pthread_mutex_unlock(&g_llam_signal_registry_lock);
         free(set);
+        llam_runtime_public_owner_release(owner_runtime);
         errno = ENOMEM;
         return -1;
     }
@@ -421,6 +431,7 @@ int llam_signal_set_destroy(llam_signal_set_t *handle) {
 #if LLAM_PLATFORM_LINUX
     uintptr_t raw = (uintptr_t)handle;
     llam_signal_set_t *set;
+    llam_runtime_t *owner_runtime;
     sigset_t mask;
     size_t slot;
     uint32_t generation;
@@ -448,11 +459,13 @@ int llam_signal_set_destroy(llam_signal_set_t *handle) {
         return -1;
     }
     mask = set->mask;
+    owner_runtime = set->owner_runtime;
     llam_signal_unregister_live_locked(set);
     llam_signal_release_signos_locked(set);
     pthread_mutex_unlock(&g_llam_signal_registry_lock);
     (void)pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
     free(set);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 #else
     (void)handle;

@@ -43,7 +43,12 @@
 void *llam_io_worker_main(void *arg) {
     llam_node_t *node = arg;
     llam_runtime_t *rt = node->runtime;
+    bool thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->io_threads_live);
 
+    if (!thread_counted) {
+        return NULL;
+    }
     llam_tune_io_worker_thread(node);
 
     for (;;) {
@@ -59,6 +64,7 @@ void *llam_io_worker_main(void *arg) {
         llam_windows_drain_completions(node, INFINITE);
     }
 
+    llam_runtime_native_thread_exit(rt, &rt->io_threads_live);
     return NULL;
 }
 
@@ -72,15 +78,16 @@ void llam_windows_iocp_cleanup_node(llam_node_t *node) {
         pthread_mutex_lock(&node->windows_assoc_lock);
     }
     assoc = node->windows_fd_assoc_head;
-    while (assoc != NULL) {
-        llam_windows_fd_assoc_t *next = assoc->next;
-
-        free(assoc);
-        assoc = next;
-    }
     node->windows_fd_assoc_head = NULL;
     if (node->windows_assoc_lock_initialized) {
         pthread_mutex_unlock(&node->windows_assoc_lock);
+    }
+    while (assoc != NULL) {
+        llam_windows_fd_assoc_t *next = assoc->next;
+
+        assoc->next = NULL;
+        llam_windows_fd_assoc_destroy(assoc);
+        assoc = next;
     }
     llam_windows_accept_socket_pool_destroy(node);
     llam_windows_io_op_pool_destroy(node);

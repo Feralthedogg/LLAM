@@ -36,43 +36,312 @@
 #include <sys/sysctl.h>
 #endif
 
-static pthread_mutex_t g_llam_process_signal_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned g_llam_process_signal_refs;
-static bool g_llam_process_preempt_installed;
-static bool g_llam_process_segv_installed;
-static struct sigaction g_llam_process_previous_preempt_action;
-static struct sigaction g_llam_process_previous_segv_action;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_bool g_llam_affinity_test_enabled;
+static atomic_int g_llam_affinity_test_supported = -1;
+static atomic_int
+    g_llam_affinity_test_errors[LLAM_TEST_AFFINITY_OPERATION_COUNT];
+static atomic_uint
+    g_llam_affinity_test_calls[LLAM_TEST_AFFINITY_OPERATION_COUNT];
+
+void llam_runtime_test_reset_affinity_hooks(void) {
+    unsigned operation;
+
+    atomic_store_explicit(&g_llam_affinity_test_enabled, false, memory_order_release);
+    atomic_store_explicit(&g_llam_affinity_test_supported, -1, memory_order_release);
+    for (operation = 0U;
+         operation < LLAM_TEST_AFFINITY_OPERATION_COUNT;
+         ++operation) {
+        atomic_store_explicit(&g_llam_affinity_test_errors[operation],
+                              0,
+                              memory_order_release);
+        atomic_store_explicit(&g_llam_affinity_test_calls[operation],
+                              0U,
+                              memory_order_release);
+    }
+}
+
+void llam_runtime_test_set_affinity_supported(int supported) {
+    atomic_store_explicit(&g_llam_affinity_test_supported,
+                          supported != 0 ? 1 : 0,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_affinity_test_enabled, true, memory_order_release);
+}
+
+void llam_runtime_test_set_affinity_error(llam_test_affinity_operation_t operation,
+                                          int error_code) {
+    if ((unsigned)operation >= LLAM_TEST_AFFINITY_OPERATION_COUNT) {
+        return;
+    }
+    atomic_store_explicit(&g_llam_affinity_test_errors[operation],
+                          error_code,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_affinity_test_enabled, true, memory_order_release);
+}
+
+unsigned llam_runtime_test_affinity_calls(
+    llam_test_affinity_operation_t operation) {
+    if ((unsigned)operation >= LLAM_TEST_AFFINITY_OPERATION_COUNT) {
+        return 0U;
+    }
+    return atomic_load_explicit(&g_llam_affinity_test_calls[operation],
+                                memory_order_acquire);
+}
+
+static bool llam_runtime_test_affinity_result(
+    llam_test_affinity_operation_t operation,
+    int *error_code) {
+    if (!atomic_load_explicit(&g_llam_affinity_test_enabled,
+                              memory_order_acquire)) {
+        return false;
+    }
+    atomic_fetch_add_explicit(&g_llam_affinity_test_calls[operation],
+                              1U,
+                              memory_order_relaxed);
+    *error_code =
+        atomic_load_explicit(&g_llam_affinity_test_errors[operation],
+                             memory_order_acquire);
+    return true;
+}
+#endif
 
 /**
- * @brief Optionally bind the current thread to a CPU.
- *
- * Linux binding is opt-in through @c LLAM_BIND_WORKERS because pinning can hurt
- * short blocking wakeups on some kernels and container schedulers.
- *
- * @param cpu_id CPU id from the runtime's allowed CPU list.
+ * @brief Return whether this platform has exact scheduler CPU affinity.
  */
-void llam_bind_current_thread_to_cpu(unsigned cpu_id) {
+bool llam_runtime_affinity_supported(void) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (atomic_load_explicit(&g_llam_affinity_test_enabled,
+                             memory_order_acquire)) {
+        int supported =
+            atomic_load_explicit(&g_llam_affinity_test_supported,
+                                 memory_order_acquire);
+
+        if (supported >= 0) {
+            return supported != 0;
+        }
+    }
+#endif
 #if defined(__linux__)
-    static atomic_int bind_enabled = -1;
-    int enabled = atomic_load_explicit(&bind_enabled, memory_order_acquire);
+    return true;
+#else
+    return false;
+#endif
+}
+
+static void llam_runtime_note_affinity_failure(llam_runtime_t *rt) {
+    uint_fast64_t failures;
+
+    failures =
+        atomic_load_explicit(&rt->affinity_failures, memory_order_acquire);
+    while (failures != UINT_FAST64_MAX &&
+           !atomic_compare_exchange_weak_explicit(&rt->affinity_failures,
+                                                  &failures,
+                                                  failures + 1U,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed)) {
+    }
+}
+
+static int llam_runtime_handle_affinity_failure(llam_runtime_t *rt,
+                                                int error_code,
+                                                int saved_errno) {
+    llam_runtime_note_affinity_failure(rt);
+    if (rt->resource_plan.affinity_policy == LLAM_RUNTIME_AFFINITY_REQUIRE) {
+        llam_thread_errno_store(error_code);
+        return -1;
+    }
+    llam_thread_errno_store(saved_errno);
+    return 0;
+}
+
+static int llam_runtime_capture_driver_affinity_raw(llam_runtime_t *rt) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    int rc;
+
+    if (llam_runtime_test_affinity_result(LLAM_TEST_AFFINITY_CAPTURE, &rc)) {
+        if (rc == 0) {
+            memset(&rt->driver_affinity, 0, sizeof(rt->driver_affinity));
+        }
+        return rc;
+    }
+#endif
+#if defined(__linux__)
+    return pthread_getaffinity_np(pthread_self(),
+                                  sizeof(rt->driver_affinity),
+                                  &rt->driver_affinity);
+#else
+    (void)rt;
+    return ENOTSUP;
+#endif
+}
+
+static int llam_runtime_apply_worker_affinity_raw(unsigned cpu_id) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    int rc;
+
+    if (llam_runtime_test_affinity_result(LLAM_TEST_AFFINITY_APPLY, &rc)) {
+        return rc;
+    }
+#endif
+#if defined(__linux__)
     cpu_set_t set;
 
-    if (enabled < 0) {
-        const char *env = llam_env_get("LLAM_BIND_WORKERS");
-
-        /* Linux CPU pinning can stretch short blocking syscall wakeups; keep it opt-in. */
-        enabled = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
-        atomic_store_explicit(&bind_enabled, enabled, memory_order_release);
-    }
-    if (enabled == 0) {
-        return;
+    if (cpu_id >= CPU_SETSIZE) {
+        return EINVAL;
     }
     CPU_ZERO(&set);
     CPU_SET(cpu_id, &set);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 #else
     (void)cpu_id;
+    return ENOTSUP;
 #endif
+}
+
+static int llam_runtime_restore_driver_affinity_raw(llam_runtime_t *rt) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    int rc;
+
+    if (llam_runtime_test_affinity_result(LLAM_TEST_AFFINITY_RESTORE, &rc)) {
+        return rc;
+    }
+#endif
+#if defined(__linux__)
+    return pthread_setaffinity_np(pthread_self(),
+                                  sizeof(rt->driver_affinity),
+                                  &rt->driver_affinity);
+#else
+    (void)rt;
+    return ENOTSUP;
+#endif
+}
+
+int llam_runtime_capture_driver_affinity(llam_runtime_t *rt) {
+    unsigned policy;
+    int saved_errno = llam_thread_errno_load();
+    int rc;
+
+    if (rt == NULL) {
+        llam_thread_errno_store(EINVAL);
+        return -1;
+    }
+    policy = rt->resource_plan.affinity_policy;
+    if (policy == LLAM_RUNTIME_AFFINITY_NONE) {
+        return 0;
+    }
+
+    rt->driver_thread = pthread_self();
+    rt->driver_affinity_capture_attempted = true;
+    rt->driver_affinity_valid = false;
+    if (!llam_runtime_affinity_supported()) {
+        return llam_runtime_handle_affinity_failure(rt, ENOTSUP, saved_errno);
+    }
+    rc = llam_runtime_capture_driver_affinity_raw(rt);
+    if (rc != 0) {
+        return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
+    }
+    rt->driver_affinity_valid = true;
+    llam_thread_errno_store(saved_errno);
+    return 0;
+}
+
+int llam_runtime_apply_worker_affinity(llam_runtime_t *rt, unsigned cpu_id) {
+    unsigned policy;
+    int saved_errno = llam_thread_errno_load();
+    int rc;
+
+    if (rt == NULL) {
+        llam_thread_errno_store(EINVAL);
+        return -1;
+    }
+    policy = rt->resource_plan.affinity_policy;
+    if (policy == LLAM_RUNTIME_AFFINITY_NONE) {
+        return 0;
+    }
+    if (rt->driver_affinity_capture_attempted &&
+        pthread_equal(pthread_self(), rt->driver_thread) &&
+        !rt->driver_affinity_valid) {
+        return 0;
+    }
+    if (!llam_runtime_affinity_supported()) {
+        return llam_runtime_handle_affinity_failure(rt, ENOTSUP, saved_errno);
+    }
+    rc = llam_runtime_apply_worker_affinity_raw(cpu_id);
+    if (rc != 0) {
+        return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
+    }
+    llam_thread_errno_store(saved_errno);
+    return 0;
+}
+
+int llam_runtime_restore_driver_affinity(llam_runtime_t *rt) {
+    unsigned policy;
+    int saved_errno = llam_thread_errno_load();
+    int rc;
+
+    if (rt == NULL) {
+        llam_thread_errno_store(EINVAL);
+        return -1;
+    }
+    policy = rt->resource_plan.affinity_policy;
+    if (policy == LLAM_RUNTIME_AFFINITY_NONE ||
+        !rt->driver_affinity_valid) {
+        return 0;
+    }
+    if (!pthread_equal(pthread_self(), rt->driver_thread)) {
+        return llam_runtime_handle_affinity_failure(rt, EPERM, saved_errno);
+    }
+    rc = llam_runtime_restore_driver_affinity_raw(rt);
+    if (rc != 0) {
+        return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
+    }
+    rt->driver_affinity_valid = false;
+    rt->driver_affinity_capture_attempted = false;
+    llam_thread_errno_store(saved_errno);
+    return 0;
+}
+
+bool llam_runtime_native_thread_enter(llam_runtime_t *rt,
+                                      atomic_uint *counter) {
+    unsigned live;
+
+    if (rt == NULL || counter == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+    live = atomic_load_explicit(counter, memory_order_acquire);
+    while (live != UINT_MAX) {
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &live,
+                                                  live + 1U,
+                                                  memory_order_release,
+                                                  memory_order_relaxed)) {
+            return true;
+        }
+    }
+    llam_record_fatal(rt, EOVERFLOW);
+    errno = EOVERFLOW;
+    return false;
+}
+
+void llam_runtime_native_thread_exit(llam_runtime_t *rt,
+                                     atomic_uint *counter) {
+    unsigned live;
+
+    if (rt == NULL || counter == NULL) {
+        return;
+    }
+    live = atomic_load_explicit(counter, memory_order_acquire);
+    while (live != 0U) {
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &live,
+                                                  live - 1U,
+                                                  memory_order_release,
+                                                  memory_order_relaxed)) {
+            return;
+        }
+    }
+    llam_record_fatal(rt, EINVAL);
 }
 
 #if defined(__APPLE__)
@@ -221,25 +490,6 @@ void llam_tune_ctrl_thread(void) {
 }
 
 /**
- * @brief Restore the init thread affinity captured during runtime initialization.
- *
- * @param rt Runtime whose init-thread affinity snapshot should be restored.
- */
-void llam_restore_init_thread_affinity(llam_runtime_t *rt) {
-#if defined(__linux__)
-    if (rt == NULL || !rt->init_thread_affinity_valid) {
-        return;
-    }
-    if (!pthread_equal(pthread_self(), rt->init_thread)) {
-        return;
-    }
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(rt->init_thread_affinity), &rt->init_thread_affinity);
-#else
-    (void)rt;
-#endif
-}
-
-/**
  * @brief Check whether an I/O error means "backend unsupported, try fallback".
  *
  * @param error_code Positive errno value.
@@ -284,160 +534,6 @@ void llam_pause_cpu(void) {
 #endif
 }
 #endif
-
-/**
- * @brief Install process-wide preemption and fault signal handlers.
- *
- * @details
- * POSIX signal actions are process-global, while LLAM 2.x allows multiple
- * explicit runtimes to coexist.  The first runtime installs the handlers and
- * saves the previous process actions; later runtimes only take a reference.
- * Restoration happens when the last referencing runtime shuts down.
- *
- * @param rt Runtime taking a process-handler reference.
- *
- * @return 0 on success, or -1 with @c errno set by @c sigaction.
- */
-int llam_install_process_signal_handlers(llam_runtime_t *rt) {
-    struct sigaction action;
-    int saved_errno;
-
-    if (rt == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    pthread_mutex_lock(&g_llam_process_signal_lock);
-    if (g_llam_process_signal_refs > 0U) {
-        g_llam_process_signal_refs += 1U;
-        rt->previous_preempt_action = g_llam_process_previous_preempt_action;
-        rt->previous_segv_action = g_llam_process_previous_segv_action;
-        rt->preempt_signal_installed = true;
-        rt->segv_signal_installed = true;
-        pthread_mutex_unlock(&g_llam_process_signal_lock);
-        return 0;
-    }
-
-    memset(&action, 0, sizeof(action));
-    sigemptyset(&action.sa_mask);
-    action.sa_handler = llam_preempt_signal_handler;
-    action.sa_flags = SA_RESTART | SA_ONSTACK;
-    if (sigaction(LLAM_PREEMPT_SIGNAL, &action, &g_llam_process_previous_preempt_action) != 0) {
-        saved_errno = errno;
-        pthread_mutex_unlock(&g_llam_process_signal_lock);
-        errno = saved_errno;
-        return -1;
-    }
-    g_llam_process_preempt_installed = true;
-
-    memset(&action, 0, sizeof(action));
-    sigemptyset(&action.sa_mask);
-    action.sa_sigaction = llam_fault_signal_handler;
-    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    if (sigaction(SIGSEGV, &action, &g_llam_process_previous_segv_action) != 0) {
-        saved_errno = errno;
-
-        (void)sigaction(LLAM_PREEMPT_SIGNAL, &g_llam_process_previous_preempt_action, NULL);
-        g_llam_process_preempt_installed = false;
-        pthread_mutex_unlock(&g_llam_process_signal_lock);
-        errno = saved_errno;
-        return -1;
-    }
-    g_llam_process_segv_installed = true;
-    g_llam_process_signal_refs = 1U;
-    rt->previous_preempt_action = g_llam_process_previous_preempt_action;
-    rt->previous_segv_action = g_llam_process_previous_segv_action;
-    rt->preempt_signal_installed = true;
-    rt->segv_signal_installed = true;
-    pthread_mutex_unlock(&g_llam_process_signal_lock);
-    return 0;
-}
-
-/**
- * @brief Release this runtime's process-wide signal handler reference.
- *
- * @details
- * The previous process actions are restored only after the last active runtime
- * releases its reference.  Restoring on every runtime destroy would expose
- * peer runtimes to the default @c SIGUSR1 action while their watchdogs may
- * still request preemption.
- *
- * @param rt Runtime containing local handler-reference state.
- */
-void llam_restore_process_signal_handlers(llam_runtime_t *rt) {
-    if (rt == NULL || (!rt->segv_signal_installed && !rt->preempt_signal_installed)) {
-        return;
-    }
-
-    pthread_mutex_lock(&g_llam_process_signal_lock);
-    if (g_llam_process_signal_refs > 0U) {
-        g_llam_process_signal_refs -= 1U;
-    }
-    rt->segv_signal_installed = false;
-    rt->preempt_signal_installed = false;
-
-    if (g_llam_process_signal_refs == 0U) {
-        if (g_llam_process_segv_installed) {
-            (void)sigaction(SIGSEGV, &g_llam_process_previous_segv_action, NULL);
-            g_llam_process_segv_installed = false;
-        }
-        if (g_llam_process_preempt_installed) {
-            (void)sigaction(LLAM_PREEMPT_SIGNAL, &g_llam_process_previous_preempt_action, NULL);
-            g_llam_process_preempt_installed = false;
-        }
-        memset(&g_llam_process_previous_preempt_action, 0, sizeof(g_llam_process_previous_preempt_action));
-        memset(&g_llam_process_previous_segv_action, 0, sizeof(g_llam_process_previous_segv_action));
-    }
-    pthread_mutex_unlock(&g_llam_process_signal_lock);
-}
-
-/**
- * @brief Install a per-thread alternate signal stack for guard-page diagnostics.
- *
- * @param shard Shard whose allocated signal stack should be installed.
- *
- * @return 0 on success, or -1 with @c errno set.
- */
-int llam_install_thread_signal_stack(llam_shard_t *shard) {
-    stack_t stack;
-
-    if (shard->signal_stack == NULL || shard->signal_stack_size == 0U) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    memset(&stack, 0, sizeof(stack));
-    stack.ss_sp = shard->signal_stack;
-    stack.ss_size = shard->signal_stack_size;
-    stack.ss_flags = 0;
-    if (sigaltstack(&stack, &shard->previous_sigaltstack) != 0) {
-        return -1;
-    }
-
-    shard->sigaltstack_installed = true;
-    return 0;
-}
-
-/**
- * @brief Disable and restore a thread's previous alternate signal stack.
- *
- * @param shard Shard whose alternate stack was installed.
- */
-void llam_uninstall_thread_signal_stack(llam_shard_t *shard) {
-    stack_t disabled;
-
-    if (!shard->sigaltstack_installed) {
-        return;
-    }
-
-    memset(&disabled, 0, sizeof(disabled));
-    disabled.ss_flags = SS_DISABLE;
-    (void)sigaltstack(&disabled, NULL);
-    if ((shard->previous_sigaltstack.ss_flags & SS_DISABLE) == 0) {
-        (void)sigaltstack(&shard->previous_sigaltstack, NULL);
-    }
-    shard->sigaltstack_installed = false;
-}
 
 /**
  * @brief Enumerate CPUs available to the current process.

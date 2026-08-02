@@ -64,7 +64,8 @@ static int llam_timer_register_live_locked(llam_timer_t *timer, size_t *out_slot
                                                   LLAM_TIMER_PUBLIC_INITIAL_CAPACITY,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_TIMER,
                                                   timer->owner_runtime != NULL
-                                                      ? timer->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            timer->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -175,10 +176,16 @@ int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_t
         errno = rc;
         return -1;
     }
+    if (llam_runtime_public_owner_acquire(timer->owner_runtime) != 0) {
+        pthread_mutex_destroy(&timer->lock);
+        free(timer);
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_timer_registry_lock);
     if (llam_timer_register_live_locked(timer, &slot) != 0) {
         pthread_mutex_unlock(&g_llam_timer_registry_lock);
         pthread_mutex_destroy(&timer->lock);
+        llam_runtime_public_owner_release(timer->owner_runtime);
         free(timer);
         return -1;
     }
@@ -188,10 +195,13 @@ int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_t
     g_llam_timer_registry = timer;
     *out = llam_timer_public_handle(timer);
     if (*out == NULL) {
+        llam_runtime_t *owner_runtime = timer->owner_runtime;
+
         llam_timer_unregister_live_locked(timer);
         pthread_mutex_unlock(&g_llam_timer_registry_lock);
         pthread_mutex_destroy(&timer->lock);
         free(timer);
+        llam_runtime_public_owner_release(owner_runtime);
         errno = ENOMEM;
         return -1;
     }
@@ -382,6 +392,7 @@ int llam_timer_cancel(llam_timer_t *handle) {
 int llam_timer_destroy(llam_timer_t *handle) {
     uintptr_t raw = (uintptr_t)handle;
     llam_timer_t *timer;
+    llam_runtime_t *owner_runtime;
     size_t slot;
     uint32_t generation;
 
@@ -409,10 +420,12 @@ int llam_timer_destroy(llam_timer_t *handle) {
         errno = EBUSY;
         return -1;
     }
+    owner_runtime = timer->owner_runtime;
     llam_timer_unregister_live_locked(timer);
     pthread_mutex_unlock(&timer->lock);
     pthread_mutex_unlock(&g_llam_timer_registry_lock);
     pthread_mutex_destroy(&timer->lock);
     free(timer);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 }

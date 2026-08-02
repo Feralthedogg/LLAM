@@ -4,14 +4,43 @@
 CC ?= cc
 AR ?= ar
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer
+DEPFLAGS ?= -MMD -MP
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
+LLAM_BUILD_RESEARCH ?= 0
+LLAM_HARDENING ?= compatible
+ifneq ($(words $(LLAM_HARDENING)),1)
+$(error LLAM_HARDENING must be off, compatible, or strict)
+endif
+ifeq ($(filter $(LLAM_HARDENING),off compatible strict),)
+$(error LLAM_HARDENING must be off, compatible, or strict)
+endif
+ifneq ($(LLAM_BUILD_RESEARCH),0)
+ifneq ($(LLAM_BUILD_RESEARCH),1)
+$(error LLAM_BUILD_RESEARCH must be 0 or 1)
+endif
+endif
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+ifneq ($(strip $(filter package,$(MAKECMDGOALS))),)
+$(error research-enabled builds cannot be packaged)
+endif
+endif
+override LLAM_INTERNAL_CPPFLAGS := -DLLAM_BUILD_RESEARCH=$(LLAM_BUILD_RESEARCH)
+override CPPFLAGS := $(CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)
 LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
+# Keep the dlopen test host threaded from process startup. NetBSD cannot switch
+# from libc pthread stubs after a loaded runtime first introduces libpthread.
+SHARED_LOAD_LDLIBS ?= -pthread
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
-SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
+ifeq ($(origin SHARED_CPPFLAGS),undefined)
+SHARED_CPPFLAGS = $(CPPFLAGS) -DLLAM_BUILD_SHARED
+else
+override SHARED_CPPFLAGS := $(SHARED_CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)
+endif
 PICFLAGS ?= -fPIC -fvisibility=hidden
+# Audited projections of config/llam-version.json.
 LLAM_ABI_MAJOR ?= 2
 LLAM_VERSION ?= 2.2.1
 SANITIZER_TARGETS_ENABLED ?= 0
@@ -38,6 +67,20 @@ CLEAN_FILES = \
 	server_lossless \
 	server_flood \
 	test_leir_phase0 \
+	test_leir_connect \
+	test_leir_aot_plan \
+	test_leir_aot_module \
+	test_leir_aot_c_consumer \
+	test_leir_aot_integration \
+	test_leir_aot_linux_unit \
+	test_leir_aot_ownership \
+	test_leir_aot_ring_profile \
+	bench_leir_aot_connect \
+	test_leir_native_plan \
+	test_leir_native_segment \
+	test_leir_native_linux \
+	bench_leir_native_segment \
+	bench_leir_native_pipeline \
 	bench_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
@@ -59,6 +102,7 @@ CLEAN_FILES = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_norm_queue_wrap \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -75,12 +119,14 @@ CLEAN_FILES = \
 	asan-test_multi_runtime_core \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability \
+	asan-test_fiber_positive \
 	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability \
+	tsan-test_fiber_positive \
 	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
@@ -90,6 +136,20 @@ CLEAN_FILES = \
 	server_lossless.exe \
 	server_flood.exe \
 	test_leir_phase0.exe \
+	test_leir_connect.exe \
+	test_leir_aot_plan.exe \
+	test_leir_aot_module.exe \
+	test_leir_aot_c_consumer.exe \
+	test_leir_aot_integration.exe \
+	test_leir_aot_linux_unit.exe \
+	test_leir_aot_ownership.exe \
+	test_leir_aot_ring_profile.exe \
+	bench_leir_aot_connect.exe \
+	test_leir_native_plan.exe \
+	test_leir_native_segment.exe \
+	test_leir_native_linux.exe \
+	bench_leir_native_segment.exe \
+	bench_leir_native_pipeline.exe \
 	bench_leir_phase0.exe \
 	test_lccf_model.exe \
 	bench_lccf_model.exe \
@@ -111,6 +171,7 @@ CLEAN_FILES = \
 	test_runtime_fuzz.exe \
 	test_runtime_invariants.exe \
 	test_runtime_shutdown_internal.exe \
+	test_norm_queue_wrap.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -125,6 +186,7 @@ CLEAN_FILES = \
 	libllam_runtime.so \
 	libllam_runtime.so.$(LLAM_ABI_MAJOR) \
 	libllam_runtime.so.$(LLAM_VERSION) \
+	*.llam-build-provenance \
 	CMakeCache.txt \
 	cmake_install.cmake \
 	compile_commands.json \
@@ -151,6 +213,54 @@ HOST_PLATFORM := posix
 endif
 endif
 
+LLAM_HARDENING_CFLAGS :=
+LLAM_HARDENING_LINK_FLAGS :=
+ifneq ($(LLAM_HARDENING),off)
+ifneq ($(HOST_PLATFORM),windows)
+LLAM_HAVE_STACK_PROTECTOR := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -Werror -fstack-protector-strong -x c - -c -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_FORTIFY_OPTIMIZED := $(if $(filter -O1 -O2 -O3 -Og -Os -Oz -Ofast,$(CFLAGS)),1,0)
+ifeq ($(LLAM_FORTIFY_OPTIMIZED),1)
+LLAM_HAVE_FORTIFY := $(shell printf '\043include <string.h>\nint main(void){char a[8]; return (int)strlen(a);}\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -O2 -Werror -D_FORTIFY_SOURCE=2 -x c - -c -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+else
+LLAM_HAVE_FORTIFY := 0
+endif
+LLAM_HAVE_STACK_CLASH := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -Werror -fstack-clash-protection -x c - -c -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_STACK_PROTECTOR),1)
+LLAM_HARDENING_CFLAGS += -fstack-protector-strong
+else ifeq ($(LLAM_HARDENING),strict)
+$(error strict hardening requires stack-protector support)
+endif
+ifeq ($(LLAM_HAVE_FORTIFY),1)
+LLAM_HARDENING_CFLAGS += -D_FORTIFY_SOURCE=2
+else ifeq ($(LLAM_HARDENING),strict)
+$(error strict hardening requires FORTIFY support)
+endif
+ifeq ($(LLAM_HAVE_STACK_CLASH),1)
+LLAM_HARDENING_CFLAGS += -fstack-clash-protection
+endif
+ifneq ($(filter $(HOST_PLATFORM),linux bsd),)
+LLAM_HAVE_RELRO := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CFLAGS) -Werror -Wl,-z,relro -x c - -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_HAVE_NOW := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CFLAGS) -Werror -Wl,-z,now -x c - -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_HAVE_NOEXECSTACK := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CFLAGS) -Werror -Wl,-z,noexecstack -x c - -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_RELRO),1)
+LLAM_HARDENING_LINK_FLAGS += -Wl,-z,relro
+endif
+ifeq ($(LLAM_HAVE_NOW),1)
+LLAM_HARDENING_LINK_FLAGS += -Wl,-z,now
+endif
+ifeq ($(LLAM_HAVE_NOEXECSTACK),1)
+LLAM_HARDENING_LINK_FLAGS += -Wl,-z,noexecstack
+endif
+ifeq ($(LLAM_HARDENING),strict)
+ifneq ($(LLAM_HAVE_RELRO)$(LLAM_HAVE_NOW)$(LLAM_HAVE_NOEXECSTACK),111)
+$(error strict ELF hardening requires RELRO, NOW, and non-executable-stack linker support)
+endif
+endif
+endif
+endif
+endif
+override CFLAGS := $(CFLAGS) $(LLAM_HARDENING_CFLAGS)
+
 ifeq ($(HOST_PLATFORM),darwin)
 SHLIB_LINK = libllam_runtime.dylib
 SHLIB_REAL = libllam_runtime.$(LLAM_ABI_MAJOR).dylib
@@ -173,7 +283,10 @@ endif
 LLAM_PUBLIC_HDRS = \
 	include/llam/io.h \
 	include/llam/platform.h \
-	include/llam/runtime.h
+	include/llam/runtime.h \
+	include/llam/runtime_driver.h \
+	include/llam/runtime_signal.h \
+	include/llam/runtime_stats.h
 
 RUNTIME_PRIV_HDRS = \
 	$(LLAM_PUBLIC_HDRS) \
@@ -184,6 +297,9 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_debug_dump_helpers.h \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
+	src/internal/runtime_external_driver.h \
+	src/internal/runtime_resource_plan.h \
+	src/internal/runtime_signal.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
 	src/internal/runtime_public_active_op.h \
@@ -210,9 +326,18 @@ RUNTIME_PRIV_HDRS = \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
+RESEARCH_PRIVATE_HDRS = \
+	src/io/linux/runtime_io_segment_linux_internal.h \
+	src/io/linux/runtime_io_ring_profile_linux_internal.h
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+RUNTIME_PRIV_HDRS += $(RESEARCH_PRIVATE_HDRS)
+endif
 
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
+	$(OBJDIR)/src/core/lifecycle/resource_plan.o \
+	$(OBJDIR)/src/core/lifecycle/runtime_layout.o \
+	$(OBJDIR)/src/core/lifecycle/external_drive.o \
 	$(OBJDIR)/src/core/base/abi.o \
 	$(OBJDIR)/src/core/base/errno.o \
 	$(OBJDIR)/src/core/base/util.o \
@@ -258,11 +383,15 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/time/time.o \
 	$(OBJDIR)/src/core/context/fp.o \
 	$(OBJDIR)/src/core/context/stack_sample.o \
+	$(OBJDIR)/src/core/context/sanitizer_fiber.o \
 	$(OBJDIR)/src/core/context/context_portable.o \
 	$(OBJDIR)/src/core/sched/queue_base.o \
 	$(OBJDIR)/src/core/sched/norm_queue_depth.o \
 	$(OBJDIR)/src/core/sched/norm_queue.o \
+	$(OBJDIR)/src/core/sched/affinity.o \
+	$(OBJDIR)/src/core/sched/external_doorbell.o \
 	$(OBJDIR)/src/core/sched/core_queue.o \
+	$(OBJDIR)/src/core/sched/handoff_policy.o \
 	$(OBJDIR)/src/core/memory/alloc.o \
 	$(OBJDIR)/src/core/memory/allocator_quiescent.o \
 	$(OBJDIR)/src/core/task/task_alloc.o \
@@ -273,13 +402,21 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/debug/trace.o \
 	$(OBJDIR)/src/core/sched/wake.o \
 	$(OBJDIR)/src/core/platform/platform.o \
+	$(OBJDIR)/src/core/platform/signal.o \
+	$(OBJDIR)/src/core/platform/stack_vm.o \
 	$(OBJDIR)/src/core/platform/windows_policy.o \
 	$(OBJDIR)/src/core/sched/safepoint.o \
 	$(OBJDIR)/src/core/wait/wait.o \
 	$(OBJDIR)/src/core/task/task_reclaim.o \
+	$(OBJDIR)/src/core/task/stack_cache.o \
+	$(OBJDIR)/src/core/task/stack_cache_lists.o \
+	$(OBJDIR)/src/core/task/stack_cache_trim.o \
 	$(OBJDIR)/src/core/task/task_stack.o \
 	$(OBJDIR)/src/core/sched/reinject.o \
 	$(OBJDIR)/src/core/wait/wait_accounting.o \
+	$(OBJDIR)/src/core/wait/wait_deadline.o \
+	$(OBJDIR)/src/core/wait/wait_io_abort.o \
+	$(OBJDIR)/src/core/wait/wait_owner.o \
 	$(OBJDIR)/src/core/wait/wait_tracking.o \
 	$(OBJDIR)/src/core/time/timer_heap.o \
 	$(OBJDIR)/src/core/time/timer.o \
@@ -295,12 +432,14 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/engine/watchdog/watchdog_scale.o \
 	$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
 	$(OBJDIR)/src/engine/watchdog/watchdog_autotune.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_autotune_config.o \
 	$(OBJDIR)/src/core/api/core_api.o \
 	$(OBJDIR)/src/core/task/spawn.o \
 	$(OBJDIR)/src/core/task/yield_join_sleep.o \
 	$(OBJDIR)/src/core/api/blocking_api.o \
 	$(OBJDIR)/src/core/api/cancel_api.o \
 	$(OBJDIR)/src/core/lifecycle/lifecycle.o \
+	$(OBJDIR)/src/core/sched/scheduler_thread.o \
 	$(OBJDIR)/src/core/sched/scheduler.o \
 	$(OBJDIR)/src/core/lifecycle/init.o \
 	$(OBJDIR)/src/core/lifecycle/shutdown.o \
@@ -322,10 +461,14 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/task/task_group.o \
 	$(OBJDIR)/src/core/task/task_group_registry.o \
 	$(OBJDIR)/src/core/task/task_local.o \
+	$(OBJDIR)/src/core/task/task_context.o \
 	$(OBJDIR)/src/io/api/io_api.o \
 	$(OBJDIR)/src/io/api/direct.o \
 	$(OBJDIR)/src/io/api/direct_tuning.o \
 	$(OBJDIR)/src/io/api/issue.o \
+	$(OBJDIR)/src/io/api/task_bootstrap.o \
+	$(OBJDIR)/src/io/api/issue_wait.o \
+	$(OBJDIR)/src/io/api/issue_watch.o \
 	$(OBJDIR)/src/io/api/blocking_ops.o \
 	$(OBJDIR)/src/io/api/blocking_file_ops.o \
 	$(OBJDIR)/src/io/api/blocking_wrappers.o \
@@ -339,6 +482,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/windows/watch/iocp.o \
 	$(OBJDIR)/src/core/debug/debug_dump_helpers.o \
 	$(OBJDIR)/src/core/debug/debug_stats_json.o \
+	$(OBJDIR)/src/core/debug/debug_stack_cache.o \
 	$(OBJDIR)/src/core/debug/debug.o \
 	$(OBJDIR)/src/io/watch/watch.o \
 	$(OBJDIR)/src/io/watch/close.o \
@@ -347,14 +491,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/watch/watch_queue.o \
 	$(OBJDIR)/src/io/watch/waiter.o
 
-ifeq ($(HOST_PLATFORM),linux)
-LDLIBS += -lm
-LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 struct io_uring_buf_ring *\050*p\051\050struct io_uring *, unsigned int, int, unsigned int, int *\051 = io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
-ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
-CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
-endif
-RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-RUNTIME_OBJS += \
+RUNTIME_LINUX_OBJS = \
 	$(OBJDIR)/src/io/linux/watch/prelude.o \
 	$(OBJDIR)/src/io/linux/watch/linux_state.o \
 	$(OBJDIR)/src/io/linux/watch/linux_lookup.o \
@@ -364,20 +501,7 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/linux/watch/linux_submit.o \
 	$(OBJDIR)/src/io/linux/watch/cqe.o \
 	$(OBJDIR)/src/io/linux/watch/linux_worker.o
-ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o \
-	$(OBJDIR)/src/asm/linux/x86_64/wake_syscalls_x86_64.o
-else ifeq ($(UNAME_M),aarch64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
-endif
-else ifeq ($(HOST_PLATFORM),darwin)
-RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-LDLIBS := $(filter-out -luring,$(LDLIBS))
-CPPFLAGS += -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE
-RUNTIME_OBJS += \
+RUNTIME_KQUEUE_OBJS = \
 	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
 	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
 	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
@@ -385,17 +509,7 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
 	$(OBJDIR)/src/io/darwin/watch/events.o \
 	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
-ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += $(OBJDIR)/src/core/context/context_arm64.o
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/darwin_context_arm64.o
-else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/darwin_context_x86_64.o
-endif
-else ifeq ($(HOST_PLATFORM),windows)
-RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
-CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
-RUNTIME_OBJS += \
+RUNTIME_WINDOWS_OBJS = \
 	$(OBJDIR)/src/io/windows/watch/windows_state.o \
 	$(OBJDIR)/src/io/windows/watch/socket.o \
 	$(OBJDIR)/src/io/windows/watch/pool.o \
@@ -404,10 +518,72 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/windows/watch/windows_completion.o \
 	$(OBJDIR)/src/io/windows/watch/fallback.o \
 	$(OBJDIR)/src/io/windows/watch/windows_watch.o
-ifeq ($(UNAME_M),AMD64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
+RUNTIME_CONTEXT_ARM64_OBJS = \
+	$(OBJDIR)/src/core/context/context_arm64.o
+RUNTIME_LINUX_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_LINUX_X86_64_WAKE_OBJS = \
+	$(OBJDIR)/src/asm/linux/x86_64/wake_syscalls_x86_64.o
+RUNTIME_LINUX_ARM64_OBJS = \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+RUNTIME_DARWIN_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/darwin/x86_64/darwin_context_x86_64.o
+RUNTIME_DARWIN_ARM64_OBJS = \
+	$(OBJDIR)/src/asm/darwin/arm64/darwin_context_arm64.o
+RUNTIME_WINDOWS_GNU_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
+# Native Make uses the GNU assembler on Windows. This audited-but-unused
+# projection keeps the complete MSVC/MASM source set visible for parity.
+RUNTIME_WINDOWS_MSVC_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+RESEARCH_RUNTIME_LINUX_OBJS = \
+	$(OBJDIR)/src/io/linux/research_ring_profile.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_complete.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_queue.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_reducer.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_submit.o
+
+ifeq ($(HOST_PLATFORM),linux)
+LDLIBS += -lm
+LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 struct io_uring_buf_ring *\050*p\051\050struct io_uring *, unsigned int, int, unsigned int, int *\051 = io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
+CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
+endif
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_OBJS)
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+RUNTIME_OBJS += $(RESEARCH_RUNTIME_LINUX_OBJS)
+endif
+ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_WAKE_OBJS)
+else ifeq ($(UNAME_M),aarch64)
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
+endif
+else ifeq ($(HOST_PLATFORM),darwin)
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+LDLIBS := $(filter-out -luring,$(LDLIBS))
+CPPFLAGS += -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE
+RUNTIME_OBJS += $(RUNTIME_KQUEUE_OBJS)
+ifeq ($(UNAME_M),arm64)
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_DARWIN_ARM64_OBJS)
 else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
+RUNTIME_OBJS += $(RUNTIME_DARWIN_X86_64_OBJS)
+endif
+else ifeq ($(HOST_PLATFORM),windows)
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
+CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
+RUNTIME_OBJS += $(RUNTIME_WINDOWS_OBJS)
+ifeq ($(UNAME_M),AMD64)
+RUNTIME_OBJS += $(RUNTIME_WINDOWS_GNU_X86_64_OBJS)
+else ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(RUNTIME_WINDOWS_GNU_X86_64_OBJS)
 endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
@@ -417,48 +593,66 @@ SERVER_FLOOD_LDLIBS += -lm
 ifeq ($(UNAME_S),NetBSD)
 LDLIBS += -lrt
 endif
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/watch/events.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
+RUNTIME_OBJS += $(RUNTIME_KQUEUE_OBJS)
 ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_OBJS)
 else ifeq ($(UNAME_M),amd64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_OBJS)
 else ifeq ($(UNAME_M),aarch64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
 else ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
 endif
 endif
 endif
+override LDLIBS := $(LLAM_HARDENING_LINK_FLAGS) $(LDLIBS)
+override SERVER_FLOOD_LDLIBS := $(LLAM_HARDENING_LINK_FLAGS) $(SERVER_FLOOD_LDLIBS)
+override SHARED_LOAD_LDLIBS := $(LLAM_HARDENING_LINK_FLAGS) $(SHARED_LOAD_LDLIBS)
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
+	$(TESTHOOK_OBJDIR)/src/core/lifecycle/init.o \
+	$(TESTHOOK_OBJDIR)/src/core/lifecycle/run.o \
+	$(TESTHOOK_OBJDIR)/src/core/memory/alloc.o \
+	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
+	$(TESTHOOK_OBJDIR)/src/core/platform/stack_vm.o \
+	$(TESTHOOK_OBJDIR)/src/core/task/stack_cache.o \
+	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
+	$(TESTHOOK_OBJDIR)/src/engine/scheduler/block.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
-	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
+	$(TESTHOOK_OBJDIR)/src/io/api/blocking_ops.o \
+	$(TESTHOOK_OBJDIR)/src/io/api/blocking_wrappers.o \
+	$(TESTHOOK_OBJDIR)/src/io/api/issue_wait.o \
+	$(TESTHOOK_OBJDIR)/src/io/api/public.o \
+	$(TESTHOOK_OBJDIR)/src/io/watch/close.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
+		$(OBJDIR)/src/core/lifecycle/init.o \
+		$(OBJDIR)/src/core/lifecycle/run.o \
+		$(OBJDIR)/src/core/memory/alloc.o \
+		$(OBJDIR)/src/core/platform/platform.o \
+		$(OBJDIR)/src/core/platform/stack_vm.o \
+		$(OBJDIR)/src/core/task/stack_cache.o \
+		$(OBJDIR)/src/core/sched/norm_queue.o \
+		$(OBJDIR)/src/engine/scheduler/block.o \
 		$(OBJDIR)/src/core/registry/capability.o \
 		$(OBJDIR)/src/core/broker/broker_buffer.o \
 		$(OBJDIR)/src/core/broker/transport/broker_transport.o \
 		$(OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
 		$(OBJDIR)/src/core/registry/registry.o \
 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
-		$(OBJDIR)/src/io/api/issue.o \
+		$(OBJDIR)/src/io/api/blocking_ops.o \
+		$(OBJDIR)/src/io/api/blocking_wrappers.o \
+		$(OBJDIR)/src/io/api/issue_wait.o \
+		$(OBJDIR)/src/io/api/public.o \
+		$(OBJDIR)/src/io/watch/close.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
@@ -523,6 +717,8 @@ TEST_RUNTIME_INVARIANTS_OBJS = \
 	$(OBJDIR)/tests/test_runtime_invariants.o
 TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_runtime_shutdown_internal.o
+TEST_NORM_QUEUE_WRAP_OBJS = \
+	$(OBJDIR)/tests/test_norm_queue_wrap.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -541,17 +737,85 @@ TEST_WINDOWS_HANDLE_IO_OBJS = \
 	$(OBJDIR)/tests/test_windows_handle_io.o
 TEST_SECURITY_CAPABILITY_OBJS = \
 	$(OBJDIR)/tests/test_security_capability.o
+TEST_ASAN_FIBER_POSITIVE_OBJS = \
+	$(OBJDIR)/tests/test_asan_fiber_positive.o
+TEST_TSAN_FIBER_POSITIVE_OBJS = \
+	$(OBJDIR)/tests/test_tsan_fiber_positive.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 LEIR_PHASE0_CORE_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_bindings.o \
 	$(OBJDIR)/experiments/leir/leir_engine.o \
 	$(OBJDIR)/experiments/leir/leir_peer_process.o \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_test_support.o
 LEIR_PHASE0_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_phase0.o
+LEIR_CONNECT_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/test_leir_connect.o
 LEIR_PHASE0_BENCH_OBJS = \
 	$(OBJDIR)/experiments/leir/bench_leir_phase0.o
+LEIR_AOT_PLAN_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_aot_plan.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_plan.o
+LEIR_AOT_MODULE_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_module.o
+LEIR_AOT_C_CONSUMER_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/fixtures/leir_aot_c_consumer.o
+LEIR_AOT_INTEGRATION_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_integration.o
+LEIR_AOT_LINUX_UNIT_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_linux_unit.o
+LEIR_AOT_OWNERSHIP_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_native_test_fixture.o \
+	$(OBJDIR)/experiments/leir/test_leir_aot_ownership.o
+LEIR_AOT_RING_PROFILE_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/test_leir_aot_ring_profile.o
+LEIR_AOT_CONNECT_BENCH_OBJS = \
+	$(OBJDIR)/experiments/leir/generated/leir_aot_connect_write.o \
+	$(OBJDIR)/experiments/leir/leir_aot_linux.o \
+	$(OBJDIR)/experiments/leir/leir_aot_connect_bench_support.o \
+	$(OBJDIR)/experiments/leir/leir_bindings.o \
+	$(OBJDIR)/experiments/leir/leir_engine.o \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/bench_leir_aot_connect.o
+LEIR_NATIVE_PLAN_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_native_plan.o \
+	$(OBJDIR)/experiments/leir/test_leir_native_plan.o
+LEIR_NATIVE_SEGMENT_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_native_plan.o \
+	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_native_linux_state.o \
+	$(OBJDIR)/experiments/leir/leir_test_support.o \
+	$(OBJDIR)/experiments/leir/test_leir_native_fixture.o \
+	$(OBJDIR)/experiments/leir/test_leir_native_segment.o
+LEIR_NATIVE_LINUX_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_native_test_fixture.o \
+	$(OBJDIR)/experiments/leir/test_leir_native_linux.o
+LEIR_NATIVE_BENCH_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_native_plan.o \
+	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_native_linux_state.o \
+	$(OBJDIR)/experiments/leir/leir_peer_process.o \
+	$(OBJDIR)/experiments/leir/leir_test_support.o \
+	$(OBJDIR)/experiments/leir/bench_leir_native_segment.o
+LEIR_NATIVE_PIPELINE_BENCH_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_native_plan.o \
+	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_native_linux_state.o \
+	$(OBJDIR)/experiments/leir/leir_peer_process.o \
+	$(OBJDIR)/experiments/leir/leir_test_support.o \
+	$(OBJDIR)/experiments/leir/bench_leir_native_pipeline.o
 LCWE_MODEL_CORE_OBJS = \
 	$(OBJDIR)/experiments/lcwe/lcwe_model.o \
 	$(OBJDIR)/experiments/lcwe/lcwe_workloads.o
@@ -575,6 +839,96 @@ SREM_MODEL_TEST_OBJS = \
 	$(OBJDIR)/experiments/srem/test_srem_model.o
 SREM_MODEL_BENCH_OBJS = \
 	$(OBJDIR)/experiments/srem/bench_srem_model.o
+RESEARCH_OBJS = \
+	$(LEIR_PHASE0_CORE_OBJS) \
+	$(LEIR_PHASE0_TEST_OBJS) \
+	$(LEIR_CONNECT_TEST_OBJS) \
+	$(LEIR_PHASE0_BENCH_OBJS) \
+	$(LEIR_AOT_PLAN_TEST_OBJS) \
+	$(LEIR_AOT_MODULE_TEST_OBJS) \
+	$(LEIR_AOT_C_CONSUMER_TEST_OBJS) \
+	$(LEIR_AOT_INTEGRATION_TEST_OBJS) \
+	$(LEIR_AOT_LINUX_UNIT_TEST_OBJS) \
+	$(LEIR_AOT_OWNERSHIP_TEST_OBJS) \
+	$(LEIR_AOT_RING_PROFILE_TEST_OBJS) \
+	$(LEIR_AOT_CONNECT_BENCH_OBJS) \
+	$(LEIR_NATIVE_PLAN_TEST_OBJS) \
+	$(LEIR_NATIVE_SEGMENT_TEST_OBJS) \
+	$(LEIR_NATIVE_LINUX_TEST_OBJS) \
+	$(LEIR_NATIVE_BENCH_OBJS) \
+	$(LEIR_NATIVE_PIPELINE_BENCH_OBJS) \
+	$(LCWE_MODEL_CORE_OBJS) \
+	$(LCWE_MODEL_TEST_OBJS) \
+	$(LCWE_MODEL_BENCH_OBJS) \
+	$(LCCF_MODEL_CORE_OBJS) \
+	$(LCCF_MODEL_TEST_OBJS) \
+	$(LCCF_MODEL_BENCH_OBJS) \
+	$(SREM_MODEL_CORE_OBJS) \
+	$(SREM_MODEL_TEST_OBJS) \
+	$(SREM_MODEL_BENCH_OBJS)
+LEIR_RESEARCH_TARGETS = \
+	test_leir_phase0 \
+	test_leir_connect \
+	test_leir_aot_plan \
+	test_leir_aot_module \
+	test_leir_aot_c_consumer \
+	test_leir_aot_integration \
+	test_leir_aot_linux_unit \
+	test_leir_aot_ownership \
+	test_leir_aot_ring_profile \
+	bench_leir_aot_connect \
+	test_leir_native_plan \
+	test_leir_native_segment \
+	test_leir_native_linux \
+	bench_leir_native_segment \
+	bench_leir_native_pipeline \
+	bench_leir_phase0
+LCWE_RESEARCH_TARGETS = \
+	test_lcwe_model \
+	bench_lcwe_model
+LCCF_RESEARCH_TARGETS = \
+	test_lccf_model \
+	bench_lccf_model
+SREM_RESEARCH_TARGETS = \
+	test_srem_model \
+	bench_srem_model
+RESEARCH_LINK_TARGETS = \
+	$(LEIR_RESEARCH_TARGETS) \
+	$(LCWE_RESEARCH_TARGETS) \
+	$(LCCF_RESEARCH_TARGETS) \
+	$(SREM_RESEARCH_TARGETS)
+RESEARCH_ENTRY_TARGETS = \
+	$(RESEARCH_LINK_TARGETS) \
+	research \
+	research-test \
+	test-leir-phase0 \
+	test-leir-aot-plan \
+	test-leir-aot-module \
+	test-leir-aot-c-consumer \
+	test-leir-aot-integration \
+	test-leir-aot-ring-profile \
+	test-leir-aot-connect-screen \
+	test-leir-native \
+	test-leir-native-plan \
+	test-leir-native-segment \
+	test-leir-native-linux \
+	leir-phase0a-screen \
+	leir-native-screen \
+	test-lcwe-model \
+	lcwe-model-report \
+	test-lccf-model \
+	lccf-model-report \
+	test-srem-model \
+	srem-model-screen \
+	srem-model-report
+ifeq ($(LLAM_BUILD_RESEARCH),0)
+ifneq ($(strip $(filter $(RESEARCH_ENTRY_TARGETS),$(MAKECMDGOALS))),)
+$(error research targets require LLAM_BUILD_RESEARCH=1)
+endif
+ifneq ($(findstring /experiments/,$(MAKECMDGOALS)),)
+$(error research targets require LLAM_BUILD_RESEARCH=1)
+endif
+endif
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 BUILD_OBJS = \
@@ -600,25 +954,43 @@ BUILD_OBJS = \
 	$(TEST_RUNTIME_FUZZ_OBJS) \
 	$(TEST_RUNTIME_INVARIANTS_OBJS) \
 	$(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) \
+	$(TEST_NORM_QUEUE_WRAP_OBJS) \
 	$(TEST_SYNC_OBJS) \
 	$(TEST_IO_BUFFERS_OBJS) \
 	$(TEST_WINDOWS_POLICY_OBJS) \
 	$(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) \
+	$(TEST_WINDOWS_IOCP_IO_OBJS) \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
+	$(TEST_WINDOWS_HANDLE_IO_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
-	$(TEST_SHARED_LOAD_OBJS) \
-	$(LEIR_PHASE0_CORE_OBJS) \
-	$(LEIR_PHASE0_TEST_OBJS) \
-	$(LEIR_PHASE0_BENCH_OBJS) \
-	$(LCWE_MODEL_CORE_OBJS) \
-	$(LCWE_MODEL_TEST_OBJS) \
-	$(LCWE_MODEL_BENCH_OBJS) \
-	$(LCCF_MODEL_CORE_OBJS) \
-	$(LCCF_MODEL_TEST_OBJS) \
-	$(LCCF_MODEL_BENCH_OBJS) \
-	$(SREM_MODEL_CORE_OBJS) \
-	$(SREM_MODEL_TEST_OBJS) \
-	$(SREM_MODEL_BENCH_OBJS)
+	$(TEST_SHARED_LOAD_OBJS)
+PUBLIC_TEST_TARGETS = \
+	test_abi_contract \
+	test_connect_io \
+	test_runtime_group_local_edges \
+	test_runtime_fuzz \
+	test_runtime_invariants \
+	test_runtime_io_dump \
+	test_runtime_select_edges \
+	test_runtime_stress \
+	test_runtime_unmanaged_join \
+	test_sync_primitives \
+	test_windows_iocp_dump \
+	test_windows_runtime_smoke \
+	test_shared_load
+INTERNAL_TEST_TARGETS = \
+	test_abi_compat \
+	test_io_buffers \
+	test_multi_runtime_core \
+	test_runtime_api_edges \
+	test_runtime_core \
+	test_norm_queue_wrap \
+	test_windows_handle_io \
+	test_windows_policy
+TEST_HOOK_TEST_TARGETS = \
+	test_runtime_shutdown_internal \
+	test_security_capability \
+	test_windows_iocp_io
 LINK_TARGETS = \
 	demo \
 	stress \
@@ -627,41 +999,35 @@ LINK_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
-	test_leir_phase0 \
-	bench_leir_phase0 \
-	test_lccf_model \
-	bench_lccf_model \
-	test_srem_model \
-	bench_srem_model \
-	test_lcwe_model \
-	bench_lcwe_model \
-	test_abi_contract \
-	test_abi_compat \
-	test_connect_io \
-	test_runtime_core \
-	test_multi_runtime_core \
-	test_runtime_api_edges \
-	test_runtime_select_edges \
-	test_runtime_io_dump \
-	test_runtime_group_local_edges \
-	test_runtime_unmanaged_join \
-	test_runtime_stress \
-	test_runtime_fuzz \
-	test_runtime_invariants \
-	test_runtime_shutdown_internal \
-	test_sync_primitives \
-	test_io_buffers \
-	test_windows_policy \
-	test_windows_runtime_smoke \
-	test_windows_iocp_io \
-	test_windows_iocp_dump \
-	test_windows_handle_io \
-	test_security_capability \
-	test_shared_load \
+	$(PUBLIC_TEST_TARGETS) \
+	$(INTERNAL_TEST_TARGETS) \
+	$(TEST_HOOK_TEST_TARGETS) \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 leir-phase0a-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+ALL_DEPFILES = \
+	$(BUILD_OBJS:.o=.d) \
+	$(RESEARCH_OBJS:.o=.d) \
+	$(SHARED_RUNTIME_OBJS:.o=.d) \
+	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
+-include $(ALL_DEPFILES)
+
+.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-aot-plan test-leir-aot-module test-leir-aot-c-consumer test-leir-aot-integration test-leir-aot-ring-profile test-leir-aot-connect-screen test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
+
+audit-build-manifests:
+	python3 scripts/audit_build_manifests.py --root . --check
+
+audit-license-headers:
+	python3 -m unittest scripts/test_audit_license_headers.py -v
+	python3 scripts/audit_license_headers.py --root . --check
+
+audit-c-structure:
+	python3 -m unittest scripts/test_audit_c_structure.py -v
+	python3 scripts/audit_c_structure.py --root . --mode ratchet --baseline config/c-structure-baseline.json
+
+audit-context-switch-gateway:
+	python3 -m unittest scripts/test_audit_context_switch_gateway.py -v
+	python3 scripts/audit_context_switch_gateway.py --root . --check
 
 require-sanitizer-target:
 	@if [ "$(SANITIZER_TARGETS_ENABLED)" != "1" ]; then \
@@ -675,7 +1041,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_bench_leir_phase0|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_norm_queue_wrap|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -684,14 +1050,6 @@ WINDOWS_CMAKE_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
-	test_leir_phase0 \
-	bench_leir_phase0 \
-	test_lccf_model \
-	bench_lccf_model \
-	test_srem_model \
-	bench_srem_model \
-	test_lcwe_model \
-	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -726,7 +1084,13 @@ static: windows-cmake-configure
 shared: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime_shared
 
-test check: windows-cmake-test
+test check: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway windows-cmake-test
+
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+research: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $(RESEARCH_LINK_TARGETS)
+
+research-test: test-leir-phase0 test-leir-native test-leir-native-linux test-lcwe-model test-lccf-model test-srem-model
 
 test-lcwe-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lcwe_model bench_lcwe_model
@@ -741,19 +1105,33 @@ test-srem-model: windows-cmake-configure
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_srem_model|test_bench_srem_native|test_bench_srem_model" $(WINDOWS_CTEST_ARGS)
 
 test-leir-phase0: windows-cmake-configure
-	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0 bench_leir_phase0
-	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_bench_leir_phase0" $(WINDOWS_CTEST_ARGS)
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0 test_leir_connect bench_leir_phase0
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_leir_connect|test_bench_leir_phase0" $(WINDOWS_CTEST_ARGS)
+
+test-leir-native: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_plan test_leir_native_segment bench_leir_native_segment bench_leir_native_pipeline
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_plan|test_leir_native_segment|test_bench_leir_native" $(WINDOWS_CTEST_ARGS)
+
+test-leir-native-linux: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_linux test_leir_aot_linux_unit test_leir_aot_ownership
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_linux|test_leir_aot_linux_unit|test_leir_aot_ownership" $(WINDOWS_CTEST_ARGS)
+else
+research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-native test-leir-native-linux:
+	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
+	@exit 2
+endif
 
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
 
 package: windows-cmake-build
+	@if [ "$(LLAM_BUILD_RESEARCH)" != 0 ]; then echo "research-enabled builds cannot be packaged" >&2; exit 2; fi
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release_windows.ps1 -BuildDir "$(WINDOWS_CMAKE_BUILD_DIR)" -Configuration "$(WINDOWS_CMAKE_CONFIG)"
 
 bench-matrix: bench
 	python scripts/bench_matrix.py
 
-audit-shared-exports audit-production-test-hooks lcwe-model-report lccf-model-report srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+audit-shared-exports audit-production-test-hooks leir-native-screen lcwe-model-report lccf-model-report srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -761,7 +1139,7 @@ platform-status:
 	@echo "Makefile Windows targets delegate to CMake. Override WINDOWS_CMAKE_ARGS to select a generator, for example WINDOWS_CMAKE_ARGS='-G Ninja'."
 
 windows-cmake-configure: platform-status
-	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON $(WINDOWS_CMAKE_ARGS)
+	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON -DLLAM_BUILD_RESEARCH=$(if $(filter 1,$(LLAM_BUILD_RESEARCH)),ON,OFF) -DLLAM_HARDENING="$(LLAM_HARDENING)" $(WINDOWS_CMAKE_ARGS)
 
 windows-cmake-build: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)"
@@ -790,7 +1168,9 @@ $(BUILD_SIGNATURE): FORCE
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
 		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
+		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'DEPFLAGS=%s\n' '$(DEPFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'OBJDIR=%s\n' '$(OBJDIR)'; \
 		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
@@ -809,7 +1189,9 @@ $(SHARED_BUILD_SIGNATURE): FORCE
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
 		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
+		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'DEPFLAGS=%s\n' '$(DEPFLAGS)'; \
 		printf 'PICFLAGS=%s\n' '$(PICFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'SHARED_OBJDIR=%s\n' '$(SHARED_OBJDIR)'; \
@@ -828,7 +1210,9 @@ $(TESTHOOK_BUILD_SIGNATURE): FORCE
 	{ \
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1'; \
+		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'DEPFLAGS=%s\n' '$(DEPFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'TESTHOOK_OBJDIR=%s\n' '$(TESTHOOK_OBJDIR)'; \
 		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
@@ -842,11 +1226,15 @@ $(TESTHOOK_BUILD_SIGNATURE): FORCE
 
 $(BUILD_OBJS): $(BUILD_SIGNATURE)
 
+$(RESEARCH_OBJS): $(BUILD_SIGNATURE)
+
 $(SHARED_RUNTIME_OBJS): $(SHARED_BUILD_SIGNATURE)
 
 $(TESTHOOK_RUNTIME_OVERRIDE_OBJS): $(TESTHOOK_BUILD_SIGNATURE)
 
 $(LINK_TARGETS): %: %.link-signature
+
+$(RESEARCH_LINK_TARGETS): %: %.link-signature
 
 $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 
@@ -871,13 +1259,35 @@ $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 		mv "$$tmp" "$@"; \
 	fi
 
+define WRITE_BUILD_PROVENANCE
+	@tmp="$@.llam-build-provenance.$$$$.tmp"; \
+	printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)' > "$$tmp"; \
+	mv "$$tmp" "$@.llam-build-provenance"
+endef
+
 all: demo stress bench llam_broker server server_lossless server_flood static shared
+
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+research: $(RESEARCH_LINK_TARGETS)
+
+research-test: test-leir-phase0 test-leir-aot-plan test-leir-aot-module \
+	test-leir-aot-c-consumer test-leir-aot-integration \
+	test-leir-aot-ring-profile \
+	test-leir-aot-connect-screen \
+	test-leir-native test-leir-native-linux test-lcwe-model \
+	test-lccf-model test-srem-model
+else
+research research-test:
+	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
+	@exit 2
+endif
 
 static: libllam_runtime.a
 
 libllam_runtime.a: $(RUNTIME_OBJS)
 	rm -f $@
 	$(AR) rcs $@ $(RUNTIME_OBJS)
+	$(WRITE_BUILD_PROVENANCE)
 
 shared: $(SHLIB_LINK)
 
@@ -886,22 +1296,16 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static
 	@if command -v nm >/dev/null 2>&1; then \
-		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)|llam_sched_test_set_cldeque_steal_claimed_hook' >/dev/null; then \
 			echo "production static runtime exports test fault-injection hooks" >&2; \
-			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)|llam_sched_test_set_cldeque_steal_claimed_hook' >&2; \
 			exit 1; \
 		fi; \
 	fi
 
-test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lccf_model test_srem_model bench_srem_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
-	./test_leir_phase0
-	./test_lcwe_model
-	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
-	./test_lccf_model
-	LCCF_MODEL_TEST_BINARY=./bench_lccf_model python3 scripts/test_bench_lccf_model.py
-	./test_srem_model
-	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_native.py
-	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_model.py
+test: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_norm_queue_wrap test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+	python3 -m unittest scripts/test_audit_hardening_artifact.py -v
+	python3 scripts/audit_hardening_artifact.py ./$(SHLIB_REAL) --profile $(LLAM_HARDENING)
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -916,6 +1320,7 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	./test_runtime_fuzz
 	./test_runtime_invariants
 	./test_runtime_shutdown_internal
+	./test_norm_queue_wrap
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -1047,9 +1452,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) ln -s libllam_runtime.2.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib" ;; \
 		Linux) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
@@ -1069,9 +1474,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.999.dylib"; \
@@ -1100,20 +1505,20 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.2.dylib"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.1"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.$(LLAM_VERSION)"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		FreeBSD|OpenBSD|NetBSD|DragonFly) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.1"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.$(LLAM_VERSION)"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		*) echo "unsupported installer regular lib-link smoke host" >&2; exit 1 ;; \
@@ -1131,16 +1536,16 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.2.1-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '$(LLAM_VERSION)-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.2.1\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
-	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.1"; \
-	ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
+	printf '$(LLAM_VERSION)\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.$(LLAM_VERSION)"; \
+	ln -s libllam_runtime.so.$(LLAM_VERSION) "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 	ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 	sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; \
 	test -L "$$tmp_dir/prefix/lib/libllam_runtime.so"; \
-	grep '^2.2.1-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
-	grep '^2.2.1$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
+	grep -Fqx '$(LLAM_VERSION)-rc.1' "$$tmp_dir/prefix/share/llam/VERSION"; \
+	grep -Fqx '$(LLAM_VERSION)' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION"
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-package-output-symlink.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	case "$$(uname -s)-$$(uname -m)" in \
@@ -1160,6 +1565,8 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
@@ -1178,10 +1585,10 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.$(LLAM_VERSION)"; ln -s libllam_runtime.so.$(LLAM_VERSION) "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	ln -s "$$tmp_dir/outside" "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release output path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1206,8 +1613,10 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted a non-directory release output path component" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1232,6 +1641,8 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
@@ -1250,10 +1661,10 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.$(LLAM_VERSION)"; ln -s libllam_runtime.so.$(LLAM_VERSION) "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	chmod 666 "$$tmp_dir/repo/README.md"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unsafe release stage mode" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1278,6 +1689,8 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
@@ -1297,9 +1710,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	ln -s "$$tmp_dir/outside/README.md" "$$tmp_dir/repo/README.md"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.$(LLAM_VERSION)"; ln -s libllam_runtime.so.$(LLAM_VERSION) "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release input path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1324,6 +1737,8 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
@@ -1345,9 +1760,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	ln "$$tmp_dir/outside-runtime.h" "$$tmp_dir/repo/include/llam/runtime.h"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.$(LLAM_VERSION)"; ln -s libllam_runtime.so.$(LLAM_VERSION) "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh copied a hard-linked release input file" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1372,6 +1787,8 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
@@ -1390,9 +1807,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; ln -s libllam_runtime.so.2.2.1 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.$(LLAM_VERSION)"; ln -s libllam_runtime.so.$(LLAM_VERSION) "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unexpected library symlink target" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1417,6 +1834,8 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.$(LLAM_VERSION); do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
@@ -1436,9 +1855,9 @@ test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lc
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; : > "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.1"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.$(LLAM_VERSION)"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.1 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=$(LLAM_VERSION) LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted non-symlink shared-library link artifacts" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1914,6 +2333,8 @@ ASAN_TEST_TARGETS = \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability
 
+ASAN_POSITIVE_TARGET = asan-test_fiber_positive
+
 NOOWNER_TEST_TARGETS = \
 	noowner-test_runtime_select_edges
 
@@ -1923,6 +2344,8 @@ TSAN_TEST_TARGETS = \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
+
+TSAN_POSITIVE_TARGET = tsan-test_fiber_positive
 
 FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 2048
 FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 512
@@ -1935,31 +2358,72 @@ RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS ?= 64
 test-asan:
 	@set -e; \
 	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
-		$(MAKE) $(ASAN_TEST_TARGETS) \
+		$(MAKE) $(ASAN_TEST_TARGETS) $(ASAN_POSITIVE_TARGET) \
 			OBJDIR=object-asan \
 			SANITIZER_TARGETS_ENABLED=1 \
 			CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 			LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
 		exit 0; \
 	fi; \
-	cleanup() { rm -f $(ASAN_TEST_TARGETS); }; \
+	asan_log="$$(mktemp "$${TMPDIR:-/tmp}/llam-asan-test.XXXXXX.log")"; \
+	cleanup() { rm -f $(ASAN_TEST_TARGETS) $(ASAN_POSITIVE_TARGET) "$$asan_log"; }; \
+	run_asan() { \
+		: >"$$asan_log"; \
+		set +e; \
+		"$$@" >"$$asan_log" 2>&1; \
+		asan_status=$$?; \
+		set -e; \
+		cat "$$asan_log"; \
+		if grep -F 'ASan is ignoring requested __asan_handle_no_return' \
+				"$$asan_log" >/dev/null; then \
+			echo "error: ASan fiber-switch instrumentation is incomplete" >&2; \
+			return 1; \
+		fi; \
+		if grep -F 'ERROR: finishing a fiber switch that has not started' \
+				"$$asan_log" >/dev/null; then \
+			echo "error: ASan observed an unbalanced fiber switch" >&2; \
+			return 1; \
+		fi; \
+		return "$$asan_status"; \
+	}; \
 	trap cleanup EXIT; \
 	cleanup; \
-	$(MAKE) $(ASAN_TEST_TARGETS) \
+	$(MAKE) $(ASAN_TEST_TARGETS) $(ASAN_POSITIVE_TARGET) \
 		OBJDIR=object-asan \
 		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_api_edges; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_core; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
-	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
-		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_api_edges; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_core; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_io_buffers; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_shutdown_internal; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_multi_runtime_core; \
+	run_asan env LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_fuzz; \
 	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
-	LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
-		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
+	run_asan env LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_security_capability; \
+	: >"$$asan_log"; \
+	set +e; \
+	ASAN_OPTIONS=halt_on_error=1 \
+		UBSAN_OPTIONS=halt_on_error=1 \
+		./$(ASAN_POSITIVE_TARGET) >"$$asan_log" 2>&1; \
+	asan_status=$$?; \
+	set -e; \
+	cat "$$asan_log"; \
+	if [ "$$asan_status" -eq 0 ] || \
+			! grep -F 'AddressSanitizer: stack-buffer-overflow' \
+				"$$asan_log" >/dev/null; then \
+		echo "error: ASan fiber positive control did not detect the task-stack overflow" >&2; \
+		exit 1; \
+	fi
 
 test-no-owner:
 	@set -e; \
@@ -1980,23 +2444,29 @@ test-no-owner:
 test-tsan:
 	@set -e; \
 	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
-		$(MAKE) $(TSAN_TEST_TARGETS) \
+		$(MAKE) $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET) \
 			OBJDIR=object-tsan \
 			SANITIZER_TARGETS_ENABLED=1 \
 			CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
 			LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 		exit 0; \
 	fi; \
-	cleanup() { rm -f $(TSAN_TEST_TARGETS); }; \
+	cleanup() { rm -f $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET); }; \
 	trap cleanup EXIT; \
 	cleanup; \
 	tsan_cflags="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread"; \
 	tsan_probe="$$(mktemp "$${TMPDIR:-/tmp}/llam-tsan-probe.XXXXXX.o")"; \
-	if printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags -Wno-error=tsan -x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
+	if printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags \
+			-Werror=unknown-warning-option -Wno-error=tsan \
+			-x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
+		tsan_cflags="$$tsan_cflags -Wno-error=tsan"; \
+	elif printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags \
+			-Wno-error=tsan \
+			-x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
 		tsan_cflags="$$tsan_cflags -Wno-error=tsan"; \
 	fi; \
 	rm -f "$$tsan_probe"; \
-	$(MAKE) $(TSAN_TEST_TARGETS) \
+	$(MAKE) $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET) \
 		OBJDIR=object-tsan \
 		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="$$tsan_cflags" \
@@ -2006,7 +2476,21 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
-	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability; \
+	tsan_log="$$(mktemp "$${TMPDIR:-/tmp}/llam-tsan-positive.XXXXXX.log")"; \
+	set +e; \
+	TSAN_OPTIONS=halt_on_error=1 ./$(TSAN_POSITIVE_TARGET) >"$$tsan_log" 2>&1; \
+	tsan_status=$$?; \
+	set -e; \
+	cat "$$tsan_log"; \
+	if [ "$$tsan_status" -eq 0 ] || \
+			! grep -F 'WARNING: ThreadSanitizer: data race' "$$tsan_log" >/dev/null || \
+			! grep -F 'race_from_distinct_fiber' "$$tsan_log" >/dev/null; then \
+		rm -f "$$tsan_log"; \
+		echo "error: TSan fiber positive control did not detect the task race" >&2; \
+		exit 1; \
+	fi; \
+	rm -f "$$tsan_log"
 
 analyze-cppcheck:
 	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
@@ -2035,8 +2519,9 @@ test-srem-model: test_srem_model bench_srem_model
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_native.py
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_model.py
 
-test-leir-phase0: test_leir_phase0 bench_leir_phase0
+test-leir-phase0: test_leir_phase0 test_leir_connect bench_leir_phase0
 	./test_leir_phase0
+	./test_leir_connect
 	./bench_leir_phase0 \
 		--workload socket_relay \
 		--nodes 4 \
@@ -2049,6 +2534,47 @@ test-leir-phase0: test_leir_phase0 bench_leir_phase0
 	LEIR_PHASE0_TEST_BINARY=./bench_leir_phase0 \
 		python3 -m unittest scripts/test_bench_leir_phase0.py -v
 
+test-leir-aot-plan: test_leir_aot_plan
+	./test_leir_aot_plan
+
+test-leir-aot-module: test_leir_aot_module
+	./test_leir_aot_module
+	python3 -m unittest scripts/test_gen_leir_aot_fixture.py -v
+
+test-leir-aot-c-consumer: test_leir_aot_c_consumer
+	./test_leir_aot_c_consumer
+
+test-leir-aot-integration: test_leir_aot_integration
+	./test_leir_aot_integration
+
+test-leir-aot-ring-profile: test_leir_aot_ring_profile
+	@./test_leir_aot_ring_profile; \
+	rc=$$?; \
+	if test "$$rc" -ne 0 && test "$$rc" -ne 77; then exit "$$rc"; fi
+
+test-leir-aot-connect-screen: bench_leir_aot_connect
+	python3 -m unittest scripts/test_bench_leir_aot_connect.py -v
+
+test-leir-native-plan: test_leir_native_plan
+	./test_leir_native_plan
+
+test-leir-native-segment: test_leir_native_segment
+	./test_leir_native_segment
+
+test-leir-native-linux: test_leir_native_linux test_leir_aot_linux_unit test_leir_aot_ownership
+	./test_leir_native_linux --unit-only
+	./test_leir_aot_linux_unit
+	./test_leir_aot_ownership
+
+test-leir-native: test_leir_native_plan test_leir_native_segment bench_leir_native_segment bench_leir_native_pipeline
+	./test_leir_native_plan
+	./test_leir_native_segment
+	LEIR_NATIVE_TEST_BINARY=./bench_leir_native_segment \
+		python3 -m unittest scripts/test_bench_leir_native.py -v
+	LEIR_NATIVE_PIPELINE_TEST_BINARY=./bench_leir_native_pipeline \
+		python3 -m unittest \
+			scripts/test_bench_leir_native_pipeline.py -v
+
 leir-phase0a-screen: test-leir-phase0
 	python3 scripts/bench_leir_phase0.py \
 		--binary ./bench_leir_phase0 \
@@ -2058,6 +2584,14 @@ leir-phase0a-screen: test-leir-phase0
 		--output-dir object/leir-phase0a-screen \
 		--tracked-report \
 			docs/research/reports/2026-07-27-leir-phase0a-results.md
+
+leir-native-screen: test-leir-native
+	python3 scripts/bench_leir_native.py \
+		--binary ./bench_leir_native_segment \
+		--phase screen \
+		--samples 5 \
+		--min-mode-ms 100 \
+		--output-dir object/leir-native-screen
 
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
@@ -2123,6 +2657,10 @@ test-process-utils:
 	python3 scripts/test_stress_server_logic.py
 	python3 scripts/test_c_env_helpers.py
 
+test-ci-supply-chain:
+	python3 -m unittest scripts/test_check_ci_supply_chain.py -v
+	python3 scripts/check_ci_supply_chain.py
+
 test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress test_runtime_shutdown_internal test_io_buffers
 	python3 scripts/runtime_soak.py \
 		--duration $(RUNTIME_SOAK_SECONDS) \
@@ -2131,7 +2669,7 @@ test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress
 		--fuzz-scenarios $(RUNTIME_SOAK_FUZZ_SCENARIOS) \
 		--multi-fuzz-scenarios $(RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS)
 
-test-hardening: analyze-cppcheck audit-deps test-process-utils test-asan test-tsan test-fuzz-heavy
+test-hardening: analyze-cppcheck audit-deps test-process-utils test-ci-supply-chain test-asan test-tsan test-fuzz-heavy
 
 test-quick: test server-stress-composite-quick
 
@@ -2145,6 +2683,7 @@ $(SHLIB_LINK): $(SHLIB_REAL)
 
 $(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)
 	$(CC) $(CFLAGS) $(SHLIB_LDFLAGS) -o $@ $(SHARED_RUNTIME_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 else
 $(SHLIB_LINK): $(SHLIB_SONAME)
 	ln -sf $(SHLIB_SONAME) $(SHLIB_LINK)
@@ -2154,28 +2693,35 @@ $(SHLIB_SONAME): $(SHLIB_REAL)
 
 $(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)
 	$(CC) $(CFLAGS) $(SHLIB_LDFLAGS) -o $@ $(SHARED_RUNTIME_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 endif
 
 demo: $(RUNTIME_OBJS) $(DEMO_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(DEMO_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 stress: $(RUNTIME_OBJS) $(STRESS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(STRESS_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BENCH_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 llam_broker: $(RUNTIME_OBJS) $(BROKER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BROKER_OBJS) $(LDLIBS)
 
 server: $(RUNTIME_OBJS) $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 server_lossless: $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 server_flood: $(SERVER_FLOOD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) $(SERVER_FLOOD_LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 test_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
@@ -2197,6 +2743,48 @@ bench_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS)
 
 test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
+
+test_leir_connect: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_CONNECT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_CONNECT_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_plan: $(RUNTIME_OBJS) $(LEIR_AOT_PLAN_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_PLAN_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_module: $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_MODULE_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_c_consumer: $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LEIR_AOT_C_CONSUMER_TEST_OBJS)
+
+test_leir_aot_integration: $(RUNTIME_OBJS) $(LEIR_AOT_INTEGRATION_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_INTEGRATION_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_linux_unit: $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_LINUX_UNIT_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_ownership: $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_OWNERSHIP_TEST_OBJS) $(LDLIBS)
+
+test_leir_aot_ring_profile: $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_RING_PROFILE_TEST_OBJS) $(LDLIBS)
+
+bench_leir_aot_connect: $(RUNTIME_OBJS) $(LEIR_AOT_CONNECT_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_AOT_CONNECT_BENCH_OBJS) $(LDLIBS)
+
+test_leir_native_plan: $(RUNTIME_OBJS) $(LEIR_NATIVE_PLAN_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_PLAN_TEST_OBJS) $(LDLIBS)
+
+test_leir_native_segment: $(RUNTIME_OBJS) $(LEIR_NATIVE_SEGMENT_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_SEGMENT_TEST_OBJS) $(LDLIBS)
+
+test_leir_native_linux: $(RUNTIME_OBJS) $(LEIR_NATIVE_LINUX_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_LINUX_TEST_OBJS) $(LDLIBS)
+
+bench_leir_native_segment: $(RUNTIME_OBJS) $(LEIR_NATIVE_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_BENCH_OBJS) $(LDLIBS)
+
+bench_leir_native_pipeline: $(RUNTIME_OBJS) $(LEIR_NATIVE_PIPELINE_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_PIPELINE_BENCH_OBJS) $(LDLIBS)
 
 bench_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_BENCH_OBJS) $(LDLIBS)
@@ -2243,6 +2831,9 @@ test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
 test_runtime_shutdown_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
+test_norm_queue_wrap: $(RUNTIME_OBJS) $(TEST_NORM_QUEUE_WRAP_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_NORM_QUEUE_WRAP_OBJS) $(LDLIBS)
+
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
 
@@ -2273,14 +2864,20 @@ asan-test_runtime_fuzz tsan-test_runtime_fuzz: require-sanitizer-target $(RUNTIM
 asan-test_security_capability tsan-test_security_capability: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
+asan-test_fiber_positive: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_ASAN_FIBER_POSITIVE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ASAN_FIBER_POSITIVE_OBJS) $(LDLIBS)
+
+tsan-test_fiber_positive: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_TSAN_FIBER_POSITIVE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_TSAN_FIBER_POSITIVE_OBJS) $(LDLIBS)
+
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
 
 test_windows_runtime_smoke: $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) $(LDLIBS)
 
-test_windows_iocp_io: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS) $(LDLIBS)
+test_windows_iocp_io: $(RUNTIME_TESTHOOK_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS) $(LDLIBS)
 
 test_windows_iocp_dump: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS) $(LDLIBS)
@@ -2292,79 +2889,82 @@ test_security_capability: $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OB
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS) $(SHARED_LOAD_LDLIBS)
 
 $(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
 		experiments/lcwe/lcwe_model.h \
 		experiments/lcwe/lcwe_model_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/experiments/lccf/%.o: experiments/lccf/%.c \
 		experiments/lccf/lccf_model.h \
 		experiments/lccf/lccf_model_internal.h \
 		experiments/lccf/lccf_platform.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lccf -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lccf $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/experiments/srem/%.o: experiments/srem/%.c \
 		experiments/srem/srem_model.h \
 		experiments/srem/srem_model_internal.h \
 		experiments/srem/srem_platform.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/srem -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/srem $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
 		$(RUNTIME_PRIV_HDRS) \
 		experiments/leir/leir_phase0.h \
 		experiments/leir/leir_phase0_internal.h \
+		experiments/leir/leir_native_plan.h \
+		experiments/leir/leir_native_segment.h \
+		experiments/leir/leir_peer_process.h \
 		experiments/leir/leir_test_support.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
@@ -2372,150 +2972,156 @@ $(SHARED_OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
 $(OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo.o: examples/demo.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo_tasks.o: examples/demo_tasks.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo_entry.o: examples/demo_entry.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress.o: examples/stress.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h examples/diagnostic_output.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/diagnostic_output.o: examples/diagnostic_output.c examples/diagnostic_output.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_support.o: examples/stress_support.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_tasks.o: examples/stress_tasks.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_core_cases.o: examples/stress_core_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_timeout_cases.o: examples/stress_timeout_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_dynamic_cases.o: examples/stress_dynamic_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_suite.o: examples/stress_suite.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_entry.o: examples/stress_entry.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_signal_dump.o: examples/stress_signal_dump.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h examples/diagnostic_output.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/bench.o: examples/bench.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/bench_support.o: examples/bench_support.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/broker.o: examples/broker.c $(LLAM_PUBLIC_HDRS) $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_lossless.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_CHAT_LOSSLESS_DEFAULT=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_CHAT_LOSSLESS_DEFAULT=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_support.o: examples/server_support.c examples/server_support.h examples/diagnostic_output.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_flood.o: examples/server_flood.c examples/server_flood_stats.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/server_flood_stats.h examples/server_flood_stats_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_flood_stats_open.o: examples/server_flood_stats_open.c examples/server_flood_stats_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # Some tests intentionally include private runtime headers to validate teardown,
 # ownership, and backend invariants. Rebuild all test objects on private layout
 # changes so internal tests cannot link against a stale object view of structs.
 $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_autotune_domain_cases.inc tests/test_task_context_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_multi_runtime_core.o: tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_host_process_cases.inc tests/test_runtime_handle_generation_cases.inc tests/test_signal_policy_cases.inc
 
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_handoff_policy_cases.inc tests/test_hard_affinity_cases.inc tests/test_signal_stack_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 clean:
 	rm -rf $(CLEAN_DIRS)
@@ -2527,6 +3133,7 @@ clean:
 	done
 
 package: all test
+	@if [ "$(LLAM_BUILD_RESEARCH)" != 0 ]; then echo "research-enabled builds cannot be packaged" >&2; exit 2; fi
 	./scripts/package_release.sh
 
 bench-matrix: bench

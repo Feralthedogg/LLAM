@@ -37,6 +37,11 @@ static int llam_stats_json_u64(int fd, const char *name, uint64_t value, unsigne
 typedef struct llam_autotune_json_snapshot {
     unsigned mode;
     unsigned phase;
+    uint64_t recognized_domains;
+    uint64_t observable_domains;
+    uint64_t controllable_domains;
+    uint64_t active_observation_domains;
+    uint64_t active_control_domains;
     uint64_t supported_domains;
     uint64_t active_domains;
     uint64_t suspended_domains;
@@ -131,6 +136,16 @@ static void llam_autotune_json_snapshot_read(llam_runtime_t *rt, llam_autotune_j
 
             snapshot->mode = atomic_load_explicit(&tune->mode, memory_order_acquire);
             snapshot->phase = atomic_load_explicit(&tune->phase, memory_order_acquire);
+            snapshot->recognized_domains = atomic_load_explicit(
+                &tune->recognized_domains, memory_order_acquire);
+            snapshot->observable_domains = atomic_load_explicit(
+                &tune->observable_domains, memory_order_acquire);
+            snapshot->controllable_domains = atomic_load_explicit(
+                &tune->controllable_domains, memory_order_acquire);
+            snapshot->active_observation_domains = atomic_load_explicit(
+                &tune->active_observation_domains, memory_order_acquire);
+            snapshot->active_control_domains = atomic_load_explicit(
+                &tune->active_control_domains, memory_order_acquire);
             snapshot->supported_domains = atomic_load_explicit(&tune->supported_domains, memory_order_acquire);
             snapshot->active_domains = atomic_load_explicit(&tune->active_domains, memory_order_acquire);
             snapshot->suspended_domains = atomic_load_explicit(&tune->suspended_domains, memory_order_acquire);
@@ -206,6 +221,11 @@ static int llam_stats_json_autotune(int fd, llam_runtime_t *rt, unsigned *field_
                  "%s\"autotune\":{"
                  "\"mode\":\"%s\","
                  "\"phase\":\"%s\","
+                 "\"recognized_domains\":%llu,"
+                 "\"observable_domains\":%llu,"
+                 "\"controllable_domains\":%llu,"
+                 "\"active_observation_domains\":%llu,"
+                 "\"active_control_domains\":%llu,"
                  "\"supported_domains\":%llu,"
                  "\"active_domains\":%llu,"
                  "\"suspended_domains\":%llu,"
@@ -248,6 +268,11 @@ static int llam_stats_json_autotune(int fd, llam_runtime_t *rt, unsigned *field_
                  *field_count == 0U ? "" : ",",
                  llam_autotune_mode_name(snapshot.mode),
                  llam_autotune_phase_name(snapshot.phase),
+                 (unsigned long long)snapshot.recognized_domains,
+                 (unsigned long long)snapshot.observable_domains,
+                 (unsigned long long)snapshot.controllable_domains,
+                 (unsigned long long)snapshot.active_observation_domains,
+                 (unsigned long long)snapshot.active_control_domains,
                  (unsigned long long)snapshot.supported_domains,
                  (unsigned long long)snapshot.active_domains,
                  (unsigned long long)snapshot.suspended_domains,
@@ -330,6 +355,50 @@ int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd) {
         llam_stats_json_u64(fd, "online_workers_min", stats.online_workers_min, &fields) != 0 ||
         llam_stats_json_u64(fd, "online_workers_max", stats.online_workers_max, &fields) != 0 ||
         llam_stats_json_u64(fd, "active_nodes", stats.active_nodes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "configured_worker_min", stats.configured_worker_min, &fields) != 0 ||
+        llam_stats_json_u64(fd, "configured_worker_count", stats.configured_worker_count, &fields) != 0 ||
+        llam_stats_json_u64(fd, "configured_worker_max", stats.configured_worker_max, &fields) != 0 ||
+        llam_stats_json_u64(fd, "configured_blocking_min", stats.configured_blocking_min, &fields) != 0 ||
+        llam_stats_json_u64(fd, "configured_blocking_max", stats.configured_blocking_max, &fields) != 0 ||
+        llam_stats_json_u64(fd, "selected_cpu_count", stats.selected_cpu_count, &fields) != 0 ||
+        llam_stats_json_u64(fd, "affinity_policy", stats.affinity_policy, &fields) != 0 ||
+        llam_stats_json_u64(fd, "scheduler_threads", stats.scheduler_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "blocking_threads", stats.blocking_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "io_threads", stats.io_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "controller_threads", stats.controller_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_helper_threads", stats.opaque_helper_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "runtime_owned_threads", stats.runtime_owned_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "native_execution_threads", stats.native_execution_threads, &fields) != 0 ||
+        llam_stats_json_u64(fd, "affinity_failures", stats.affinity_failures, &fields) != 0 ||
+        llam_stats_json_u64(fd, "requested_task_prewarm_total", stats.requested_task_prewarm_total, &fields) != 0 ||
+        llam_stats_json_u64(fd, "achieved_task_prewarm_total", stats.achieved_task_prewarm_total, &fields) != 0 ||
+        llam_stats_json_u64(fd, "requested_stack_prewarm_total", stats.requested_stack_prewarm_total, &fields) != 0 ||
+        llam_stats_json_u64(fd, "achieved_stack_prewarm_total", stats.achieved_stack_prewarm_total, &fields) != 0 ||
+        llam_stats_json_u64(fd, "requested_timer_prewarm_total", stats.requested_timer_prewarm_total, &fields) != 0 ||
+        llam_stats_json_u64(fd, "achieved_timer_prewarm_total", stats.achieved_timer_prewarm_total, &fields) != 0 ||
+        llam_stats_json_u64(fd, "estimated_metadata_bytes", stats.estimated_metadata_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "estimated_stack_mapping_bytes", stats.estimated_stack_mapping_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "task_prewarm_source", stats.task_prewarm_source, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_prewarm_source", stats.stack_prewarm_source, &fields) != 0 ||
+        llam_stats_json_u64(fd, "timer_prewarm_source", stats.timer_prewarm_source, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_budget_bytes", stats.stack_cache_budget_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_high_watermark_bytes", stats.stack_cache_high_watermark_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_low_watermark_bytes", stats.stack_cache_low_watermark_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_idle_ns", stats.stack_cache_idle_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_flags", stats.stack_cache_flags, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_cached_bytes", stats.stack_cache_cached_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_cached_mappings", stats.stack_cache_cached_mappings, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_committed_bytes", stats.stack_cache_committed_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_trim_requests", stats.stack_cache_trim_requests, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_discarded_bytes", stats.stack_cache_discarded_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_released_bytes", stats.stack_cache_released_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_budget_rejections", stats.stack_cache_budget_rejections, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_secure_return_failures", stats.stack_cache_secure_return_failures, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_resident_valid", stats.stack_cache_resident_valid, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_resident_bytes", stats.stack_cache_resident_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_resident_sample_ns", stats.stack_cache_resident_sample_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_process_quarantine_bytes", stats.stack_cache_process_quarantine_bytes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "stack_cache_process_quarantine_mappings", stats.stack_cache_process_quarantine_mappings, &fields) != 0 ||
         llam_stats_json_u64(fd, "dynamic_workers", stats.dynamic_workers, &fields) != 0 ||
         llam_stats_json_u64(fd, "worker_rings", stats.worker_rings, &fields) != 0 ||
         llam_stats_json_u64(fd, "worker_rings_multishot", stats.worker_rings_multishot, &fields) != 0 ||

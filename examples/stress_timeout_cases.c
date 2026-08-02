@@ -223,8 +223,15 @@ void run_channel_timeout_paths(void) {
         stress_fail_errno("channel send timeout errno", errno, ETIMEDOUT);
     }
 
-    llam_channel_destroy(recv_channel);
-    llam_channel_destroy(send_channel);
+    value = NULL;
+    if (llam_channel_try_recv_result(send_channel, &value) != 0 ||
+        value != (void *)(intptr_t)1) {
+        stress_fail_msg("channel timeout drain failed");
+    }
+    if (llam_channel_destroy(recv_channel) != 0 ||
+        llam_channel_destroy(send_channel) != 0) {
+        stress_fail_msg("channel timeout destroy failed");
+    }
 }
 
 void run_dynamic_join_timeout_path(void) {
@@ -358,8 +365,15 @@ void run_dynamic_channel_timeout_paths(void) {
         stress_fail_errno("dynamic channel send timeout errno", errno, ETIMEDOUT);
     }
 
-    llam_channel_destroy(recv_channel);
-    llam_channel_destroy(send_channel);
+    value = NULL;
+    if (llam_channel_try_recv_result(send_channel, &value) != 0 ||
+        value != (void *)(intptr_t)1) {
+        stress_fail_msg("dynamic channel timeout drain failed");
+    }
+    if (llam_channel_destroy(recv_channel) != 0 ||
+        llam_channel_destroy(send_channel) != 0) {
+        stress_fail_msg("dynamic channel timeout destroy failed");
+    }
 }
 
 void run_dynamic_poll_paths(void) {

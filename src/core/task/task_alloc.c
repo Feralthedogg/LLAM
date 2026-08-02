@@ -29,12 +29,12 @@
 #include "runtime_internal.h"
 
 /**
- * @brief Reset a recycled task object while preserving embedded permanent state.
+ * @brief Reset a recycled task object while preserving permanent state.
  *
  * @details
- * The pthread mutex is initialized once per slab object and embedded wait/I/O
- * objects are cleared at acquisition time.  Avoiding a whole-struct memset keeps
- * spawn-heavy workloads from repeatedly touching cold embedded request storage.
+ * The pthread mutex is initialized once per slab object and the embedded I/O
+ * request is cleared at acquisition time. Avoiding a whole-struct memset keeps
+ * spawn-heavy workloads from repeatedly touching cold request storage.
  *
  * @param task     Task object taken from a shard free list.
  * @param owner_runtime Runtime that owns the task object.
@@ -42,7 +42,6 @@
  */
 static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runtime, unsigned shard_id) {
     bool lock_initialized;
-    unsigned i;
 
     if (task == NULL) {
         return;
@@ -64,6 +63,8 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     memset((char *)task + offsetof(llam_task_t, deadline_ns),
            0,
            offsetof(llam_task_t, ctx) - offsetof(llam_task_t, deadline_ns));
+    task->user_context = NULL;
+    memset(task->context_slots, 0, sizeof(task->context_slots));
     memset((char *)task + offsetof(llam_task_t, stack_mapping),
            0,
            offsetof(llam_task_t, lock) - offsetof(llam_task_t, stack_mapping));
@@ -81,10 +82,6 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->wait_next = NULL;
     task->cancel_next = NULL;
     task->cancel_prev = NULL;
-    llam_wait_node_reset(&task->embedded_wait_node, owner_runtime, UINT_MAX);
-    for (i = 0U; i < LLAM_TASK_EMBEDDED_SELECT_NODES; ++i) {
-        llam_wait_node_reset(&task->embedded_select_nodes[i], owner_runtime, UINT_MAX);
-    }
     /*
      * Wait ownership fields are atomics because runtime stop/cancel and timeout
      * paths can sample them from other OS threads. Initialize them explicitly;
@@ -112,14 +109,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->handoff_sample_current = false;
     task->enqueue_hot = 0U;
     task->last_runnable_ns = 0U;
-    task->last_yield_ns = 0U;
-    task->last_started_ns = 0U;
-    task->last_run_ns = 0U;
-    task->total_run_ns = 0U;
-    task->opaque_block_started_ns = 0U;
-    task->last_opaque_block_ns = 0U;
-    task->max_opaque_block_ns = 0U;
-    task->opaque_block_count = 0U;
+    task->recent_explicit_yield = false;
     task->blocking_result = NULL;
     task->saved_errno = 0;
     task->blocking_errno = 0;
@@ -131,8 +121,6 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->preempt_poll_tick = 0U;
     atomic_init(&task->last_stack_used, 0U);
     atomic_init(&task->stack_high_water, 0U);
-    memset(&task->embedded_timer_node, 0, sizeof(task->embedded_timer_node));
-    task->embedded_timer_node.owner_runtime = owner_runtime;
     task->active_timer = NULL;
     atomic_init(&task->preempt_requested, 0U);
     atomic_init(&task->completed, 0U);
@@ -272,8 +260,13 @@ void llam_task_allocator_free(llam_task_t *task) {
     if (task == NULL || rt == NULL || task->alloc_owner_shard >= rt->active_shards) {
         return;
     }
+    if (task->public_owner_pinned) {
+        llam_task_invalidate_public_handle(task);
+    }
 
     llam_task_local_clear(task);
+    task->user_context = NULL;
+    memset(task->context_slots, 0, sizeof(task->context_slots));
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
     if (task->alloc_external_pool) {

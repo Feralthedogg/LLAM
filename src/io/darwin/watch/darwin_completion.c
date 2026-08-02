@@ -8,6 +8,11 @@
  * into request results, manages copied owned-buffer payloads, and wakes parked
  * tasks through the common reinjection path.
  *
+ * Readiness is therefore not itself semantic completion. Event-batch pins keep
+ * every referenced owner alive while the syscall and handler run; the common
+ * completion claim then clears in-flight ownership and any stale queued cancel
+ * before reinjection permits the task to release its request.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
@@ -134,10 +139,12 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
         pthread_mutex_unlock(&shard->lock);
     }
 
+#if LLAM_BUILD_RESEARCH
     if (llam_io_dispatch_completion_sink(
             node, req, completion_owner, &wake_reason)) {
         return;
     }
+#endif
     llam_reinject_task_on_shard(rt,
                               req->task,
                               completion_owner,

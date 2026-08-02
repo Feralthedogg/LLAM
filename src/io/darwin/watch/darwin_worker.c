@@ -8,6 +8,12 @@
  * wake events, and dispatches tagged watch/request events to specialized
  * handlers.
  *
+ * A returned @c kevent batch contains borrowed @c udata pointers. The worker
+ * pins every live watch and every request's parent storage before dispatch, and
+ * releases those pins only after the whole batch has been processed. If a
+ * request pin cannot be acquired, its event is rewritten to an inert control
+ * tag so no handler can dereference partially owned storage.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
@@ -702,7 +708,12 @@ void llam_darwin_queue_shutdown_controls(llam_node_t *node) {
 void *llam_io_worker_main(void *arg) {
     llam_node_t *node = arg;
     llam_runtime_t *rt = node->runtime;
+    bool thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->io_threads_live);
 
+    if (!thread_counted) {
+        return NULL;
+    }
     llam_tune_io_worker_thread(node);
 
     for (;;) {
@@ -809,5 +820,6 @@ void *llam_io_worker_main(void *arg) {
         llam_darwin_unpin_event_batch(node, events, (unsigned)count);
     }
 
+    llam_runtime_native_thread_exit(rt, &rt->io_threads_live);
     return NULL;
 }

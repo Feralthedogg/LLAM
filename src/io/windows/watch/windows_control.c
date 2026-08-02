@@ -64,17 +64,20 @@ static void llam_windows_process_control(llam_node_t *node, llam_io_control_op_t
         if (io_op != NULL && io_op->magic == LLAM_WINDOWS_IO_OP_MAGIC) {
             DWORD error_code;
             bool already_closing;
+            HANDLE cancel_handle = NULL;
 
             atomic_fetch_add_explicit(&io_op->node->windows_cancel_controls, 1U, memory_order_relaxed);
-            HANDLE cancel_handle = (req->kind == LLAM_IO_KIND_HANDLE_READ ||
-                                    req->kind == LLAM_IO_KIND_HANDLE_WRITE ||
-                                    req->kind == LLAM_IO_KIND_HANDLE_PREAD ||
-                                    req->kind == LLAM_IO_KIND_HANDLE_PWRITE) ?
-                                       (HANDLE)req->handle :
-                                       (HANDLE)(uintptr_t)req->fd;
-
             llam_fd_watch_lifecycle_lock();
-            already_closing = io_op->association == NULL || io_op->association->closing;
+            already_closing =
+                io_op->association == NULL ||
+                io_op->association->closing ||
+                io_op->association->owner_node != io_op->node ||
+                io_op->association->generation !=
+                    io_op->association_generation;
+            if (!already_closing) {
+                cancel_handle =
+                    (HANDLE)io_op->association->authority;
+            }
             if (already_closing) {
                 atomic_fetch_add_explicit(&io_op->node->windows_cancel_not_found, 1U, memory_order_relaxed);
             } else if (CancelIoEx(cancel_handle, &io_op->overlapped)) {

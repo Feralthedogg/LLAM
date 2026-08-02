@@ -26,6 +26,7 @@
 #ifndef LLAM_RUNTIME_INTERNAL_H
 #define LLAM_RUNTIME_INTERNAL_H
 
+#include "runtime_resource_plan.h"
 #include "runtime_types.h"
 #include "runtime_state.h"
 #include "runtime_protos.h"

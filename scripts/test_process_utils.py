@@ -87,6 +87,40 @@ def test_path_command_capture() -> None:
         fail(f"normal command output mismatch: {proc.stdout!r}")
 
 
+def test_capture_output_is_bounded_while_draining() -> None:
+    limit = 4096
+    proc = run_capture(
+        [
+            Path(sys.executable),
+            "-c",
+            (
+                "import sys;"
+                "sys.stdout.buffer.write(b'o' * 131072);"
+                "sys.stdout.buffer.flush();"
+                "sys.stderr.buffer.write(b'e' * 131072);"
+                "sys.stderr.buffer.flush()"
+            ),
+        ],
+        timeout=5.0,
+        max_output_bytes=limit,
+    )
+    if proc.returncode != 0:
+        fail(f"bounded output command returned {proc.returncode}")
+    if (
+        len(proc.stdout.encode()) != limit
+        or len(proc.stderr.encode()) != limit
+        or not proc.stdout_truncated
+        or not proc.stderr_truncated
+    ):
+        fail(
+            "bounded output capture did not retain exact prefixes "
+            f"stdout={len(proc.stdout.encode())}/"
+            f"{proc.stdout_truncated} "
+            f"stderr={len(proc.stderr.encode())}/"
+            f"{proc.stderr_truncated}"
+        )
+
+
 def test_run_capture_rejects_nonfinite_timeout_before_spawn() -> None:
     with tempfile.TemporaryDirectory(prefix="llam-process-utils-invalid-timeout-test-") as tmp:
         tmp_path = Path(tmp)
@@ -536,6 +570,61 @@ def test_timeout_kills_descendant() -> None:
                 kill_process(pid)
 
 
+def test_timeout_covers_descendant_pipe_after_parent_exit() -> None:
+    if os.name == "nt":
+        return
+
+    with tempfile.TemporaryDirectory(
+        prefix="llam-process-utils-orphan-pipe-test-"
+    ) as tmp:
+        tmp_path = Path(tmp)
+        pidfile = tmp_path / "child.pid"
+        parent = tmp_path / "parent.py"
+        parent.write_text(
+            "\n".join(
+                [
+                    "import subprocess",
+                    "import sys",
+                    "from pathlib import Path",
+                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])",
+                    "Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')",
+                    "print(f'child-outlives-parent pid={child.pid}', flush=True)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        try:
+            run_capture(
+                [Path(sys.executable), parent, pidfile],
+                timeout=0.5,
+                stderr_to_stdout=True,
+                max_output_bytes=4096,
+            )
+        except ProcessTimeoutError as exc:
+            if "child-outlives-parent" not in exc.stdout:
+                fail(
+                    "orphan-pipe timeout lost captured prefix: "
+                    f"{exc.stdout!r}"
+                )
+        else:
+            fail("orphan-pipe command escaped the timeout")
+
+        if not pidfile.exists():
+            fail("orphan-pipe child pidfile was not written")
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+        try:
+            if not wait_for_exit(pid, 5.0):
+                fail(
+                    "orphan-pipe descendant survived timeout "
+                    f"cleanup: pid={pid}"
+                )
+        finally:
+            if process_alive(pid):
+                kill_process(pid)
+
+
 def test_run_with_timeout_kills_descendant() -> None:
     with tempfile.TemporaryDirectory(prefix="llam-run-timeout-test-") as tmp:
         tmp_path = Path(tmp)
@@ -931,6 +1020,7 @@ def test_stress_server_composite_times_out_wrapper_flood_descendant() -> None:
 
 def main() -> int:
     test_path_command_capture()
+    test_capture_output_is_bounded_while_draining()
     test_run_capture_rejects_nonfinite_timeout_before_spawn()
     test_run_with_timeout_rejects_nonfinite_timeouts()
     test_stress_and_bench_helpers_reject_invalid_numbers()
@@ -938,6 +1028,7 @@ def main() -> int:
     test_safe_output_rejects_hardlinked_leaf()
     test_safe_output_rejects_symlink_parent_prepare_dir()
     test_timeout_kills_descendant()
+    test_timeout_covers_descendant_pipe_after_parent_exit()
     test_run_with_timeout_kills_descendant()
     test_run_with_timeout_dump_signal_reaches_descendant()
     test_run_with_timeout_cleans_after_dump_kills_wrapper()

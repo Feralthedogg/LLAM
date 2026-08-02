@@ -3,10 +3,9 @@
  * @brief Shared synchronization and wait-list primitives used by mutexes, condvars, and channels.
  *
  * @details
- * Synchronization primitives share a small wait-node abstraction. The current
- * task's embedded wait node handles the common one-wait-at-a-time case without
- * allocation; heap wait nodes are used only for nested or exceptional ownership
- * patterns.
+ * Synchronization primitives share a small wait-node abstraction backed by a
+ * shard-owned recyclable pool. Nodes are acquired before publication and
+ * returned only after wait tracking and resolver claims have drained.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -60,12 +59,12 @@ int llam_require_task_context(void) {
  *
  * @details
  * Wait nodes contain atomic wake state used by producers and parked waiters.
- * Reset fields explicitly so embedded and heap-backed node recycling never
- * writes over an already initialized atomic object with a byte clear.
+ * Reset fields explicitly so pooled node recycling never writes over an
+ * already initialized atomic object with a byte clear.
  *
  * @param node        Wait node to reset.
  * @param owner_runtime Runtime that owns the wait node.
- * @param owner_shard   Allocation-owner shard, or @c UINT_MAX for embedded nodes.
+ * @param owner_shard   Allocation-owner shard.
  */
 void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime, unsigned owner_shard) {
     if (node == NULL) {
@@ -83,9 +82,9 @@ void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime,
     node->scalar_value = 0;
     node->owner_shard = owner_shard;
     /*
-     * This helper also resets embedded nodes immediately after a producer has
-     * completed them.  Use atomic stores, not atomic_init(), because the latter
-     * is only valid for one-time initialization before any concurrent access.
+     * A pooled node can be reset immediately after a producer has completed it.
+     * Use atomic stores, not atomic_init(), because the latter is only valid
+     * for one-time initialization before any concurrent access.
      */
     atomic_store_explicit(&node->wake_armed, 0U, memory_order_release);
     atomic_store_explicit(&node->wake_completed, 0U, memory_order_release);
@@ -190,8 +189,7 @@ bool llam_sync_complete_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter
 /**
  * @brief Acquire a wait node for a synchronization primitive.
  *
- * The current task's embedded wait node is used when it is free. Otherwise a
- * shard-local heap wait node is allocated.
+ * A node is acquired from the requesting shard's recyclable wait-node pool.
  *
  * @param shard Shard requesting the wait node.
  *
@@ -199,20 +197,10 @@ bool llam_sync_complete_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter
  */
 llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard) {
     llam_task_t *task = g_llam_tls_task;
-    llam_wait_node_t *node;
+    llam_wait_node_t *node = llam_wait_node_alloc(shard);
 
-    if (task != NULL &&
-        atomic_load_explicit(&task->active_wait_node, memory_order_acquire) == NULL) {
-        node = &task->embedded_wait_node;
-        llam_wait_node_reset(node, task->owner_runtime, UINT_MAX);
-        node->task = task;
-        return node;
-    }
-
-    node = llam_wait_node_alloc(shard);
     if (node != NULL) {
         node->task = task;
-        node->owner_shard = shard != NULL ? shard->id : UINT_MAX;
     }
     return node;
 }
@@ -220,18 +208,13 @@ llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard) {
 /**
  * @brief Release a wait node acquired by ::llam_sync_wait_node_acquire.
  *
- * Embedded nodes are zeroed in place. Heap nodes are returned to the shard-local
- * allocator.
+ * The node is returned to its allocation-owner shard.
  *
  * @param shard Shard owning the allocator.
  * @param node  Wait node to release; may be @c NULL.
  */
 void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node) {
     if (node == NULL) {
-        return;
-    }
-    if (node->task != NULL && node == &node->task->embedded_wait_node) {
-        llam_wait_node_reset(node, node->task->owner_runtime, UINT_MAX);
         return;
     }
     llam_wait_node_free(shard, node);

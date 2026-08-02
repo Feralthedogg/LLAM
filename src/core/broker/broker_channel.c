@@ -88,11 +88,30 @@ llam_broker_channel_slot_t *llam_broker_find_channel_unlocked(llam_broker_t *bro
     return NULL;
 }
 
+static size_t llam_broker_subject_channel_count_unlocked(
+    const llam_broker_t *broker,
+    uint64_t subject_id) {
+    size_t count = 0U;
+    size_t i;
+
+    for (i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
+        const llam_broker_channel_slot_t *slot = &broker->channels[i];
+        bool reusable =
+            !slot->active || (slot->closed && slot->count == 0U);
+
+        if (!reusable && slot->subject_id == subject_id) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 int llam_broker_create_channel(llam_broker_t *broker,
                                size_t capacity,
                                uint64_t rights,
                                llam_capability_token_t *out_token) {
     llam_broker_channel_slot_t *slot = NULL;
+    uint64_t subject_id;
     size_t i;
 
     if (out_token != NULL) {
@@ -123,6 +142,16 @@ int llam_broker_create_channel(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
+    subject_id = llam_broker_current_subject(broker);
+    if (subject_id != 0U &&
+        llam_broker_subject_channel_count_unlocked(
+            broker, subject_id) >=
+            LLAM_BROKER_CHANNELS_PER_SUBJECT) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        errno = LLAM_BROKER_QUOTA_ERRNO;
+        return -1;
+    }
     for (i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
         if (!broker->channels[i].active ||
             (broker->channels[i].closed && broker->channels[i].count == 0U)) {
@@ -147,7 +176,7 @@ int llam_broker_create_channel(llam_broker_t *broker,
     slot->id = broker->next_channel_id++;
     slot->generation = 1U;
     slot->rights = rights;
-    slot->subject_id = llam_broker_current_subject(broker);
+    slot->subject_id = subject_id;
     slot->active = true;
     if (llam_broker_issue_object_cap_unlocked(broker,
                                               LLAM_BROKER_CAP_FAMILY_CHANNEL,

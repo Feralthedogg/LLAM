@@ -3,6 +3,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
+# Audited projection of config/llam-version.json.
 project(llam VERSION 2.2.1 LANGUAGES C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 2)
@@ -11,6 +12,8 @@ set(LLAM_LIBRARY_VERSION "${PROJECT_VERSION}")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include(CheckCCompilerFlag)
+include(CheckLinkerFlag)
 include(CheckSymbolExists)
 find_package(Python3 COMPONENTS Interpreter)
 
@@ -21,7 +24,96 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 option(LLAM_ENABLE_WINDOWS_BACKEND "Enable the native Windows 10/11 backend when building on Windows" ON)
+option(LLAM_BUILD_RESEARCH
+       "Build private LLAM research implementations and experiments" OFF)
+set(LLAM_HARDENING "compatible" CACHE STRING
+    "Build hardening profile: off, compatible, or strict")
+if(NOT LLAM_HARDENING MATCHES "^(off|compatible|strict)$")
+    message(FATAL_ERROR
+        "LLAM_HARDENING must be off, compatible, or strict")
+endif()
 add_compile_options($<$<COMPILE_LANG_AND_ID:C,MSVC>:/experimental:c11atomics>)
+
+if(NOT LLAM_HARDENING STREQUAL "off")
+    set(LLAM_HARDENING_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+    if(MSVC)
+        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} /WX")
+        check_c_compiler_flag("/GS" LLAM_HARDENING_STACK_PROTECTOR)
+        check_c_compiler_flag("/guard:cf" LLAM_HARDENING_CONTROL_FLOW_GUARD)
+        check_linker_flag(C "/guard:cf" LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK)
+        if(LLAM_HARDENING_STACK_PROTECTOR)
+            add_compile_options($<$<COMPILE_LANGUAGE:C>:/GS>)
+        endif()
+        if(LLAM_HARDENING_CONTROL_FLOW_GUARD)
+            add_compile_options($<$<COMPILE_LANGUAGE:C>:/guard:cf>)
+        endif()
+        if(LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK)
+            add_link_options("/guard:cf")
+        endif()
+    else()
+        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror")
+        check_c_compiler_flag("-fstack-protector-strong"
+                              LLAM_HARDENING_STACK_PROTECTOR)
+        check_c_compiler_flag("-D_FORTIFY_SOURCE=2"
+                              LLAM_HARDENING_FORTIFY)
+        check_c_compiler_flag("-fstack-clash-protection"
+                              LLAM_HARDENING_STACK_CLASH)
+        if(LLAM_HARDENING_STACK_PROTECTOR)
+            add_compile_options(
+                $<$<COMPILE_LANGUAGE:C>:-fstack-protector-strong>)
+        endif()
+        if(LLAM_HARDENING_FORTIFY)
+            add_compile_options(
+                $<$<AND:$<COMPILE_LANGUAGE:C>,$<NOT:$<CONFIG:Debug>>>:-D_FORTIFY_SOURCE=2>)
+        endif()
+        if(LLAM_HARDENING_STACK_CLASH)
+            add_compile_options(
+                $<$<COMPILE_LANGUAGE:C>:-fstack-clash-protection>)
+        endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+           CMAKE_SYSTEM_NAME MATCHES "^(FreeBSD|OpenBSD|NetBSD|DragonFly)$")
+            check_linker_flag(C "-Wl,-z,relro" LLAM_HARDENING_RELRO)
+            check_linker_flag(C "-Wl,-z,now" LLAM_HARDENING_NOW)
+            check_linker_flag(C "-Wl,-z,noexecstack"
+                              LLAM_HARDENING_NOEXECSTACK)
+            if(LLAM_HARDENING_RELRO)
+                add_link_options("-Wl,-z,relro")
+            endif()
+            if(LLAM_HARDENING_NOW)
+                add_link_options("-Wl,-z,now")
+            endif()
+            if(LLAM_HARDENING_NOEXECSTACK)
+                add_link_options("-Wl,-z,noexecstack")
+            endif()
+        endif()
+    endif()
+    set(CMAKE_REQUIRED_FLAGS "${LLAM_HARDENING_SAVED_REQUIRED_FLAGS}")
+
+    if(LLAM_HARDENING STREQUAL "strict")
+        if(NOT LLAM_HARDENING_STACK_PROTECTOR)
+            message(FATAL_ERROR
+                "strict hardening requires stack-protector support")
+        endif()
+        if(MSVC AND
+           (NOT LLAM_HARDENING_CONTROL_FLOW_GUARD OR
+            NOT LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK))
+            message(FATAL_ERROR
+                "strict Windows hardening requires Control Flow Guard compiler and linker support")
+        endif()
+        if(NOT MSVC AND NOT LLAM_HARDENING_FORTIFY)
+            message(FATAL_ERROR
+                "strict hardening requires FORTIFY support")
+        endif()
+        if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+            CMAKE_SYSTEM_NAME MATCHES "^(FreeBSD|OpenBSD|NetBSD|DragonFly)$") AND
+           (NOT LLAM_HARDENING_RELRO OR
+            NOT LLAM_HARDENING_NOW OR
+            NOT LLAM_HARDENING_NOEXECSTACK))
+            message(FATAL_ERROR
+                "strict ELF hardening requires RELRO, NOW, and non-executable-stack linker support")
+        endif()
+    endif()
+endif()
 
 set(LLAM_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES)
@@ -44,14 +136,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR LLAM_SYSTEM_IS_BSD)
     set(LLAM_SYSTEM_IS_KQUEUE TRUE)
 endif()
 
-set(LLAM_RUNTIME_SOURCES
+set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/lifecycle/runtime.c
+    src/core/lifecycle/resource_plan.c
+    src/core/lifecycle/runtime_layout.c
+    src/core/lifecycle/external_drive.c
     src/core/base/abi.c
     src/core/base/errno.c
-    src/core/memory/alloc.c
-    src/core/memory/allocator_quiescent.c
-    src/core/api/core_api.c
-    src/core/api/blocking_api.c
+    src/core/base/util.c
+    src/core/base/io_udata.c
     src/core/registry/capability.c
     src/core/broker/broker.c
     src/core/broker/broker_lifecycle.c
@@ -88,174 +181,233 @@ set(LLAM_RUNTIME_SOURCES
     src/core/broker/ring/broker_ring_shm.c
     src/core/broker/ring/broker_ring_shm_posix.c
     src/core/broker/ring/broker_ring_shm_windows.c
-    src/core/api/cancel_api.c
-    src/core/context/context_portable.c
-    src/core/debug/debug.c
-    src/core/debug/debug_dump_helpers.c
-    src/core/debug/debug_stats_json.c
     src/core/debug/fault.c
+    src/core/base/names.c
+    src/core/time/time.c
     src/core/context/fp.c
+    src/core/context/stack_sample.c
+    src/core/context/sanitizer_fiber.c
+    src/core/context/context_portable.c
+    src/core/sched/queue_base.c
+    src/core/sched/norm_queue_depth.c
+    src/core/sched/norm_queue.c
+    src/core/sched/affinity.c
+    src/core/sched/external_doorbell.c
+    src/core/sched/core_queue.c
+    src/core/sched/handoff_policy.c
+    src/core/memory/alloc.c
+    src/core/memory/allocator_quiescent.c
+    src/core/task/task_alloc.c
+    src/core/task/task_handle_registry.c
+    src/core/task/task_handle_claim.c
     src/core/memory/io_object_alloc.c
-    src/core/base/io_udata.c
-    src/core/lifecycle/init.c
+    src/core/wait/wait_timer_alloc.c
+    src/core/debug/trace.c
+    src/core/sched/wake.c
+    src/core/platform/platform.c
+    src/core/platform/signal.c
+    src/core/platform/stack_vm.c
+    src/core/platform/windows_policy.c
+    src/core/sched/safepoint.c
+    src/core/wait/wait.c
+    src/core/task/task_reclaim.c
+    src/core/task/stack_cache.c
+    src/core/task/stack_cache_lists.c
+    src/core/task/stack_cache_trim.c
+    src/core/task/task_stack.c
+    src/core/sched/reinject.c
+    src/core/wait/wait_accounting.c
+    src/core/wait/wait_deadline.c
+    src/core/wait/wait_io_abort.c
+    src/core/wait/wait_owner.c
+    src/core/wait/wait_tracking.c
+    src/core/time/timer_heap.c
+    src/core/time/timer.c
+    src/core/api/timer_api.c
+    src/core/api/signal_api.c
+    src/engine/scheduler/scheduler_engine.c
+    src/engine/scheduler/block.c
+    src/io/engine/io_engine.c
+    src/engine/watchdog/watchdog.c
+    src/engine/watchdog/watchdog_probe.c
+    src/engine/watchdog/watchdog_merge.c
+    src/engine/watchdog/watchdog_rehome.c
+    src/engine/watchdog/watchdog_scale.c
+    src/engine/watchdog/watchdog_worker.c
+    src/engine/watchdog/watchdog_autotune.c
+    src/engine/watchdog/watchdog_autotune_config.c
+    src/core/api/core_api.c
+    src/core/task/spawn.c
+    src/core/task/yield_join_sleep.c
+    src/core/api/blocking_api.c
+    src/core/api/cancel_api.c
     src/core/lifecycle/lifecycle.c
+    src/core/sched/scheduler_thread.c
+    src/core/sched/scheduler.c
+    src/core/lifecycle/init.c
+    src/core/lifecycle/shutdown.c
+    src/core/lifecycle/run.c
+    src/core/sync/sync.c
+    src/core/sync/mutex_lifecycle.c
+    src/core/sync/mutex.c
+    src/core/sync/cond_lifecycle.c
+    src/core/sync/cond.c
     src/core/sync/channel_cache.c
     src/core/sync/channel_lifecycle.c
     src/core/sync/channel_fast.c
     src/core/sync/channel.c
     src/core/sync/channel_select_fast.c
     src/core/sync/channel_select.c
-    src/core/sync/cond_lifecycle.c
-    src/core/sync/cond.c
     src/core/registry/handle.c
     src/core/registry/owner.c
     src/core/registry/registry.c
-    src/core/sync/mutex_lifecycle.c
-    src/core/sync/mutex.c
-    src/core/base/names.c
-    src/core/sched/norm_queue_depth.c
-    src/core/sched/norm_queue.c
-    src/core/platform/platform.c
-    src/core/sched/queue_base.c
-    src/core/sched/core_queue.c
-    src/core/sched/reinject.c
-    src/core/sched/safepoint.c
-    src/core/lifecycle/run.c
-    src/core/sched/scheduler.c
-    src/core/lifecycle/shutdown.c
-    src/core/context/stack_sample.c
-    src/core/sync/sync.c
-    src/core/task/spawn.c
-    src/core/task/task_alloc.c
-    src/core/task/task_handle_registry.c
-    src/core/task/task_handle_claim.c
     src/core/task/task_group.c
     src/core/task/task_group_registry.c
     src/core/task/task_local.c
-    src/core/task/task_reclaim.c
-    src/core/task/task_stack.c
-    src/core/wait/wait_accounting.c
-    src/core/time/timer_heap.c
-    src/core/time/timer.c
-    src/core/api/timer_api.c
-    src/core/api/signal_api.c
-    src/core/time/time.c
-    src/core/debug/trace.c
-    src/core/base/util.c
-    src/core/wait/wait.c
-    src/core/wait/wait_timer_alloc.c
-    src/core/wait/wait_tracking.c
-    src/core/sched/wake.c
-    src/core/platform/windows_policy.c
-    src/core/task/yield_join_sleep.c
-    src/engine/scheduler/block.c
-    src/engine/scheduler/scheduler_engine.c
-    src/engine/watchdog/watchdog.c
-    src/engine/watchdog/watchdog_autotune.c
-    src/engine/watchdog/watchdog_merge.c
-    src/engine/watchdog/watchdog_probe.c
-    src/engine/watchdog/watchdog_rehome.c
-    src/engine/watchdog/watchdog_scale.c
-    src/engine/watchdog/watchdog_worker.c
+    src/core/task/task_context.c
     src/io/api/io_api.c
-    src/io/api/blocking_ops.c
     src/io/api/direct.c
     src/io/api/direct_tuning.c
     src/io/api/issue.c
-    src/io/buffer/buffer_registry.c
+    src/io/api/task_bootstrap.c
+    src/io/api/issue_wait.c
+    src/io/api/issue_watch.c
+    src/io/api/blocking_ops.c
     src/io/api/blocking_file_ops.c
     src/io/api/blocking_wrappers.c
+    src/io/buffer/buffer_registry.c
+    src/io/api/owned.c
     src/io/api/datagram.c
     src/io/api/handle_positional.c
-    src/io/api/owned.c
     src/io/api/positional.c
     src/io/api/positional_util.c
     src/io/api/public.c
-    src/io/engine/io_engine.c
+    src/io/windows/watch/iocp.c
+    src/core/debug/debug_dump_helpers.c
+    src/core/debug/debug_stats_json.c
+    src/core/debug/debug_stack_cache.c
+    src/core/debug/debug.c
     src/io/watch/watch.c
     src/io/watch/close.c
     src/io/watch/watch_lookup.c
     src/io/watch/migration.c
     src/io/watch/watch_queue.c
     src/io/watch/waiter.c
-    src/io/windows/watch/iocp.c
 )
 
+set(LLAM_RUNTIME_LINUX_SOURCES
+    src/io/linux/watch/prelude.c
+    src/io/linux/watch/linux_state.c
+    src/io/linux/watch/linux_lookup.c
+    src/io/linux/watch/linux_migration_live.c
+    src/io/linux/watch/linux_migration_rehome.c
+    src/io/linux/watch/linux_control.c
+    src/io/linux/watch/linux_submit.c
+    src/io/linux/watch/cqe.c
+    src/io/linux/watch/linux_worker.c
+)
+set(LLAM_RUNTIME_KQUEUE_SOURCES
+    src/io/darwin/watch/darwin_state.c
+    src/io/darwin/watch/darwin_migration_live.c
+    src/io/darwin/watch/darwin_migration_rehome.c
+    src/io/darwin/watch/darwin_control.c
+    src/io/darwin/watch/darwin_completion.c
+    src/io/darwin/watch/events.c
+    src/io/darwin/watch/darwin_worker.c
+)
+set(LLAM_RUNTIME_WINDOWS_SOURCES
+    src/io/windows/watch/windows_state.c
+    src/io/windows/watch/socket.c
+    src/io/windows/watch/pool.c
+    src/io/windows/watch/windows_control.c
+    src/io/windows/watch/windows_submit.c
+    src/io/windows/watch/windows_completion.c
+    src/io/windows/watch/fallback.c
+    src/io/windows/watch/windows_watch.c
+)
+set(LLAM_RUNTIME_CONTEXT_ARM64_SOURCES
+    src/core/context/context_arm64.c
+)
+set(LLAM_RUNTIME_LINUX_X86_64_SOURCES
+    src/asm/linux/x86_64/linux_context_x86_64.S
+)
+set(LLAM_RUNTIME_LINUX_X86_64_WAKE_SOURCES
+    src/asm/linux/x86_64/wake_syscalls_x86_64.S
+)
+set(LLAM_RUNTIME_LINUX_ARM64_SOURCES
+    src/asm/linux/arm64/linux_context_arm64.S
+)
+set(LLAM_RUNTIME_DARWIN_X86_64_SOURCES
+    src/asm/darwin/x86_64/darwin_context_x86_64.S
+)
+set(LLAM_RUNTIME_DARWIN_ARM64_SOURCES
+    src/asm/darwin/arm64/darwin_context_arm64.S
+)
+set(LLAM_RUNTIME_WINDOWS_GNU_X86_64_SOURCES
+    src/asm/windows/x86_64/windows_context_x86_64.S
+)
+set(LLAM_RUNTIME_WINDOWS_MSVC_X86_64_SOURCES
+    src/asm/windows/x86_64/context_x86_64.asm
+)
+set(LLAM_RESEARCH_RUNTIME_LINUX_SOURCES
+    src/io/linux/research_ring_profile.c
+    src/io/linux/watch/linux_segment.c
+    src/io/linux/watch/linux_segment_cancel.c
+    src/io/linux/watch/linux_segment_complete.c
+    src/io/linux/watch/linux_segment_queue.c
+    src/io/linux/watch/linux_segment_reducer.c
+    src/io/linux/watch/linux_segment_resources.c
+    src/io/linux/watch/linux_segment_submit.c
+)
+
+set(LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_COMMON_SOURCES})
 if(LLAM_SYSTEM_IS_KQUEUE)
-    list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/darwin/watch/darwin_state.c
-        src/io/darwin/watch/darwin_migration_live.c
-        src/io/darwin/watch/darwin_migration_rehome.c
-        src/io/darwin/watch/darwin_control.c
-        src/io/darwin/watch/darwin_completion.c
-        src/io/darwin/watch/events.c
-        src/io/darwin/watch/darwin_worker.c
-    )
+    list(APPEND LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_KQUEUE_SOURCES})
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/linux/watch/prelude.c
-        src/io/linux/watch/linux_state.c
-        src/io/linux/watch/linux_lookup.c
-        src/io/linux/watch/linux_migration_live.c
-        src/io/linux/watch/linux_migration_rehome.c
-        src/io/linux/watch/linux_control.c
-        src/io/linux/watch/linux_submit.c
-        src/io/linux/watch/cqe.c
-        src/io/linux/watch/linux_worker.c
-    )
+    list(APPEND LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_LINUX_SOURCES})
+    if(LLAM_BUILD_RESEARCH)
+        list(APPEND LLAM_RUNTIME_SOURCES
+             ${LLAM_RESEARCH_RUNTIME_LINUX_SOURCES})
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/windows/watch/windows_state.c
-        src/io/windows/watch/socket.c
-        src/io/windows/watch/pool.c
-        src/io/windows/watch/windows_control.c
-        src/io/windows/watch/windows_submit.c
-        src/io/windows/watch/windows_completion.c
-        src/io/windows/watch/fallback.c
-        src/io/windows/watch/windows_watch.c
-    )
+    list(APPEND LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_WINDOWS_SOURCES})
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "arm64|aarch64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/core/context/context_arm64.c
-        src/asm/darwin/arm64/darwin_context_arm64.S
+        ${LLAM_RUNTIME_CONTEXT_ARM64_SOURCES}
+        ${LLAM_RUNTIME_DARWIN_ARM64_SOURCES}
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
-    list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/darwin/x86_64/darwin_context_x86_64.S
-    )
+    list(APPEND LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_DARWIN_X86_64_SOURCES})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/linux/x86_64/linux_context_x86_64.S
-        src/asm/linux/x86_64/wake_syscalls_x86_64.S
+        ${LLAM_RUNTIME_LINUX_X86_64_SOURCES}
+        ${LLAM_RUNTIME_LINUX_X86_64_WAKE_SOURCES}
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/core/context/context_arm64.c
-        src/asm/linux/arm64/linux_context_arm64.S
+        ${LLAM_RUNTIME_CONTEXT_ARM64_SOURCES}
+        ${LLAM_RUNTIME_LINUX_ARM64_SOURCES}
     )
 elseif(LLAM_SYSTEM_IS_BSD AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
-    list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/linux/x86_64/linux_context_x86_64.S
-    )
+    list(APPEND LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_LINUX_X86_64_SOURCES})
 elseif(LLAM_SYSTEM_IS_BSD AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/core/context/context_arm64.c
-        src/asm/linux/arm64/linux_context_arm64.S
+        ${LLAM_RUNTIME_CONTEXT_ARM64_SOURCES}
+        ${LLAM_RUNTIME_LINUX_ARM64_SOURCES}
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND MSVC)
     enable_language(ASM_MASM)
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/windows/x86_64/context_x86_64.asm
-    )
+         ${LLAM_RUNTIME_WINDOWS_MSVC_X86_64_SOURCES})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/windows/x86_64/windows_context_x86_64.S
+        ${LLAM_RUNTIME_WINDOWS_GNU_X86_64_SOURCES}
     )
 endif()
 
@@ -276,6 +428,41 @@ add_library(llam_runtime_shared SHARED ${LLAM_RUNTIME_SOURCES})
 add_library(llam_runtime_testhooks STATIC ${LLAM_RUNTIME_SOURCES})
 add_library(llam::runtime ALIAS llam_runtime)
 add_library(llam::runtime_shared ALIAS llam_runtime_shared)
+
+set(LLAM_RESEARCH_DEFINE
+    "LLAM_BUILD_RESEARCH=$<BOOL:${LLAM_BUILD_RESEARCH}>")
+target_compile_definitions(llam_runtime PRIVATE ${LLAM_RESEARCH_DEFINE})
+target_compile_definitions(llam_runtime_shared PRIVATE
+                           ${LLAM_RESEARCH_DEFINE})
+target_compile_definitions(llam_runtime_testhooks PRIVATE
+                           ${LLAM_RESEARCH_DEFINE})
+
+if(LLAM_BUILD_RESEARCH)
+    set(LLAM_BUILD_RESEARCH_NORMALIZED 1)
+else()
+    set(LLAM_BUILD_RESEARCH_NORMALIZED 0)
+endif()
+function(llam_attach_build_provenance LLAM_PROVENANCE_TARGET)
+    add_custom_command(TARGET ${LLAM_PROVENANCE_TARGET} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}"
+                "-DLLAM_BUILD_PROVENANCE_PATH=$<TARGET_FILE:${LLAM_PROVENANCE_TARGET}>.llam-build-provenance"
+                "-DLLAM_BUILD_RESEARCH_MODE=${LLAM_BUILD_RESEARCH_NORMALIZED}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_build_provenance.cmake"
+        VERBATIM
+    )
+endfunction()
+function(llam_attach_linker_build_provenance LLAM_PROVENANCE_TARGET)
+    add_custom_command(TARGET ${LLAM_PROVENANCE_TARGET} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}"
+                "-DLLAM_BUILD_PROVENANCE_PATH=$<TARGET_LINKER_FILE:${LLAM_PROVENANCE_TARGET}>.llam-build-provenance"
+                "-DLLAM_BUILD_RESEARCH_MODE=${LLAM_BUILD_RESEARCH_NORMALIZED}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_build_provenance.cmake"
+        VERBATIM
+    )
+endfunction()
+llam_attach_build_provenance(llam_runtime)
+llam_attach_build_provenance(llam_runtime_shared)
+llam_attach_linker_build_provenance(llam_runtime_shared)
 
 set_target_properties(llam_runtime
     PROPERTIES
@@ -400,7 +587,10 @@ target_include_directories(stress PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
 )
-target_compile_definitions(stress PRIVATE _GNU_SOURCE)
+target_compile_definitions(stress PRIVATE
+    _GNU_SOURCE
+    ${LLAM_RESEARCH_DEFINE}
+)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(stress PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
@@ -423,6 +613,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(bench PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
 target_link_libraries(bench PRIVATE llam_runtime)
+llam_attach_build_provenance(bench)
 
 add_executable(llam_broker
     examples/broker.c
@@ -495,21 +686,300 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 
 enable_testing()
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_gen_leir_aot_fixture
+        COMMAND ${Python3_EXECUTABLE}
+            -m unittest scripts/test_gen_leir_aot_fixture.py -v
+    )
+    set_tests_properties(
+        test_gen_leir_aot_fixture
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME build_manifest
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_build_manifests.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --check
+    )
+    set_tests_properties(
+        build_manifest
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME license_header_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_license_headers.py -v
+    )
+    add_test(
+        NAME license_headers
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_license_headers.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --check
+    )
+    set_tests_properties(
+        license_header_fixtures
+        license_headers
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME c_structure_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_c_structure.py -v
+    )
+    add_test(
+        NAME c_structure_ratchet
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_c_structure.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --mode ratchet
+                --baseline
+                ${CMAKE_CURRENT_SOURCE_DIR}/config/c-structure-baseline.json
+    )
+    set_tests_properties(
+        c_structure_fixtures
+        c_structure_ratchet
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME context_switch_gateway_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_context_switch_gateway.py -v
+    )
+    add_test(
+        NAME context_switch_gateway
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_context_switch_gateway.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --check
+    )
+    set_tests_properties(
+        context_switch_gateway_fixtures
+        context_switch_gateway
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME hardening_artifact_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_hardening_artifact.py -v
+    )
+    set_tests_properties(
+        hardening_artifact_fixtures
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()
 
+if(LLAM_BUILD_RESEARCH)
+set(LLAM_LEIR_RESEARCH_TARGETS
+    test_leir_phase0
+    test_leir_connect
+    test_leir_aot_plan
+    test_leir_aot_module
+    test_leir_aot_c_consumer
+    test_leir_aot_integration
+    test_leir_aot_linux_unit
+    test_leir_aot_ownership
+    test_leir_aot_ring_profile
+    bench_leir_aot_connect
+    test_leir_native_plan
+    test_leir_native_segment
+    bench_leir_native_segment
+    bench_leir_native_pipeline
+    test_leir_native_linux
+    bench_leir_phase0
+)
 set(LLAM_LEIR_PHASE0_SOURCES
+    experiments/leir/leir_bindings.c
     experiments/leir/leir_engine.c
     experiments/leir/leir_peer_process.c
     experiments/leir/leir_program.c
     experiments/leir/leir_test_support.c
 )
 
+add_executable(test_leir_aot_plan
+    experiments/leir/leir_program.c
+    experiments/leir/leir_aot_plan.c
+    experiments/leir/test_leir_aot_plan.c
+)
+target_include_directories(test_leir_aot_plan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_plan PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_module
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/test_leir_aot_module.c
+)
+target_include_directories(test_leir_aot_module PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_module PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_c_consumer
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/fixtures/leir_aot_c_consumer.c
+)
+target_include_directories(test_leir_aot_c_consumer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+
+add_executable(test_leir_aot_integration
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_linux.c
+    experiments/leir/test_leir_aot_integration.c
+)
+target_include_directories(test_leir_aot_integration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_integration PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_linux_unit
+    experiments/leir/leir_aot_connect_bench_support.c
+    experiments/leir/test_leir_aot_linux_unit.c
+)
+target_include_directories(test_leir_aot_linux_unit PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_linux_unit PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_ownership
+    experiments/leir/leir_native_test_fixture.c
+    experiments/leir/test_leir_aot_ownership.c
+)
+target_include_directories(test_leir_aot_ownership PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_ownership PRIVATE llam_runtime)
+
+add_executable(test_leir_aot_ring_profile
+    experiments/leir/test_leir_aot_ring_profile.c
+)
+target_include_directories(test_leir_aot_ring_profile PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_aot_ring_profile PRIVATE llam_runtime)
+
+add_executable(bench_leir_aot_connect
+    experiments/leir/generated/leir_aot_connect_write.c
+    experiments/leir/leir_aot_linux.c
+    experiments/leir/leir_aot_connect_bench_support.c
+    experiments/leir/leir_bindings.c
+    experiments/leir/leir_engine.c
+    experiments/leir/leir_program.c
+    experiments/leir/bench_leir_aot_connect.c
+)
+target_include_directories(bench_leir_aot_connect PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(bench_leir_aot_connect PRIVATE llam_runtime)
+
+add_executable(test_leir_native_plan
+    experiments/leir/leir_program.c
+    experiments/leir/leir_native_plan.c
+    experiments/leir/test_leir_native_plan.c
+)
+target_include_directories(test_leir_native_plan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_native_plan PRIVATE llam_runtime)
+
+add_executable(test_leir_native_segment
+    experiments/leir/leir_program.c
+    experiments/leir/leir_native_plan.c
+    experiments/leir/leir_native_segment.c
+    experiments/leir/leir_native_linux_state.c
+    experiments/leir/leir_test_support.c
+    experiments/leir/test_leir_native_fixture.c
+    experiments/leir/test_leir_native_segment.c
+)
+target_include_directories(test_leir_native_segment PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_native_segment PRIVATE llam_runtime)
+
+add_executable(bench_leir_native_segment
+    experiments/leir/leir_program.c
+    experiments/leir/leir_native_plan.c
+    experiments/leir/leir_native_segment.c
+    experiments/leir/leir_native_linux_state.c
+    experiments/leir/leir_peer_process.c
+    experiments/leir/leir_test_support.c
+    experiments/leir/bench_leir_native_segment.c
+)
+target_include_directories(bench_leir_native_segment PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(bench_leir_native_segment PRIVATE llam_runtime)
+
+add_executable(bench_leir_native_pipeline
+    experiments/leir/leir_program.c
+    experiments/leir/leir_native_plan.c
+    experiments/leir/leir_native_segment.c
+    experiments/leir/leir_native_linux_state.c
+    experiments/leir/leir_peer_process.c
+    experiments/leir/leir_test_support.c
+    experiments/leir/bench_leir_native_pipeline.c
+)
+target_include_directories(bench_leir_native_pipeline PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(bench_leir_native_pipeline PRIVATE llam_runtime)
+
+add_executable(test_leir_native_linux
+    experiments/leir/leir_native_test_fixture.c
+    experiments/leir/test_leir_native_linux.c
+)
+target_include_directories(test_leir_native_linux PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_native_linux PRIVATE llam_runtime)
+
 add_executable(test_leir_phase0
     ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/test_leir_phase0.c
 )
+add_executable(test_leir_connect
+    ${LLAM_LEIR_PHASE0_SOURCES}
+    experiments/leir/test_leir_connect.c
+)
 add_executable(bench_leir_phase0
     ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/bench_leir_phase0.c
+)
+target_link_libraries(test_leir_phase0 PRIVATE llam_runtime)
+target_link_libraries(test_leir_connect PRIVATE llam_runtime)
+target_link_libraries(bench_leir_phase0 PRIVATE llam_runtime)
+target_include_directories(test_leir_connect PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
 )
 foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
     target_include_directories(${LLAM_LEIR_PHASE0_TARGET} PRIVATE
@@ -517,9 +987,85 @@ foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
     )
-    target_link_libraries(${LLAM_LEIR_PHASE0_TARGET} PRIVATE llam_runtime)
 endforeach()
 add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
+add_test(NAME test_leir_connect COMMAND test_leir_connect)
+add_test(NAME test_leir_aot_plan COMMAND test_leir_aot_plan)
+add_test(NAME test_leir_aot_module COMMAND test_leir_aot_module)
+add_test(
+    NAME test_leir_aot_c_consumer
+    COMMAND test_leir_aot_c_consumer)
+add_test(
+    NAME test_leir_aot_integration
+    COMMAND test_leir_aot_integration)
+add_test(
+    NAME test_leir_aot_linux_unit
+    COMMAND test_leir_aot_linux_unit)
+add_test(
+    NAME test_leir_aot_ownership
+    COMMAND test_leir_aot_ownership)
+add_test(
+    NAME test_leir_aot_ring_profile
+    COMMAND test_leir_aot_ring_profile)
+set_tests_properties(
+    test_leir_aot_ring_profile
+    PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(
+    test_leir_aot_integration
+    PROPERTIES SKIP_RETURN_CODE 77)
+add_test(
+    NAME test_bench_leir_aot_connect_portable
+    COMMAND bench_leir_aot_connect
+        --candidate portable
+        --family tcp
+        --concurrency 2
+        --payload 64
+        --activations 8)
+add_test(
+    NAME test_bench_leir_aot_connect_native
+    COMMAND bench_leir_aot_connect
+        --candidate native
+        --family tcp
+        --concurrency 2
+        --payload 64
+        --activations 8)
+set_tests_properties(
+    test_bench_leir_aot_connect_portable
+    test_bench_leir_aot_connect_native
+    PROPERTIES SKIP_RETURN_CODE 77)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_bench_leir_aot_connect_contract
+        COMMAND ${Python3_EXECUTABLE}
+            -m unittest scripts/test_bench_leir_aot_connect.py -v)
+    set_tests_properties(
+        test_bench_leir_aot_connect_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+add_test(NAME test_leir_native_plan COMMAND test_leir_native_plan)
+add_test(
+    NAME test_leir_native_segment
+    COMMAND test_leir_native_segment)
+add_test(
+    NAME test_bench_leir_native_segment_smoke
+    COMMAND bench_leir_native_segment
+        --candidate link
+        --ops 8
+        --concurrency 4
+        --payload 64
+        --activations 8
+        --min-mode-ms 1
+        --order ABBA)
+set_tests_properties(
+    test_bench_leir_native_segment_smoke
+    PROPERTIES SKIP_RETURN_CODE 77)
+add_test(
+    NAME test_bench_leir_native_pipeline_smoke
+    COMMAND bench_leir_native_pipeline)
+set_tests_properties(
+    test_bench_leir_native_pipeline_smoke
+    PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME test_leir_native_linux COMMAND test_leir_native_linux --unit-only)
 add_test(
     NAME test_bench_leir_phase0_smoke
     COMMAND bench_leir_phase0
@@ -533,6 +1079,29 @@ add_test(
         --order ABBA
 )
 if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_bench_leir_native_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            "LEIR_NATIVE_TEST_BINARY=$<TARGET_FILE:bench_leir_native_segment>"
+            ${Python3_EXECUTABLE}
+            -m unittest scripts/test_bench_leir_native.py -v
+    )
+    set_tests_properties(
+        test_bench_leir_native_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME test_bench_leir_native_pipeline_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            "LEIR_NATIVE_PIPELINE_TEST_BINARY=$<TARGET_FILE:bench_leir_native_pipeline>"
+            ${Python3_EXECUTABLE}
+            -m unittest
+            scripts/test_bench_leir_native_pipeline.py -v
+    )
+    set_tests_properties(
+        test_bench_leir_native_pipeline_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
     add_test(
         NAME test_bench_leir_phase0_contract
         COMMAND ${CMAKE_COMMAND} -E env
@@ -550,6 +1119,10 @@ set(LLAM_LCWE_MODEL_SOURCES
     experiments/lcwe/lcwe_model.c
     experiments/lcwe/lcwe_workloads.c
 )
+set(LLAM_LCWE_RESEARCH_TARGETS
+    test_lcwe_model
+    bench_lcwe_model
+)
 
 add_executable(test_lcwe_model
     ${LLAM_LCWE_MODEL_SOURCES}
@@ -559,7 +1132,7 @@ add_executable(bench_lcwe_model
     ${LLAM_LCWE_MODEL_SOURCES}
     experiments/lcwe/bench_lcwe_model.c
 )
-foreach(LLAM_LCWE_MODEL_TARGET test_lcwe_model bench_lcwe_model)
+foreach(LLAM_LCWE_MODEL_TARGET ${LLAM_LCWE_RESEARCH_TARGETS})
     target_include_directories(${LLAM_LCWE_MODEL_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lcwe
     )
@@ -579,11 +1152,19 @@ foreach(LLAM_LCWE_MODEL_TARGET test_lcwe_model bench_lcwe_model)
         )
     endif()
 endforeach()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(test_lcwe_model PRIVATE Threads::Threads)
+    target_link_libraries(bench_lcwe_model PRIVATE Threads::Threads)
+endif()
 
 set(LLAM_LCCF_MODEL_SOURCES
     experiments/lccf/lccf_platform.c
     experiments/lccf/lccf_model.c
     experiments/lccf/lccf_workloads.c
+)
+set(LLAM_LCCF_RESEARCH_TARGETS
+    test_lccf_model
+    bench_lccf_model
 )
 
 add_executable(test_lccf_model
@@ -594,7 +1175,11 @@ add_executable(bench_lccf_model
     ${LLAM_LCCF_MODEL_SOURCES}
     experiments/lccf/bench_lccf_model.c
 )
-foreach(LLAM_LCCF_MODEL_TARGET test_lccf_model bench_lccf_model)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(test_lccf_model PRIVATE Threads::Threads)
+    target_link_libraries(bench_lccf_model PRIVATE Threads::Threads)
+endif()
+foreach(LLAM_LCCF_MODEL_TARGET ${LLAM_LCCF_RESEARCH_TARGETS})
     target_include_directories(${LLAM_LCCF_MODEL_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/experiments/lccf
     )
@@ -613,17 +1198,16 @@ foreach(LLAM_LCCF_MODEL_TARGET test_lccf_model bench_lccf_model)
             _WIN32_WINNT=0x0A00
         )
     endif()
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        target_link_libraries(${LLAM_LCCF_MODEL_TARGET} PRIVATE
-            Threads::Threads
-        )
-    endif()
 endforeach()
 
 set(LLAM_SREM_MODEL_SOURCES
     experiments/srem/srem_platform.c
     experiments/srem/srem_model.c
     experiments/srem/srem_workloads.c
+)
+set(LLAM_SREM_RESEARCH_TARGETS
+    test_srem_model
+    bench_srem_model
 )
 
 add_executable(test_srem_model
@@ -634,7 +1218,11 @@ add_executable(bench_srem_model
     ${LLAM_SREM_MODEL_SOURCES}
     experiments/srem/bench_srem_model.c
 )
-foreach(LLAM_SREM_MODEL_TARGET test_srem_model bench_srem_model)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(test_srem_model PRIVATE Threads::Threads)
+    target_link_libraries(bench_srem_model PRIVATE Threads::Threads)
+endif()
+foreach(LLAM_SREM_MODEL_TARGET ${LLAM_SREM_RESEARCH_TARGETS})
     target_include_directories(${LLAM_SREM_MODEL_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/experiments/srem
     )
@@ -653,12 +1241,96 @@ foreach(LLAM_SREM_MODEL_TARGET test_srem_model bench_srem_model)
             _WIN32_WINNT=0x0A00
         )
     endif()
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        target_link_libraries(${LLAM_SREM_MODEL_TARGET} PRIVATE
-            Threads::Threads
+endforeach()
+
+foreach(LLAM_RESEARCH_TEST_TARGET ${LLAM_LEIR_RESEARCH_TARGETS})
+    target_include_directories(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    )
+    target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+        _GNU_SOURCE
+        ${LLAM_RESEARCH_DEFINE}
+    )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+            _XOPEN_SOURCE=700
+            _DARWIN_C_SOURCE
+        )
+    elseif(LLAM_SYSTEM_IS_BSD)
+        target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+            ${LLAM_BSD_FEATURE_DEFINITIONS}
+        )
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+            _WIN32_WINNT=0x0A00
+            LLAM_ENABLE_WINDOWS_BACKEND
         )
     endif()
 endforeach()
+
+add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
+add_test(NAME test_lccf_model COMMAND test_lccf_model)
+add_test(NAME test_srem_model COMMAND test_srem_model)
+if(Python3_FOUND)
+    add_test(
+        NAME test_bench_lcwe_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcwe_model.py
+    )
+    add_test(
+        NAME test_bench_lccf_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LCCF_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lccf_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_model.py
+    )
+    add_test(
+        NAME test_bench_srem_native
+        COMMAND ${CMAKE_COMMAND} -E env
+                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_native.py
+    )
+    add_test(
+        NAME test_bench_srem_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_model.py
+    )
+endif()
+endif()
+
+set(LLAM_PUBLIC_TEST_TARGETS
+    test_abi_contract
+    test_connect_io
+    test_runtime_group_local_edges
+    test_runtime_fuzz
+    test_runtime_invariants
+    test_runtime_io_dump
+    test_runtime_select_edges
+    test_runtime_stress
+    test_runtime_unmanaged_join
+    test_sync_primitives
+    test_windows_runtime_smoke
+    test_shared_load
+)
+set(LLAM_INTERNAL_TEST_TARGETS
+    test_abi_compat
+    test_io_buffers
+    test_multi_runtime_core
+    test_runtime_api_edges
+    test_runtime_core
+    test_norm_queue_wrap
+    test_windows_policy
+)
+set(LLAM_TEST_HOOK_TEST_TARGETS
+    test_runtime_shutdown_internal
+    test_security_capability
+)
 
 add_executable(test_abi_contract
     tests/test_abi_contract.c
@@ -740,6 +1412,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_HAVE_IO_URING_SETUP_BUF_RING)
 endif()
 target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime_testhooks)
 
+add_executable(test_norm_queue_wrap
+    tests/test_norm_queue_wrap.c
+)
+target_link_libraries(test_norm_queue_wrap PRIVATE llam_runtime)
+
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c
 )
@@ -775,8 +1452,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
-    target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime)
+    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND LLAM_ENABLE_TEST_HOOKS=1 ${LLAM_RESEARCH_DEFINE})
+    target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime_testhooks)
 
     add_executable(test_windows_handle_io
         tests/test_windows_handle_io.c
@@ -786,7 +1463,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND ${LLAM_RESEARCH_DEFINE})
     target_link_libraries(test_windows_handle_io PRIVATE llam_runtime)
 
     add_executable(test_windows_iocp_dump
@@ -797,44 +1474,32 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_iocp_dump PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_compile_definitions(test_windows_iocp_dump PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND ${LLAM_RESEARCH_DEFINE})
     target_link_libraries(test_windows_iocp_dump PRIVATE llam_runtime)
+
+    list(APPEND LLAM_PUBLIC_TEST_TARGETS test_windows_iocp_dump)
+    list(APPEND LLAM_INTERNAL_TEST_TARGETS test_windows_handle_io)
+    list(APPEND LLAM_TEST_HOOK_TEST_TARGETS test_windows_iocp_io)
 endif()
 
 add_executable(test_shared_load ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_shared_load.c
 )
-target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 add_dependencies(test_shared_load llam_runtime_shared)
 
 foreach(LLAM_TEST_TARGET
-        test_leir_phase0
-        bench_leir_phase0
-        test_abi_contract
-        test_abi_compat
-        test_connect_io
-        test_runtime_core
-        test_multi_runtime_core
-        test_runtime_api_edges
-        test_runtime_select_edges
-        test_runtime_io_dump
-        test_runtime_group_local_edges
-        test_runtime_unmanaged_join
-        test_runtime_stress
-        test_runtime_fuzz
-        test_runtime_invariants
-        test_runtime_shutdown_internal
-        test_sync_primitives
-        test_io_buffers
-        test_windows_policy
-        test_windows_runtime_smoke
-        test_security_capability
-        test_shared_load)
+        ${LLAM_PUBLIC_TEST_TARGETS}
+        ${LLAM_INTERNAL_TEST_TARGETS}
+        ${LLAM_TEST_HOOK_TEST_TARGETS})
     target_include_directories(${LLAM_TEST_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     )
-    target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _GNU_SOURCE)
+    target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE
+        _GNU_SOURCE
+        ${LLAM_RESEARCH_DEFINE}
+    )
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
     elseif(LLAM_SYSTEM_IS_BSD)
@@ -855,43 +1520,11 @@ add_test(NAME test_runtime_stress COMMAND test_runtime_stress)
 add_test(NAME test_runtime_fuzz COMMAND test_runtime_fuzz)
 add_test(NAME test_runtime_invariants COMMAND test_runtime_invariants)
 add_test(NAME test_runtime_shutdown_internal COMMAND test_runtime_shutdown_internal)
+add_test(NAME test_norm_queue_wrap COMMAND test_norm_queue_wrap)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
-add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
-add_test(NAME test_lccf_model COMMAND test_lccf_model)
-add_test(NAME test_srem_model COMMAND test_srem_model)
-if(Python3_FOUND)
-    add_test(
-        NAME test_bench_lcwe_model
-        COMMAND ${CMAKE_COMMAND} -E env
-                "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcwe_model.py
-    )
-    add_test(
-        NAME test_bench_lccf_model
-        COMMAND ${CMAKE_COMMAND} -E env
-                "LCCF_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lccf_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_model.py
-    )
-    add_test(
-        NAME test_bench_srem_native
-        COMMAND ${CMAKE_COMMAND} -E env
-                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_native.py
-    )
-    add_test(
-        NAME test_bench_srem_model
-        COMMAND ${CMAKE_COMMAND} -E env
-                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_model.py
-    )
-endif()
 add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_windows_iocp_io COMMAND test_windows_iocp_io)
@@ -911,6 +1544,15 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
                          $<TARGET_FILE:llam_runtime_shared>
                          --root ${CMAKE_CURRENT_SOURCE_DIR})
     endif()
+endif()
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME hardening_artifact
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_hardening_artifact.py
+                $<TARGET_FILE:llam_runtime_shared>
+                --profile ${LLAM_HARDENING}
+    )
 endif()
 
 set(LLAM_PC_PRIVATE_LIBS "-pthread")

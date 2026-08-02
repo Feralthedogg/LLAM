@@ -60,7 +60,8 @@ static int llam_task_reserve_public_slot_locked(llam_task_t *task, size_t *out_s
                                                   256U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_TASK,
                                                   task->owner_runtime != NULL
-                                                      ? task->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            task->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -69,29 +70,34 @@ static int llam_task_reserve_public_slot_locked(llam_task_t *task, size_t *out_s
 void llam_task_invalidate_public_handle_locked(llam_task_t *task) {
     uint32_t generation = 0U;
     int saved_errno = errno;
+    bool invalidated = false;
 
-    if (task == NULL ||
-        llam_public_slot_reactivate_family_secret(&g_llam_task_public_slots,
-                                                  task->public_handle_slot,
-                                                  task,
-                                                  LLAM_PUBLIC_HANDLE_FAMILY_TASK,
-                                                  task->owner_runtime != NULL
-                                                      ? task->owner_runtime->public_handle_secret
-                                                      : 0U,
-                                                  &generation) == 0) {
-        if (task != NULL) {
-            atomic_store_explicit(&task->public_handle_generation, generation, memory_order_release);
-        }
+    if (task == NULL) {
         errno = saved_errno;
         return;
     }
-    if (errno == EOVERFLOW) {
+    if (llam_public_slot_reactivate_family_secret(
+            &g_llam_task_public_slots,
+            task->public_handle_slot,
+            task,
+            LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+            task->owner_runtime != NULL
+                ? llam_runtime_public_owner_secret(
+                      task->owner_runtime)
+                : 0U,
+            &generation) == 0) {
+        atomic_store_explicit(&task->public_handle_generation,
+                              generation,
+                              memory_order_release);
+        invalidated = true;
+    } else if (errno == EOVERFLOW) {
         size_t old_slot = task->public_handle_slot;
         uint32_t old_generation = atomic_load_explicit(&task->public_handle_generation, memory_order_acquire);
         size_t new_slot = 0U;
 
         if (old_slot < g_llam_task_public_slots.count) {
             llam_public_slot_release(&g_llam_task_public_slots, old_slot, task, old_generation);
+            invalidated = true;
         }
         task->public_handle_slot = SIZE_MAX;
         atomic_store_explicit(&task->public_handle_generation, 0U, memory_order_release);
@@ -101,6 +107,12 @@ void llam_task_invalidate_public_handle_locked(llam_task_t *task) {
                                   llam_public_slot_generation(&g_llam_task_public_slots, new_slot),
                                   memory_order_release);
         }
+    }
+    if (invalidated && task->public_owner_pinned) {
+        llam_runtime_t *owner_runtime = task->owner_runtime;
+
+        task->public_owner_pinned = false;
+        llam_runtime_public_owner_release(owner_runtime);
     }
     errno = saved_errno;
 }
@@ -119,7 +131,7 @@ int llam_task_activate_public_handle(llam_task_t *task) {
      */
     if (task->public_handle_slot != SIZE_MAX &&
         atomic_load_explicit(&task->public_handle_generation, memory_order_acquire) != 0U) {
-        return 0;
+        goto pin_owner;
     }
     pthread_mutex_lock(&g_llam_task_registry_lock);
     if (task->public_handle_slot >= g_llam_task_public_slots.count ||
@@ -141,6 +153,17 @@ int llam_task_activate_public_handle(llam_task_t *task) {
         llam_task_invalidate_public_handle_locked(task);
     }
     pthread_mutex_unlock(&g_llam_task_registry_lock);
+    if (rc != 0) {
+        return rc;
+    }
+
+pin_owner:
+    if (!task->public_owner_pinned) {
+        if (llam_runtime_public_owner_acquire(task->owner_runtime) != 0) {
+            return -1;
+        }
+        task->public_owner_pinned = true;
+    }
     return rc;
 }
 
@@ -171,6 +194,7 @@ llam_task_t *llam_task_resolve_public_handle_locked(const llam_task_t *handle) {
 
 static void llam_task_unregister_live_locked(llam_task_t *task) {
     llam_task_t **link = &g_llam_task_registry;
+    llam_runtime_t *owner_runtime = task->owner_runtime;
 
     if (task->public_handle_slot < g_llam_task_public_slots.count) {
         llam_public_slot_release(&g_llam_task_public_slots,
@@ -184,9 +208,13 @@ static void llam_task_unregister_live_locked(llam_task_t *task) {
         if (*link == task) {
             *link = task->registry_next;
             task->registry_next = NULL;
-            return;
+            break;
         }
         link = &(*link)->registry_next;
+    }
+    if (task->public_owner_pinned) {
+        task->public_owner_pinned = false;
+        llam_runtime_public_owner_release(owner_runtime);
     }
 }
 
@@ -200,6 +228,7 @@ void llam_task_register_public_slab(llam_task_t *items, unsigned count) {
     for (i = 0U; i < count; ++i) {
         llam_public_active_op_init(&items[i].active_ops);
         items[i].public_handle_slot = SIZE_MAX;
+        items[i].public_owner_pinned = false;
         atomic_init(&items[i].public_handle_generation, 0U);
         items[i].registry_next = g_llam_task_registry;
         g_llam_task_registry = &items[i];

@@ -129,8 +129,11 @@ static bool llam_channel_has_local_runnable_hint(void) {
     if (shard->norm_q.depth != 0U) {
         return true;
     }
-    top = atomic_load_explicit(&shard->norm_cldeque.top, memory_order_acquire);
-    bottom = atomic_load_explicit(&shard->norm_cldeque.bottom, memory_order_acquire);
+    if (shard->norm_cldeque == NULL) {
+        return false;
+    }
+    top = atomic_load_explicit(&shard->norm_cldeque->top, memory_order_acquire);
+    bottom = atomic_load_explicit(&shard->norm_cldeque->bottom, memory_order_acquire);
     return bottom > top;
 }
 

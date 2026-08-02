@@ -58,6 +58,8 @@ ssize_t llam_posix_sendmsg_no_sigpipe(
 /* Request ownership helpers used by public I/O entry points. */
 llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard);
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
+int llam_fail_io_setup_req(llam_io_req_t *req, int error_code);
+llam_runtime_t *llam_io_request_runtime(const llam_io_req_t *req);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 bool llam_io_test_abort_published_io_setup(llam_io_req_t *req,
                                            llam_io_abort_reason_t reason,
@@ -67,6 +69,32 @@ typedef void (*llam_io_park_snapshot_hook_fn)(
     unsigned observed_wait_mode);
 void llam_io_test_set_park_snapshot_hook(
     llam_io_park_snapshot_hook_fn hook);
+
+typedef enum llam_blocking_result_test_kind {
+    LLAM_BLOCKING_RESULT_TEST_GETADDRINFO = 1,
+    LLAM_BLOCKING_RESULT_TEST_OPEN = 2,
+    LLAM_BLOCKING_RESULT_TEST_ACCEPT = 3,
+} llam_blocking_result_test_kind_t;
+
+typedef enum llam_blocking_result_test_event {
+    LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE = 1,
+    LLAM_BLOCKING_RESULT_TEST_CREATED = 2,
+    LLAM_BLOCKING_RESULT_TEST_DISCARDED = 3,
+} llam_blocking_result_test_event_t;
+
+typedef void (*llam_blocking_result_test_hook_fn)(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value,
+    void *context);
+
+void llam_io_test_set_blocking_result_hook(
+    llam_blocking_result_test_hook_fn hook,
+    void *context);
+void llam_io_test_notify_blocking_result(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value);
 #endif
 
 /* Direct syscall and poll probes used before parking a task. */
@@ -407,11 +435,27 @@ int llam_positional_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req);
 
 /* Cooperative I/O parking and backend issue paths. */
 void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req);
+LLAM_INTERNAL_API int llam_prepare_io_wait(
+    llam_io_req_t *req,
+    llam_io_wait_mode_t wait_mode,
+    uint64_t deadline_ns);
 int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns, llam_node_t *wake_node);
 int llam_issue_multishot_poll(llam_io_req_t *req);
 int llam_issue_multishot_accept(llam_io_req_t *req);
 int llam_issue_multishot_recv(llam_io_req_t *req);
 int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns);
+#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
+struct llam_linux_native_segment;
+struct llam_linux_native_batch;
+LLAM_INTERNAL_API int llam_issue_linux_native_batch(
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
+LLAM_INTERNAL_API int llam_issue_linux_native_segment(
+    struct llam_linux_native_segment *segment,
+    llam_io_req_t *req);
+#endif
+#endif
 bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kind, const void *target);
 
 #endif

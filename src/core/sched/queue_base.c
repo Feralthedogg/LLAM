@@ -212,7 +212,24 @@ bool llam_shard_merge_pause_requested(const llam_shard_t *shard) {
  * @return true when online and not merge-paused.
  */
 bool llam_shard_accepts_new_work(const llam_shard_t *shard) {
-    return llam_shard_is_online(shard) && !llam_shard_merge_pause_requested(shard);
+    bool requested;
+    bool acknowledged;
+
+    if (!llam_shard_is_online(shard)) {
+        return false;
+    }
+    requested = atomic_load_explicit(
+        &((llam_shard_t *)shard)->merge_pause_requested,
+        memory_order_acquire) != 0U;
+    acknowledged = atomic_load_explicit(
+        &((llam_shard_t *)shard)->merge_pause_ack,
+        memory_order_acquire) != 0U;
+    /*
+     * A request alone does not prove the current task saved its continuation.
+     * Keep early wakes on the occupied source until scheduler acknowledgement
+     * establishes the merge-safe context-save edge.
+     */
+    return !(requested && acknowledged);
 }
 
 /**

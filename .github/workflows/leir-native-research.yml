@@ -1,0 +1,457 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
+name: LEIR Linux Native Segment Research
+
+env:
+  LLAM_BUILD_RESEARCH: "1"
+
+on:
+  workflow_call:
+    inputs:
+      require_promotion:
+        description: Require portable SPECIALIZED promotion evidence
+        required: true
+        type: boolean
+  pull_request:
+    paths:
+      - ".github/workflows/leir-native-research.yml"
+      - "experiments/leir/**"
+      - "include/llam/experimental/**"
+      - "src/io/linux/**"
+      - "src/core/wait/**"
+      - "src/internal/**"
+      - "scripts/bench_leir_native.py"
+      - "scripts/test_bench_leir_native.py"
+      - "scripts/bench_leir_native_pipeline.py"
+      - "scripts/test_bench_leir_native_pipeline.py"
+      - "scripts/evidence_bundle.py"
+      - "scripts/test_evidence_bundle.py"
+      - "scripts/process_utils.py"
+      - "scripts/test_process_utils.py"
+      - "scripts/verify_linux.sh"
+      - "docs/operations/benchmarks.md"
+      - "CMakeLists.txt"
+      - "Makefile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leir-native-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: linux-x86_64-screen
+    if: >-
+      inputs.require_promotion ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Configure evidence directory
+        shell: bash
+        run: |
+          echo "OUT_DIR=$RUNNER_TEMP/leir-native-screen" >> "$GITHUB_ENV"
+          echo "RESEARCH_BIN_DIR=$RUNNER_TEMP/leir-native-bin" >> "$GITHUB_ENV"
+
+      - name: Verify exact source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install Linux research toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            liburing-dev \
+            pkg-config \
+            util-linux
+
+      - name: Record source and runner environment
+        run: |
+          mkdir -p "$OUT_DIR"
+          {
+            echo "event_sha=$GITHUB_SHA"
+            echo "source_sha=$(git rev-parse HEAD)"
+          } | tee "$OUT_DIR/source.txt"
+          {
+            uname -a
+            ulimit -l
+            lscpu
+            gcc --version
+            clang --version
+            cmake --version
+            python3 --version
+            pkg-config --modversion liburing
+            cat /proc/sys/kernel/io_uring_disabled
+            taskset --version
+            taskset -pc $$
+            git rev-parse HEAD
+          } > "$OUT_DIR/environment.txt"
+
+      - name: Make native pipeline correctness gate
+        shell: bash
+        run: |
+          set -o pipefail
+          make clean
+          make -j2 \
+            test-leir-native \
+            test-leir-native-linux \
+            CC=gcc \
+            CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O3 -g -fno-omit-frame-pointer" \
+            2>&1 | tee "$OUT_DIR/make-test-leir-native.log"
+          ./test_leir_native_plan \
+            2>&1 | tee "$OUT_DIR/make-native-plan-test.log"
+          ./test_leir_native_segment \
+            2>&1 | tee "$OUT_DIR/make-native-segment-test.log"
+          ./test_leir_native_linux \
+            2>&1 | tee "$OUT_DIR/make-native-linux-test.log"
+          python3 -m unittest \
+            scripts/test_bench_leir_native.py \
+            scripts/test_bench_leir_native_pipeline.py \
+            scripts/test_evidence_bundle.py -v \
+            2>&1 | tee "$OUT_DIR/make-native-python-test.log"
+          mkdir -p "$RESEARCH_BIN_DIR"
+          install -m 0755 ./bench_leir_native_pipeline "$RESEARCH_BIN_DIR/bench_leir_native_pipeline"
+
+      - name: Probe kernel native feature status
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from process_utils import ProcessTimeoutError, run_capture
+
+          out_dir = Path(os.environ["OUT_DIR"])
+          command = [
+              "./bench_leir_native_segment",
+              "--candidate", "link_skip",
+              "--ops", "4",
+              "--concurrency", "4",
+              "--payload", "64",
+              "--activations", "8",
+              "--min-mode-ms", "1",
+              "--order", "ABBA",
+          ]
+          try:
+              probe = run_capture(
+                  command,
+                  timeout=30,
+                  max_output_bytes=64 * 1024,
+              )
+          except ProcessTimeoutError as exc:
+              (out_dir / "feature-probe.stdout").write_text(
+                  exc.stdout, encoding="utf-8"
+              )
+              (out_dir / "feature-probe.stderr").write_text(
+                  exc.stderr, encoding="utf-8"
+              )
+              raise SystemExit(124)
+
+          (out_dir / "feature-probe.stdout").write_text(
+              probe.stdout, encoding="utf-8"
+          )
+          (out_dir / "feature-probe.stderr").write_text(
+              probe.stderr, encoding="utf-8"
+          )
+          if probe.stdout_truncated or probe.stderr_truncated:
+              raise SystemExit("feature probe exceeded output cap")
+          if probe.returncode == 0:
+              status = "available"
+          elif probe.returncode == 77:
+              status = "unavailable"
+              print(probe.stderr, end="")
+          else:
+              print(probe.stdout, end="")
+              print(probe.stderr, end="", file=sys.stderr)
+              raise SystemExit(probe.returncode)
+          text = f"linux_io_uring_native={status}\n"
+          (out_dir / "feature-status.txt").write_text(
+              text, encoding="utf-8"
+          )
+          print(text, end="")
+          PY
+
+      - name: Clang CMake native gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B object/leir-native-ci-cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_ASM_COMPILER=clang \
+            2>&1 | tee "$OUT_DIR/cmake-configure.log"
+          cmake --build object/leir-native-ci-cmake \
+            --target \
+              test_leir_native_plan \
+              test_leir_native_segment \
+              test_leir_native_linux \
+              bench_leir_native_segment \
+              bench_leir_native_pipeline \
+            -j2 2>&1 | tee "$OUT_DIR/cmake-build.log"
+          ctest --test-dir object/leir-native-ci-cmake \
+            --output-on-failure \
+            --timeout 180 \
+            -R "test_leir_native_plan|test_leir_native_segment|test_bench_leir_native" \
+            2>&1 | tee "$OUT_DIR/ctest.log"
+          ./object/leir-native-ci-cmake/test_leir_native_linux \
+            2>&1 | tee "$OUT_DIR/cmake-native-linux-test.log"
+
+      - name: ASan and UBSan native integration gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B object/leir-native-ci-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_ASM_COMPILER=gcc \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            2>&1 | tee "$OUT_DIR/asan-configure.log"
+          cmake --build object/leir-native-ci-asan \
+            --target \
+              test_leir_native_plan \
+              test_leir_native_segment \
+              test_leir_native_linux \
+              bench_leir_native_segment \
+              bench_leir_native_pipeline \
+            -j2 2>&1 | tee "$OUT_DIR/asan-build.log"
+
+          status=0
+          run_logged() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              status=1
+            fi
+          }
+          run_logged_allow_skip() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ]; then
+              status=1
+            fi
+          }
+          sanitizer_env=(
+            env
+            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
+            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          )
+          run_logged "$OUT_DIR/asan-plan-test.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/test_leir_native_plan
+          run_logged "$OUT_DIR/asan-segment-test.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/test_leir_native_segment
+          for iteration in 1 2 3 4 5; do
+            run_logged \
+              "$OUT_DIR/asan-linux-test-$iteration.log" \
+              "${sanitizer_env[@]}" \
+              ./object/leir-native-ci-asan/test_leir_native_linux
+          done
+          run_logged_allow_skip "$OUT_DIR/asan-native-bench.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/bench_leir_native_segment \
+              --candidate link \
+              --ops 8 \
+              --concurrency 1 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          run_logged_allow_skip "$OUT_DIR/asan-pipeline-bench.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/bench_leir_native_pipeline \
+              --candidate link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          run_logged_allow_skip \
+            "$OUT_DIR/asan-pipeline-fixed-bench.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/bench_leir_native_pipeline \
+              --candidate fixed_link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          exit "$status"
+
+      - name: TSan native integration gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B object/leir-native-ci-tsan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_ASM_COMPILER=gcc \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            2>&1 | tee "$OUT_DIR/tsan-configure.log"
+          cmake --build object/leir-native-ci-tsan \
+            --target \
+              test_leir_native_plan \
+              test_leir_native_segment \
+              test_leir_native_linux \
+              bench_leir_native_pipeline \
+            -j2 2>&1 | tee "$OUT_DIR/tsan-build.log"
+
+          status=0
+          run_logged() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              status=1
+            fi
+          }
+          run_logged_allow_skip() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ]; then
+              status=1
+            fi
+          }
+          run_logged "$OUT_DIR/tsan-plan-test.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/test_leir_native_plan
+          run_logged "$OUT_DIR/tsan-segment-test.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/test_leir_native_segment
+          run_logged "$OUT_DIR/tsan-linux-test.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/test_leir_native_linux
+          run_logged_allow_skip "$OUT_DIR/tsan-pipeline-bench.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/bench_leir_native_pipeline \
+              --candidate link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          run_logged_allow_skip \
+            "$OUT_DIR/tsan-pipeline-fixed-bench.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/bench_leir_native_pipeline \
+              --candidate fixed_link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          exit "$status"
+
+      - name: Full runtime regression and export gates
+        shell: bash
+        run: |
+          set -o pipefail
+          make clean
+          env LLAM_BUILD_RESEARCH=0 make -j2 test CC=gcc \
+            2>&1 | tee "$OUT_DIR/make-test.log"
+          env LLAM_BUILD_RESEARCH=0 make -j2 shared audit-shared-exports \
+            audit-production-test-hooks CC=gcc \
+            2>&1 | tee "$OUT_DIR/export-audit.log"
+          JOBS=2 scripts/verify_linux.sh \
+            2>&1 | tee "$OUT_DIR/verify-linux.log"
+
+      - name: Run pinned connected pipeline evidence
+        shell: bash
+        run: |
+          set -o pipefail
+          benchmark_cpus="$(
+            python3 - <<'PY'
+          import os
+          cpus = sorted(os.sched_getaffinity(0))
+          if len(cpus) < 2:
+              raise SystemExit("expected at least two benchmark CPUs")
+          print(",".join(str(cpu) for cpu in cpus[:2]))
+          PY
+          )"
+          {
+            echo "benchmark_cpus=$benchmark_cpus"
+            echo "allowed_cpus=$(taskset -pc $$)"
+          } | tee "$OUT_DIR/affinity.txt"
+          sha256sum "$RESEARCH_BIN_DIR/bench_leir_native_pipeline" \
+            | tee "$OUT_DIR/pipeline-binary.sha256"
+          taskset -c "$benchmark_cpus" \
+            python3 scripts/bench_leir_native_pipeline.py \
+              --binary "$RESEARCH_BIN_DIR/bench_leir_native_pipeline" \
+              --samples 9 \
+              --activations 32 \
+              --min-mode-ms 20 \
+              --output-dir "$OUT_DIR/pipeline" \
+            2> >(tee "$OUT_DIR/pipeline-runner-stderr.log" >&2) |
+            tee "$OUT_DIR/pipeline-runner-stdout.log"
+
+      - name: Audit connected pipeline screen
+        if: github.event_name == 'pull_request' && !inputs.require_promotion
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/bench_leir_native_pipeline.py \
+            --audit-existing "$OUT_DIR/pipeline" \
+            --require-source "$GITHUB_SHA" \
+            2>&1 | tee "$OUT_DIR/pipeline-audit.log"
+
+      - name: Enforce connected pipeline promotion
+        if: inputs.require_promotion || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/bench_leir_native_pipeline.py \
+            --audit-existing "$OUT_DIR/pipeline" \
+            --require-source "$GITHUB_SHA" \
+            --require-verdict SPECIALIZED \
+            2>&1 | tee "$OUT_DIR/pipeline-promotion.log"
+
+      - name: Upload LEIR native evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: leir-native-screen-linux-x86_64
+          path: ${{ runner.temp }}/leir-native-screen
+          if-no-files-found: error

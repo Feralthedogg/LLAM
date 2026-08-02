@@ -112,11 +112,13 @@ static void llam_broker_ring_completion_fail_errno(llam_broker_ring_completion_t
     llam_broker_ring_completion_fail(completion, errno);
 }
 
-void llam_broker_ring_execute_submission(llam_broker_t *broker,
-                                         llam_broker_ring_t *ring,
-                                         const llam_broker_ring_submission_t *submission,
-                                         llam_broker_ring_completion_t *completion,
-                                         llam_capability_token_t *out_created_task_token) {
+void llam_broker_ring_execute_submission_until(
+    llam_broker_t *broker,
+    llam_broker_ring_t *ring,
+    const llam_broker_ring_submission_t *submission,
+    llam_broker_ring_completion_t *completion,
+    llam_capability_token_t *out_created_task_token,
+    uint64_t deadline_ns) {
     size_t ring_offset;
     size_t length;
 
@@ -207,7 +209,12 @@ void llam_broker_ring_execute_submission(llam_broker_t *broker,
         break;
     case LLAM_BROKER_RING_OP_DESCRIPTOR_READ:
         if (llam_broker_ring_data_range(submission->arg2, submission->arg1, &ring_offset, &length) == 0) {
-            ssize_t nread = llam_broker_read_handle(broker, &submission->token, ring->data + ring_offset, length);
+            ssize_t nread = llam_broker_read_handle_until(
+                broker,
+                &submission->token,
+                ring->data + ring_offset,
+                length,
+                deadline_ns);
 
             if (nread >= 0) {
                 llam_broker_ring_clear_output_suffix(ring, ring_offset, length, (size_t)nread);
@@ -223,7 +230,12 @@ void llam_broker_ring_execute_submission(llam_broker_t *broker,
         break;
     case LLAM_BROKER_RING_OP_DESCRIPTOR_WRITE:
         if (llam_broker_ring_data_range(submission->arg2, submission->arg1, &ring_offset, &length) == 0) {
-            ssize_t nwritten = llam_broker_write_handle(broker, &submission->token, ring->data + ring_offset, length);
+            ssize_t nwritten = llam_broker_write_handle_until(
+                broker,
+                &submission->token,
+                ring->data + ring_offset,
+                length,
+                deadline_ns);
 
             if (nwritten >= 0) {
                 completion->status = 0;
@@ -315,4 +327,19 @@ void llam_broker_ring_execute_submission(llam_broker_t *broker,
         llam_broker_ring_completion_fail(completion, EINVAL);
         break;
     }
+}
+
+void llam_broker_ring_execute_submission(
+    llam_broker_t *broker,
+    llam_broker_ring_t *ring,
+    const llam_broker_ring_submission_t *submission,
+    llam_broker_ring_completion_t *completion,
+    llam_capability_token_t *out_created_task_token) {
+    llam_broker_ring_execute_submission_until(
+        broker,
+        ring,
+        submission,
+        completion,
+        out_created_task_token,
+        llam_broker_descriptor_io_deadline());
 }

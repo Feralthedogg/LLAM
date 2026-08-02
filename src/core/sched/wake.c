@@ -576,7 +576,21 @@ long llam_linux_futex_wake_private(atomic_uint *addr, unsigned count) {
  * @param shard Shard to kick.
  */
 void llam_kick_shard(llam_shard_t *shard) {
-    if (shard == NULL || shard->event_fd < 0) {
+    if (shard == NULL) {
+        return;
+    }
+    if (shard->runtime != NULL && shard->runtime->external_driver.enabled) {
+        int saved_errno = errno;
+
+        if (llam_external_doorbell_signal(
+                &shard->runtime->external_driver.doorbell) != 0) {
+            int signal_errno = errno != 0 ? errno : EIO;
+
+            llam_record_fatal_deferred(shard->runtime, signal_errno);
+        }
+        errno = saved_errno;
+    }
+    if (shard->event_fd < 0) {
         return;
     }
     if (llam_eventfd_try_claim(&shard->event_pending) == 0U) {

@@ -39,48 +39,6 @@
 
 #include "runtime_internal.h"
 
-static bool llam_scheduler_signal_stack_failure_is_fatal(int err) {
-    /*
-     * The alternate signal stack is a diagnostics surface for guard-page fault
-     * reports, not a correctness prerequisite for running tasks.  DragonFlyBSD
-     * can transiently report EAGAIN when tests rapidly move shard 0 across host
-     * pthreads; treating that as fatal makes the scheduler fail even though the
-     * runtime can safely continue with reduced crash diagnostics.
-     */
-    return err != EAGAIN;
-}
-
-static int llam_scheduler_try_install_signal_stack(llam_shard_t *shard) {
-    int saved_errno;
-
-    if (llam_install_thread_signal_stack(shard) == 0) {
-        return 0;
-    }
-
-    saved_errno = errno;
-    if (!llam_scheduler_signal_stack_failure_is_fatal(saved_errno)) {
-        errno = 0;
-        return 0;
-    }
-
-    errno = saved_errno;
-    return -1;
-}
-
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thread) {
-    /*
-     * The join handle in shard->thread is written by pthread_create() and read by
-     * pthread_join().  The watchdog signal target is mutable while opaque-block
-     * helper compensation is active, so publish it under shard->lock instead of
-     * reusing the join handle and racing the run thread.
-     */
-    pthread_mutex_lock(&shard->lock);
-    shard->preempt_thread = thread;
-    pthread_mutex_unlock(&shard->lock);
-}
-#endif
-
 /**
  * @brief Mark a task as running on a shard and update dispatch metrics.
  *
@@ -107,7 +65,7 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     g_llam_tls_task = task;
     atomic_store_explicit(&task->last_shard, shard->id, memory_order_relaxed);
     task->state = LLAM_TASK_STATE_RUNNING;
-    task->last_started_ns = now_ns;
+    shard->current_started_ns = now_ns;
     if (wake_timing) {
         llam_runtime_record_dispatch_latency(shard, task, now_ns);
     }
@@ -187,8 +145,6 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     if (task != NULL && run_ns != 0U) {
         uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
 
-        task->last_run_ns = run_ns;
-        task->total_run_ns += run_ns;
 #if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
         llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
 #elif LLAM_ARCH_AARCH64
@@ -233,10 +189,21 @@ static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
     }
 
     if (!llam_shard_merge_pause_requested(shard)) {
+        /*
+         * An external driver acknowledges one pause quantum and returns to its
+         * host instead of waiting here. Clear that receipt when a later drive
+         * observes the request released.
+         */
+        atomic_store_explicit(&shard->merge_pause_ack,
+                              0U,
+                              memory_order_release);
         return false;
     }
 
     atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
+    if (rt->external_driver.enabled) {
+        return true;
+    }
     while (llam_shard_merge_pause_requested(shard)) {
         if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
             llam_runtime_drained(rt)) {
@@ -251,6 +218,95 @@ static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
     }
     atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
     return true;
+}
+
+/**
+ * @brief Execute one scheduler iteration without entering an idle wait.
+ *
+ * Queue and timer maintenance may process a bounded batch, but at most one
+ * task fiber is dispatched. The caller decides whether an IDLE result should
+ * block, return to a host loop, or be retried.
+ */
+llam_scheduler_quantum_result_t
+llam_scheduler_run_quantum(llam_shard_t *shard) {
+    llam_runtime_t *rt;
+    llam_task_t *task;
+    uint64_t started_ns;
+    bool pressure;
+
+    if (shard == NULL || shard->runtime == NULL) {
+        return LLAM_SCHEDULER_QUANTUM_DONE;
+    }
+    rt = shard->runtime;
+    if (llam_runtime_drained(rt)) {
+        return LLAM_SCHEDULER_QUANTUM_DONE;
+    }
+    if (llam_shard_pause_for_merge(shard)) {
+        return LLAM_SCHEDULER_QUANTUM_IDLE;
+    }
+    if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire) &&
+        llam_runtime_has_live_tasks(rt)) {
+        llam_runtime_cancel_parked_waiters(rt);
+    }
+    if (rt->experimental_dynamic_shards != 0U &&
+        atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
+        if (!llam_shard_has_local_work(shard)) {
+            if ((atomic_load(&rt->stop_requested) &&
+                 !llam_runtime_has_live_tasks(rt)) ||
+                llam_runtime_drained(rt)) {
+                return LLAM_SCHEDULER_QUANTUM_DONE;
+            }
+            return LLAM_SCHEDULER_QUANTUM_IDLE;
+        }
+        atomic_store_explicit(&shard->online, 1U, memory_order_release);
+        llam_runtime_note_online_shards(
+            rt,
+            atomic_fetch_add_explicit(&rt->online_shards,
+                                      1U,
+                                      memory_order_acq_rel) +
+                1U);
+    }
+
+    llam_allocator_quiescent(shard);
+    llam_drain_inject_queue(shard);
+    llam_fire_expired_timers(shard);
+    pressure = llam_runtime_pressure_signal(rt);
+
+    task = llam_take_local_task_with_pressure(shard, pressure);
+    if (task == NULL && pressure) {
+        task = llam_take_overflow_task_for_shard(rt, shard);
+    }
+    if (task == NULL) {
+        task = llam_try_steal_task(rt, shard);
+    }
+    if (task == NULL) {
+        task = llam_take_overflow_task_for_shard(rt, shard);
+    }
+    if (task == NULL) {
+        if ((atomic_load(&rt->stop_requested) &&
+             !llam_runtime_has_live_tasks(rt)) ||
+            llam_runtime_drained(rt)) {
+            return LLAM_SCHEDULER_QUANTUM_DONE;
+        }
+        return LLAM_SCHEDULER_QUANTUM_IDLE;
+    }
+    if (!llam_prepare_task_dispatch(shard, task)) {
+        return LLAM_SCHEDULER_QUANTUM_PROGRESS;
+    }
+
+    started_ns = llam_set_task_running(shard, task);
+    shard->metrics.ctx_switches += 1U;
+    llam_switch_scheduler_to_task(g_llam_tls_scheduler_ctx, task);
+    task = g_llam_tls_task != NULL ? g_llam_tls_task : task;
+    llam_clear_current_task(
+        shard,
+        started_ns != 0U ? llam_now_ns() - started_ns : 0U);
+    if (task->state == LLAM_TASK_STATE_DEAD) {
+        llam_task_release_stack(task);
+        llam_task_mark_reclaim_ready(task);
+        llam_try_reclaim_detached_task(rt, task);
+    }
+    return LLAM_SCHEDULER_QUANTUM_PROGRESS;
 }
 
 #if defined(__linux__)
@@ -303,109 +359,33 @@ static void llam_opaque_helper_wait_for_signal_locked(llam_shard_t *shard) {
  */
 void llam_scheduler_loop(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
+    atomic_uint *thread_counter =
+        shard->id == 0U ? &rt->host_threads_live : &rt->scheduler_threads_live;
+    llam_thread_signal_stack_t signal_stack;
 
-    g_llam_tls_shard = shard;
-    g_llam_tls_task = NULL;
-    g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-    llam_shard_publish_preempt_thread(shard, pthread_self());
-#endif
-    shard->primary_thread = pthread_self();
-    llam_bind_current_thread_to_cpu(shard->cpu_id);
-    llam_tune_scheduler_thread(shard, false);
-    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
+    memset(&signal_stack, 0, sizeof(signal_stack));
+    if (llam_scheduler_thread_enter(shard,
+                                    thread_counter,
+                                    &signal_stack) != 0) {
         llam_record_fatal(rt, errno);
-        g_llam_tls_shard = NULL;
-        g_llam_tls_task = NULL;
-        g_llam_tls_scheduler_ctx = NULL;
         return;
     }
 
     while (!atomic_load(&rt->stop_requested) || llam_runtime_has_live_tasks(rt)) {
-        llam_task_t *task;
-        uint64_t started_ns;
-        bool pressure;
+        llam_scheduler_quantum_result_t quantum =
+            llam_scheduler_run_quantum(shard);
 
-        if (llam_runtime_drained(rt)) {
+        if (quantum == LLAM_SCHEDULER_QUANTUM_DONE) {
             break;
         }
-        if (llam_shard_pause_for_merge(shard)) {
-            continue;
-        }
-        if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire) &&
-            llam_runtime_has_live_tasks(rt)) {
-            /*
-             * A task can enter a blocking wait after another task has already
-             * requested runtime stop.  Re-run the stop cancellation pass from
-             * the scheduler loop so those late parkers observe ECANCELED
-             * instead of waiting for a producer that may never arrive.
-             */
-            llam_runtime_cancel_parked_waiters(rt);
-        }
-        if (rt->experimental_dynamic_shards != 0U &&
-            atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
-            if (!llam_shard_has_local_work(shard)) {
-                if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
-                    llam_runtime_drained(rt)) {
-                    break;
-                }
-                llam_idle_wait(shard);
-                continue;
-            }
-            atomic_store_explicit(&shard->online, 1U, memory_order_release);
-            llam_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
-        }
-
-        llam_allocator_quiescent(shard);
-        llam_drain_inject_queue(shard);
-        llam_fire_expired_timers(shard);
-        pressure = llam_runtime_pressure_signal(rt);
-
-        task = llam_take_local_task_with_pressure(shard, pressure);
-        if (task == NULL) {
-            if (pressure) {
-                task = llam_take_overflow_task(rt);
-            }
-        }
-        if (task == NULL) {
-            task = llam_try_steal_task(rt, shard);
-        }
-        if (task == NULL) {
-            task = llam_take_overflow_task(rt);
-        }
-
-        if (task == NULL) {
-            if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
-                llam_runtime_drained(rt)) {
-                break;
-            }
+        if (quantum == LLAM_SCHEDULER_QUANTUM_IDLE) {
             llam_idle_wait(shard);
-            continue;
-        }
-
-        started_ns = llam_set_task_running(shard, task);
-        shard->metrics.ctx_switches += 1U;
-        llam_switch_scheduler_to_task(g_llam_tls_scheduler_ctx, task);
-        task = g_llam_tls_task != NULL ? g_llam_tls_task : task;
-        llam_clear_current_task(shard, started_ns != 0U ? llam_now_ns() - started_ns : 0U);
-        if (task->state == LLAM_TASK_STATE_DEAD) {
-            llam_task_release_stack(task);
-            llam_task_mark_reclaim_ready(task);
-            llam_try_reclaim_detached_task(rt, task);
         }
     }
 
-    llam_uninstall_thread_signal_stack(shard);
-    llam_channel_tls_cache_drain();
-    /*
-     * The caller returns to unmanaged host code after driving shard 0. Leaving
-     * the shard cursor installed makes later host-side cleanup look like a
-     * managed task from the last runtime, which can falsely reject explicit
-     * handles from another runtime with EXDEV.
-     */
-    g_llam_tls_shard = NULL;
-    g_llam_tls_task = NULL;
-    g_llam_tls_scheduler_ctx = NULL;
+    llam_scheduler_thread_leave(shard,
+                                thread_counter,
+                                &signal_stack);
 }
 
 /**
@@ -422,21 +402,29 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 void *llam_opaque_helper_main(void *arg) {
     llam_shard_t *shard = arg;
     llam_runtime_t *rt = shard->runtime;
+    llam_thread_signal_stack_t signal_stack;
+    bool thread_counted;
+    int setup_error = 0;
 
+    memset(&signal_stack, 0, sizeof(signal_stack));
     g_llam_tls_shard = shard;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
-    llam_bind_current_thread_to_cpu(shard->cpu_id);
+    thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->opaque_helper_threads_live);
+    if (!thread_counted) {
+        setup_error = errno != 0 ? errno : EOVERFLOW;
+        goto setup_failed;
+    }
+    if (llam_runtime_apply_worker_affinity(rt, shard->cpu_id) != 0) {
+        setup_error = errno;
+        goto setup_failed;
+    }
     llam_tune_scheduler_thread(shard, true);
-    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
-        pthread_mutex_lock(&shard->opaque_lock);
-        shard->opaque_helper_failed = true;
-        shard->opaque_helper_ready = false;
-        atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-        llam_opaque_wake_signal(shard);
-        pthread_mutex_unlock(&shard->opaque_lock);
-        llam_record_fatal(rt, errno);
-        return NULL;
+    if (llam_scheduler_try_install_signal_stack(shard,
+                                                &signal_stack) != 0) {
+        setup_error = errno;
+        goto setup_failed;
     }
 
     pthread_mutex_lock(&shard->opaque_lock);
@@ -503,7 +491,7 @@ void *llam_opaque_helper_main(void *arg) {
             task = llam_take_local_task_with_pressure(shard, pressure);
             if (task == NULL) {
                 if (pressure) {
-                    task = llam_take_overflow_task(rt);
+                    task = llam_take_overflow_task_for_shard(rt, shard);
                 }
             }
             if (task == NULL) {
@@ -513,7 +501,7 @@ void *llam_opaque_helper_main(void *arg) {
             }
             if (task == NULL) {
                 if (pressure) {
-                    task = llam_take_overflow_task(rt);
+                    task = llam_take_overflow_task_for_shard(rt, shard);
                 }
             }
 
@@ -545,6 +533,9 @@ void *llam_opaque_helper_main(void *arg) {
                     break;
                 }
                 llam_idle_wait(shard);
+                continue;
+            }
+            if (!llam_prepare_task_dispatch(shard, task)) {
                 continue;
             }
 
@@ -580,9 +571,8 @@ void *llam_opaque_helper_main(void *arg) {
     }
 
 out:
-    llam_uninstall_thread_signal_stack(shard);
+    llam_uninstall_thread_signal_stack(&signal_stack);
     llam_channel_tls_cache_drain();
-    g_llam_tls_scheduler_ctx = NULL;
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
@@ -592,6 +582,24 @@ out:
 #endif
     llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
+    goto exit_thread;
+
+setup_failed:
+    pthread_mutex_lock(&shard->opaque_lock);
+    shard->opaque_helper_failed = true;
+    shard->opaque_helper_ready = false;
+    atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+    llam_opaque_wake_signal(shard);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_record_fatal(rt, setup_error != 0 ? setup_error : EIO);
+
+exit_thread:
+    g_llam_tls_shard = NULL;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = NULL;
+    if (thread_counted) {
+        llam_runtime_native_thread_exit(rt, &rt->opaque_helper_threads_live);
+    }
     return NULL;
 }
 

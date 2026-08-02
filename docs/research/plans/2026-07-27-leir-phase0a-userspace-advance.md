@@ -1695,7 +1695,7 @@ Do not classify performance if any mechanism counter fails.
 ```bash
 git add docs/research/reports/2026-07-27-leir-phase0a-results.md
 git commit -m "docs: record LEIR Phase 0A screening"
-git push -u origin codex/leir-phase0
+git push -u origin leir-phase0
 ```
 
 - [ ] **Step 4: Dispatch and collect authoritative Linux evidence**

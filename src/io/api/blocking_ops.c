@@ -31,6 +31,35 @@
 #include <sys/stat.h>
 #endif
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_blocking_result_test_hook_fn
+    g_llam_blocking_result_test_hook;
+static void *g_llam_blocking_result_test_context;
+
+void llam_io_test_set_blocking_result_hook(
+    llam_blocking_result_test_hook_fn hook,
+    void *context) {
+    g_llam_blocking_result_test_context = context;
+    g_llam_blocking_result_test_hook = hook;
+}
+
+void llam_io_test_notify_blocking_result(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value) {
+    llam_blocking_result_test_hook_fn hook =
+        g_llam_blocking_result_test_hook;
+
+    if (hook != NULL) {
+        hook(
+            kind,
+            event,
+            value,
+            g_llam_blocking_result_test_context);
+    }
+}
+#endif
+
 /**
  * @brief Run an owned-buffer blocking fallback through the unambiguous API.
  */
@@ -534,11 +563,25 @@ void *llam_blocking_accept_impl(void *arg) {
             llam_blocking_req_set_cancelled(req);
             break;
         }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        llam_io_test_notify_blocking_result(
+            LLAM_BLOCKING_RESULT_TEST_ACCEPT,
+            LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE,
+            0U);
+#endif
         {
             llam_fd_t accepted = llam_platform_accept_fd(req->fd, req->addr, req->addrlen);
 
             req->fd_result = accepted;
             req->result = LLAM_FD_IS_INVALID(accepted) ? -1 : (ssize_t)accepted;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+            if (!LLAM_FD_IS_INVALID(accepted)) {
+                llam_io_test_notify_blocking_result(
+                    LLAM_BLOCKING_RESULT_TEST_ACCEPT,
+                    LLAM_BLOCKING_RESULT_TEST_CREATED,
+                    (uintptr_t)accepted);
+            }
+#endif
         }
         if (req->result >= 0) {
             break;

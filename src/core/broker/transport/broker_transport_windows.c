@@ -185,6 +185,52 @@ static int llam_broker_write_exact_handle(HANDLE handle, const void *data, size_
     return 0;
 }
 
+static void llam_broker_wait_for_pipe_client_finish(HANDLE handle) {
+    unsigned char extra_byte = 0U;
+    OVERLAPPED overlapped;
+    HANDLE event;
+    DWORD transferred = 0U;
+    DWORD saved_last_error = GetLastError();
+    int saved_errno = errno;
+
+    /*
+     * DisconnectNamedPipe discards a response that the client has not read
+     * yet.  After a graceful STOP, wait for the client to consume the response
+     * and close its end.  An extra byte also ends the wait and is discarded:
+     * requests after STOP are outside the protocol contract.
+     *
+     * FlushFileBuffers would provide the same delivery ordering but can block
+     * forever when a hostile client stops reading.  Keep this close handshake
+     * within the transport's existing I/O deadline instead.
+     */
+    event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (event == NULL) {
+        goto done;
+    }
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.hEvent = event;
+    if (!ReadFile(handle, &extra_byte, 1U, &transferred, &overlapped)) {
+        DWORD error_code = GetLastError();
+
+        if (error_code == ERROR_IO_PENDING) {
+            DWORD wait_result =
+                WaitForSingleObject(event, LLAM_BROKER_WINDOWS_IO_TIMEOUT_MS);
+
+            if (wait_result == WAIT_OBJECT_0) {
+                (void)GetOverlappedResult(handle, &overlapped, &transferred, FALSE);
+            } else {
+                (void)CancelIoEx(handle, &overlapped);
+                (void)WaitForSingleObject(event, INFINITE);
+            }
+        }
+    }
+    CloseHandle(event);
+
+done:
+    errno = saved_errno;
+    SetLastError(saved_last_error);
+}
+
 static int llam_broker_duplicate_pipe_client_handle(HANDLE pipe,
                                                     uint64_t client_handle_value,
                                                     llam_handle_t *out_handle) {
@@ -435,6 +481,9 @@ int llam_broker_serve_handle(llam_broker_t *broker, llam_handle_t handle) {
             break;
         }
         ++request_count;
+    }
+    if (rc == 0 && should_close) {
+        llam_broker_wait_for_pipe_client_finish((HANDLE)handle);
     }
     llam_broker_forget_transport_subject(broker, transport_id);
     return rc;

@@ -264,13 +264,20 @@ static void pending_handle_close_trigger_task(void *arg) {
 }
 
 static bool runtime_assoc_contains_handle(llam_runtime_t *runtime, llam_handle_t handle) {
+    llam_runtime_t *raw_runtime = NULL;
     uintptr_t key = (uintptr_t)handle;
+    bool found_any = false;
 
-    if (runtime == NULL || runtime->nodes == NULL) {
+    if (runtime == NULL ||
+        llam_runtime_begin_public_op(runtime, &raw_runtime) != 0 ||
+        raw_runtime->nodes == NULL) {
+        if (raw_runtime != NULL) {
+            llam_runtime_end_public_op(raw_runtime);
+        }
         return false;
     }
-    for (unsigned i = 0U; i < runtime->active_nodes; ++i) {
-        llam_node_t *node = &runtime->nodes[i];
+    for (unsigned i = 0U; i < raw_runtime->active_nodes; ++i) {
+        llam_node_t *node = &raw_runtime->nodes[i];
         llam_windows_fd_assoc_t *assoc;
         bool found = false;
 
@@ -285,10 +292,12 @@ static bool runtime_assoc_contains_handle(llam_runtime_t *runtime, llam_handle_t
         }
         pthread_mutex_unlock(&node->windows_assoc_lock);
         if (found) {
-            return true;
+            found_any = true;
+            break;
         }
     }
-    return false;
+    llam_runtime_end_public_op(raw_runtime);
+    return found_any;
 }
 
 static int test_managed_close_handle_purges_peer_runtime_assoc(void) {
@@ -296,6 +305,7 @@ static int test_managed_close_handle_purges_peer_runtime_assoc(void) {
     cross_runtime_close_handle_state_t close_state;
     llam_runtime_t *closer_runtime = NULL;
     llam_runtime_t *assoc_runtime = NULL;
+    llam_runtime_t *raw_assoc_runtime = NULL;
     llam_task_t *closer_task = NULL;
     llam_runtime_opts_t opts;
     int failed = 0;
@@ -317,7 +327,9 @@ static int test_managed_close_handle_purges_peer_runtime_assoc(void) {
         failed = fail_errno("cross-runtime close handle runtime create failed");
         goto cleanup;
     }
-    if (assoc_runtime == NULL || assoc_runtime->nodes == NULL || assoc_runtime->active_nodes == 0U) {
+    if (llam_runtime_begin_public_op(assoc_runtime, &raw_assoc_runtime) != 0 ||
+        raw_assoc_runtime->nodes == NULL ||
+        raw_assoc_runtime->active_nodes == 0U) {
         fprintf(stderr, "[test_windows_handle_io] cross-runtime assoc runtime has no IOCP node\n");
         failed = 1;
         goto cleanup;
@@ -326,7 +338,7 @@ static int test_managed_close_handle_purges_peer_runtime_assoc(void) {
         failed = fail_errno("cross-runtime close handle pipe setup failed");
         goto cleanup;
     }
-    if (llam_windows_associate_handle(&assoc_runtime->nodes[0], pipe_state.pipe_reader) != 0) {
+    if (llam_windows_associate_handle(&raw_assoc_runtime->nodes[0], pipe_state.pipe_reader) != 0) {
         failed = fail_errno("cross-runtime close handle associate failed");
         goto cleanup;
     }
@@ -379,6 +391,9 @@ cleanup:
     if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_writer)) {
         CloseHandle((HANDLE)pipe_state.pipe_writer);
     }
+    if (raw_assoc_runtime != NULL) {
+        llam_runtime_end_public_op(raw_assoc_runtime);
+    }
     llam_runtime_destroy(assoc_runtime);
     llam_runtime_destroy(closer_runtime);
     return failed;
@@ -387,6 +402,7 @@ cleanup:
 static int test_host_close_handle_purges_peer_runtime_assoc(void) {
     windows_handle_state_t pipe_state;
     llam_runtime_t *assoc_runtime = NULL;
+    llam_runtime_t *raw_assoc_runtime = NULL;
     llam_runtime_opts_t opts;
     llam_handle_t closed_handle = LLAM_INVALID_HANDLE;
     llam_windows_fd_assoc_t *pinned_assoc = NULL;
@@ -405,7 +421,9 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         failed = fail_errno("host close handle runtime create failed");
         goto cleanup;
     }
-    if (assoc_runtime == NULL || assoc_runtime->nodes == NULL || assoc_runtime->active_nodes == 0U) {
+    if (llam_runtime_begin_public_op(assoc_runtime, &raw_assoc_runtime) != 0 ||
+        raw_assoc_runtime->nodes == NULL ||
+        raw_assoc_runtime->active_nodes == 0U) {
         fprintf(stderr, "[test_windows_handle_io] host close assoc runtime has no IOCP node\n");
         failed = 1;
         goto cleanup;
@@ -414,7 +432,7 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         failed = fail_errno("host close handle pipe setup failed");
         goto cleanup;
     }
-    if (llam_windows_associate_handle(&assoc_runtime->nodes[0], pipe_state.pipe_reader) != 0) {
+    if (llam_windows_associate_handle(&raw_assoc_runtime->nodes[0], pipe_state.pipe_reader) != 0) {
         failed = fail_errno("host close handle associate failed");
         goto cleanup;
     }
@@ -423,7 +441,7 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         failed = 1;
         goto cleanup;
     }
-    pinned_assoc = llam_windows_fd_assoc_pin(&assoc_runtime->nodes[0],
+    pinned_assoc = llam_windows_fd_assoc_pin(&raw_assoc_runtime->nodes[0],
                                              (uintptr_t)pipe_state.pipe_reader);
     if (pinned_assoc == NULL || pinned_assoc->inflight_ops != 1U || pinned_assoc->closing) {
         failed = fail_errno("host close association generation pin failed");
@@ -452,18 +470,21 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         failed = 1;
         goto cleanup;
     }
-    llam_windows_fd_assoc_unpin(&assoc_runtime->nodes[0], pinned_assoc);
+    llam_windows_fd_assoc_unpin(&raw_assoc_runtime->nodes[0], pinned_assoc);
     pinned_assoc = NULL;
 
 cleanup:
     if (pinned_assoc != NULL) {
-        llam_windows_fd_assoc_unpin(&assoc_runtime->nodes[0], pinned_assoc);
+        llam_windows_fd_assoc_unpin(&raw_assoc_runtime->nodes[0], pinned_assoc);
     }
     if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_reader)) {
         CloseHandle((HANDLE)pipe_state.pipe_reader);
     }
     if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_writer)) {
         CloseHandle((HANDLE)pipe_state.pipe_writer);
+    }
+    if (raw_assoc_runtime != NULL) {
+        llam_runtime_end_public_op(raw_assoc_runtime);
     }
     llam_runtime_destroy(assoc_runtime);
     return failed;

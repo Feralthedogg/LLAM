@@ -45,7 +45,9 @@ void llam_trace_shard(llam_shard_t *shard,
     unsigned seq;
     unsigned slot;
 
-    if (LLAM_LIKELY(shard == NULL || shard->runtime == NULL || shard->runtime->trace_events_enabled == 0U)) {
+    if (LLAM_LIKELY(shard == NULL || shard->runtime == NULL ||
+                    shard->runtime->trace_events_enabled == 0U ||
+                    shard->trace_ring == NULL)) {
         return;
     }
 

@@ -94,7 +94,36 @@ static void *llam_blocking_getaddrinfo_call(void *arg) {
     }
     call->result = NULL;
     call->gai_error = getaddrinfo(call->node, call->service, call->hints, &call->result);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (call->gai_error == 0 && call->result != NULL) {
+        llam_io_test_notify_blocking_result(
+            LLAM_BLOCKING_RESULT_TEST_GETADDRINFO,
+            LLAM_BLOCKING_RESULT_TEST_CREATED,
+            (uintptr_t)call->result);
+    }
+#endif
     return call;
+}
+
+static void llam_discard_getaddrinfo_result(
+    llam_getaddrinfo_call_t *call) {
+    struct addrinfo *result;
+    int saved_errno;
+
+    if (call == NULL || call->result == NULL) {
+        return;
+    }
+    result = call->result;
+    call->result = NULL;
+    saved_errno = errno;
+    freeaddrinfo(result);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_io_test_notify_blocking_result(
+        LLAM_BLOCKING_RESULT_TEST_GETADDRINFO,
+        LLAM_BLOCKING_RESULT_TEST_DISCARDED,
+        (uintptr_t)result);
+#endif
+    errno = saved_errno;
 }
 
 int llam_getaddrinfo_result(const char *node,
@@ -116,11 +145,18 @@ int llam_getaddrinfo_result(const char *node,
     call.service = service;
     call.hints = hints;
     if (llam_call_blocking_result(llam_blocking_getaddrinfo_call, &call, &ignored) != 0) {
+        int saved_errno = errno;
+
+        llam_discard_getaddrinfo_result(&call);
+        errno = saved_errno;
         return -1;
     }
     *gai_error = call.gai_error;
     if (call.gai_error == 0) {
         *out = call.result;
+        call.result = NULL;
+    } else {
+        llam_discard_getaddrinfo_result(&call);
     }
     return 0;
 }
@@ -194,6 +230,12 @@ static void *llam_blocking_open_call(void *arg) {
             return call;
         }
         call->handle = (llam_handle_t)handle;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        llam_io_test_notify_blocking_result(
+            LLAM_BLOCKING_RESULT_TEST_OPEN,
+            LLAM_BLOCKING_RESULT_TEST_CREATED,
+            (uintptr_t)call->handle);
+#endif
         return call;
     }
 #elif LLAM_PLATFORM_POSIX
@@ -205,12 +247,44 @@ static void *llam_blocking_open_call(void *arg) {
             return call;
         }
         call->handle = (llam_handle_t)fd;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        llam_io_test_notify_blocking_result(
+            LLAM_BLOCKING_RESULT_TEST_OPEN,
+            LLAM_BLOCKING_RESULT_TEST_CREATED,
+            (uintptr_t)call->handle);
+#endif
         return call;
     }
 #else
     call->error_code = ENOTSUP;
     return call;
 #endif
+}
+
+static void llam_discard_open_result(llam_open_call_t *call) {
+    llam_handle_t handle;
+    int saved_errno;
+    int close_result;
+
+    if (call == NULL ||
+        LLAM_HANDLE_IS_INVALID(call->handle)) {
+        return;
+    }
+    handle = call->handle;
+    call->handle = LLAM_INVALID_HANDLE;
+    saved_errno = errno;
+    close_result = llam_close_handle(handle);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (close_result == 0) {
+        llam_io_test_notify_blocking_result(
+            LLAM_BLOCKING_RESULT_TEST_OPEN,
+            LLAM_BLOCKING_RESULT_TEST_DISCARDED,
+            (uintptr_t)handle);
+    }
+#else
+    (void)close_result;
+#endif
+    errno = saved_errno;
 }
 
 int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *out) {
@@ -228,13 +302,21 @@ int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *o
     call.mode = mode;
     call.handle = LLAM_INVALID_HANDLE;
     if (llam_call_blocking_result(llam_blocking_open_call, &call, &ignored) != 0) {
+        int saved_errno = errno;
+
+        llam_discard_open_result(&call);
+        errno = saved_errno;
         return -1;
     }
     if (call.error_code != 0) {
-        errno = call.error_code;
+        int saved_error = call.error_code;
+
+        llam_discard_open_result(&call);
+        errno = saved_error;
         return -1;
     }
     *out = call.handle;
+    call.handle = LLAM_INVALID_HANDLE;
     return 0;
 }
 

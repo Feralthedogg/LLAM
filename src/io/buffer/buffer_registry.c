@@ -66,7 +66,8 @@ static int llam_io_buffer_public_reserve_slot_locked(llam_io_buffer_t *buffer, s
                                                   64U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER,
                                                   buffer->owner_runtime != NULL
-                                                      ? buffer->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            buffer->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -139,15 +140,25 @@ static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *h
 
 int llam_io_buffer_public_register(llam_io_buffer_t *buffer) {
     size_t slot = 0U;
+    bool owner_pinned = false;
 
     if (buffer == NULL) {
         errno = EINVAL;
         return -1;
     }
+    if (buffer->owner_runtime != NULL) {
+        if (llam_runtime_public_owner_acquire(buffer->owner_runtime) != 0) {
+            return -1;
+        }
+        owner_pinned = true;
+    }
 
     (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
     if (llam_io_buffer_public_reserve_slot_locked(buffer, &slot) != 0) {
         (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
+        if (owner_pinned) {
+            llam_runtime_public_owner_release(buffer->owner_runtime);
+        }
         return -1;
     }
     buffer->public_handle_slot = slot;

@@ -634,6 +634,7 @@ int stress_run_phase(const char *phase_name,
     pthread_t watchdog_thread = (pthread_t)0;
     int watchdog_started = 0;
     unsigned failures_before = atomic_load(&g_failures);
+    llam_task_t *phase_task;
 
     printf("[stress] phase=%s deterministic=%u forced_yield_every=%u shard_rings=%u shard_rings_multishot=%u dynamic_shards=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u sqpoll_cpu=%d\n",
            phase_name,
@@ -650,14 +651,20 @@ int stress_run_phase(const char *phase_name,
         perror("llam_runtime_init");
         return 1;
     }
-    if (llam_spawn(task_fn,
-                 arg,
-                 &(llam_spawn_opts_t){
-                     .task_class = LLAM_TASK_CLASS_DEFAULT,
-                     .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                     .flags = LLAM_SPAWN_F_PINNED,
-                 }) == NULL) {
+    phase_task = llam_spawn(task_fn,
+                            arg,
+                            &(llam_spawn_opts_t){
+                                .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                                .flags = LLAM_SPAWN_F_PINNED,
+                            });
+    if (phase_task == NULL) {
         perror("llam_spawn");
+        llam_runtime_shutdown();
+        return 1;
+    }
+    if (llam_detach(phase_task) != 0) {
+        perror("llam_detach");
         llam_runtime_shutdown();
         return 1;
     }

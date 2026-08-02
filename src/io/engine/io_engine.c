@@ -30,6 +30,10 @@
 
 #include "runtime_internal.h"
 
+#if defined(__linux__) && LLAM_BUILD_RESEARCH
+#include "io/linux/runtime_io_ring_profile_linux_internal.h"
+#endif
+
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 #include "runtime_windows_iocp.h"
 #endif
@@ -200,11 +204,55 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
         return -1;
     }
 
+    node->linux_ring_features = 0U;
+    node->linux_submit_all = false;
     memset(&params, 0, sizeof(params));
+#if LLAM_BUILD_RESEARCH
+    {
+        const char *requested_profile =
+            llam_linux_research_ring_profile_request();
+
+        if (requested_profile != NULL) {
+            llam_linux_research_ring_profile_config_t profile;
+
+            if (llam_linux_research_ring_profile_select(
+                    requested_profile,
+                    rt->experimental_sqpoll_requested != 0U,
+                    llam_linux_research_ring_profile_compiled_capabilities(),
+                    &profile) != 0) {
+                return -1;
+            }
+            if (llam_linux_research_ring_profile_validate_topology(
+                    &profile, false) != 0) {
+                return -1;
+            }
+            params.flags = profile.setup_flags;
+            rc = io_uring_queue_init_params(
+                LLAM_IO_RING_DEPTH, &node->ring, &params);
+            if (rc != 0) {
+                llam_node_disable_cq_eventfd(node);
+                llam_node_disable_sqpoll(node);
+                node->linux_ring_features = 0U;
+                node->linux_submit_all = false;
+                errno = llam_linux_research_ring_profile_setup_errno(rc);
+                return -1;
+            }
+            llam_node_disable_cq_eventfd(node);
+            llam_node_disable_sqpoll(node);
+            node->ring_ready = true;
+            node->linux_ring_features = params.features;
+            node->linux_submit_all = true;
+            return 0;
+        }
+    }
+#endif
     if (rt->experimental_sqpoll_requested != 0U && rt->experimental_shard_rings == 0U) {
         unsigned sqpoll_cpu = rt->sqpoll_cpu >= 0 ? (unsigned)rt->sqpoll_cpu : llam_node_default_sqpoll_cpu(rt, node->index);
 
         params.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+#if defined(IORING_SETUP_SUBMIT_ALL)
+        params.flags |= IORING_SETUP_SUBMIT_ALL;
+#endif
         params.sq_thread_cpu = sqpoll_cpu;
         params.sq_thread_idle = 2000U;
         rc = io_uring_queue_init_params(LLAM_IO_RING_DEPTH, &node->ring, &params);
@@ -215,6 +263,10 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
                 llam_node_disable_cq_eventfd(node);
             }
             node->ring_ready = true;
+            node->linux_ring_features = params.features;
+#if defined(IORING_SETUP_SUBMIT_ALL)
+            node->linux_submit_all = true;
+#endif
             node->sqpoll_enabled = true;
             node->sqpoll_cpu = sqpoll_cpu;
             rt->experimental_sqpoll_active = 1U;
@@ -222,17 +274,43 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
         }
         llam_node_disable_sqpoll(node);
         if (!llam_io_sqpoll_setup_error(-rc)) {
+            node->linux_ring_features = 0U;
             errno = -rc;
             return -1;
         }
     }
 
-    rc = io_uring_queue_init(LLAM_IO_RING_DEPTH, &node->ring, 0);
+    memset(&params, 0, sizeof(params));
+#if defined(IORING_SETUP_SUBMIT_ALL)
+    params.flags = IORING_SETUP_SUBMIT_ALL;
+#endif
+    rc = io_uring_queue_init_params(
+        LLAM_IO_RING_DEPTH, &node->ring, &params);
     if (rc == 0) {
         llam_node_disable_cq_eventfd(node);
         node->ring_ready = true;
+        node->linux_ring_features = params.features;
+#if defined(IORING_SETUP_SUBMIT_ALL)
+        node->linux_submit_all = true;
+#endif
         return 0;
     }
+#if defined(IORING_SETUP_SUBMIT_ALL)
+    if (rc == -EINVAL || rc == -EOPNOTSUPP) {
+        memset(&params, 0, sizeof(params));
+        rc = io_uring_queue_init_params(
+            LLAM_IO_RING_DEPTH, &node->ring, &params);
+        if (rc == 0) {
+            llam_node_disable_cq_eventfd(node);
+            node->ring_ready = true;
+            node->linux_ring_features = params.features;
+            node->linux_submit_all = false;
+            return 0;
+        }
+    }
+#endif
+    node->linux_ring_features = 0U;
+    node->linux_submit_all = false;
     errno = -rc;
     return -1;
 }
@@ -646,6 +724,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->windows_use_skip_completion_on_success = policy.use_skip_completion_on_success;
     node->windows_io_op_free = NULL;
     node->windows_accept_socket_free = NULL;
+    node->windows_assoc_generation = 0U;
     node->windows_io_op_free_count = 0U;
     node->windows_accept_socket_free_count = 0U;
     node->windows_io_op_free_max = policy.recv_prepost != 0U ? policy.recv_prepost * 4U : 64U;

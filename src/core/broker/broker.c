@@ -109,7 +109,7 @@ int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
         return -1;
     }
     memset(&object, 0, sizeof(object));
-    object.runtime_id = broker->runtime->runtime_id;
+    object.runtime_id = broker->runtime_id;
     object.family = family;
     object.slot = slot;
     object.generation = generation;
@@ -120,6 +120,8 @@ int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
 
 int llam_broker_init(llam_broker_t *broker, const llam_runtime_opts_t *opts, size_t opts_size) {
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
+    uint64_t runtime_id;
 
     if (LLAM_UNLIKELY(broker == NULL)) {
         errno = EINVAL;
@@ -153,12 +155,25 @@ int llam_broker_init(llam_broker_t *broker, const llam_runtime_opts_t *opts, siz
         broker->lock_initialized = false;
         return -1;
     }
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        int saved_errno = errno != 0 ? errno : EINVAL;
+
+        llam_runtime_destroy(runtime);
+        (void)pthread_cond_destroy(&broker->idle_cond);
+        broker->idle_cond_initialized = false;
+        (void)pthread_mutex_destroy(&broker->lock);
+        broker->lock_initialized = false;
+        errno = saved_errno;
+        return -1;
+    }
+    runtime_id = pinned_runtime->runtime_id;
+    llam_runtime_end_public_op(pinned_runtime);
     /*
      * Capability MAC authority is broker-local. Ordinary in-process runtimes
      * must not need broker entropy or carry broker signing keys; otherwise the
      * fast in-process API would look like a capability boundary it cannot be.
      */
-    if (llam_capability_key_init(&broker->capability_key, broker, runtime->runtime_id) != 0) {
+    if (llam_capability_key_init(&broker->capability_key, broker, runtime_id) != 0) {
         int saved_errno = errno != 0 ? errno : EIO;
 
         llam_runtime_destroy(runtime);
@@ -188,6 +203,7 @@ int llam_broker_init(llam_broker_t *broker, const llam_runtime_opts_t *opts, siz
         return -1;
     }
     broker->runtime = runtime;
+    broker->runtime_id = runtime_id;
     atomic_init(&broker->revocation_epoch, 1U);
     broker->next_buffer_id = 1U;
     broker->next_descriptor_id = 1U;
@@ -304,7 +320,7 @@ int llam_broker_validate_cap_unlocked(const llam_broker_t *broker,
      * key material is accidentally reused or an internal caller fabricates a
      * structurally valid token for a different broker runtime.
      */
-    if (LLAM_UNLIKELY(token->runtime_id != broker->runtime->runtime_id)) {
+    if (LLAM_UNLIKELY(token->runtime_id != broker->runtime_id)) {
         errno = EACCES;
         return -1;
     }

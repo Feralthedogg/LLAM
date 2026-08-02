@@ -124,7 +124,19 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
             task = llam_norm_queue_steal(victim);
         } else {
             pthread_mutex_lock(&victim->lock);
-            task = llam_queue_pop_tail(&victim->norm_q);
+            /*
+             * A yielding task is published at the FIFO tail before its
+             * task-to-scheduler context save completes. Never steal that
+             * still-current tail; the owner clears current immediately after
+             * the switch reaches its scheduler stack.
+             */
+            if (victim->norm_q.tail ==
+                atomic_load_explicit(&victim->current,
+                                     memory_order_acquire)) {
+                task = NULL;
+            } else {
+                task = llam_queue_pop_tail(&victim->norm_q);
+            }
             if (task != NULL) {
                 (void)llam_norm_queue_note_dequeue(victim);
             }
@@ -133,15 +145,17 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
         if (task == NULL) {
             break;
         }
-        if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
-            // Pinned tasks must remain on the victim; put them back on inject.
-            pthread_mutex_lock(&victim->lock);
-            task->enqueue_hot = 0U;
-            if (llam_queue_push_bounded_locked(victim, &victim->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
-                victim->metrics.inject_enqueues += 1U;
+        if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U ||
+            !llam_task_may_run_on_shard(task, thief)) {
+            /*
+             * A pinned task may have reached a non-home victim through a
+             * corrupted producer path. Return it to its immutable home rather
+             * than assuming the victim is authoritative.
+             */
+            if (!llam_requeue_task_to_required_shard(
+                    victim->runtime, task, false)) {
+                llam_enqueue_overflow_task(victim->runtime, task);
             }
-            pthread_mutex_unlock(&victim->lock);
-            llam_kick_shard(victim);
             victim_depth -= 1U;
             continue;
         }

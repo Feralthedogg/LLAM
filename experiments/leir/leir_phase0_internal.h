@@ -1,11 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 #ifndef LLAM_EXPERIMENTS_LEIR_PHASE0_INTERNAL_H
 #define LLAM_EXPERIMENTS_LEIR_PHASE0_INTERNAL_H
 
+#include "runtime_internal.h"
 #include "leir_phase0.h"
 
 #include <stdatomic.h>
 
 typedef void *(*leir_phase0_calloc_fn)(size_t count, size_t size);
+typedef void (*leir_phase0_test_hook_fn)(void *context);
 
 typedef enum leir_phase0_advance_result {
     LEIR_PHASE0_ADVANCE_TERMINAL = 0,
@@ -56,10 +61,17 @@ int leir_phase0_program_create_with_allocator(
     leir_phase0_program_t **out,
     leir_phase0_calloc_fn calloc_fn);
 
+bool leir_phase0_bindings_are_valid(
+    const leir_phase0_program_t *program,
+    const leir_phase0_value_t *values);
+
 bool leir_phase0_test_inject_completion(
     leir_phase0_instance_t *instance,
     uint64_t activation_generation,
     ssize_t result,
     int error_code);
+void leir_phase0_test_set_bind_precommit_hook(
+    leir_phase0_test_hook_fn hook,
+    void *context);
 
 #endif

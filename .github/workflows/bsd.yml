@@ -22,6 +22,7 @@ on:
   workflow_dispatch:
 
 env:
+  LLAM_BUILD_RESEARCH: "0"
   LLAM_CI_VERSION: "2.2.1"
 
 concurrency:
@@ -63,7 +64,7 @@ jobs:
             package_target: dragonflybsd-x86_64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Note DragonFlyBSD CI policy
         if: ${{ matrix.os == 'dragonflybsd' }}
@@ -77,7 +78,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start BSD VM
-        uses: cross-platform-actions/action@v1.1.0
+        uses: cross-platform-actions/action@0c165ad7eb2d6a7e8552d6af5aad2bbedfc646b0 # v1.1.0
         timeout-minutes: 10
         with:
           operating_system: ${{ matrix.os }}
@@ -104,23 +105,6 @@ jobs:
               sleep "$delay_seconds"
             done
           }
-          configure_dragonfly_pkg_repo() {
-            # The default Avalon repository can be unreachable from GitHub
-            # runners. Pin the DragonFly dports master over plain HTTP:
-            # the CI VM's pkg has failed fetching HTTPS metadata while this
-            # direct HTTP endpoint serves ${ABI}/LATEST/meta.conf reliably.
-            sudo mkdir -p /usr/local/etc/pkg/repos
-            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
-          AUTO: {
-            url             : "http://mirror-master.dragonflybsd.org/dports/${ABI}/LATEST"
-            mirror_type     : NONE
-            enabled         : yes
-          }
-          Avalon: {
-            enabled         : no
-          }
-          EOF
-          }
           case "$(uname -s)" in
             FreeBSD)
               packages=""
@@ -133,33 +117,23 @@ jobs:
               if ! command -v xz >/dev/null 2>&1; then
                 packages="$packages xz"
               fi
+              if ! command -v python3 >/dev/null 2>&1; then
+                packages="$packages python3"
+              fi
               if [ -n "$packages" ]; then
                 retry sudo pkg install -y $packages
               fi
               ;;
             DragonFly)
-              configure_dragonfly_pkg_repo
-              pkg config ABI || true
-              pkg -vv | sed -n '/Repositories:/,$p' || true
-              packages=""
-              if ! command -v gmake >/dev/null 2>&1; then
-                packages="$packages gmake"
-              fi
-              if ! command -v cmake >/dev/null 2>&1; then
-                packages="$packages cmake"
-              fi
-              if ! command -v xz >/dev/null 2>&1; then
-                packages="$packages xz"
-              fi
-              if [ -n "$packages" ]; then
-                if ! retry sudo pkg update -f; then
-                  echo "DragonFlyBSD pkg repository unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
-                  exit 0
-                fi
-                if ! retry sudo pkg install -y $packages; then
-                  echo "DragonFlyBSD pkg install unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
-                  exit 0
-                fi
+              if ! command -v gmake >/dev/null 2>&1 ||
+                 ! command -v cmake >/dev/null 2>&1 ||
+                 ! command -v xz >/dev/null 2>&1 ||
+                 ! command -v python3 >/dev/null 2>&1; then
+                {
+                  echo "DragonFlyBSD release tools are not preinstalled."
+                  echo "Skipping the experimental job because unsigned package bootstrap is disabled."
+                } | tee "$skip_file"
+                exit 0
               fi
               ;;
             OpenBSD)
@@ -173,6 +147,9 @@ jobs:
               if ! command -v xz >/dev/null 2>&1; then
                 retry sudo pkg_add xz
               fi
+              if ! command -v python3 >/dev/null 2>&1; then
+                retry sudo pkg_add python%3
+              fi
               ;;
             NetBSD)
               if ! command -v gmake >/dev/null 2>&1; then
@@ -184,12 +161,20 @@ jobs:
               if ! command -v xz >/dev/null 2>&1; then
                 retry sudo pkgin -y install xz
               fi
+              if ! command -v python3 >/dev/null 2>&1; then
+                if ! command -v python3.12 >/dev/null 2>&1; then
+                  retry sudo pkgin -y install python312
+                fi
+                test -x /usr/pkg/bin/python3.12
+                sudo ln -s /usr/pkg/bin/python3.12 /usr/pkg/bin/python3
+              fi
               ;;
           esac
           command -v cc
           command -v gmake
           command -v cmake
           command -v xz
+          command -v python3
 
       - name: Build and run core tests
         run: |
@@ -249,7 +234,7 @@ jobs:
             cat .llam-bsd-infra-skip
             exit 0
           fi
-          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
+          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/bsd --parallel 2 --target \
             test_abi_contract \
             test_abi_compat \

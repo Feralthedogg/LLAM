@@ -45,14 +45,14 @@
 #define LLAM_RUNTIME_H
 
 #include "llam/platform.h"
-
+#include "llam/runtime_driver.h"
+#include "llam/runtime_signal.h"
 #include <stddef.h>
 #include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
+/* Audited public projection of config/llam-version.json. */
 #define LLAM_VERSION_MAJOR 2U
 #define LLAM_VERSION_MINOR 2U
 #define LLAM_VERSION_PATCH 1U
@@ -84,6 +84,9 @@ typedef struct llam_abi_info {
     const char *runtime_name;          /**< Stable runtime name string, currently "LLAM". */
     const char *version_string;        /**< Static version string owned by the library. */
     const char *platform_name;         /**< Static platform name string owned by the library. */
+    uint32_t task_context_slot_count;  /**< Number of inline O(1) task context slots. */
+    uint32_t reserved1;                /**< Reserved ABI padding; currently 0. */
+    size_t runtime_readiness_size;     /**< Size of the external-driver readiness struct, or 0 if unavailable. */
 } llam_abi_info_t;
 
 /** @brief Current size to pass to ::llam_abi_get_info. */
@@ -96,7 +99,6 @@ typedef struct llam_cond llam_cond_t;
 typedef struct llam_channel llam_channel_t;
 typedef struct llam_cancel_token llam_cancel_token_t;
 typedef struct llam_io_buffer llam_io_buffer_t;
-typedef struct llam_runtime llam_runtime_t;
 typedef struct llam_task_group llam_task_group_t;
 typedef struct llam_timer llam_timer_t;
 typedef struct llam_signal_set llam_signal_set_t;
@@ -107,11 +109,37 @@ typedef uint32_t llam_task_local_key_t;
 /** @brief Invalid task-local storage key value. */
 #define LLAM_TASK_LOCAL_INVALID_KEY UINT32_MAX
 
+/** @brief Number of caller-owned O(1) pointer slots stored directly on each task. */
+#define LLAM_TASK_CONTEXT_SLOT_COUNT 4U
+
 /**
  * @brief Task entry point executed on a LLAM-managed stackful user thread.
  * @param arg User pointer passed to llam_spawn().
  */
 typedef void (*llam_task_fn)(void *arg);
+
+/**
+ * @brief Synchronous notification at a managed task execution boundary.
+ *
+ * @details
+ * Resume hooks run after the task's logical @c errno is restored and
+ * immediately before its stack is entered. Suspend hooks run after logical
+ * @c errno is saved and immediately before its stack is left. LLAM restores
+ * the pre-callback logical @c errno after the hook returns.
+ *
+ * Hooks for one task are serialized, while hooks for different tasks may run
+ * concurrently on different scheduler threads. The callback must remain
+ * bounded and must not call LLAM APIs that park, yield, switch, or destroy the
+ * runtime. Both pointers are caller-owned and must remain valid through
+ * runtime destruction.
+ *
+ * @param hook_context Runtime-wide context from
+ *        ::llam_runtime_opts_t::switch_hook_context.
+ * @param task_user_context Per-task context from
+ *        ::llam_spawn_opts_t::user_context.
+ */
+typedef void (*llam_task_switch_hook_fn)(void *hook_context,
+                                         void *task_user_context);
 
 /**
  * @brief Blocking callback executed by the runtime blocking/offload path.
@@ -207,9 +235,24 @@ typedef enum llam_preempt_mode {
     LLAM_PREEMPT_STRICT = 3,      /**< Diagnostic mode: preempt over-budget tasks even without pressure. */
 } llam_preempt_mode_t;
 
+/** @brief Native scheduler-thread CPU placement policy. */
+typedef enum llam_runtime_affinity_policy {
+    LLAM_RUNTIME_AFFINITY_NONE = 0,    /**< Do not modify native thread affinity. */
+    LLAM_RUNTIME_AFFINITY_PREFER = 1,  /**< Attempt placement and continue if it fails. */
+    LLAM_RUNTIME_AFFINITY_REQUIRE = 2, /**< Require placement support and successful binding. */
+} llam_runtime_affinity_policy_t;
+
+/** @brief Authority that selected a resolved runtime prewarm target. */
+typedef enum llam_runtime_prewarm_source {
+    LLAM_RUNTIME_PREWARM_DEFAULT = 0,          /**< Profile/default compatibility policy. */
+    LLAM_RUNTIME_PREWARM_PUBLIC_EXACT = 1,     /**< Exact size-aware public option. */
+    LLAM_RUNTIME_PREWARM_ENV_TOTAL = 2,        /**< Best-effort runtime-total environment input. */
+    LLAM_RUNTIME_PREWARM_ENV_LEGACY = 3,       /**< Deprecated best-effort environment input. */
+} llam_runtime_prewarm_source_t;
+
 /** @brief Bit flags accepted by llam_spawn_opts_t::flags. */
 enum {
-    LLAM_SPAWN_F_PINNED = 1U << 0,           /**< Prefer keeping the task on its home worker. */
+    LLAM_SPAWN_F_PINNED = 1U << 0, /**< Execute only on the logical home shard; same-shard helpers are allowed. */
     LLAM_SPAWN_F_NO_PREEMPT = 1U << 1,       /**< Restrict cooperative preemption checks. */
     LLAM_SPAWN_F_SYS_TASK = 1U << 2,         /**< Mark runtime-owned helper work. */
     LLAM_SPAWN_F_LATENCY_CRITICAL = 1U << 3, /**< Promote wakeup and dispatch priority. */
@@ -228,6 +271,28 @@ enum {
 /** @brief Linux io_uring SQPOLL experiment for node-owned rings. */
 #define LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL (UINT64_C(1) << 5)
 
+/** @brief Default runtime-wide retained stack-mapping budget: 512 MiB. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES \
+    (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
+/** @brief Default automatic-trim high watermark: 384 MiB. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_HIGH_WATERMARK_BYTES \
+    (UINT64_C(384) * UINT64_C(1024) * UINT64_C(1024))
+/** @brief Default automatic-trim target: 256 MiB. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_LOW_WATERMARK_BYTES \
+    (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
+/** @brief Default idle age before opportunistic stack-cache trim: 30 seconds. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_IDLE_NS UINT64_C(30000000000)
+
+/** @brief Stack-cache policy flags accepted by llam_runtime_opts_t. */
+enum {
+    /** Securely clear usable stack bytes before a mapping becomes reusable. */
+    LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB = 1U << 0,
+    /** Discard/decommit usable pages before retaining a mapping. */
+    LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN = 1U << 1,
+    /** Disable stack caching and release every returned mapping directly. */
+    LLAM_RUNTIME_STACK_CACHE_F_DISABLED = 1U << 2,
+};
+
 /** @brief Optional per-task spawn policy. */
 typedef struct llam_spawn_opts {
     uint32_t task_class;                /**< Scheduler class; one of ::llam_task_class_t. */
@@ -236,6 +301,7 @@ typedef struct llam_spawn_opts {
     uint32_t reserved0;                 /**< Reserved ABI padding; initialize to 0, ignored by this version. */
     uint64_t deadline_ns;               /**< Optional absolute deadline in llam_now_ns() units; 0 disables it. */
     llam_cancel_token_t *cancel_token;  /**< Optional cancellation token observed by waits and I/O. */
+    void *user_context;                 /**< Optional caller-owned pointer exposed to the spawned task. */
 } llam_spawn_opts_t;
 
 /** @brief Current size to pass to ::llam_spawn_ex and ::llam_spawn_opts_init. */
@@ -254,77 +320,40 @@ typedef struct llam_runtime_opts {
     uint32_t preempt_mode;                          /**< Cooperative preemption policy; one of ::llam_preempt_mode_t. */
     uint32_t preempt_poll_period;                   /**< Safepoint flag-poll period; 0 selects a profile default. */
     uint64_t preempt_quantum_ns;                    /**< Global preempt slice override; 0 uses task-class budgets. */
+    uint32_t worker_min;                            /**< Minimum online scheduler workers; 0 selects the legacy default. */
+    uint32_t worker_count;                          /**< Initial online scheduler workers; 0 selects the legacy default. */
+    uint32_t worker_max;                            /**< Maximum scheduler-worker capacity; 0 selects the legacy default. */
+    uint32_t blocking_min;                          /**< Blocking workers created during initialization. */
+    uint32_t blocking_max;                          /**< Maximum blocking workers; 0 selects the legacy default. */
+    uint32_t affinity_policy;                       /**< CPU placement policy; one of ::llam_runtime_affinity_policy_t. */
+    uint32_t cpu_count;                             /**< Number of ordered CPU IDs in @c cpu_ids; 0 discovers allowed CPUs. */
+    uint32_t reserved1;                             /**< Reserved ABI padding; initialize to 0. */
+    const uint32_t *cpu_ids;                        /**< Optional ordered CPU IDs, copied during initialization. */
+    uint64_t task_prewarm_total;                    /**< Exact runtime-total task-object prewarm target; 0 uses legacy policy. */
+    uint64_t stack_prewarm_total;                   /**< Exact runtime-total stack prewarm target; 0 uses legacy policy. */
+    uint64_t timer_prewarm_total;                   /**< Exact runtime-total timer-slot prewarm target; 0 uses legacy policy. */
+    uint64_t stack_cache_budget_bytes;              /**< Runtime-wide retained mapping-byte budget; 0 selects the default. */
+    uint64_t stack_cache_high_watermark_bytes;      /**< Automatic-trim trigger; 0 selects the default. */
+    uint64_t stack_cache_low_watermark_bytes;       /**< Automatic-trim target; 0 selects the default. */
+    uint64_t stack_cache_idle_ns;                   /**< Minimum idle age for opportunistic trim; 0 selects the default. */
+    uint32_t stack_cache_flags;                     /**< Bitwise OR of LLAM_RUNTIME_STACK_CACHE_F_* values. */
+    uint32_t reserved2;                             /**< Reserved ABI padding; initialize to 0. */
+    llam_task_switch_hook_fn on_task_resume;         /**< Optional callback immediately before a task resumes. */
+    llam_task_switch_hook_fn on_task_suspend;        /**< Optional callback immediately before a task suspends or exits. */
+    void *switch_hook_context;                       /**< Caller-owned runtime-wide pointer passed to both switch hooks. */
+    uint32_t driver_mode;                            /**< Scheduler authority; one of ::llam_runtime_driver_mode_t. */
+    uint32_t reserved3;                              /**< Reserved ABI padding; initialize to 0. */
+    uint32_t signal_flags;                           /**< Bitwise OR of LLAM_RUNTIME_SIGNAL_F_*; 0 fully opts out. */
+    int32_t preempt_signal;                          /**< POSIX preemption signal, or 0 for the platform default. */
 } llam_runtime_opts_t;
+/** @brief Frozen option prefix consumed by the source-compatible 2.2 wrapper. */
+#define LLAM_RUNTIME_OPTS_V2_2_SIZE \
+    ((size_t)(offsetof(llam_runtime_opts_t, preempt_quantum_ns) + \
+              sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns)))
 
 /** @brief Current size to pass to ::llam_runtime_init_ex and ::llam_runtime_opts_init. */
 #define LLAM_RUNTIME_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_opts_t))
-
-/** @brief Cumulative runtime statistics snapshot. */
-typedef struct llam_runtime_stats {
-    uint64_t ctx_switches;              /**< Number of fiber context switches. */
-    uint64_t yields;                    /**< Cooperative yields. */
-    uint64_t parks;                     /**< Task park operations. */
-    uint64_t wakes;                     /**< Task wake operations. */
-    uint64_t steals;                    /**< Cross-worker steal attempts that succeeded. */
-    uint64_t migrations;                /**< Task or I/O ownership migrations. */
-    uint64_t blocking_calls;            /**< Blocking/offload calls submitted. */
-    uint64_t blocking_completions;      /**< Blocking/offload calls completed. */
-    uint64_t io_submits;                /**< Logical I/O requests submitted. */
-    uint64_t io_submit_calls;           /**< Backend submit attempts. */
-    uint64_t io_submit_syscalls;        /**< Backend submit syscalls. */
-    uint64_t io_completions;            /**< Logical I/O completions. */
-    uint64_t idle_polls;                /**< Idle worker kernel-poll iterations. */
-    uint64_t idle_spin_loops;           /**< Idle spin loop iterations. */
-    uint64_t idle_spin_hits;            /**< Idle spins that found work. */
-    uint64_t idle_spin_fallbacks;       /**< Idle spins that fell back to kernel sleep. */
-    uint64_t idle_spin_ns;              /**< Total idle spin time in nanoseconds. */
-    uint64_t queue_overflows;           /**< Scheduler queue overflow events. */
-    uint64_t overflow_depth;            /**< Current overflow queue depth. */
-    uint32_t active_workers;            /**< Configured worker count. */
-    uint32_t online_workers;            /**< Workers currently online. */
-    uint32_t online_workers_floor;      /**< Minimum online-worker floor. */
-    uint32_t online_workers_min;        /**< Minimum online workers observed. */
-    uint32_t online_workers_max;        /**< Maximum online workers observed. */
-    uint32_t active_nodes;              /**< Active platform I/O nodes. */
-    uint32_t dynamic_workers;           /**< Whether dynamic workers are active. */
-    uint32_t worker_rings;              /**< Whether worker ring mode is active. */
-    uint32_t worker_rings_multishot;    /**< Whether worker-ring multishot mode is active. */
-    uint32_t lockfree_normq;            /**< Whether lock-free normal queues are active. */
-    uint32_t huge_alloc;                /**< Whether huge allocation mode is active. */
-    uint32_t sqpoll;                    /**< Whether Linux SQPOLL mode is active. */
-    uint64_t opaque_block_ns;           /**< Total opaque blocking time in nanoseconds. */
-    uint64_t opaque_block_samples;      /**< Opaque blocking sample count. */
-    uint64_t opaque_block_max_ns;       /**< Maximum opaque blocking duration. */
-    uint64_t opaque_enter_wait_ns;      /**< Total wait time entering opaque blocking regions. */
-    uint64_t opaque_enter_wait_samples; /**< Enter-wait sample count. */
-    uint64_t opaque_enter_wait_max_ns;  /**< Maximum enter-wait duration. */
-    uint64_t opaque_leave_wait_ns;      /**< Total wait time leaving opaque blocking regions. */
-    uint64_t opaque_leave_wait_samples; /**< Leave-wait sample count. */
-    uint64_t opaque_leave_wait_max_ns;  /**< Maximum leave-wait duration. */
-    uint64_t yield_direct_attempts;     /**< Direct yield handoff attempts. */
-    uint64_t yield_direct_fast_hits;    /**< Lock-free direct yield handoff hits. */
-    uint64_t yield_direct_locked_hits;  /**< Locked direct yield handoff hits. */
-    uint64_t yield_direct_fail_context; /**< Direct handoff failures from invalid context. */
-    uint64_t yield_direct_fail_policy;  /**< Direct handoff failures from policy/state guards. */
-    uint64_t yield_direct_fail_no_work; /**< Direct handoff failures with no local runnable work. */
-    uint64_t yield_direct_fail_self;    /**< Direct handoff failures that only found the caller. */
-    uint64_t yield_direct_fail_push;    /**< Direct handoff failures requeueing the caller. */
-    uint64_t preempt_requests;          /**< Automatic preemption requests published by safepoints/watchdog. */
-    uint64_t preempt_yields;            /**< Safepoints that yielded because of automatic preemption. */
-    uint64_t preempt_suppressed;        /**< Over-budget observations suppressed by policy or lack of pressure. */
-    uint64_t preempt_signals;           /**< Worker wake signals sent for watchdog preemption requests. */
-    uint32_t preempt_mode;              /**< Active ::llam_preempt_mode_t policy. */
-    uint32_t preempt_poll_period;       /**< Active preempt flag-poll period. */
-    uint64_t preempt_quantum_ns;        /**< Active global preempt slice override, or 0 for task-class budgets. */
-    uint64_t wake_handoff_attempts;     /**< Same-shard wake-to-task handoff attempts. */
-    uint64_t wake_handoff_hits;         /**< Same-shard wake-to-task handoffs that switched directly. */
-    uint64_t wake_handoff_fail_context; /**< Wake handoffs rejected by caller/task context. */
-    uint64_t wake_handoff_fail_policy;  /**< Wake handoffs rejected by runtime policy guards. */
-    uint64_t wake_handoff_fail_race;    /**< Wake handoffs that lost a queue/state race and fell back. */
-} llam_runtime_stats_t;
-
-/** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */
-#define LLAM_RUNTIME_STATS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_stats_t))
+#include "runtime_stats.h"
 
 /* ============================================================================
  * Runtime lifecycle and task scheduling
@@ -383,8 +412,10 @@ LLAM_API int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_s
 /**
  * @brief Initialize the process-default runtime.
  * @param opts Optional runtime options; pass NULL for defaults.
- * @details Convenience wrapper around ::llam_runtime_init_ex. New embedding
- * code should prefer ::llam_runtime_create and drive the returned handle.
+ * @details Convenience wrapper around ::llam_runtime_init_ex that consumes
+ * only ::LLAM_RUNTIME_OPTS_V2_2_SIZE bytes. Resource-governance fields appended
+ * after the 2.2 prefix are intentionally ignored. New embedding code should
+ * prefer ::llam_runtime_create and drive the returned handle.
  * @return 0 on success, -1 on failure with errno set.
  */
 LLAM_API int llam_runtime_init(const llam_runtime_opts_t *opts);
@@ -453,6 +484,46 @@ LLAM_API int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t s
 LLAM_API int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime,
                                                   llam_runtime_stats_t *stats,
                                                   size_t stats_size);
+
+/**
+ * @brief Release retained stack mappings until the cache reaches a byte target.
+ *
+ * @details
+ * The target is runtime-wide and includes guard pages. Trimming is serialized
+ * per runtime, but stack-cache list locks are held only while a bounded batch
+ * is detached; platform VM release happens after the owning list lock is
+ * released. Because concurrent tasks may return stacks while trimming runs,
+ * the target is best effort under active cache traffic.
+ * A platform release failure leaves the mapping owned and byte-charged so a
+ * later trim request can retry it.
+ *
+ * @param runtime Runtime returned by ::llam_runtime_create or
+ *        ::llam_runtime_default; must not be NULL.
+ * @param target_bytes Desired retained mapping-byte ceiling. Must not exceed
+ *        the runtime's resolved stack-cache budget.
+ * @param released_bytes Receives mapping bytes successfully returned to the
+ *        platform during this request. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set on invalid arguments, an unknown
+ *         or stopped runtime, or a platform release failure.
+ */
+LLAM_API int llam_runtime_stack_cache_trim_ex(llam_runtime_t *runtime,
+                                              uint64_t target_bytes,
+                                              uint64_t *released_bytes);
+
+/**
+ * @brief Notify a runtime of host memory pressure.
+ *
+ * @details
+ * This is equivalent to a serialized stack-cache trim toward zero retained
+ * bytes. It is safe to call concurrently with task execution and runtime
+ * statistics collection.
+ *
+ * @param runtime Runtime returned by ::llam_runtime_create or
+ *        ::llam_runtime_default; must not be NULL.
+ * @return 0 on success, -1 with @c errno set on invalid state or a platform
+ *         release failure.
+ */
+LLAM_API int llam_runtime_notify_memory_pressure(llam_runtime_t *runtime);
 
 /**
  * @brief Collect a best-effort snapshot of runtime counters.
@@ -533,10 +604,10 @@ LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
  *
  * @details
  * Canonical embedding teardown. Requests cooperative stop, tears down
- * runtime-owned resources, and invalidates the handle. Heap-backed handle
- * storage returned by
- * ::llam_runtime_create is retired for the process lifetime rather than
- * immediately reused, so stale raw pointers cannot alias a later runtime.
+ * runtime-owned resources, and invalidates the handle. Explicit handles returned
+ * by ::llam_runtime_create are opaque encoded tokens carrying a runtime family,
+ * slot, and generation; they are never storage addresses and must not be
+ * dereferenced or modified. A destroyed token never aliases a later runtime.
  * Passing NULL is a legacy default-runtime shutdown alias. Managed tasks may
  * only stop their owner runtime through this API; foreign runtime handles and
  * unknown handles are ignored because this function has no errno channel.
@@ -961,6 +1032,42 @@ LLAM_API void llam_dump_runtime_state(int fd);
  * foreign-runtime, or NULL handles.
  */
 LLAM_API uint32_t llam_task_flags(const llam_task_t *task);
+
+/**
+ * @brief Return the caller-owned context pointer for the current task.
+ *
+ * @details The runtime never dereferences or frees this pointer. Successful
+ * calls preserve @c errno, including when the stored value is NULL.
+ *
+ * @return The pointer supplied through ::llam_spawn_opts_t, or NULL with
+ *         @c errno set to @c ENOTSUP outside a managed task.
+ */
+LLAM_API void *llam_task_user_context(void);
+
+/**
+ * @brief Return one inline caller-owned context pointer for the current task.
+ *
+ * @details Successful calls preserve @c errno, including when the stored value
+ * is NULL. The runtime never dereferences or frees the pointer.
+ *
+ * @param slot Slot in the range [0, ::LLAM_TASK_CONTEXT_SLOT_COUNT).
+ * @return Stored pointer on success, or NULL with @c errno set to @c ENOTSUP
+ *         outside a managed task or @c EINVAL for an invalid slot.
+ */
+LLAM_API void *llam_task_context_slot_get(uint32_t slot);
+
+/**
+ * @brief Store one inline caller-owned context pointer on the current task.
+ *
+ * @details Successful calls preserve @c errno. The runtime never dereferences
+ * or frees @p value.
+ *
+ * @param slot Slot in the range [0, ::LLAM_TASK_CONTEXT_SLOT_COUNT).
+ * @param value Caller-owned pointer; NULL clears the slot.
+ * @return 0 on success, or -1 with @c errno set to @c ENOTSUP outside a
+ *         managed task or @c EINVAL for an invalid slot.
+ */
+LLAM_API int llam_task_context_slot_set(uint32_t slot, void *value);
 
 /**
  * @brief Allocate a task-local storage key.

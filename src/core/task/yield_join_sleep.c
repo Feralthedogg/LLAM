@@ -31,9 +31,6 @@
 
 #include "runtime_internal.h"
 
-/** @brief Sentinel used to mark an explicit user yield without sampling a real timestamp. */
-#define LLAM_RECENT_EXPLICIT_YIELD UINT64_MAX
-
 #if LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
 #define LLAM_DIRECT_OWNER_HANDOFF 1
 #else
@@ -41,16 +38,6 @@
 #endif
 
 #define LLAM_DIRECT_YIELD_HANDOFF_AUTO 3
-
-typedef enum llam_yield_direct_fail {
-    LLAM_YIELD_DIRECT_FAIL_NONE = 0,
-    LLAM_YIELD_DIRECT_FAIL_CONTEXT,
-    LLAM_YIELD_DIRECT_FAIL_POLICY,
-    LLAM_YIELD_DIRECT_FAIL_BUDGET,
-    LLAM_YIELD_DIRECT_FAIL_NO_WORK,
-    LLAM_YIELD_DIRECT_FAIL_SELF,
-    LLAM_YIELD_DIRECT_FAIL_PUSH,
-} llam_yield_direct_fail_t;
 
 static void llam_yield_direct_record_attempt(llam_shard_t *shard) {
     llam_task_t *current = g_llam_tls_task;
@@ -93,7 +80,9 @@ static void llam_yield_direct_record_hit(llam_shard_t *shard, bool fast) {
     }
 }
 
-static void llam_yield_direct_record_fail(llam_shard_t *shard, llam_yield_direct_fail_t reason) {
+static void llam_yield_direct_record_fail(
+    llam_shard_t *shard,
+    llam_handoff_result_class_t reason) {
     llam_task_t *current = g_llam_tls_task;
     bool sample;
 
@@ -110,26 +99,27 @@ static void llam_yield_direct_record_fail(llam_shard_t *shard, llam_yield_direct
         shard->autotune_handoff_sample_current = false;
     }
     switch (reason) {
-    case LLAM_YIELD_DIRECT_FAIL_CONTEXT:
+    case LLAM_HANDOFF_RESULT_CONTEXT:
         shard->metrics.yield_direct_fail_context += 1U;
         break;
-    case LLAM_YIELD_DIRECT_FAIL_POLICY:
+    case LLAM_HANDOFF_RESULT_POLICY:
         shard->metrics.yield_direct_fail_policy += 1U;
         break;
-    case LLAM_YIELD_DIRECT_FAIL_BUDGET:
+    case LLAM_HANDOFF_RESULT_BUDGET:
         shard->metrics.yield_direct_fail_policy += 1U;
         shard->metrics.yield_direct_fail_budget += 1U;
         break;
-    case LLAM_YIELD_DIRECT_FAIL_NO_WORK:
+    case LLAM_HANDOFF_RESULT_NO_WORK:
         shard->metrics.yield_direct_fail_no_work += 1U;
         break;
-    case LLAM_YIELD_DIRECT_FAIL_SELF:
+    case LLAM_HANDOFF_RESULT_SELF:
         shard->metrics.yield_direct_fail_self += 1U;
         break;
-    case LLAM_YIELD_DIRECT_FAIL_PUSH:
+    case LLAM_HANDOFF_RESULT_PUSH:
         shard->metrics.yield_direct_fail_push += 1U;
         break;
-    case LLAM_YIELD_DIRECT_FAIL_NONE:
+    case LLAM_HANDOFF_RESULT_NONE:
+    case LLAM_HANDOFF_RESULT_RACE:
     default:
         break;
     }
@@ -146,6 +136,9 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
+    if (rt != NULL && rt->external_driver.enabled) {
+        return 0U;
+    }
     if (value < 0) {
         const char *env = llam_env_get("LLAM_YIELD_DIRECT_HANDOFF");
 
@@ -200,64 +193,64 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
  * needed: the current task is the single owner of the Chase-Lev bottom and FIFO
  * yield lane. This removes one lock/unlock pair from tight spawn/yield bursts.
  */
-static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail_reason) {
+static bool llam_yield_to_local_runnable_unlocked(
+    llam_handoff_result_class_t *fail_reason) {
 #if LLAM_DIRECT_OWNER_HANDOFF
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *current = g_llam_tls_task;
     llam_task_t *next;
     llam_runtime_t *rt;
+    llam_handoff_policy_input_t input;
+    llam_handoff_reject_t reject;
     bool push_failed = false;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+    if (shard == NULL || current == NULL ||
+        g_llam_tls_scheduler_ctx != &shard->scheduler_ctx ||
+        !llam_task_may_run_on_shard(current, shard)) {
         if (fail_reason != NULL) {
-            *fail_reason = LLAM_YIELD_DIRECT_FAIL_CONTEXT;
+            *fail_reason = LLAM_HANDOFF_RESULT_CONTEXT;
         }
         return false;
     }
     rt = shard->runtime;
-    if (rt == NULL ||
-        rt->trace_events_enabled != 0U ||
-        rt->run_timing_enabled != 0U ||
-        rt->wake_latency_metrics_enabled != 0U ||
-        !llam_lockfree_normq_enabled(rt) ||
-        !llam_shard_accepts_new_work(shard) ||
-        shard->opaque_redirect_active ||
-        (rt->direct_handoff_allow_timers == 0U &&
-         atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U)) {
+    if (rt == NULL) {
         if (fail_reason != NULL) {
-            *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
+            *fail_reason = LLAM_HANDOFF_RESULT_CONTEXT;
         }
         return false;
     }
-    if (rt->direct_handoff_live_limit != 0U &&
-        llam_runtime_live_tasks(rt) > rt->direct_handoff_live_limit) {
-        shard->direct_handoff_streak = 0U;
-        if (fail_reason != NULL) {
-            *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
-        }
-        return false;
-    }
-    {
-        unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
 
-        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
+    input.runtime = rt;
+    input.shard = shard;
+    input.current = current;
+    input.next = NULL;
+    input.target_id = shard->id;
+    input.target_deadline_active = false;
+    input.honor_timer_allowance = true;
+    input.require_lockfree_queue = true;
+    reject = llam_direct_handoff_policy(&input);
+    if (reject != LLAM_HANDOFF_REJECT_NONE) {
+        if (reject == LLAM_HANDOFF_REJECT_LIVE_LIMIT ||
+            reject == LLAM_HANDOFF_REJECT_BUDGET) {
             shard->direct_handoff_streak = 0U;
-            if (fail_reason != NULL) {
-                *fail_reason = LLAM_YIELD_DIRECT_FAIL_BUDGET;
-            }
-            return false;
         }
+        if (fail_reason != NULL) {
+            *fail_reason = llam_handoff_reject_classify(reject);
+        }
+        return false;
     }
     if (!llam_norm_queue_exchange_yield_unlocked(shard, current, &next, &push_failed)) {
         if (fail_reason != NULL) {
-            *fail_reason = push_failed ? LLAM_YIELD_DIRECT_FAIL_PUSH : LLAM_YIELD_DIRECT_FAIL_NO_WORK;
+            *fail_reason = push_failed
+                               ? LLAM_HANDOFF_RESULT_PUSH
+                               : LLAM_HANDOFF_RESULT_NO_WORK;
         }
         return false;
     }
     if (next == current) {
         if (fail_reason != NULL) {
-            *fail_reason = LLAM_YIELD_DIRECT_FAIL_SELF;
+            *fail_reason = LLAM_HANDOFF_RESULT_SELF;
         }
         return false;
     }
@@ -273,26 +266,28 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         current->forced_yield_budget = rt->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->recent_explicit_yield =
+            g_llam_tls_io_handoff_yield == 0U;
         current->last_runnable_ns = now_ns;
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
         atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-        next->last_started_ns = 0U;
+        shard->current_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
-    atomic_store_explicit(&shard->current, next, memory_order_release);
-    g_llam_tls_task = next;
-
     shard->metrics.yields += 1U;
     shard->metrics.ctx_switches += 1U;
     shard->direct_handoff_streak += 1U;
+    /* Record before a migrated task can resume and race this source shard. */
+    llam_yield_direct_record_hit(shard, true);
+    atomic_store_explicit(&shard->current, next, memory_order_release);
+    g_llam_tls_task = next;
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
 #else
     if (fail_reason != NULL) {
-        *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
+        *fail_reason = LLAM_HANDOFF_RESULT_POLICY;
     }
     return false;
 #endif
@@ -308,15 +303,14 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
  */
 static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
 #if LLAM_DIRECT_OWNER_HANDOFF
-    llam_yield_direct_fail_t fail_reason = LLAM_YIELD_DIRECT_FAIL_NONE;
+    llam_handoff_result_class_t fail_reason = LLAM_HANDOFF_RESULT_NONE;
 
     llam_yield_direct_record_attempt(shard);
     if (llam_yield_to_local_runnable_unlocked(&fail_reason)) {
-        llam_yield_direct_record_hit(shard, true);
         return true;
     }
-    if (fail_reason == LLAM_YIELD_DIRECT_FAIL_NONE) {
-        fail_reason = LLAM_YIELD_DIRECT_FAIL_NO_WORK;
+    if (fail_reason == LLAM_HANDOFF_RESULT_NONE) {
+        fail_reason = LLAM_HANDOFF_RESULT_NO_WORK;
     }
     if (shard != NULL) {
         shard->direct_handoff_streak = 0U;
@@ -360,7 +354,8 @@ void llam_yield(void) {
     task->forced_yield_budget = rt->forced_yield_every;
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
-    task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    task->recent_explicit_yield =
+        g_llam_tls_io_handoff_yield == 0U;
     task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
     pthread_mutex_lock(&shard->lock);
@@ -386,16 +381,15 @@ void llam_yield(void) {
  */
 bool llam_yield_to_local_runnable(void) {
     llam_shard_t *shard = g_llam_tls_shard;
-    llam_yield_direct_fail_t fail_reason = LLAM_YIELD_DIRECT_FAIL_NONE;
+    llam_handoff_result_class_t fail_reason = LLAM_HANDOFF_RESULT_NONE;
 
     llam_yield_direct_record_attempt(shard);
     if (llam_yield_to_local_runnable_unlocked(&fail_reason)) {
-        llam_yield_direct_record_hit(shard, true);
         return true;
     }
 #if LLAM_DIRECT_OWNER_HANDOFF
-    if (fail_reason == LLAM_YIELD_DIRECT_FAIL_NONE) {
-        fail_reason = LLAM_YIELD_DIRECT_FAIL_NO_WORK;
+    if (fail_reason == LLAM_HANDOFF_RESULT_NONE) {
+        fail_reason = LLAM_HANDOFF_RESULT_NO_WORK;
     }
     if (shard != NULL) {
         shard->direct_handoff_streak = 0U;
@@ -409,17 +403,18 @@ bool llam_yield_to_local_runnable(void) {
     llam_task_t *next = NULL;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || shard->runtime == NULL) {
-        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_CONTEXT);
+    if (shard == NULL || current == NULL || shard->runtime == NULL ||
+        !llam_task_may_run_on_shard(current, shard)) {
+        llam_yield_direct_record_fail(shard, LLAM_HANDOFF_RESULT_CONTEXT);
         return false;
     }
     if (llam_direct_yield_handoff_mode(shard->runtime) == 0U) {
-        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
+        llam_yield_direct_record_fail(shard, LLAM_HANDOFF_RESULT_POLICY);
         return false;
     }
     if (shard->runtime->run_timing_enabled != 0U || shard->runtime->wake_latency_metrics_enabled != 0U ||
         !llam_shard_accepts_new_work(shard)) {
-        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
+        llam_yield_direct_record_fail(shard, LLAM_HANDOFF_RESULT_POLICY);
         return false;
     }
 
@@ -429,25 +424,23 @@ bool llam_yield_to_local_runnable(void) {
         (shard->runtime->direct_handoff_allow_timers == 0U && shard->timers != NULL) ||
         shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         pthread_mutex_unlock(&shard->lock);
-        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
+        llam_yield_direct_record_fail(shard, LLAM_HANDOFF_RESULT_POLICY);
         return false;
     }
-    if (shard->hot_q.depth > 0U) {
-        next = llam_queue_pop_head(&shard->hot_q);
-    }
-    if (next == NULL) {
-        next = llam_norm_queue_pop_owner_locked(shard);
-    }
+    next = llam_take_handoff_task_locked(shard);
     if (next == NULL || next == current) {
         pthread_mutex_unlock(&shard->lock);
-        llam_yield_direct_record_fail(shard, next == current ? LLAM_YIELD_DIRECT_FAIL_SELF : LLAM_YIELD_DIRECT_FAIL_NO_WORK);
+        llam_yield_direct_record_fail(
+            shard,
+            next == current ? LLAM_HANDOFF_RESULT_SELF
+                            : LLAM_HANDOFF_RESULT_NO_WORK);
         return false;
     }
 
     if (!llam_norm_queue_push_yield_locked(shard, current)) {
         (void)llam_norm_queue_push_owner_locked(shard, next);
         pthread_mutex_unlock(&shard->lock);
-        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_PUSH);
+        llam_yield_direct_record_fail(shard, LLAM_HANDOFF_RESULT_PUSH);
         return false;
     }
 
@@ -461,12 +454,13 @@ bool llam_yield_to_local_runnable(void) {
         current->forced_yield_budget = shard->runtime->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->recent_explicit_yield =
+            g_llam_tls_io_handoff_yield == 0U;
         current->last_runnable_ns = now_ns;
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
         atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-        next->last_started_ns = 0U;
+        shard->current_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     atomic_store_explicit(&shard->current, next, memory_order_release);
@@ -502,37 +496,38 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 #if LLAM_DIRECT_OWNER_HANDOFF
     llam_task_t *next;
     llam_runtime_t *rt;
+    llam_handoff_policy_input_t input;
+    llam_handoff_reject_t reject;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+    if (shard == NULL || current == NULL ||
+        g_llam_tls_scheduler_ctx != &shard->scheduler_ctx ||
+        !llam_task_may_run_on_shard(current, shard)) {
         return false;
     }
     rt = shard->runtime;
-    if (rt == NULL ||
-        rt->trace_events_enabled != 0U ||
-        rt->run_timing_enabled != 0U ||
-        rt->wake_latency_metrics_enabled != 0U ||
-        !llam_lockfree_normq_enabled(rt) ||
-        !llam_shard_accepts_new_work(shard) ||
-        shard->opaque_redirect_active ||
-        atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U) {
+    if (rt == NULL) {
         return false;
     }
-    if (rt->direct_handoff_live_limit != 0U &&
-        llam_runtime_live_tasks(rt) > rt->direct_handoff_live_limit) {
-        shard->direct_handoff_streak = 0U;
-        return false;
-    }
-    {
-        unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
 
-        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
+    input.runtime = rt;
+    input.shard = shard;
+    input.current = current;
+    input.next = NULL;
+    input.target_id = shard->id;
+    input.target_deadline_active = false;
+    input.honor_timer_allowance = false;
+    input.require_lockfree_queue = true;
+    reject = llam_direct_handoff_policy(&input);
+    if (reject != LLAM_HANDOFF_REJECT_NONE) {
+        if (reject == LLAM_HANDOFF_REJECT_LIVE_LIMIT ||
+            reject == LLAM_HANDOFF_REJECT_BUDGET) {
             shard->direct_handoff_streak = 0U;
-            return false;
         }
+        return false;
     }
 
-    next = llam_norm_queue_pop_owner_unlocked(shard);
+    next = llam_take_handoff_task_unlocked(shard);
     if (next == NULL || next == current) {
         return false;
     }
@@ -543,7 +538,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
         atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-        next->last_started_ns = 0U;
+        shard->current_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     atomic_store_explicit(&shard->current, next, memory_order_release);
@@ -558,7 +553,8 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     llam_task_t *next = NULL;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || shard->runtime == NULL) {
+    if (shard == NULL || current == NULL || shard->runtime == NULL ||
+        !llam_task_may_run_on_shard(current, shard)) {
         return false;
     }
     if (llam_direct_yield_handoff_mode(shard->runtime) == 0U) {
@@ -577,12 +573,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         pthread_mutex_unlock(&shard->lock);
         return false;
     }
-    if (shard->hot_q.depth > 0U) {
-        next = llam_queue_pop_head(&shard->hot_q);
-    }
-    if (next == NULL) {
-        next = llam_norm_queue_pop_owner_locked(shard);
-    }
+    next = llam_take_handoff_task_locked(shard);
     if (next == NULL || next == current) {
         pthread_mutex_unlock(&shard->lock);
         return false;
@@ -591,7 +582,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
     atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-    next->last_started_ns = 0U;
+    shard->current_started_ns = 0U;
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
 
