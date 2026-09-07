@@ -1013,6 +1013,16 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                 return llam_runtime_init_fail_registered(rt, ENOMEM);
             }
             helper_end = helper_base + slice_size;
+            if (mapping_end < mapping_base ||
+                helper_base < mapping_base || helper_base > mapping_end ||
+                primary_end < mapping_base || primary_end > mapping_end ||
+                helper_end < helper_base || helper_end > mapping_end ||
+                primary_end > helper_base) {
+                (void)munmap(mapping, mapping_size);
+                free(io_node_ids);
+                free(locality_node_ids);
+                return llam_runtime_init_fail_registered(rt, ENOMEM);
+            }
             assert(primary_end <= mapping_end);
             assert(helper_end <= mapping_end);
             assert(primary_end <= helper_base);
