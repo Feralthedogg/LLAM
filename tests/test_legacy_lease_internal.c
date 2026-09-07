@@ -34,6 +34,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if LLAM_PLATFORM_POSIX
@@ -80,6 +81,8 @@ typedef struct takeover_state {
     pthread_t helper_thread_after;
     uintptr_t root_worker;
     uintptr_t helper_worker;
+    llam_lease_test_snapshot_t root_snapshot;
+    llam_lease_test_snapshot_t helper_snapshot;
 } takeover_state_t;
 
 typedef struct repeat_observation {
@@ -98,6 +101,7 @@ typedef struct repeat_run_state {
     atomic_uint run_done[2];
     int run_rc[2];
     int run_errno[2];
+    int fatal_errno[2];
     pthread_t drivers[2];
 } repeat_run_state_t;
 
@@ -121,20 +125,25 @@ typedef struct active_shutdown_state {
     unsigned helper_active;
     int run_rc;
     int run_errno;
+    int fatal_errno;
+    pthread_t helper_thread_after;
 } active_shutdown_state_t;
 
 typedef struct dynamic_pause_state {
     test_failure_state_t failure;
+    llam_task_t *task;
     atomic_uint task_started;
     atomic_uint release_task;
     atomic_uint task_done;
     atomic_uint run_done;
     int run_rc;
     int run_errno;
+    int fatal_errno;
 } dynamic_pause_state_t;
 
 typedef struct watchdog_overlap_state {
     test_failure_state_t failure;
+    llam_task_t *task;
     atomic_uint task_started;
     atomic_uint task_done;
     atomic_uint monitor_stop;
@@ -142,6 +151,7 @@ typedef struct watchdog_overlap_state {
     atomic_uint run_done;
     int run_rc;
     int run_errno;
+    int fatal_errno;
 } watchdog_overlap_state_t;
 
 static uint64_t legacy_deadline(void) {
@@ -170,6 +180,79 @@ static int wait_flag(const atomic_uint *flag, uint64_t deadline_ns) {
     return 0;
 }
 
+typedef void (*cleanup_release_fn)(void *arg);
+
+typedef struct cleanup_release_state {
+    llam_runtime_t *runtime;
+    atomic_uint *release_flag;
+} cleanup_release_state_t;
+
+static void fail_safe_cleanup(const char *message) {
+    fprintf(stderr,
+            "test_legacy_lease_internal: bounded cleanup failed: %s\n",
+            message != NULL ? message : "unknown failure");
+    fflush(stderr);
+    _Exit(1);
+}
+
+static void release_flag_and_runtime(void *arg) {
+    cleanup_release_state_t *state = arg;
+
+    if (state == NULL) {
+        return;
+    }
+    if (state->release_flag != NULL) {
+        atomic_store_explicit(state->release_flag, 1U, memory_order_release);
+    }
+    if (state->runtime != NULL) {
+        (void)llam_runtime_request_stop_rt(state->runtime);
+    }
+}
+
+static void release_runtime_stop(void *arg) {
+    llam_runtime_t *runtime = arg;
+
+    if (runtime != NULL) {
+        llam_request_stop(runtime);
+    }
+}
+
+static void bounded_join_thread(pthread_t thread,
+                                bool created,
+                                const atomic_uint *done,
+                                cleanup_release_fn release,
+                                void *release_arg,
+                                const char *message) {
+    if (!created) {
+        return;
+    }
+    if (wait_flag(done, legacy_deadline()) != 0) {
+        if (release != NULL) {
+            release(release_arg);
+        }
+        if (wait_flag(done, legacy_deadline()) != 0) {
+            fail_safe_cleanup(message);
+        }
+    }
+    if (pthread_join(thread, NULL) != 0) {
+        fail_safe_cleanup(message);
+    }
+}
+
+static void bounded_join_task(llam_task_t *task,
+                              const atomic_uint *done,
+                              const char *message) {
+    if (task == NULL) {
+        return;
+    }
+    if (wait_flag(done, legacy_deadline()) != 0) {
+        fail_safe_cleanup(message);
+    }
+    if (llam_join_until(task, legacy_deadline()) != 0) {
+        fail_safe_cleanup(message);
+    }
+}
+
 static int failure_result(const test_failure_state_t *state, const char *fallback) {
     if (state != NULL && atomic_load_explicit(&state->failures, memory_order_acquire) != 0U) {
         fprintf(stderr,
@@ -180,7 +263,11 @@ static int failure_result(const test_failure_state_t *state, const char *fallbac
     return 0;
 }
 
-static int create_runtime(llam_runtime_t **out, bool deterministic, bool dynamic_workers) {
+static int create_runtime_with_preempt(llam_runtime_t **out,
+                                       bool deterministic,
+                                       bool dynamic_workers,
+                                       uint32_t preempt_mode,
+                                       uint64_t preempt_quantum_ns) {
     llam_runtime_opts_t opts;
 
     if (out == NULL || llam_runtime_opts_init(&opts, sizeof(opts)) != 0) {
@@ -188,17 +275,54 @@ static int create_runtime(llam_runtime_t **out, bool deterministic, bool dynamic
     }
     opts.deterministic = deterministic ? 1U : 0U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+    opts.preempt_mode = preempt_mode;
+    opts.preempt_quantum_ns = preempt_quantum_ns;
     if (dynamic_workers) {
         opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
     }
     return llam_runtime_create(&opts, sizeof(opts), out);
 }
 
+static int create_runtime(llam_runtime_t **out, bool deterministic, bool dynamic_workers) {
+    return create_runtime_with_preempt(out,
+                                       deterministic,
+                                       dynamic_workers,
+                                       0U,
+                                       0U);
+}
+
+typedef struct destroy_runtime_call {
+    llam_runtime_t *runtime;
+    atomic_uint done;
+} destroy_runtime_call_t;
+
+static void *destroy_runtime_main(void *arg) {
+    destroy_runtime_call_t *call = arg;
+
+    llam_runtime_destroy(call->runtime);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
 static void destroy_runtime(llam_runtime_t **runtime) {
-    if (runtime != NULL && *runtime != NULL) {
-        llam_runtime_destroy(*runtime);
-        *runtime = NULL;
+    destroy_runtime_call_t call;
+    pthread_t destroy_thread;
+
+    if (runtime == NULL || *runtime == NULL) {
+        return;
     }
+    call.runtime = *runtime;
+    atomic_init(&call.done, 0U);
+    if (pthread_create(&destroy_thread, NULL, destroy_runtime_main, &call) != 0) {
+        fail_safe_cleanup("runtime destroy thread could not start");
+    }
+    bounded_join_thread(destroy_thread,
+                        true,
+                        &call.done,
+                        release_runtime_stop,
+                        call.runtime,
+                        "runtime destroy exceeded its deadline");
+    *runtime = NULL;
 }
 
 static void reset_lease_test_gates(void) {
@@ -211,15 +335,35 @@ static void reset_lease_test_gates(void) {
     }
 }
 
-static int assert_snapshot(llam_runtime_t *runtime,
-                           unsigned shard_id,
-                           test_failure_state_t *failure,
-                           const char *message) {
+/*
+ * Phase 1A Task 1 only provides the gate storage/API. Production transition
+ * call sites are owned by Task 3, so these tests deliberately keep every gate
+ * disabled and use task/lock observations for the legacy windows.
+ */
+
+static int assert_snapshot_values(llam_runtime_t *runtime,
+                                  unsigned shard_id,
+                                  unsigned expected_state,
+                                  uintptr_t expected_owner,
+                                  uint64_t expected_incarnation,
+                                  test_failure_state_t *failure,
+                                  const char *message) {
     llam_lease_test_snapshot_t snapshot;
 
-    memset(&snapshot, 0xa5, sizeof(snapshot));
-    if (llam_lease_test_snapshot(runtime, shard_id, &snapshot) != 0) {
+    memset(&snapshot, 0, sizeof(snapshot));
+    if (llam_lease_test_snapshot(runtime, shard_id, &snapshot) != 0 ||
+        snapshot.state != expected_state ||
+        snapshot.owner_worker != expected_owner ||
+        (expected_owner != 0U && snapshot.owner_incarnation != expected_incarnation) ||
+        (expected_owner == 0U && snapshot.owner_incarnation != 0U)) {
         test_fail(failure, message);
+        return -1;
+    }
+    /* The legacy Phase 0 has no lease counters or return claimant. */
+    if (snapshot.epoch != 0U || snapshot.return_worker != 0U ||
+        snapshot.return_incarnation != 0U || snapshot.transfer_sequence != 0U ||
+        snapshot.handback_ack_sequence != 0U) {
+        test_fail(failure, "legacy snapshot unexpectedly published lease counters");
         return -1;
     }
     return 0;
@@ -231,6 +375,7 @@ static int assert_no_fatal(llam_runtime_t *runtime,
                            test_failure_state_t *failure,
                            const char *message) {
     if (run_rc != 0 ||
+        (run_rc < 0 && run_errno == 0) ||
         runtime == NULL ||
         atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != 0) {
         fprintf(stderr,
@@ -254,6 +399,17 @@ static void helper_activation_task(void *arg) {
         test_fail(&state->failure, "helper activation ran outside the opaque helper worker");
     }
     state->helper_worker = (uintptr_t)g_llam_tls_worker;
+    if (llam_lease_test_snapshot(state->runtime, shard->id, &state->helper_snapshot) != 0 ||
+        state->helper_snapshot.state != 3U ||
+        state->helper_snapshot.owner_worker != (uintptr_t)&shard->opaque_helper_worker ||
+        state->helper_snapshot.owner_incarnation !=
+            atomic_load_explicit(&shard->opaque_helper_worker.incarnation, memory_order_acquire) ||
+        state->helper_snapshot.epoch != 0U || state->helper_snapshot.return_worker != 0U ||
+        state->helper_snapshot.return_incarnation != 0U ||
+        state->helper_snapshot.transfer_sequence != 0U ||
+        state->helper_snapshot.handback_ack_sequence != 0U) {
+        test_fail(&state->failure, "helper activation snapshot did not identify the helper owner");
+    }
     errno = 0;
     state->helper_enter_rc = llam_enter_blocking();
     state->helper_enter_errno = errno;
@@ -273,6 +429,17 @@ static void takeover_root_task(void *arg) {
         test_fail(&state->failure, "primary activation ran outside the primary worker");
     }
     state->root_worker = (uintptr_t)g_llam_tls_worker;
+    if (llam_lease_test_snapshot(state->runtime, shard->id, &state->root_snapshot) != 0 ||
+        state->root_snapshot.state != 1U ||
+        state->root_snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
+        state->root_snapshot.owner_incarnation !=
+            atomic_load_explicit(&shard->primary_worker.incarnation, memory_order_acquire) ||
+        state->root_snapshot.epoch != 0U || state->root_snapshot.return_worker != 0U ||
+        state->root_snapshot.return_incarnation != 0U ||
+        state->root_snapshot.transfer_sequence != 0U ||
+        state->root_snapshot.handback_ack_sequence != 0U) {
+        test_fail(&state->failure, "primary activation snapshot did not identify the primary owner");
+    }
     helper_task = llam_runtime_spawn_ex(state->runtime, helper_activation_task, state, NULL, 0U);
     if (helper_task == NULL) {
         test_fail(&state->failure, "primary could not spawn helper activation task");
@@ -296,7 +463,8 @@ static void takeover_root_task(void *arg) {
     pthread_mutex_unlock(&shard->opaque_lock);
 
     if (wait_flag(&state->helper_done, deadline) != 0) {
-        test_fail(&state->failure, "helper activation task did not complete");
+        (void)llam_runtime_request_stop_rt(state->runtime);
+        fail_safe_cleanup("helper activation task did not complete");
     }
     errno = 0;
     state->root_leave_rc = llam_leave_blocking();
@@ -304,10 +472,9 @@ static void takeover_root_task(void *arg) {
     if (state->root_leave_rc != 0) {
         test_fail(&state->failure, "primary helper handback failed");
     }
-    errno = 0;
-    if (llam_join(helper_task) != 0) {
-        test_fail(&state->failure, "helper activation task join changed errno semantics");
-    }
+    bounded_join_task(helper_task,
+                      &state->helper_done,
+                      "helper activation task join exceeded its deadline");
     atomic_store_explicit(&state->root_done, 1U, memory_order_release);
 }
 
@@ -336,7 +503,13 @@ static int test_primary_helper_activation_and_return(void) {
     }
     state.runtime = runtime;
     shard = &runtime->shards[0];
-    if (assert_snapshot(runtime, 0U, &state.failure, "activation snapshot before run failed") != 0) {
+    if (assert_snapshot_values(runtime,
+                               0U,
+                               0U,
+                               0U,
+                               0U,
+                               &state.failure,
+                               "activation snapshot before run failed") != 0) {
         destroy_runtime(&runtime);
         return 1;
     }
@@ -348,10 +521,9 @@ static int test_primary_helper_activation_and_return(void) {
     run_rc = root == NULL ? -1 : llam_runtime_run_handle(runtime);
     run_errno = errno;
     if (root != NULL) {
-        errno = 0;
-        if (llam_join(root) != 0) {
-            test_fail(&state.failure, "primary activation task join failed");
-        }
+        bounded_join_task(root,
+                          &state.root_done,
+                          "primary activation task join exceeded its deadline");
     }
     assert_no_fatal(runtime, run_rc, run_errno, &state.failure,
                     "primary/helper activation changed run or fatal semantics");
@@ -362,21 +534,25 @@ static int test_primary_helper_activation_and_return(void) {
         test_fail(&state.failure, "primary/helper activation did not complete cleanly");
     }
     pthread_mutex_lock(&shard->opaque_lock);
-    if (state.helper_thread != shard->opaque_helper_thread ||
+    if (pthread_equal(state.helper_thread, shard->opaque_helper_thread) == 0 ||
         !shard->opaque_helper_thread_started || !shard->opaque_helper_ready ||
         shard->opaque_helper_failed || shard->opaque_helper_active) {
         test_fail(&state.failure, "primary/helper activation created or retained an invalid helper");
     }
     state.helper_thread_after = shard->opaque_helper_thread;
     pthread_mutex_unlock(&shard->opaque_lock);
-    if (state.helper_thread != state.helper_thread_after ||
+    if (pthread_equal(state.helper_thread, state.helper_thread_after) == 0 ||
         state.root_worker == 0U || state.helper_worker == 0U ||
         state.root_worker == state.helper_worker) {
         test_fail(&state.failure, "primary/helper activation did not preserve one helper identity");
     }
-    if (assert_snapshot(runtime, 0U, &state.failure, "activation snapshot after run failed") != 0) {
-        /* Keep the first failure for the report. */
-    }
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &state.failure,
+                           "activation snapshot after run failed");
     destroy_runtime(&runtime);
     return failure_result(&state.failure, "primary/helper activation characterization failed");
 }
@@ -437,7 +613,9 @@ static void redirect_root_task(void *arg) {
     }
     atomic_store_explicit(&state->release_helper, 1U, memory_order_release);
     if (wait_flag(&state->helper_done, deadline) != 0) {
-        test_fail(&state->failure, "helper redirect task did not return");
+        atomic_store_explicit(&state->release_helper, 1U, memory_order_release);
+        (void)llam_runtime_request_stop_rt(state->runtime);
+        fail_safe_cleanup("helper redirect task did not return");
     }
     errno = 0;
     state->root_leave_rc = llam_leave_blocking();
@@ -445,10 +623,9 @@ static void redirect_root_task(void *arg) {
     if (state->root_leave_rc != 0) {
         test_fail(&state->failure, "redirect root handback failed");
     }
-    errno = 0;
-    if (llam_join(helper_task) != 0) {
-        test_fail(&state->failure, "redirect helper join changed errno semantics");
-    }
+    bounded_join_task(helper_task,
+                      &state->helper_done,
+                      "redirect helper join exceeded its deadline");
     atomic_store_explicit(&state->root_done, 1U, memory_order_release);
 }
 
@@ -481,10 +658,9 @@ static int test_helper_reblocking_through_redirect(void) {
     run_rc = root == NULL ? -1 : llam_runtime_run_handle(runtime);
     run_errno = errno;
     if (root != NULL) {
-        errno = 0;
-        if (llam_join(root) != 0) {
-            test_fail(&state.failure, "redirect root join failed");
-        }
+        bounded_join_task(root,
+                          &state.root_done,
+                          "redirect root join exceeded its deadline");
     }
     assert_no_fatal(runtime, run_rc, run_errno, &state.failure,
                     "helper redirect changed run or fatal semantics");
@@ -497,12 +673,19 @@ static int test_helper_reblocking_through_redirect(void) {
         test_fail(&state.failure, "helper re-blocking did not preserve redirect ordering");
     }
     pthread_mutex_lock(&shard->opaque_lock);
-    if (!shard->opaque_helper_thread_started || state.helper_thread != shard->opaque_helper_thread ||
+    if (!shard->opaque_helper_thread_started ||
+        pthread_equal(state.helper_thread, shard->opaque_helper_thread) == 0 ||
         !shard->opaque_helper_ready || shard->opaque_helper_failed) {
         test_fail(&state.failure, "helper re-blocking created a second or invalid helper");
     }
     pthread_mutex_unlock(&shard->opaque_lock);
-    assert_snapshot(runtime, 0U, &state.failure, "redirect snapshot after run failed");
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &state.failure,
+                           "redirect snapshot after run failed");
     destroy_runtime(&runtime);
     return failure_result(&state.failure, "helper re-blocking characterization failed");
 }
@@ -561,7 +744,9 @@ static void ownerless_root_task(void *arg) {
     pthread_mutex_unlock(&shard->lock);
     atomic_store_explicit(&state->release_helper, 1U, memory_order_release);
     if (wait_flag(&state->helper_done, deadline) != 0) {
-        test_fail(&state->failure, "ownerless helper did not complete its return");
+        atomic_store_explicit(&state->release_helper, 1U, memory_order_release);
+        (void)llam_runtime_request_stop_rt(state->runtime);
+        fail_safe_cleanup("ownerless helper did not complete its return");
     }
     pthread_mutex_lock(&shard->lock);
     if (redirect_active_before == 0U || redirect_depth_before == 0U ||
@@ -575,10 +760,9 @@ static void ownerless_root_task(void *arg) {
     if (state->root_leave_rc != 0) {
         test_fail(&state->failure, "ownerless primary return failed");
     }
-    errno = 0;
-    if (llam_join(helper_task) != 0) {
-        test_fail(&state->failure, "ownerless helper join changed errno semantics");
-    }
+    bounded_join_task(helper_task,
+                      &state->helper_done,
+                      "ownerless helper join exceeded its deadline");
     atomic_store_explicit(&state->root_done, 1U, memory_order_release);
 }
 
@@ -608,10 +792,9 @@ static int test_ownerless_return_ordering(void) {
     run_rc = root == NULL ? -1 : llam_runtime_run_handle(runtime);
     run_errno = errno;
     if (root != NULL) {
-        errno = 0;
-        if (llam_join(root) != 0) {
-            test_fail(&state.failure, "ownerless root join failed");
-        }
+        bounded_join_task(root,
+                          &state.root_done,
+                          "ownerless root join exceeded its deadline");
     }
     assert_no_fatal(runtime, run_rc, run_errno, &state.failure,
                     "ownerless return changed run or fatal semantics");
@@ -623,11 +806,17 @@ static int test_ownerless_return_ordering(void) {
     }
     pthread_mutex_lock(&shard->opaque_lock);
     if (!shard->opaque_helper_thread_started || shard->opaque_helper_failed ||
-        state.helper_thread != shard->opaque_helper_thread) {
+        pthread_equal(state.helper_thread, shard->opaque_helper_thread) == 0) {
         test_fail(&state.failure, "ownerless return did not preserve one helper lifecycle");
     }
     pthread_mutex_unlock(&shard->opaque_lock);
-    assert_snapshot(runtime, 0U, &state.failure, "ownerless snapshot after run failed");
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &state.failure,
+                           "ownerless snapshot after run failed");
     destroy_runtime(&runtime);
     return failure_result(&state.failure, "ownerless return characterization failed");
 }
@@ -658,6 +847,8 @@ static void *repeat_run_driver(void *arg) {
     state->run_rc[index] = llam_runtime_run_handle(state->runtime);
     saved_errno = errno;
     state->run_errno[index] = saved_errno;
+    state->fatal_errno[index] = atomic_load_explicit(&state->runtime->fatal_errno,
+                                                     memory_order_acquire);
     atomic_store_explicit(&state->run_done[index], 1U, memory_order_release);
     return NULL;
 }
@@ -667,6 +858,7 @@ static int test_repeated_shard_zero_runs_two_callers(void) {
     llam_runtime_t *runtime = NULL;
     llam_task_t *tasks[2] = {NULL, NULL};
     repeat_driver_arg_t drivers[2];
+    cleanup_release_state_t release;
     unsigned i;
     int rc = 0;
 
@@ -682,6 +874,8 @@ static int test_repeated_shard_zero_runs_two_callers(void) {
         return 1;
     }
     state.runtime = runtime;
+    release.runtime = runtime;
+    release.release_flag = NULL;
     for (i = 0U; i < 2U; ++i) {
         tasks[i] = llam_runtime_spawn_ex(runtime, repeat_observer_task, &state, NULL, 0U);
         if (tasks[i] == NULL) {
@@ -701,15 +895,22 @@ static int test_repeated_shard_zero_runs_two_callers(void) {
             test_fail(&state.failure, "repeated shard-zero run did not complete");
             rc = 1;
         }
-        pthread_join(state.drivers[i], NULL);
-        if (state.run_rc[i] != 0) {
+        bounded_join_thread(state.drivers[i],
+                            true,
+                            &state.run_done[i],
+                            release_flag_and_runtime,
+                            &release,
+                            "repeated shard-zero run thread exceeded its deadline");
+        if (state.run_rc[i] != 0 ||
+            (state.run_rc[i] < 0 && state.run_errno[i] == 0) ||
+            state.fatal_errno[i] != 0) {
             test_fail(&state.failure, "repeated shard-zero run changed fatal semantics");
             rc = 1;
         }
-        errno = 0;
-        if (tasks[i] != NULL && llam_join(tasks[i]) != 0) {
-            test_fail(&state.failure, "repeated shard-zero task join failed");
-            rc = 1;
+        if (tasks[i] != NULL) {
+            bounded_join_task(tasks[i],
+                              &state.task_done[i],
+                              "repeated shard-zero task join exceeded its deadline");
         }
     }
     if (state.observations[0].shard == 0U ||
@@ -735,7 +936,13 @@ static int test_repeated_shard_zero_runs_two_callers(void) {
         }
         pthread_mutex_unlock(&shard->opaque_lock);
     }
-    if (assert_snapshot(runtime, 0U, &state.failure, "repeat snapshot after runs failed") != 0) {
+    if (assert_snapshot_values(runtime,
+                               0U,
+                               0U,
+                               0U,
+                               0U,
+                               &state.failure,
+                               "repeat snapshot after runs failed") != 0) {
         rc = 1;
     }
     destroy_runtime(&runtime);
@@ -780,10 +987,9 @@ static int test_helper_shutdown_while_idle(void) {
     run_rc = task == NULL ? -1 : llam_runtime_run_handle(runtime);
     run_errno = errno;
     if (task != NULL) {
-        errno = 0;
-        if (llam_join(task) != 0) {
-            test_fail(&failure, "idle helper task join failed");
-        }
+        bounded_join_task(task,
+                          &status.done,
+                          "idle helper task join exceeded its deadline");
     }
     assert_no_fatal(runtime, run_rc, run_errno, &failure,
                     "idle helper shutdown changed run or fatal semantics");
@@ -798,7 +1004,13 @@ static int test_helper_shutdown_while_idle(void) {
         !helper_started || !helper_ready || helper_active) {
         test_fail(&failure, "idle helper shutdown did not leave one ready idle helper");
     }
-    assert_snapshot(runtime, 0U, &failure, "idle helper snapshot failed");
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &failure,
+                           "idle helper snapshot failed");
     destroy_runtime(&runtime);
     return failure_result(&failure, "idle helper shutdown characterization failed");
 }
@@ -829,6 +1041,8 @@ static void *active_shutdown_run(void *arg) {
     errno = 0;
     state->run_rc = llam_runtime_run_handle(state->runtime);
     state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
     atomic_store_explicit(&state->run_done, 1U, memory_order_release);
     return NULL;
 }
@@ -848,6 +1062,7 @@ static int test_helper_shutdown_while_active(void) {
     llam_task_t *task = NULL;
     pthread_t run_thread;
     pthread_t destroy_thread;
+    cleanup_release_state_t release;
     bool run_created = false;
     bool destroy_created = false;
     int rc = 0;
@@ -865,6 +1080,8 @@ static int test_helper_shutdown_while_active(void) {
         return 1;
     }
     state.runtime = runtime;
+    release.runtime = runtime;
+    release.release_flag = &state.release_task;
     task = llam_runtime_spawn_ex(runtime, active_shutdown_task, &state, NULL, 0U);
     if (task == NULL || pthread_create(&run_thread, NULL, active_shutdown_run, &state) != 0) {
         test_fail(&state.failure, "active helper run setup failed");
@@ -891,6 +1108,13 @@ static int test_helper_shutdown_while_active(void) {
         test_fail(&state.failure, "active helper task did not publish one active helper");
         goto cleanup;
     }
+    pthread_mutex_lock(&runtime->shards[0].opaque_lock);
+    state.helper_thread_after = runtime->shards[0].opaque_helper_thread;
+    pthread_mutex_unlock(&runtime->shards[0].opaque_lock);
+    if (pthread_equal(state.helper_thread, state.helper_thread_after) == 0) {
+        test_fail(&state.failure, "active helper lifecycle changed its helper identity");
+        goto cleanup;
+    }
     if (pthread_create(&destroy_thread, NULL, active_shutdown_destroy, &state) != 0) {
         test_fail(&state.failure, "active helper destroy thread setup failed");
         goto cleanup;
@@ -907,27 +1131,63 @@ static int test_helper_shutdown_while_active(void) {
         test_fail(&state.failure, "active helper shutdown did not complete bounded teardown");
         goto cleanup;
     }
+    bounded_join_thread(destroy_thread,
+                        true,
+                        &state.destroy_done,
+                        release_flag_and_runtime,
+                        &release,
+                        "active helper destroy thread exceeded its deadline");
+    destroy_created = false;
     runtime = NULL;
-    if (state.run_rc != 0) {
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "active helper run thread exceeded its deadline");
+    run_created = false;
+    if (state.run_rc != 0 ||
+        (state.run_rc < 0 && state.run_errno == 0) ||
+        state.fatal_errno != 0) {
         test_fail(&state.failure, "active helper shutdown changed run fatal semantics");
     }
     rc = failure_result(&state.failure, "active helper shutdown characterization failed");
 
 cleanup:
     atomic_store_explicit(&state.release_task, 1U, memory_order_release);
-    if (runtime != NULL && run_created) {
-        if (wait_flag(&state.run_done, legacy_deadline()) == 0) {
+    if (destroy_created) {
+        release.runtime = runtime;
+        bounded_join_thread(destroy_thread,
+                            true,
+                            &state.destroy_done,
+                            release_flag_and_runtime,
+                            &release,
+                            "active helper destroy cleanup exceeded its deadline");
+        destroy_created = false;
+        runtime = NULL;
+    }
+    if (run_created) {
+        if (runtime != NULL) {
+            release.runtime = runtime;
+            bounded_join_thread(run_thread,
+                                true,
+                                &state.run_done,
+                                release_flag_and_runtime,
+                                &release,
+                                "active helper run cleanup exceeded its deadline");
             runtime = NULL;
+        } else {
+            bounded_join_thread(run_thread,
+                                true,
+                                &state.run_done,
+                                NULL,
+                                NULL,
+                                "active helper run cleanup exceeded its deadline");
         }
+        run_created = false;
     }
     if (runtime != NULL) {
         destroy_runtime(&runtime);
-    }
-    if (destroy_created) {
-        pthread_join(destroy_thread, NULL);
-    }
-    if (run_created) {
-        pthread_join(run_thread, NULL);
     }
     return rc != 0 ? rc : failure_result(&state.failure, "active helper shutdown characterization failed");
 }
@@ -953,6 +1213,8 @@ static void *dynamic_pause_run_typed(void *arg) {
     errno = 0;
     driver->state->run_rc = llam_runtime_run_handle(driver->runtime);
     driver->state->run_errno = errno;
+    driver->state->fatal_errno = atomic_load_explicit(&driver->runtime->fatal_errno,
+                                                      memory_order_acquire);
     atomic_store_explicit(&driver->state->run_done, 1U, memory_order_release);
     return NULL;
 }
@@ -962,7 +1224,10 @@ static int test_dynamic_merge_pause(void) {
     dynamic_pause_driver_t driver;
     llam_runtime_t *runtime = NULL;
     pthread_t run_thread;
+    cleanup_release_state_t release;
     bool run_created = false;
+    bool task_joined = false;
+    bool have_online_secondary = false;
     unsigned i;
     unsigned paused = 0U;
     int rc = 0;
@@ -979,17 +1244,32 @@ static int test_dynamic_merge_pause(void) {
         return 1;
     }
     if (runtime->active_shards < 2U) {
-        fprintf(stderr, "test_legacy_lease_internal: dynamic merge pause skipped with one shard\n");
+        fprintf(stderr, "test_legacy_lease_internal: SKIP dynamic merge pause (one shard)\n");
         destroy_runtime(&runtime);
-        return 0;
+        return 77;
     }
-    if (llam_runtime_spawn_ex(runtime, dynamic_pause_task, &state, NULL, 0U) == NULL) {
+    for (i = 1U; i < runtime->active_shards; ++i) {
+        if (llam_shard_is_online(&runtime->shards[i])) {
+            have_online_secondary = true;
+            break;
+        }
+    }
+    if (!have_online_secondary) {
+        fprintf(stderr,
+                "test_legacy_lease_internal: SKIP dynamic merge pause (no online secondary)\n");
+        destroy_runtime(&runtime);
+        return 77;
+    }
+    state.task = llam_runtime_spawn_ex(runtime, dynamic_pause_task, &state, NULL, 0U);
+    if (state.task == NULL) {
         test_fail(&state.failure, "dynamic merge pause task spawn failed");
         destroy_runtime(&runtime);
         return 1;
     }
     driver.state = &state;
     driver.runtime = runtime;
+    release.runtime = runtime;
+    release.release_flag = &state.release_task;
     if (pthread_create(&run_thread, NULL, dynamic_pause_run_typed, &driver) != 0) {
         test_fail(&state.failure, "dynamic merge pause run thread setup failed");
         destroy_runtime(&runtime);
@@ -1019,7 +1299,22 @@ static int test_dynamic_merge_pause(void) {
         pthread_mutex_unlock(&runtime->shards[i].opaque_lock);
     }
     if (paused == 0U) {
-        fprintf(stderr, "test_legacy_lease_internal: dynamic merge pause skipped with no online secondary\n");
+        fprintf(stderr,
+                "test_legacy_lease_internal: SKIP dynamic merge pause (secondary went offline)\n");
+        atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "dynamic merge skip task join exceeded its deadline");
+        task_joined = true;
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            NULL,
+                            NULL,
+                            "dynamic merge skip run thread exceeded its deadline");
+        run_created = false;
+        destroy_runtime(&runtime);
+        return 77;
     }
     atomic_store_explicit(&state.release_task, 1U, memory_order_release);
     if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
@@ -1027,18 +1322,48 @@ static int test_dynamic_merge_pause(void) {
         test_fail(&state.failure, "dynamic merge pause task/run did not complete");
         goto cleanup;
     }
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "dynamic merge pause task join exceeded its deadline");
+    task_joined = true;
+    /* A successful run has no errno postcondition; fatal_errno is authoritative. */
     if (state.run_rc != 0 ||
-        atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != 0) {
+        (state.run_rc < 0 && state.run_errno == 0) ||
+        state.fatal_errno != 0) {
         test_fail(&state.failure, "dynamic merge pause changed run fatal semantics");
     }
-    assert_snapshot(runtime, 0U, &state.failure, "dynamic merge snapshot failed");
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &state.failure,
+                           "dynamic merge snapshot failed");
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "dynamic merge pause run thread exceeded its deadline");
+    run_created = false;
     rc = failure_result(&state.failure, "dynamic merge pause characterization failed");
 
 cleanup:
     atomic_store_explicit(&state.release_task, 1U, memory_order_release);
     if (run_created) {
-        wait_flag(&state.run_done, legacy_deadline());
-        pthread_join(run_thread, NULL);
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &release,
+                            "dynamic merge pause run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "dynamic merge pause task cleanup exceeded its deadline");
+        task_joined = true;
     }
     destroy_runtime(&runtime);
     return rc != 0 ? rc : failure_result(&state.failure, "dynamic merge pause characterization failed");
@@ -1090,8 +1415,11 @@ static int test_watchdog_task_exit_overlap(void) {
     llam_runtime_t *runtime = NULL;
     pthread_t run_thread;
     pthread_t monitor_thread;
+    cleanup_release_state_t run_release;
+    cleanup_release_state_t monitor_release;
     bool run_created = false;
     bool monitor_created = false;
+    bool task_joined = false;
     int rc = 0;
 
     memset(&state, 0, sizeof(state));
@@ -1103,25 +1431,34 @@ static int test_watchdog_task_exit_overlap(void) {
     atomic_init(&state.monitor_done, 0U);
     atomic_init(&state.run_done, 0U);
     reset_lease_test_gates();
-    if (create_runtime(&runtime, true, false) != 0) {
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_STRICT,
+                                    1U) != 0) {
         return 1;
     }
-    runtime->preempt_mode = LLAM_PREEMPT_STRICT;
-    runtime->preempt_quantum_ns = 1U;
-    if (llam_runtime_spawn_ex(runtime, watchdog_overlap_task, &state, NULL, 0U) == NULL) {
+    state.task = llam_runtime_spawn_ex(runtime, watchdog_overlap_task, &state, NULL, 0U);
+    if (state.task == NULL) {
         test_fail(&state.failure, "watchdog overlap task spawn failed");
         destroy_runtime(&runtime);
         return 1;
     }
     driver.state = &state;
     driver.runtime = runtime;
-    if (pthread_create(&run_thread, NULL, watchdog_overlap_run_typed, &driver) != 0 ||
-        pthread_create(&monitor_thread, NULL, watchdog_overlap_monitor, &driver) != 0) {
-        test_fail(&state.failure, "watchdog overlap thread setup failed");
-        atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    run_release.runtime = runtime;
+    run_release.release_flag = NULL;
+    monitor_release.runtime = runtime;
+    monitor_release.release_flag = &state.monitor_stop;
+    if (pthread_create(&run_thread, NULL, watchdog_overlap_run_typed, &driver) != 0) {
+        test_fail(&state.failure, "watchdog overlap run thread setup failed");
         goto cleanup;
     }
     run_created = true;
+    if (pthread_create(&monitor_thread, NULL, watchdog_overlap_monitor, &driver) != 0) {
+        test_fail(&state.failure, "watchdog overlap monitor thread setup failed");
+        goto cleanup;
+    }
     monitor_created = true;
     if (wait_flag(&state.task_started, legacy_deadline()) != 0 ||
         wait_flag(&state.task_done, legacy_deadline()) != 0 ||
@@ -1130,9 +1467,21 @@ static int test_watchdog_task_exit_overlap(void) {
         goto cleanup;
     }
     atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
-    wait_flag(&state.monitor_done, legacy_deadline());
+    bounded_join_thread(monitor_thread,
+                        true,
+                        &state.monitor_done,
+                        release_flag_and_runtime,
+                        &monitor_release,
+                        "watchdog overlap monitor thread exceeded its deadline");
+    monitor_created = false;
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "watchdog overlap task join exceeded its deadline");
+    task_joined = true;
+    /* A successful run has no errno postcondition; fatal_errno is authoritative. */
     if (state.run_rc != 0 ||
-        atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != 0) {
+        (state.run_rc < 0 && state.run_errno == 0) ||
+        state.fatal_errno != 0) {
         test_fail(&state.failure, "watchdog/task-exit overlap changed fatal semantics");
     }
     {
@@ -1145,18 +1494,47 @@ static int test_watchdog_task_exit_overlap(void) {
         }
         pthread_mutex_unlock(&shard->opaque_lock);
     }
-    assert_snapshot(runtime, 0U, &state.failure, "watchdog overlap snapshot failed");
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &state.failure,
+                           "watchdog overlap snapshot failed");
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "watchdog overlap run thread exceeded its deadline");
+    run_created = false;
     rc = failure_result(&state.failure, "watchdog/task-exit overlap characterization failed");
 
 cleanup:
     atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
     if (monitor_created) {
-        wait_flag(&state.monitor_done, legacy_deadline());
-        pthread_join(monitor_thread, NULL);
+        bounded_join_thread(monitor_thread,
+                            true,
+                            &state.monitor_done,
+                            release_flag_and_runtime,
+                            &monitor_release,
+                            "watchdog overlap monitor cleanup exceeded its deadline");
+        monitor_created = false;
     }
     if (run_created) {
-        wait_flag(&state.run_done, legacy_deadline());
-        pthread_join(run_thread, NULL);
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "watchdog overlap run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "watchdog overlap task cleanup exceeded its deadline");
+        task_joined = true;
     }
     destroy_runtime(&runtime);
     return rc != 0 ? rc : failure_result(&state.failure, "watchdog/task-exit overlap characterization failed");
@@ -1238,7 +1616,13 @@ static int test_partial_helper_start_failure(void) {
         !helper_started || !helper_ready || helper_failed) {
         test_fail(&failure, "partial helper-start failure was not one-shot");
     }
-    assert_snapshot(runtime, 0U, &failure, "partial helper snapshot failed");
+    assert_snapshot_values(runtime,
+                           0U,
+                           0U,
+                           0U,
+                           0U,
+                           &failure,
+                           "partial helper snapshot failed");
     destroy_runtime(&runtime);
     return failure_result(&failure, "partial helper-start failure characterization failed");
 }
@@ -1269,17 +1653,33 @@ static int test_lease_test_gate_contract(void) {
 }
 
 int main(void) {
-    if (test_lease_test_gate_contract() != 0 ||
-        test_primary_helper_activation_and_return() != 0 ||
-        test_helper_reblocking_through_redirect() != 0 ||
-        test_ownerless_return_ordering() != 0 ||
-        test_repeated_shard_zero_runs_two_callers() != 0 ||
-        test_helper_shutdown_while_idle() != 0 ||
-        test_helper_shutdown_while_active() != 0 ||
-        test_dynamic_merge_pause() != 0 ||
-        test_watchdog_task_exit_overlap() != 0 ||
-        test_partial_helper_start_failure() != 0) {
-        return 1;
+    static int (*const tests[])(void) = {
+        test_lease_test_gate_contract,
+        test_primary_helper_activation_and_return,
+        test_helper_reblocking_through_redirect,
+        test_ownerless_return_ordering,
+        test_repeated_shard_zero_runs_two_callers,
+        test_helper_shutdown_while_idle,
+        test_helper_shutdown_while_active,
+        test_dynamic_merge_pause,
+        test_watchdog_task_exit_overlap,
+        test_partial_helper_start_failure,
+    };
+    unsigned i;
+    unsigned skipped = 0U;
+
+    for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); ++i) {
+        int rc = tests[i]();
+
+        if (rc == 77) {
+            skipped += 1U;
+        } else if (rc != 0) {
+            return 1;
+        }
+    }
+    if (skipped != 0U) {
+        printf("test_legacy_lease_internal: checks passed; skipped=%u\n", skipped);
+        return 77;
     }
     printf("test_legacy_lease_internal: all legacy lease characterization checks passed\n");
     return 0;

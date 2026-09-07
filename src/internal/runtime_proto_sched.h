@@ -51,7 +51,12 @@ typedef enum llam_lease_test_point {
     LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL = 5
 } llam_lease_test_point_t;
 
-/** @brief Lock-free observation of the execution lease test boundary. */
+/**
+ * @brief Test-only observation of the execution lease boundary.
+ *
+ * The implementation takes `opaque_lock` before the shard lock to combine
+ * legacy helper and current/redirect projections safely.
+ */
 typedef struct llam_lease_test_snapshot {
     unsigned state;
     uintptr_t owner_worker;
@@ -64,6 +69,7 @@ typedef struct llam_lease_test_snapshot {
 } llam_lease_test_snapshot_t;
 
 void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled);
+/* Task 1 provides the gate storage; transition call sites are wired in Task 3. */
 bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns);
 int llam_lease_test_snapshot(llam_runtime_t *runtime,
                              unsigned shard_id,

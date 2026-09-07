@@ -104,17 +104,20 @@ int llam_lease_test_snapshot(llam_runtime_t *runtime,
         return -1;
     }
 
-    /* Read the task publication under its existing shard lock. */
-    pthread_mutex_lock(&shard->lock);
-    current = atomic_load_explicit(&shard->current, memory_order_acquire);
-    pthread_mutex_unlock(&shard->lock);
-
-    /* Compatibility helper/redirect state is protected by opaque_lock. */
+    /*
+     * Take the established handoff/lease lock before the shard lock.  The
+     * helper projection is written under opaque_lock, while redirect/current
+     * publication is written under shard->lock; holding both gives one
+     * coherent legacy observation and avoids an unprotected plain-field read.
+     */
     pthread_mutex_lock(&shard->opaque_lock);
     helper_active = shard->opaque_helper_active && !shard->opaque_helper_failed;
+    pthread_mutex_lock(&shard->lock);
+    current = atomic_load_explicit(&shard->current, memory_order_acquire);
     redirect_active = shard->opaque_redirect_active || shard->opaque_redirect_depth != 0U;
     stopping = shard->opaque_helper_stop ||
                atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire);
+    pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
 
     if (helper_active) {

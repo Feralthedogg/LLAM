@@ -896,7 +896,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	./test_runtime_invariants
 	./test_runtime_shutdown_internal
 	./test_worker_identity_internal
-	./test_legacy_lease_internal
+	./test_legacy_lease_internal || test $$? -eq 77
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -1958,7 +1958,7 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_worker_identity_internal; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_legacy_lease_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_legacy_lease_internal || test $$? -eq 77; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
@@ -2009,7 +2009,7 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_worker_identity_internal; \
-	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_legacy_lease_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_legacy_lease_internal || test $$? -eq 77; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \

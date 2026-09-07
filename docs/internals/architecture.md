@@ -116,6 +116,11 @@ lease authority is introduced. Its gate and snapshot declarations are guarded
 by `LLAM_ENABLE_TEST_HOOKS`; the snapshot only observes the existing atomic
 current publication and lock-protected helper/redirect state. It does not add
 lease fields, change scheduling, or make a test observation authoritative.
+Task 1 intentionally has no production call sites for `llam_lease_test_wait_gate`:
+the transfer-request, owner-clear, grant, handback, and watchdog transition
+windows are deferred to Task 3, which owns those production transitions. The
+characterization scenarios therefore assert legacy state and lock observations
+only; they do not claim to hold a real lease transition window.
 
 The following is the complete Phase 0 ownership inventory for the fields that
 Phase 1A will migrate. Line numbers are intentionally omitted so the inventory
@@ -137,14 +142,17 @@ remains useful across mechanical edits; function names identify each access.
   (`llam_shard_can_offline_locked` and `llam_shard_can_start_merge_locked`),
   and `watchdog_scale.c` (the offline diagnostic) read it; `debug.c`
   (`llam_dump_runtime_state`) reads it in both the busy-lock and normal dump
-  paths; and the test-hook snapshot reads the atomic under the shard lock.
+  paths; and the test-hook snapshot reads the atomic while holding
+  `opaque_lock` before `shard->lock`.
 * `shard->preempt_thread`: `scheduler.c`
   (`llam_shard_publish_preempt_thread`) writes the mutable watchdog target at
   primary entry and helper activation/idle/exit; `watchdog_probe.c`
   (`llam_watchdog_check_shard`) reads it for `pthread_kill`; the field is
   declared in `runtime_types.h` as the current independent target authority.
-* `opaque_helper_active`: `scheduler.c` (`llam_opaque_helper_main`) writes
-  helper readiness/activation and exit projections; `blocking_api.c`
+* `opaque_helper_active`: `timer.c` (`llam_ensure_opaque_helper_locked`) resets
+  the projection under `opaque_lock` before helper creation; `scheduler.c`
+  (`llam_opaque_helper_main`) writes helper readiness/activation and exit
+  projections; `blocking_api.c`
   (`llam_enter_blocking`, `llam_leave_blocking`) reads the projection while
   waiting for helper activation/return; `watchdog_probe.c`
   (`llam_runtime_has_opaque_blocking`) reads it under `opaque_lock`; `debug.c`
