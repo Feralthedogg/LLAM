@@ -78,8 +78,17 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
      * exec_started now protects runtime-owned scheduler state from teardown;
      * release the public-op pin so shutdown can request stop and wait on the
      * run token instead of being blocked for the full scheduler lifetime.
-     */
+    */
     llam_runtime_end_public_op(pinned_runtime);
+    /*
+     * Shard zero is driven by this borrowed caller thread. Publish its worker
+     * binding before auxiliary shards start so no producer can observe an
+     * ownerless shard that is already eligible to run.  The scheduler loop
+     * recognizes this binding and does not consume a second incarnation.
+     */
+    llam_scheduler_bind_identity(&rt->shards[0],
+                                 &rt->shards[0].primary_worker,
+                                 &rt->shards[0].scheduler_ctx);
     for (i = 1; i < rt->active_shards; ++i) {
         rc = pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]);
         if (rc != 0) {
@@ -95,6 +104,9 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
                     rt->shards[i].thread_started = false;
                 }
             }
+            llam_scheduler_unbind_identity(&rt->shards[0],
+                                           &rt->shards[0].primary_worker);
+            llam_scheduler_clear_identity();
             atomic_store_explicit(&rt->exec_started, false, memory_order_release);
             errno = rc;
             return -1;

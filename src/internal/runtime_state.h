@@ -48,6 +48,56 @@ extern _Thread_local llam_task_t *g_llam_tls_task;
 extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 
 /**
+ * @brief Return the embedded lease coordinator while its lock is held.
+ *
+ * The suffix documents the ownership contract: callers must hold
+ * @c shard->opaque_lock before dereferencing the returned record.
+ */
+static inline llam_legacy_lease_t *llam_shard_legacy_lease_locked(llam_shard_t *shard) {
+    assert(shard != NULL);
+    return shard != NULL ? &shard->legacy_lease : NULL;
+}
+
+/** @brief Const form of ::llam_shard_legacy_lease_locked. */
+static inline const llam_legacy_lease_t *llam_shard_legacy_lease_const_locked(
+    const llam_shard_t *shard) {
+    assert(shard != NULL);
+    return shard != NULL ? &shard->legacy_lease : NULL;
+}
+
+/** @brief Validate the finite lease state set at lock-protected boundaries. */
+static inline bool llam_legacy_lease_state_valid(llam_legacy_lease_state_t state) {
+    return state >= LLAM_LEASE_PRIMARY_OWNED && state <= LLAM_LEASE_STOPPING;
+}
+
+/**
+ * @brief Assert lock-protected lease invariants in debug builds.
+ *
+ * Transfer states intentionally allow a temporary ownerless coordinator; the
+ * two stable ownerless states are redirect and stopping.
+ */
+static inline void llam_legacy_lease_assert_consistent_locked(const llam_shard_t *shard) {
+    const llam_legacy_lease_t *lease = llam_shard_legacy_lease_const_locked(shard);
+
+    assert(lease != NULL);
+    assert(llam_legacy_lease_state_valid(lease->state));
+    if (lease->owner != NULL) {
+        assert(lease->owner_incarnation != 0U);
+    } else {
+        assert(lease->state == LLAM_LEASE_TRANSFER_TO_HELPER ||
+               lease->state == LLAM_LEASE_TRANSFER_TO_PRIMARY ||
+               lease->state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+               lease->state == LLAM_LEASE_STOPPING);
+        assert(lease->owner_incarnation == 0U);
+    }
+    if (lease->return_worker == NULL) {
+        assert(lease->return_incarnation == 0U);
+    } else {
+        assert(lease->return_incarnation != 0U);
+    }
+}
+
+/**
  * @brief Match the current worker/P TLS tuple to one descriptive worker role.
  *
  * This is a legacy-role observation only.  Scheduler ownership, current-task

@@ -90,6 +90,22 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);
     llam_request_stop(rt);
 
+    /*
+     * Stop lease grants before waiting for controller or worker teardown.  The
+     * coordinator is lock-protected even during partial shutdown; shards whose
+     * opaque lock was never initialized have no worker that could race this
+     * cleanup and are reclaimed by the final runtime teardown below.
+     */
+    if (rt->shards != NULL) {
+        for (i = 0; i < rt->active_shards; ++i) {
+            if (rt->shards[i].opaque_lock_initialized) {
+                pthread_mutex_lock(&rt->shards[i].opaque_lock);
+                llam_legacy_lease_begin_stop_locked(&rt->shards[i]);
+                pthread_mutex_unlock(&rt->shards[i].opaque_lock);
+            }
+        }
+    }
+
     if (rt->ctrl_thread_started) {
         pthread_join(rt->ctrl_thread, NULL);
         rt->ctrl_thread_started = false;
@@ -311,6 +327,54 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 
     if (rt->shards != NULL) {
         for (i = 0; i < rt->active_shards; ++i) {
+            if (rt->shards[i].opaque_lock_initialized) {
+                pthread_mutex_lock(&rt->shards[i].opaque_lock);
+                /* Worker joins above make these stores race-free. */
+                llam_legacy_lease_begin_stop_locked(&rt->shards[i]);
+                atomic_store_explicit(&rt->shards[i].primary_worker.native_thread_live,
+                                      false,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].primary_worker.binding_incarnation,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].primary_worker.active_g,
+                                      NULL,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].primary_worker.last_run_started_ns,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].primary_worker.last_safepoint_ns,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].primary_worker.last_idle_wake_ns,
+                                      0U,
+                                      memory_order_release);
+                memset(&rt->shards[i].primary_worker.native_thread,
+                       0,
+                       sizeof(rt->shards[i].primary_worker.native_thread));
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.native_thread_live,
+                                      false,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.binding_incarnation,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.active_g,
+                                      NULL,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.last_run_started_ns,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.last_safepoint_ns,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.last_idle_wake_ns,
+                                      0U,
+                                      memory_order_release);
+                memset(&rt->shards[i].opaque_helper_worker.native_thread,
+                       0,
+                       sizeof(rt->shards[i].opaque_helper_worker.native_thread));
+                pthread_mutex_unlock(&rt->shards[i].opaque_lock);
+            }
             if (rt->shards[i].event_fd >= 0) {
                 llam_wake_handle_close(rt->shards[i].event_fd);
                 rt->shards[i].event_fd = -1;

@@ -79,6 +79,8 @@ typedef struct takeover_state {
     unsigned helper_redirect_depth;
     pthread_t helper_thread;
     pthread_t helper_thread_after;
+    uint64_t helper_incarnation;
+    bool helper_binding_live;
     uintptr_t root_worker;
     uintptr_t helper_worker;
     llam_lease_test_snapshot_t root_snapshot;
@@ -109,6 +111,24 @@ typedef struct repeat_driver_arg {
     repeat_run_state_t *state;
     unsigned index;
 } repeat_driver_arg_t;
+
+typedef struct lease_binding_observation {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    atomic_uint entered;
+    uintptr_t worker;
+    uintptr_t processor;
+    uint64_t incarnation;
+    uint64_t active_g;
+    uint64_t last_run_started_ns;
+    uint64_t last_safepoint_ns;
+    uint64_t last_idle_wake_ns;
+    uintptr_t native_thread;
+    unsigned lease_state;
+    uintptr_t lease_owner;
+    uint64_t lease_owner_incarnation;
+    bool binding_live;
+} lease_binding_observation_t;
 
 typedef struct active_shutdown_state {
     test_failure_state_t failure;
@@ -291,6 +311,19 @@ static int create_runtime(llam_runtime_t **out, bool deterministic, bool dynamic
                                        0U);
 }
 
+static int snapshot_lease_locked_for_test(llam_shard_t *shard,
+                                          llam_lease_test_snapshot_t *snapshot) {
+    int rc;
+
+    if (shard == NULL || snapshot == NULL) {
+        return -1;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    rc = llam_legacy_lease_snapshot_locked(shard, snapshot) ? 0 : -1;
+    pthread_mutex_unlock(&shard->opaque_lock);
+    return rc;
+}
+
 typedef struct destroy_runtime_call {
     llam_runtime_t *runtime;
     atomic_uint done;
@@ -399,6 +432,14 @@ static void helper_activation_task(void *arg) {
         test_fail(&state->failure, "helper activation ran outside the opaque helper worker");
     }
     state->helper_worker = (uintptr_t)g_llam_tls_worker;
+    state->helper_incarnation = atomic_load_explicit(&shard->opaque_helper_worker.incarnation,
+                                                     memory_order_acquire);
+    state->helper_binding_live = llam_worker_binding_live(&shard->opaque_helper_worker,
+                                                          state->helper_incarnation);
+    if (!state->helper_binding_live) {
+        test_fail(&state->failure,
+                  "helper activation did not publish a live native binding");
+    }
     if (llam_lease_test_snapshot(state->runtime, shard->id, &state->helper_snapshot) != 0 ||
         state->helper_snapshot.state != 3U ||
         state->helper_snapshot.owner_worker != (uintptr_t)&shard->opaque_helper_worker ||
@@ -553,6 +594,33 @@ static int test_primary_helper_activation_and_return(void) {
                            0U,
                            &state.failure,
                            "activation snapshot after run failed");
+    if (!state.helper_binding_live ||
+        !llam_worker_binding_live(&shard->opaque_helper_worker,
+                                  state.helper_incarnation)) {
+        test_fail(&state.failure,
+                  "helper binding was not live before its native thread joined");
+    }
+    if (atomic_load_explicit(&state.helper_started, memory_order_acquire) != 0U) {
+        pthread_mutex_lock(&shard->opaque_lock);
+        shard->opaque_helper_stop = true;
+        llam_legacy_lease_begin_stop_locked(shard);
+        llam_opaque_wake_signal(shard);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        llam_kick_shard(shard);
+        if (pthread_join(state.helper_thread, NULL) != 0) {
+            test_fail(&state.failure, "helper native thread join failed");
+        }
+        pthread_mutex_lock(&shard->opaque_lock);
+        shard->opaque_helper_thread_started = false;
+        shard->opaque_helper_ready = false;
+        shard->opaque_helper_active = false;
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (llam_worker_binding_live(&shard->opaque_helper_worker,
+                                     state.helper_incarnation)) {
+            test_fail(&state.failure,
+                      "helper binding remained live after native thread join");
+        }
+    }
     destroy_runtime(&runtime);
     return failure_result(&state.failure, "primary/helper activation characterization failed");
 }
@@ -1627,6 +1695,189 @@ static int test_partial_helper_start_failure(void) {
     return failure_result(&failure, "partial helper-start failure characterization failed");
 }
 
+static void lease_binding_observer_task(void *arg) {
+    lease_binding_observation_t *observation = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_worker_t *worker = g_llam_tls_worker;
+    llam_lease_test_snapshot_t snapshot;
+
+    if (shard == NULL || worker == NULL || worker != &shard->primary_worker ||
+        g_llam_tls_processor != &shard->processor ||
+        g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+        test_fail(&observation->failure,
+                  "primary scheduler entry did not publish a complete worker binding");
+    }
+    observation->runtime = shard != NULL ? shard->runtime : NULL;
+    observation->worker = (uintptr_t)worker;
+    observation->processor = (uintptr_t)g_llam_tls_processor;
+    observation->incarnation = worker != NULL
+                                   ? atomic_load_explicit(&worker->incarnation,
+                                                          memory_order_acquire)
+                                   : 0U;
+    observation->binding_live = llam_worker_binding_live(worker,
+                                                         observation->incarnation);
+    observation->active_g = worker != NULL
+                                ? (uint64_t)(uintptr_t)atomic_load_explicit(
+                                      &worker->active_g,
+                                      memory_order_acquire)
+                                : 0U;
+    observation->last_run_started_ns = worker != NULL
+                                           ? atomic_load_explicit(
+                                                 &worker->last_run_started_ns,
+                                                 memory_order_acquire)
+                                           : 0U;
+    observation->last_safepoint_ns = worker != NULL
+                                         ? atomic_load_explicit(&worker->last_safepoint_ns,
+                                                                memory_order_acquire)
+                                         : 0U;
+    observation->last_idle_wake_ns = worker != NULL
+                                         ? atomic_load_explicit(&worker->last_idle_wake_ns,
+                                                                memory_order_acquire)
+                                         : 0U;
+    observation->native_thread = worker != NULL
+                                     ? (uintptr_t)worker->native_thread
+                                     : 0U;
+    if (worker == NULL || pthread_equal(worker->native_thread, pthread_self()) == 0) {
+        test_fail(&observation->failure,
+                  "primary binding did not publish the caller's native thread");
+    }
+    if (snapshot_lease_locked_for_test(shard, &snapshot) != 0 ||
+        snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
+        snapshot.owner_incarnation != observation->incarnation ||
+        snapshot.return_worker != 0U || snapshot.return_incarnation != 0U) {
+        test_fail(&observation->failure,
+                  "primary scheduler entry did not publish the primary lease");
+    }
+    observation->lease_state = snapshot.state;
+    observation->lease_owner = snapshot.owner_worker;
+    observation->lease_owner_incarnation = snapshot.owner_incarnation;
+    atomic_store_explicit(&observation->entered, 1U, memory_order_release);
+}
+
+static int test_lease_binding_lifecycle(void) {
+    lease_binding_observation_t observation;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    llam_shard_t *shard;
+    llam_lease_test_snapshot_t snapshot;
+    uint64_t initial_incarnation;
+    int run_rc;
+    int run_errno;
+
+    memset(&observation, 0, sizeof(observation));
+    atomic_init(&observation.failure.failures, 0U);
+    atomic_init(&observation.entered, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    initial_incarnation = atomic_load_explicit(&shard->primary_worker.incarnation,
+                                               memory_order_acquire);
+    if (initial_incarnation != 0U ||
+        llam_worker_binding_live(&shard->primary_worker, initial_incarnation) ||
+        llam_worker_binding_live(&shard->opaque_helper_worker,
+                                 atomic_load_explicit(&shard->opaque_helper_worker.incarnation,
+                                                      memory_order_acquire))) {
+        test_fail(&observation.failure,
+                  "runtime initialization published a live worker before scheduler entry");
+    }
+    if (snapshot_lease_locked_for_test(shard, &snapshot) != 0 ||
+        snapshot.state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+        snapshot.owner_worker != 0U || snapshot.owner_incarnation != 0U ||
+        snapshot.epoch != 0U || snapshot.return_worker != 0U ||
+        snapshot.return_incarnation != 0U || snapshot.transfer_sequence != 0U ||
+        snapshot.handback_ack_sequence != 0U) {
+        test_fail(&observation.failure,
+                  "runtime initialization did not leave an ownerless lease");
+    }
+    if (atomic_load_explicit(&shard->primary_worker.active_g, memory_order_acquire) != NULL ||
+        atomic_load_explicit(&shard->opaque_helper_worker.active_g,
+                             memory_order_acquire) != NULL ||
+        atomic_load_explicit(&shard->primary_worker.last_run_started_ns,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&shard->primary_worker.last_safepoint_ns,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&shard->primary_worker.last_idle_wake_ns,
+                             memory_order_acquire) != 0U) {
+        test_fail(&observation.failure,
+                  "runtime initialization did not clear worker-local execution state");
+    }
+
+    task = llam_runtime_spawn_ex(runtime,
+                                 lease_binding_observer_task,
+                                 &observation,
+                                 NULL,
+                                 0U);
+    errno = 0;
+    run_rc = task == NULL ? -1 : llam_runtime_run_handle(runtime);
+    run_errno = errno;
+    if (task != NULL) {
+        bounded_join_task(task,
+                          &observation.entered,
+                          "lease binding observer task join exceeded its deadline");
+    }
+    assert_no_fatal(runtime,
+                    run_rc,
+                    run_errno,
+                    &observation.failure,
+                    "lease binding lifecycle changed run or fatal semantics");
+    if (atomic_load_explicit(&observation.entered, memory_order_acquire) == 0U ||
+        !observation.binding_live || observation.incarnation == 0U ||
+        observation.lease_state != LLAM_LEASE_PRIMARY_OWNED ||
+        observation.lease_owner != (uintptr_t)&shard->primary_worker ||
+        observation.lease_owner_incarnation != observation.incarnation ||
+        observation.native_thread == 0U) {
+        test_fail(&observation.failure,
+                  "primary binding observation was incomplete during scheduler entry");
+    }
+    if (llam_worker_binding_live(&shard->primary_worker, observation.incarnation)) {
+        test_fail(&observation.failure,
+                  "primary binding remained live after borrowed scheduler exit");
+    }
+    if (snapshot_lease_locked_for_test(shard, &snapshot) != 0 ||
+        snapshot.state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+        snapshot.owner_worker != 0U || snapshot.owner_incarnation != 0U) {
+        test_fail(&observation.failure,
+                  "borrowed scheduler exit did not clear the primary lease");
+    }
+    destroy_runtime(&runtime);
+    return failure_result(&observation.failure, "lease binding lifecycle failed");
+}
+
+static int test_shutdown_rejects_unbound_lease(void) {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    llam_lease_test_snapshot_t snapshot;
+
+    memset(&failure, 0, sizeof(failure));
+    atomic_init(&failure.failures, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    pthread_mutex_lock(&shard->opaque_lock);
+    llam_legacy_lease_begin_stop_locked(shard);
+    if (!llam_legacy_lease_snapshot_locked(shard, &snapshot) ||
+        snapshot.state != LLAM_LEASE_STOPPING || snapshot.owner_worker != 0U ||
+        snapshot.owner_incarnation != 0U || snapshot.return_worker != 0U ||
+        snapshot.return_incarnation != 0U) {
+        test_fail(&failure,
+                  "shutdown stop transition granted or retained an unbound worker");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (llam_worker_binding_live(&shard->primary_worker, 0U) ||
+        llam_worker_binding_live(&shard->opaque_helper_worker, 0U)) {
+        test_fail(&failure,
+                  "shutdown stop transition reported an unbound worker as live");
+    }
+    destroy_runtime(&runtime);
+    return failure_result(&failure, "shutdown rejected-unbound lease check failed");
+}
+
 static int test_lease_test_gate_contract(void) {
     test_failure_state_t failure;
     llam_lease_test_snapshot_t snapshot;
@@ -1655,6 +1906,8 @@ static int test_lease_test_gate_contract(void) {
 int main(void) {
     static int (*const tests[])(void) = {
         test_lease_test_gate_contract,
+        test_lease_binding_lifecycle,
+        test_shutdown_rejects_unbound_lease,
         test_primary_helper_activation_and_return,
         test_helper_reblocking_through_redirect,
         test_ownerless_return_ordering,

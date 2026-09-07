@@ -76,6 +76,27 @@ bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_n
     return true;
 }
 
+bool llam_legacy_lease_snapshot_locked(const llam_shard_t *shard,
+                                       llam_lease_test_snapshot_t *out) {
+    const llam_legacy_lease_t *lease;
+
+    if (shard == NULL || out == NULL) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_const_locked(shard);
+    memset(out, 0, sizeof(*out));
+    out->state = (unsigned)lease->state;
+    out->owner_worker = (uintptr_t)lease->owner;
+    out->owner_incarnation = lease->owner_incarnation;
+    out->epoch = lease->epoch;
+    out->return_worker = (uintptr_t)lease->return_worker;
+    out->return_incarnation = lease->return_incarnation;
+    out->transfer_sequence = lease->transfer_sequence;
+    out->handback_ack_sequence = lease->handback_ack_sequence;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
 int llam_lease_test_snapshot(llam_runtime_t *runtime,
                              unsigned shard_id,
                              llam_lease_test_snapshot_t *out) {

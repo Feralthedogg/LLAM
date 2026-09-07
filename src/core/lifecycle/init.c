@@ -883,10 +883,29 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->shards[i].primary_worker.associated_processor = &rt->shards[i].processor;
         rt->shards[i].primary_worker.role = LLAM_WORKER_ROLE_PRIMARY;
         atomic_init(&rt->shards[i].primary_worker.incarnation, 0U);
+        memset(&rt->shards[i].primary_worker.native_thread,
+               0,
+               sizeof(rt->shards[i].primary_worker.native_thread));
+        atomic_init(&rt->shards[i].primary_worker.native_thread_live, false);
+        atomic_init(&rt->shards[i].primary_worker.binding_incarnation, 0U);
+        atomic_init(&rt->shards[i].primary_worker.active_g, NULL);
+        atomic_init(&rt->shards[i].primary_worker.last_run_started_ns, 0U);
+        atomic_init(&rt->shards[i].primary_worker.last_safepoint_ns, 0U);
+        atomic_init(&rt->shards[i].primary_worker.last_idle_wake_ns, 0U);
         rt->shards[i].opaque_helper_worker.compat_shard = &rt->shards[i];
         rt->shards[i].opaque_helper_worker.associated_processor = &rt->shards[i].processor;
         rt->shards[i].opaque_helper_worker.role = LLAM_WORKER_ROLE_OPAQUE_HELPER;
         atomic_init(&rt->shards[i].opaque_helper_worker.incarnation, 0U);
+        memset(&rt->shards[i].opaque_helper_worker.native_thread,
+               0,
+               sizeof(rt->shards[i].opaque_helper_worker.native_thread));
+        atomic_init(&rt->shards[i].opaque_helper_worker.native_thread_live, false);
+        atomic_init(&rt->shards[i].opaque_helper_worker.binding_incarnation, 0U);
+        atomic_init(&rt->shards[i].opaque_helper_worker.active_g, NULL);
+        atomic_init(&rt->shards[i].opaque_helper_worker.last_run_started_ns, 0U);
+        atomic_init(&rt->shards[i].opaque_helper_worker.last_safepoint_ns, 0U);
+        atomic_init(&rt->shards[i].opaque_helper_worker.last_idle_wake_ns, 0U);
+        llam_legacy_lease_init(&rt->shards[i]);
         rt->shards[i].cpu_id = rt->allowed_cpus[i];
         rt->shards[i].node_index = node_index;
         rt->shards[i].io_node_index = rt->experimental_shard_rings != 0U ? i : node_index;

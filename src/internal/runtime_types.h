@@ -1083,6 +1083,34 @@ typedef enum llam_worker_role {
     LLAM_WORKER_ROLE_OPAQUE_HELPER = 2,
 } llam_worker_role_t;
 
+/** @brief Legacy execution-lease state owned by one scheduler shard. */
+typedef enum llam_legacy_lease_state {
+    LLAM_LEASE_PRIMARY_OWNED = 1,
+    LLAM_LEASE_TRANSFER_TO_HELPER = 2,
+    LLAM_LEASE_HELPER_OWNED = 3,
+    LLAM_LEASE_TRANSFER_TO_PRIMARY = 4,
+    LLAM_LEASE_REDIRECTED_NO_EXECUTOR = 5,
+    LLAM_LEASE_STOPPING = 6
+} llam_legacy_lease_state_t;
+
+/**
+ * @brief Embedded coordinator for the legacy primary/helper execution lease.
+ *
+ * All fields are plain because the containing shard's @c opaque_lock is the
+ * handoff/lease lock.  Callers that need a cross-thread observation must hold
+ * that lock before reading this record.
+ */
+typedef struct llam_legacy_lease {
+    llam_worker_t *owner;
+    uint64_t owner_incarnation;
+    uint64_t epoch;
+    llam_worker_t *return_worker;
+    uint64_t return_incarnation;
+    uint64_t transfer_sequence;
+    uint64_t handback_ack_sequence;
+    llam_legacy_lease_state_t state;
+} llam_legacy_lease_t;
+
 /**
  * @brief Minimal processor identity cell associated with one scheduler shard.
  *
@@ -1106,6 +1134,15 @@ struct llam_worker {
     llam_processor_t *associated_processor;
     llam_worker_role_t role;
     atomic_uint_fast64_t incarnation;
+    /* Native binding metadata is published/cleared under the shard lease lock. */
+    pthread_t native_thread;
+    atomic_bool native_thread_live;
+    atomic_uint_fast64_t binding_incarnation;
+    /* Worker-local execution publication storage consumed by later migration. */
+    _Atomic(llam_task_t *) active_g;
+    atomic_uint_fast64_t last_run_started_ns;
+    atomic_uint_fast64_t last_safepoint_ns;
+    atomic_uint_fast64_t last_idle_wake_ns;
     void *signal_stack;
     size_t signal_stack_size;
     stack_t previous_sigaltstack;
@@ -1124,6 +1161,7 @@ struct llam_shard {
     llam_processor_t processor;
     llam_worker_t primary_worker;
     llam_worker_t opaque_helper_worker;
+    llam_legacy_lease_t legacy_lease;
     unsigned cpu_id;
     unsigned node_index;
     unsigned io_node_index;

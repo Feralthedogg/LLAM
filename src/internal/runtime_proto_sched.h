@@ -32,6 +32,18 @@
 #include "runtime_state.h"
 
 /*
+ * Legacy execution-lease and worker binding lifecycle.
+ */
+void llam_legacy_lease_init(llam_shard_t *shard);
+void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard);
+bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation);
+void llam_scheduler_bind_identity(llam_shard_t *shard,
+                                  llam_worker_t *worker,
+                                  llam_ctx_t *ctx);
+void llam_scheduler_unbind_identity(llam_shard_t *shard,
+                                    llam_worker_t *worker);
+void llam_scheduler_clear_identity(void);
+/*
  * Opaque-block redirect and helper compensation.
  */
 void llam_activate_opaque_redirect_locked(llam_shard_t *shard, llam_task_t *current_task);
@@ -71,6 +83,8 @@ typedef struct llam_lease_test_snapshot {
 void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled);
 /* Task 1 provides the gate storage; transition call sites are wired in Task 3. */
 bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns);
+bool llam_legacy_lease_snapshot_locked(const llam_shard_t *shard,
+                                       llam_lease_test_snapshot_t *out);
 int llam_lease_test_snapshot(llam_runtime_t *runtime,
                              unsigned shard_id,
                              llam_lease_test_snapshot_t *out);

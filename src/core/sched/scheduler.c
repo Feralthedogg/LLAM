@@ -69,19 +69,123 @@ static int llam_scheduler_try_install_signal_stack(llam_worker_t *worker) {
     return -1;
 }
 
-static llam_worker_t *llam_scheduler_bind_identity(llam_shard_t *shard,
-                                                   llam_worker_t *worker,
-                                                   llam_ctx_t *ctx) {
-    atomic_fetch_add_explicit(&worker->incarnation, 1U, memory_order_acq_rel);
+void llam_legacy_lease_init(llam_shard_t *shard) {
+    llam_legacy_lease_t *lease;
+
+    if (shard == NULL) {
+        return;
+    }
+    lease = &shard->legacy_lease;
+    lease->owner = NULL;
+    lease->owner_incarnation = 0U;
+    lease->epoch = 0U;
+    lease->return_worker = NULL;
+    lease->return_incarnation = 0U;
+    lease->transfer_sequence = 0U;
+    lease->handback_ack_sequence = 0U;
+    /* No native worker is bound while a runtime is merely initialized. */
+    lease->state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
+}
+
+void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard) {
+    llam_legacy_lease_t *lease;
+
+    if (shard == NULL) {
+        return;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    lease->owner = NULL;
+    lease->owner_incarnation = 0U;
+    lease->epoch = 0U;
+    lease->return_worker = NULL;
+    lease->return_incarnation = 0U;
+    lease->transfer_sequence = 0U;
+    lease->handback_ack_sequence = 0U;
+    lease->state = LLAM_LEASE_STOPPING;
+}
+
+bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation) {
+    uint64_t worker_incarnation;
+    uint64_t binding_incarnation;
+
+    if (worker == NULL || incarnation == 0U ||
+        !atomic_load_explicit(&worker->native_thread_live, memory_order_acquire)) {
+        return false;
+    }
+    worker_incarnation =
+        atomic_load_explicit(&worker->incarnation, memory_order_acquire);
+    binding_incarnation =
+        atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire);
+    return worker_incarnation == incarnation && binding_incarnation == incarnation;
+}
+
+void llam_scheduler_bind_identity(llam_shard_t *shard,
+                                  llam_worker_t *worker,
+                                  llam_ctx_t *ctx) {
+    uint64_t incarnation;
+
+    if (shard == NULL || worker == NULL || ctx == NULL) {
+        return;
+    }
+    /* Binding metadata and lease publication share the handoff lock. */
+    pthread_mutex_lock(&shard->opaque_lock);
+    incarnation = atomic_fetch_add_explicit(&worker->incarnation,
+                                             1U,
+                                             memory_order_acq_rel) + 1U;
+    worker->native_thread = pthread_self();
+    atomic_store_explicit(&worker->binding_incarnation,
+                          incarnation,
+                          memory_order_release);
+    atomic_store_explicit(&worker->native_thread_live, true, memory_order_release);
+    if (worker == &shard->primary_worker &&
+        shard->legacy_lease.state != LLAM_LEASE_STOPPING) {
+        shard->legacy_lease.owner = worker;
+        shard->legacy_lease.owner_incarnation = incarnation;
+        shard->legacy_lease.state = LLAM_LEASE_PRIMARY_OWNED;
+        llam_legacy_lease_assert_consistent_locked(shard);
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+
     g_llam_tls_shard = shard;
     g_llam_tls_worker = worker;
     g_llam_tls_processor = &shard->processor;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = ctx;
-    return worker;
 }
 
-static void llam_scheduler_clear_identity(void) {
+void llam_scheduler_unbind_identity(llam_shard_t *shard, llam_worker_t *worker) {
+    uint64_t incarnation;
+
+    if (shard == NULL || worker == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    incarnation = atomic_load_explicit(&worker->binding_incarnation,
+                                       memory_order_acquire);
+    if (atomic_load_explicit(&worker->native_thread_live, memory_order_acquire) &&
+        pthread_equal(worker->native_thread, pthread_self()) != 0) {
+        /* Clear eligibility before the native handle can be reused. */
+        atomic_store_explicit(&worker->native_thread_live, false, memory_order_release);
+        atomic_store_explicit(&worker->binding_incarnation, 0U, memory_order_release);
+        memset(&worker->native_thread, 0, sizeof(worker->native_thread));
+    }
+    atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+    atomic_store_explicit(&worker->last_run_started_ns, 0U, memory_order_release);
+    atomic_store_explicit(&worker->last_safepoint_ns, 0U, memory_order_release);
+    atomic_store_explicit(&worker->last_idle_wake_ns, 0U, memory_order_release);
+    if (shard->legacy_lease.owner == worker &&
+        shard->legacy_lease.owner_incarnation == incarnation) {
+        shard->legacy_lease.owner = NULL;
+        shard->legacy_lease.owner_incarnation = 0U;
+        if (shard->legacy_lease.state != LLAM_LEASE_STOPPING) {
+            shard->legacy_lease.state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
+        }
+        llam_legacy_lease_assert_consistent_locked(shard);
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+}
+
+void llam_scheduler_clear_identity(void) {
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
     g_llam_tls_processor = NULL;
@@ -326,7 +430,11 @@ static void llam_opaque_helper_wait_for_signal_locked(llam_shard_t *shard) {
 void llam_scheduler_loop(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
 
-    llam_scheduler_bind_identity(shard, &shard->primary_worker, &shard->scheduler_ctx);
+    if (g_llam_tls_shard != shard ||
+        g_llam_tls_worker != &shard->primary_worker ||
+        g_llam_tls_processor != &shard->processor) {
+        llam_scheduler_bind_identity(shard, &shard->primary_worker, &shard->scheduler_ctx);
+    }
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
     llam_shard_publish_preempt_thread(shard, pthread_self());
 #endif
@@ -335,6 +443,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     llam_tune_scheduler_thread(shard, false);
     if (llam_scheduler_try_install_signal_stack(&shard->primary_worker) != 0) {
         llam_record_fatal(rt, errno);
+        llam_scheduler_unbind_identity(shard, &shard->primary_worker);
         llam_scheduler_clear_identity();
         return;
     }
@@ -414,6 +523,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     }
 
     llam_uninstall_thread_signal_stack(&shard->primary_worker);
+    llam_scheduler_unbind_identity(shard, &shard->primary_worker);
     llam_channel_tls_cache_drain();
     /*
      * The caller returns to unmanaged host code after driving shard 0. Leaving
@@ -450,6 +560,7 @@ void *llam_opaque_helper_main(void *arg) {
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
         llam_record_fatal(rt, errno);
+        llam_scheduler_unbind_identity(shard, &shard->opaque_helper_worker);
         llam_scheduler_clear_identity();
         return NULL;
     }
@@ -596,6 +707,7 @@ void *llam_opaque_helper_main(void *arg) {
 
 out:
     llam_uninstall_thread_signal_stack(&shard->opaque_helper_worker);
+    llam_scheduler_unbind_identity(shard, &shard->opaque_helper_worker);
     llam_channel_tls_cache_drain();
     llam_scheduler_clear_identity();
     pthread_mutex_lock(&shard->opaque_lock);
