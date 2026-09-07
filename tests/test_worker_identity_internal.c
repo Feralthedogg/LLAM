@@ -1,0 +1,811 @@
+/**
+ * @file tests/test_worker_identity_internal.c
+ * @brief Characterization tests for legacy scheduler worker roles and opaque helper lifecycle.
+ *
+ * @copyright Copyright 2026 Feralthedogg
+ *
+ * @par License
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ */
+
+#include "runtime_internal.h"
+
+#include <errno.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define LEGACY_TEST_WAIT_NS (3ULL * 1000ULL * 1000ULL * 1000ULL)
+
+typedef struct legacy_worker_observation {
+    uintptr_t shard;
+    uintptr_t scheduler_context;
+    unsigned primary_by_context;
+    unsigned helper_by_context;
+} legacy_worker_observation_t;
+
+typedef struct test_failure_state {
+    atomic_uint failures;
+    const char *first_failure;
+} test_failure_state_t;
+
+typedef struct helper_failure_state {
+    test_failure_state_t failure;
+    int enter_rc;
+    int enter_errno;
+    int leave_rc;
+} helper_failure_state_t;
+
+typedef struct role_state role_state_t;
+
+struct role_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    legacy_worker_observation_t root_before;
+    legacy_worker_observation_t root_after;
+    legacy_worker_observation_t helper;
+    atomic_uint helper_copied;
+    atomic_uint helper_done;
+    atomic_uint root_depth_after_nested_enter;
+    atomic_uint root_depth_after_inner_leave;
+    atomic_uint root_depth_after_outer_leave;
+    atomic_uint root_compensation_after_nested_enter;
+    atomic_int helper_enter_rc;
+    atomic_int helper_leave_rc;
+    atomic_uint helper_redirect_active;
+    atomic_uint helper_redirect_depth;
+    atomic_uint helper_ready;
+    atomic_uint helper_thread_started;
+    atomic_uint helper_driver_matches;
+};
+
+typedef struct repeat_task_arg {
+    struct repeat_state *state;
+    unsigned index;
+} repeat_task_arg_t;
+
+typedef struct repeat_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    legacy_worker_observation_t observations[2];
+    atomic_uint first_seen;
+    atomic_uint first_run_done;
+    atomic_uint second_seen;
+    atomic_uint second_run_done;
+    pthread_mutex_t lock;
+    pthread_cond_t condition;
+    unsigned release_first;
+    int first_run_rc;
+    int second_run_rc;
+    pthread_t first_driver;
+    pthread_t second_driver;
+} repeat_state_t;
+
+typedef struct active_shutdown_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    atomic_uint primary_entered;
+    atomic_uint release_primary;
+    atomic_uint destroy_started;
+    atomic_uint task_done;
+    atomic_uint release_thread_done;
+    int run_rc;
+} active_shutdown_state_t;
+
+static int create_deterministic_runtime(llam_runtime_t **out) {
+    llam_runtime_opts_t opts;
+
+    if (llam_runtime_opts_init(&opts, sizeof(opts)) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+    return llam_runtime_create(&opts, sizeof(opts), out);
+}
+
+static void observe_legacy_worker(legacy_worker_observation_t *out) {
+    llam_shard_t *shard = g_llam_tls_shard;
+
+    memset(out, 0, sizeof(*out));
+    out->shard = (uintptr_t)shard;
+    out->scheduler_context = (uintptr_t)g_llam_tls_scheduler_ctx;
+    if (shard != NULL) {
+        out->primary_by_context =
+            g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
+        out->helper_by_context =
+            g_llam_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
+    }
+}
+
+static uint64_t legacy_deadline(void) {
+    return llam_now_ns() + LEGACY_TEST_WAIT_NS;
+}
+
+static int wait_flag(const atomic_uint *flag, uint64_t deadline_ns) {
+    while (atomic_load_explicit(flag, memory_order_acquire) == 0U) {
+        if (llam_now_ns() >= deadline_ns) {
+            return -1;
+        }
+        llam_pause_cpu();
+    }
+    return 0;
+}
+
+static void test_fail(test_failure_state_t *state, const char *message) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_acq_rel) == 0U) {
+        state->first_failure = message;
+    }
+}
+
+static int failure_result(const test_failure_state_t *state, const char *fallback) {
+    if (atomic_load_explicit(&state->failures, memory_order_acquire) != 0U) {
+        fprintf(stderr,
+                "test_worker_identity_internal: %s\n",
+                state->first_failure != NULL ? state->first_failure : fallback);
+        return 1;
+    }
+    return 0;
+}
+
+static void helper_failure_task(void *arg) {
+    helper_failure_state_t *state = arg;
+
+    errno = 0;
+    state->enter_rc = llam_enter_blocking();
+    state->enter_errno = errno;
+    state->leave_rc = llam_leave_blocking();
+    if (state->enter_rc != 0 || state->leave_rc != 0) {
+        test_fail(&state->failure, "helper-create failure did not preserve blocking lifecycle");
+    }
+}
+
+static int test_helper_create_failure_redirect(void) {
+    helper_failure_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    llam_shard_t *shard;
+    uint64_t redirect_before;
+    bool helper_started;
+    bool helper_ready;
+    bool helper_failed;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        fprintf(stderr,
+                "test_worker_identity_internal: runtime create failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    redirect_before = atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
+                                           memory_order_acquire);
+    task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
+    if (task == NULL) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: task spawn failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+
+    llam_worker_test_force_helper_create_error(EAGAIN);
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper-create run/join failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    helper_started = shard->opaque_helper_thread_started;
+    helper_ready = shard->opaque_helper_ready;
+    helper_failed = shard->opaque_helper_failed;
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (failure_result(&state.failure, "helper-create task failed")) {
+        llam_runtime_destroy(runtime);
+        return 1;
+    }
+    if (state.enter_errno != EAGAIN) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper-create failure did not preserve injected errno\n");
+        return 1;
+    }
+    if (atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
+                             memory_order_acquire) <= redirect_before) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper-create failure did not activate opaque redirect\n");
+        return 1;
+    }
+    if (helper_started || helper_ready || !helper_failed) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper-create failure published an invalid helper state\n");
+        return 1;
+    }
+
+    /* The injected error is one-shot: a later enter may create the helper. */
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper-create one-shot rerun failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    helper_started = shard->opaque_helper_thread_started;
+    helper_ready = shard->opaque_helper_ready;
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (failure_result(&state.failure, "helper-create one-shot task failed")) {
+        llam_runtime_destroy(runtime);
+        return 1;
+    }
+    if (!helper_started || !helper_ready) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper-create injection was not one-shot\n");
+        return 1;
+    }
+    llam_runtime_destroy(runtime);
+    return 0;
+}
+
+static void helper_role_task(void *arg) {
+    role_state_t *state = arg;
+    llam_shard_t *shard;
+
+    observe_legacy_worker(&state->helper);
+    shard = g_llam_tls_shard;
+    pthread_mutex_lock(&shard->opaque_lock);
+    atomic_store_explicit(&state->helper_ready,
+                          shard->opaque_helper_ready ? 1U : 0U,
+                          memory_order_release);
+    atomic_store_explicit(&state->helper_thread_started,
+                          shard->opaque_helper_thread_started ? 1U : 0U,
+                          memory_order_release);
+    atomic_store_explicit(&state->helper_driver_matches,
+                          shard->opaque_helper_thread_started &&
+                                  pthread_equal(pthread_self(), shard->opaque_helper_thread) != 0
+                              ? 1U
+                              : 0U,
+                          memory_order_release);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    atomic_store_explicit(&state->helper_copied, 1U, memory_order_release);
+
+    atomic_store_explicit(&state->helper_enter_rc, llam_enter_blocking(), memory_order_release);
+    if (atomic_load_explicit(&state->helper_enter_rc, memory_order_acquire) == 0) {
+        pthread_mutex_lock(&shard->lock);
+        atomic_store_explicit(&state->helper_redirect_active,
+                              shard->opaque_redirect_active ? 1U : 0U,
+                              memory_order_release);
+        atomic_store_explicit(&state->helper_redirect_depth,
+                              shard->opaque_redirect_depth,
+                              memory_order_release);
+        pthread_mutex_unlock(&shard->lock);
+        atomic_store_explicit(&state->helper_leave_rc, llam_leave_blocking(), memory_order_release);
+    } else {
+        atomic_store_explicit(&state->helper_leave_rc, -1, memory_order_release);
+    }
+    if (atomic_load_explicit(&state->helper_enter_rc, memory_order_acquire) != 0 ||
+        atomic_load_explicit(&state->helper_leave_rc, memory_order_acquire) != 0) {
+        test_fail(&state->failure, "helper-dispatched blocking lifecycle failed");
+    }
+    atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
+}
+
+static void role_root_task(void *arg) {
+    role_state_t *state = arg;
+    llam_task_t *child;
+    uint64_t deadline;
+
+    observe_legacy_worker(&state->root_before);
+    if (state->root_before.primary_by_context == 0U ||
+        state->root_before.helper_by_context != 0U) {
+        test_fail(&state->failure, "root task did not observe the primary scheduler context");
+    }
+    child = llam_runtime_spawn_ex(state->runtime, helper_role_task, state, NULL, 0U);
+    if (child == NULL) {
+        test_fail(&state->failure, "root task could not spawn helper observer");
+        atomic_store_explicit(&state->helper_copied, 1U, memory_order_release);
+        return;
+    }
+    if (llam_enter_blocking() != 0) {
+        test_fail(&state->failure, "primary opaque enter failed");
+        return;
+    }
+    if (g_llam_tls_task->opaque_blocking_depth != 1U) {
+        test_fail(&state->failure, "primary opaque enter did not set depth one");
+    }
+    if (llam_enter_blocking() != 0) {
+        test_fail(&state->failure, "nested primary opaque enter failed");
+    }
+    atomic_store_explicit(&state->root_depth_after_nested_enter,
+                          g_llam_tls_task->opaque_blocking_depth,
+                          memory_order_release);
+    {
+        llam_shard_t *shard = g_llam_tls_shard;
+
+        pthread_mutex_lock(&shard->opaque_lock);
+        atomic_store_explicit(&state->root_compensation_after_nested_enter,
+                              shard->opaque_compensation_depth,
+                              memory_order_release);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+    deadline = legacy_deadline();
+    if (wait_flag(&state->helper_copied, deadline) != 0) {
+        test_fail(&state->failure, "helper observer did not run before the bounded deadline");
+    }
+    if (wait_flag(&state->helper_done, deadline) != 0) {
+        test_fail(&state->failure, "helper observer did not return before the bounded deadline");
+    }
+    if (llam_leave_blocking() != 0) {
+        test_fail(&state->failure, "inner primary opaque leave failed");
+    }
+    atomic_store_explicit(&state->root_depth_after_inner_leave,
+                          g_llam_tls_task->opaque_blocking_depth,
+                          memory_order_release);
+    if (llam_leave_blocking() != 0) {
+        test_fail(&state->failure, "outer primary opaque leave failed");
+    }
+    atomic_store_explicit(&state->root_depth_after_outer_leave,
+                          g_llam_tls_task->opaque_blocking_depth,
+                          memory_order_release);
+    observe_legacy_worker(&state->root_after);
+    if (state->root_after.primary_by_context == 0U ||
+        state->root_after.helper_by_context != 0U) {
+        test_fail(&state->failure, "primary did not regain its scheduler context after helper return");
+    }
+    if (llam_join(child) != 0) {
+        test_fail(&state->failure, "root could not join helper observer");
+    }
+}
+
+static int test_primary_helper_takeover(void) {
+    role_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *root = NULL;
+    llam_shard_t *shard;
+    uint64_t redirect_before;
+    bool helper_same_driver;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.helper_copied, 0U);
+    atomic_init(&state.helper_done, 0U);
+    atomic_init(&state.root_depth_after_nested_enter, 0U);
+    atomic_init(&state.root_depth_after_inner_leave, 0U);
+    atomic_init(&state.root_depth_after_outer_leave, 0U);
+    atomic_init(&state.root_compensation_after_nested_enter, 0U);
+    atomic_init(&state.helper_enter_rc, 0);
+    atomic_init(&state.helper_leave_rc, 0);
+    atomic_init(&state.helper_redirect_active, 0U);
+    atomic_init(&state.helper_redirect_depth, 0U);
+    atomic_init(&state.helper_ready, 0U);
+    atomic_init(&state.helper_thread_started, 0U);
+    atomic_init(&state.helper_driver_matches, 0U);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    redirect_before = atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
+                                           memory_order_acquire);
+    root = llam_runtime_spawn_ex(runtime, role_root_task, &state, NULL, 0U);
+    if (root == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(root) != 0) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: role takeover run/join failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    if (failure_result(&state.failure, "role takeover task failed")) {
+        llam_runtime_destroy(runtime);
+        return 1;
+    }
+    helper_same_driver = atomic_load_explicit(&state.helper_driver_matches, memory_order_acquire) != 0U;
+    if (state.root_before.shard == 0U || state.root_before.scheduler_context == 0U ||
+        state.root_before.primary_by_context != 1U || state.root_before.helper_by_context != 0U ||
+        state.root_after.shard != state.root_before.shard ||
+        state.root_after.scheduler_context != state.root_before.scheduler_context ||
+        state.root_after.primary_by_context != 1U || state.root_after.helper_by_context != 0U) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: root legacy context truth table changed\n");
+        return 1;
+    }
+    if (state.helper.shard != state.root_before.shard ||
+        state.helper.scheduler_context == state.root_before.scheduler_context ||
+        state.helper.primary_by_context != 0U || state.helper.helper_by_context != 1U ||
+        atomic_load_explicit(&state.helper_ready, memory_order_acquire) == 0U || !helper_same_driver) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper legacy context truth table changed\n");
+        return 1;
+    }
+    if (atomic_load_explicit(&state.root_depth_after_nested_enter, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&state.root_depth_after_inner_leave, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.root_depth_after_outer_leave, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.root_compensation_after_nested_enter, memory_order_acquire) != 1U) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: nested primary blocking depth changed\n");
+        return 1;
+    }
+    if (atomic_load_explicit(&state.helper_redirect_active, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&state.helper_redirect_depth, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
+                             memory_order_acquire) <= redirect_before) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper blocking did not activate redirect\n");
+        return 1;
+    }
+    llam_runtime_destroy(runtime);
+    return 0;
+}
+
+static void repeat_observer_task(void *arg) {
+    repeat_task_arg_t *task_arg = arg;
+    repeat_state_t *state = task_arg->state;
+    legacy_worker_observation_t *observation = &state->observations[task_arg->index];
+
+    observe_legacy_worker(observation);
+    if (observation->primary_by_context == 0U || observation->helper_by_context != 0U) {
+        test_fail(&state->failure, "repeat-run task did not observe primary context");
+    }
+    if (task_arg->index == 0U) {
+        atomic_store_explicit(&state->first_seen, 1U, memory_order_release);
+    } else {
+        atomic_store_explicit(&state->second_seen, 1U, memory_order_release);
+    }
+}
+
+static void *first_runtime_driver(void *arg) {
+    repeat_state_t *state = arg;
+
+    state->first_driver = pthread_self();
+    state->first_run_rc = llam_runtime_run_handle(state->runtime);
+    atomic_store_explicit(&state->first_run_done, 1U, memory_order_release);
+    pthread_mutex_lock(&state->lock);
+    pthread_cond_broadcast(&state->condition);
+    while (state->release_first == 0U) {
+        if (pthread_cond_wait(&state->condition, &state->lock) != 0) {
+            test_fail(&state->failure, "first run driver condition wait failed");
+            state->release_first = 1U;
+            break;
+        }
+    }
+    pthread_cond_broadcast(&state->condition);
+    pthread_mutex_unlock(&state->lock);
+    return NULL;
+}
+
+static void *second_runtime_driver(void *arg) {
+    repeat_state_t *state = arg;
+
+    state->second_driver = pthread_self();
+    state->second_run_rc = llam_runtime_run_handle(state->runtime);
+    atomic_store_explicit(&state->second_run_done, 1U, memory_order_release);
+    pthread_mutex_lock(&state->lock);
+    pthread_cond_broadcast(&state->condition);
+    pthread_mutex_unlock(&state->lock);
+    return NULL;
+}
+
+static int test_repeated_runs_distinct_host_threads(void) {
+    repeat_state_t state;
+    repeat_task_arg_t first_arg;
+    repeat_task_arg_t second_arg;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *first_task = NULL;
+    llam_task_t *second_task = NULL;
+    pthread_t first_thread;
+    pthread_t second_thread;
+    bool first_created = false;
+    bool second_created = false;
+    bool mutex_created = false;
+    bool condition_created = false;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.first_seen, 0U);
+    atomic_init(&state.first_run_done, 0U);
+    atomic_init(&state.second_seen, 0U);
+    atomic_init(&state.second_run_done, 0U);
+    if (pthread_mutex_init(&state.lock, NULL) != 0) {
+        fprintf(stderr, "test_worker_identity_internal: repeat-run mutex setup failed\n");
+        return 1;
+    }
+    mutex_created = true;
+    if (pthread_cond_init(&state.condition, NULL) != 0) {
+        pthread_mutex_destroy(&state.lock);
+        fprintf(stderr, "test_worker_identity_internal: repeat-run condition setup failed\n");
+        return 1;
+    }
+    condition_created = true;
+    if (create_deterministic_runtime(&runtime) != 0) {
+        pthread_cond_destroy(&state.condition);
+        pthread_mutex_destroy(&state.lock);
+        fprintf(stderr, "test_worker_identity_internal: repeat-run runtime setup failed\n");
+        return 1;
+    }
+    state.runtime = runtime;
+    first_arg.state = &state;
+    first_arg.index = 0U;
+    first_task = llam_runtime_spawn_ex(runtime, repeat_observer_task, &first_arg, NULL, 0U);
+    if (first_task == NULL || pthread_create(&first_thread, NULL, first_runtime_driver, &state) != 0) {
+        test_fail(&state.failure, "first repeat-run driver could not start");
+        goto cleanup;
+    }
+    first_created = true;
+    if (wait_flag(&state.first_run_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.first_seen, legacy_deadline()) != 0 ||
+        state.first_run_rc != 0) {
+        test_fail(&state.failure, "first repeat run did not complete its observation");
+        goto cleanup;
+    }
+    if (first_task != NULL && llam_join(first_task) != 0) {
+        test_fail(&state.failure, "first repeat-run task join failed");
+        goto cleanup;
+    }
+
+    second_arg.state = &state;
+    second_arg.index = 1U;
+    second_task = llam_runtime_spawn_ex(runtime, repeat_observer_task, &second_arg, NULL, 0U);
+    if (second_task == NULL || pthread_create(&second_thread, NULL, second_runtime_driver, &state) != 0) {
+        test_fail(&state.failure, "second repeat-run driver could not start");
+        goto cleanup;
+    }
+    second_created = true;
+    if (wait_flag(&state.second_seen, legacy_deadline()) != 0 ||
+        wait_flag(&state.second_run_done, legacy_deadline()) != 0 ||
+        state.second_run_rc != 0) {
+        test_fail(&state.failure, "second repeat run did not complete its observation");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&state.lock);
+    state.release_first = 1U;
+    pthread_cond_broadcast(&state.condition);
+    pthread_mutex_unlock(&state.lock);
+    if (second_task != NULL && llam_join(second_task) != 0) {
+        test_fail(&state.failure, "second repeat-run task join failed");
+        goto cleanup;
+    }
+    if (state.observations[0].shard != state.observations[1].shard ||
+        state.observations[0].scheduler_context != state.observations[1].scheduler_context ||
+        pthread_equal(state.first_driver, state.second_driver) != 0) {
+        test_fail(&state.failure, "repeated runs changed legacy shard/context or recycled the host thread");
+        goto cleanup;
+    }
+    rc = failure_result(&state.failure, "repeat-run characterization failed");
+
+cleanup:
+    if (mutex_created) {
+        pthread_mutex_lock(&state.lock);
+        state.release_first = 1U;
+        pthread_cond_broadcast(&state.condition);
+        pthread_mutex_unlock(&state.lock);
+    }
+    if (runtime != NULL) {
+        llam_runtime_destroy(runtime);
+        runtime = NULL;
+    }
+    if (second_created) {
+        pthread_join(second_thread, NULL);
+    }
+    if (first_created) {
+        pthread_join(first_thread, NULL);
+    }
+    if (state.failure.first_failure != NULL && rc == 1) {
+        (void)failure_result(&state.failure, "repeat-run characterization failed");
+    }
+    if (condition_created) {
+        pthread_cond_destroy(&state.condition);
+    }
+    if (mutex_created) {
+        pthread_mutex_destroy(&state.lock);
+    }
+    return rc;
+}
+
+static void idle_helper_task(void *arg) {
+    test_failure_state_t *failure = arg;
+
+    if (llam_enter_blocking() != 0 || llam_leave_blocking() != 0) {
+        test_fail(failure, "idle-helper blocking lifecycle failed");
+    }
+}
+
+static int test_idle_helper_shutdown(void) {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    llam_shard_t *shard;
+    bool helper_started;
+    bool helper_ready;
+    bool helper_active;
+
+    memset(&failure, 0, sizeof(failure));
+    atomic_init(&failure.failures, 0U);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        return 1;
+    }
+    task = llam_runtime_spawn_ex(runtime, idle_helper_task, &failure, NULL, 0U);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: idle-helper run/join failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    pthread_mutex_lock(&shard->opaque_lock);
+    helper_started = shard->opaque_helper_thread_started;
+    helper_ready = shard->opaque_helper_ready;
+    helper_active = shard->opaque_helper_active;
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (failure_result(&failure, "idle-helper task failed")) {
+        llam_runtime_destroy(runtime);
+        return 1;
+    }
+    if (!helper_started || !helper_ready || helper_active) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper was not idle and ready before destruction\n");
+        return 1;
+    }
+    llam_runtime_destroy(runtime);
+    return 0;
+}
+
+static void active_shutdown_task(void *arg) {
+    active_shutdown_state_t *state = arg;
+    uint64_t deadline;
+
+    if (llam_enter_blocking() != 0) {
+        test_fail(&state->failure, "active-helper primary enter failed");
+        atomic_store_explicit(&state->primary_entered, 1U, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->primary_entered, 1U, memory_order_release);
+    deadline = legacy_deadline();
+    if (wait_flag(&state->release_primary, deadline) != 0) {
+        test_fail(&state->failure, "active-helper primary was not released before its bounded deadline");
+    }
+    if (llam_leave_blocking() != 0) {
+        test_fail(&state->failure, "active-helper primary leave failed");
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *active_shutdown_release_thread(void *arg) {
+    active_shutdown_state_t *state = arg;
+    uint64_t deadline = legacy_deadline();
+
+    if (wait_flag(&state->destroy_started, deadline) != 0) {
+        test_fail(&state->failure, "release thread did not observe destroy publication");
+    }
+    atomic_store_explicit(&state->release_primary, 1U, memory_order_release);
+    atomic_store_explicit(&state->release_thread_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *active_shutdown_run_thread(void *arg) {
+    active_shutdown_state_t *state = arg;
+
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    return NULL;
+}
+
+static int test_active_helper_shutdown(void) {
+    active_shutdown_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    pthread_t run_thread;
+    pthread_t release_thread;
+    bool run_created = false;
+    bool release_created = false;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.primary_entered, 0U);
+    atomic_init(&state.release_primary, 0U);
+    atomic_init(&state.destroy_started, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.release_thread_done, 0U);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    task = llam_runtime_spawn_ex(runtime, active_shutdown_task, &state, NULL, 0U);
+    if (task == NULL || pthread_create(&run_thread, NULL, active_shutdown_run_thread, &state) != 0) {
+        test_fail(&state.failure, "active-helper run thread could not start");
+        goto cleanup;
+    }
+    run_created = true;
+    if (pthread_create(&release_thread, NULL, active_shutdown_release_thread, &state) != 0) {
+        test_fail(&state.failure, "active-helper release thread could not start");
+        goto cleanup;
+    }
+    release_created = true;
+    if (wait_flag(&state.primary_entered, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "active-helper primary did not enter before the bounded deadline");
+    }
+    atomic_store_explicit(&state.destroy_started, 1U, memory_order_release);
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.release_thread_done, legacy_deadline()) != 0 ||
+        state.run_rc != 0) {
+        test_fail(&state.failure, "active-helper shutdown did not drain the released primary");
+    }
+    if (failure_result(&state.failure, "active-helper shutdown characterization failed")) {
+        goto cleanup;
+    }
+    if (run_created) {
+        pthread_join(run_thread, NULL);
+        run_created = false;
+    }
+    if (release_created) {
+        pthread_join(release_thread, NULL);
+        release_created = false;
+    }
+    if (task == NULL) {
+        return 1;
+    }
+    return 0;
+
+cleanup:
+    atomic_store_explicit(&state.destroy_started, 1U, memory_order_release);
+    atomic_store_explicit(&state.release_primary, 1U, memory_order_release);
+    if (runtime != NULL) {
+        llam_runtime_destroy(runtime);
+    }
+    if (run_created) {
+        pthread_join(run_thread, NULL);
+    }
+    if (release_created) {
+        pthread_join(release_thread, NULL);
+    }
+    return failure_result(&state.failure, "active-helper shutdown characterization failed");
+}
+
+int main(void) {
+    if (test_helper_create_failure_redirect() != 0 ||
+        test_primary_helper_takeover() != 0 ||
+        test_repeated_runs_distinct_host_threads() != 0 ||
+        test_idle_helper_shutdown() != 0 ||
+        test_active_helper_shutdown() != 0) {
+        return 1;
+    }
+    printf("test_worker_identity_internal: all legacy checks passed\n");
+    return 0;
+}

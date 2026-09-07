@@ -622,6 +622,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_HAVE_IO_URING_SETUP_BUF_RING)
 endif()
 target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime_testhooks)
 
+add_executable(test_worker_identity_internal
+    tests/test_worker_identity_internal.c
+)
+target_include_directories(test_worker_identity_internal PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_compile_definitions(test_worker_identity_internal PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+target_link_libraries(test_worker_identity_internal PRIVATE llam_runtime_testhooks)
+
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c
 )
@@ -704,6 +713,7 @@ foreach(LLAM_TEST_TARGET
         test_runtime_fuzz
         test_runtime_invariants
         test_runtime_shutdown_internal
+        test_worker_identity_internal
         test_sync_primitives
         test_io_buffers
         test_windows_policy
@@ -735,6 +745,7 @@ add_test(NAME test_runtime_stress COMMAND test_runtime_stress)
 add_test(NAME test_runtime_fuzz COMMAND test_runtime_fuzz)
 add_test(NAME test_runtime_invariants COMMAND test_runtime_invariants)
 add_test(NAME test_runtime_shutdown_internal COMMAND test_runtime_shutdown_internal)
+add_test(NAME test_worker_identity_internal COMMAND test_worker_identity_internal)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)

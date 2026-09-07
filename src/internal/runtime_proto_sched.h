@@ -39,6 +39,9 @@ void llam_deactivate_opaque_redirect_locked(llam_shard_t *shard);
 bool llam_enqueue_opaque_redirect_task_locked(llam_shard_t *blocked, llam_task_t *task, bool hot);
 int llam_ensure_opaque_helper_locked(llam_shard_t *shard);
 void *llam_opaque_helper_main(void *arg);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_worker_test_force_helper_create_error(int error_code);
+#endif
 
 /*
  * Worker loops and idle handling.

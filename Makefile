@@ -66,6 +66,7 @@ CLEAN_FILES = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_worker_identity_internal \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -112,6 +113,7 @@ CLEAN_FILES = \
 	test_runtime_fuzz.exe \
 	test_runtime_invariants.exe \
 	test_runtime_shutdown_internal.exe \
+	test_worker_identity_internal.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -450,7 +452,8 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
-	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o
+	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o \
+	$(TESTHOOK_OBJDIR)/src/core/time/timer.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/registry/capability.o \
@@ -460,7 +463,8 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/registry/registry.o \
 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 		$(OBJDIR)/src/io/api/issue.o \
-		$(OBJDIR)/src/io/watch/watch_queue.o, \
+		$(OBJDIR)/src/io/watch/watch_queue.o \
+		$(OBJDIR)/src/core/time/timer.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \
@@ -524,6 +528,8 @@ TEST_RUNTIME_INVARIANTS_OBJS = \
 	$(OBJDIR)/tests/test_runtime_invariants.o
 TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_runtime_shutdown_internal.o
+TEST_WORKER_IDENTITY_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_worker_identity_internal.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -576,6 +582,7 @@ BUILD_OBJS = \
 	$(TEST_RUNTIME_FUZZ_OBJS) \
 	$(TEST_RUNTIME_INVARIANTS_OBJS) \
 	$(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) \
+	$(TEST_WORKER_IDENTITY_INTERNAL_OBJS) \
 	$(TEST_SYNC_OBJS) \
 	$(TEST_IO_BUFFERS_OBJS) \
 	$(TEST_WINDOWS_POLICY_OBJS) \
@@ -610,6 +617,7 @@ LINK_TARGETS = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_worker_identity_internal \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -838,14 +846,14 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static
 	@if command -v nm >/dev/null 2>&1; then \
-		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_worker_test_force_helper_create_error|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
 			echo "production static runtime exports test fault-injection hooks" >&2; \
-			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_worker_test_force_helper_create_error|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
 			exit 1; \
 		fi; \
 	fi
 
-test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 	./test_abi_contract
@@ -862,6 +870,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	./test_runtime_fuzz
 	./test_runtime_invariants
 	./test_runtime_shutdown_internal
+	./test_worker_identity_internal
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -2105,6 +2114,9 @@ test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
 test_runtime_shutdown_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
+test_worker_identity_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS) $(LDLIBS)
+
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
 
@@ -2354,6 +2366,10 @@ $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(R
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_worker_identity_internal.o: tests/test_worker_identity_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 

@@ -31,6 +31,16 @@
 
 #include "runtime_internal.h"
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_int g_llam_test_helper_create_error;
+
+void llam_worker_test_force_helper_create_error(int error_code) {
+    atomic_store_explicit(&g_llam_test_helper_create_error,
+                          error_code,
+                          memory_order_release);
+}
+#endif
+
 /** @brief Return the runtime that owns a parked task's timer/wait state. */
 static llam_runtime_t *llam_timer_task_runtime(const llam_task_t *task) {
     return task != NULL ? task->owner_runtime : NULL;
@@ -733,7 +743,16 @@ int llam_ensure_opaque_helper_locked(llam_shard_t *shard) {
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    rc = atomic_exchange_explicit(&g_llam_test_helper_create_error,
+                                  0,
+                                  memory_order_acq_rel);
+    if (rc == 0) {
+#endif
     rc = pthread_create(&shard->opaque_helper_thread, NULL, llam_opaque_helper_main, shard);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    }
+#endif
     if (rc != 0) {
         shard->opaque_helper_failed = true;
         errno = rc;
