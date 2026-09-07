@@ -123,6 +123,22 @@ typedef struct repeat_state {
     pthread_t second_driver;
 } repeat_state_t;
 
+typedef struct managed_tls_tuple {
+    llam_shard_t *shard;
+    llam_worker_t *worker;
+    llam_processor_t *processor;
+    llam_task_t *task;
+    llam_ctx_t *scheduler_ctx;
+} managed_tls_tuple_t;
+
+typedef struct nested_runtime_identity_state {
+    test_failure_state_t failure;
+    llam_runtime_t *nested_runtime;
+    managed_tls_tuple_t before_create;
+    managed_tls_tuple_t after_create;
+    managed_tls_tuple_t after_yield;
+} nested_runtime_identity_state_t;
+
 typedef struct active_shutdown_state {
     test_failure_state_t failure;
     llam_runtime_t *runtime;
@@ -186,6 +202,40 @@ static unsigned worker_identity_tuple_is_clear(void) {
                    g_llam_tls_processor == NULL &&
                    g_llam_tls_task == NULL &&
                    g_llam_tls_scheduler_ctx == NULL
+               ? 1U
+               : 0U;
+}
+
+static managed_tls_tuple_t capture_managed_tls_tuple(void) {
+    managed_tls_tuple_t tuple;
+
+    tuple.shard = g_llam_tls_shard;
+    tuple.worker = g_llam_tls_worker;
+    tuple.processor = g_llam_tls_processor;
+    tuple.task = g_llam_tls_task;
+    tuple.scheduler_ctx = g_llam_tls_scheduler_ctx;
+    return tuple;
+}
+
+static unsigned managed_tls_tuple_complete(const managed_tls_tuple_t *tuple) {
+    return tuple != NULL &&
+                   tuple->shard != NULL &&
+                   tuple->worker != NULL &&
+                   tuple->processor != NULL &&
+                   tuple->task != NULL &&
+                   tuple->scheduler_ctx != NULL
+               ? 1U
+               : 0U;
+}
+
+static unsigned managed_tls_tuples_match(const managed_tls_tuple_t *expected,
+                                         const managed_tls_tuple_t *actual) {
+    return expected != NULL && actual != NULL &&
+                   expected->shard == actual->shard &&
+                   expected->worker == actual->worker &&
+                   expected->processor == actual->processor &&
+                   expected->task == actual->task &&
+                   expected->scheduler_ctx == actual->scheduler_ctx
                ? 1U
                : 0U;
 }
@@ -922,6 +972,120 @@ cleanup:
     return rc;
 }
 
+static void nested_runtime_identity_task(void *arg) {
+    nested_runtime_identity_state_t *state = arg;
+    llam_runtime_opts_t opts;
+
+    state->before_create = capture_managed_tls_tuple();
+    if (!managed_tls_tuple_complete(&state->before_create)) {
+        test_fail(&state->failure,
+                  "nested runtime task did not start with a complete TLS tuple");
+        return;
+    }
+    if (llam_runtime_opts_init(&opts, sizeof(opts)) != 0) {
+        test_fail(&state->failure,
+                  "nested runtime task could not initialize runtime options");
+        return;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+    if (llam_runtime_create(&opts, sizeof(opts), &state->nested_runtime) != 0) {
+        test_fail(&state->failure,
+                  "nested runtime create failed from a managed task");
+        return;
+    }
+    if (state->nested_runtime == NULL ||
+        state->nested_runtime == llam_runtime_default()) {
+        test_fail(&state->failure,
+                  "nested runtime create returned an invalid runtime handle");
+        if (state->nested_runtime == llam_runtime_default()) {
+            state->nested_runtime = NULL;
+        }
+        return;
+    }
+
+    state->after_create = capture_managed_tls_tuple();
+    if (managed_tls_tuples_match(&state->before_create, &state->after_create) == 0U) {
+        test_fail(&state->failure,
+                  "nested runtime create did not preserve all five TLS pointers");
+        return;
+    }
+    llam_yield();
+    state->after_yield = capture_managed_tls_tuple();
+    if (managed_tls_tuples_match(&state->before_create, &state->after_yield) == 0U) {
+        test_fail(&state->failure,
+                  "nested runtime create TLS tuple changed after yield");
+    }
+}
+
+static int test_nested_runtime_preserves_identity_tls(void) {
+    nested_runtime_identity_state_t state;
+    llam_runtime_t *outer_runtime = NULL;
+    llam_task_t *outer_task = NULL;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    if (create_deterministic_runtime(&outer_runtime) != 0) {
+        fprintf(stderr,
+                "test_worker_identity_internal: nested identity outer runtime create failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    outer_task = llam_runtime_spawn_ex(outer_runtime,
+                                       nested_runtime_identity_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (outer_task == NULL) {
+        fprintf(stderr,
+                "test_worker_identity_internal: nested identity outer task spawn failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        rc = 1;
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(outer_runtime) != 0) {
+        fprintf(stderr,
+                "test_worker_identity_internal: nested identity outer run failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        rc = 1;
+        goto cleanup;
+    }
+    if (llam_join(outer_task) != 0) {
+        fprintf(stderr,
+                "test_worker_identity_internal: nested identity outer task join failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        rc = 1;
+        goto cleanup;
+    }
+    if (state.nested_runtime == NULL) {
+        test_fail(&state.failure,
+                  "nested runtime task did not publish a runtime handle");
+    }
+    if (state.nested_runtime != NULL) {
+        destroy_runtime_bounded(&state.nested_runtime,
+                                "nested identity runtime destroy exceeded the bounded deadline");
+    }
+    if (failure_result(&state.failure, "nested runtime identity preservation failed")) {
+        rc = 1;
+    }
+
+cleanup:
+    if (state.nested_runtime != NULL) {
+        destroy_runtime_bounded(&state.nested_runtime,
+                                "nested identity runtime cleanup exceeded the bounded deadline");
+    }
+    if (outer_runtime != NULL) {
+        destroy_runtime_bounded(&outer_runtime,
+                                "nested identity outer runtime destroy exceeded the bounded deadline");
+    }
+    return rc;
+}
+
 static void idle_helper_task(void *arg) {
     test_failure_state_t *failure = arg;
 
@@ -1160,6 +1324,7 @@ int main(void) {
     if (test_helper_create_failure_redirect() != 0 ||
         test_primary_helper_takeover() != 0 ||
         test_repeated_runs_distinct_host_threads() != 0 ||
+        test_nested_runtime_preserves_identity_tls() != 0 ||
         test_idle_helper_shutdown() != 0 ||
         test_active_helper_shutdown() != 0) {
         return 1;
