@@ -188,7 +188,14 @@ static int repeat_cond_timedwait(repeat_state_t *state, uint64_t deadline_ns) {
     {
         struct timespec deadline;
 
-        if (timespec_get(&deadline, TIME_UTC) != TIME_UTC) {
+#if defined(__APPLE__)
+        deadline.tv_sec = (time_t)(remaining_ns / 1000000000ULL);
+        deadline.tv_nsec = (long)(remaining_ns % 1000000000ULL);
+        return pthread_cond_timedwait_relative_np(&state->condition,
+                                                  &state->lock,
+                                                  &deadline);
+#else
+        if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
             return EINVAL;
         }
         deadline.tv_sec += (time_t)(remaining_ns / 1000000000ULL);
@@ -198,7 +205,28 @@ static int repeat_cond_timedwait(repeat_state_t *state, uint64_t deadline_ns) {
             deadline.tv_nsec -= 1000000000L;
         }
         return pthread_cond_timedwait(&state->condition, &state->lock, &deadline);
+#endif
     }
+#endif
+}
+
+static int repeat_condition_init(pthread_cond_t *condition) {
+#if LLAM_PLATFORM_POSIX && !defined(__APPLE__)
+    pthread_condattr_t attr;
+    int rc;
+
+    rc = pthread_condattr_init(&attr);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    if (rc == 0) {
+        rc = pthread_cond_init(condition, &attr);
+    }
+    (void)pthread_condattr_destroy(&attr);
+    return rc;
+#else
+    return pthread_cond_init(condition, NULL);
 #endif
 }
 
@@ -228,6 +256,38 @@ static void require_flag_before_cleanup(const atomic_uint *flag, const char *mes
     if (wait_flag(flag, legacy_deadline()) != 0) {
         fail_safe_cleanup(message);
     }
+}
+
+typedef struct bounded_destroy_call {
+    llam_runtime_t *runtime;
+    atomic_uint done;
+} bounded_destroy_call_t;
+
+static void *bounded_destroy_main(void *arg) {
+    bounded_destroy_call_t *call = arg;
+
+    llam_runtime_destroy(call->runtime);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void destroy_runtime_bounded(llam_runtime_t **runtime, const char *message) {
+    bounded_destroy_call_t call;
+    pthread_t destroy_thread;
+
+    if (runtime == NULL || *runtime == NULL) {
+        return;
+    }
+    call.runtime = *runtime;
+    atomic_init(&call.done, 0U);
+    if (pthread_create(&destroy_thread, NULL, bounded_destroy_main, &call) != 0) {
+        fail_safe_cleanup(message);
+    }
+    if (wait_flag(&call.done, legacy_deadline()) != 0) {
+        fail_safe_cleanup(message);
+    }
+    pthread_join(destroy_thread, NULL);
+    *runtime = NULL;
 }
 
 static void helper_failure_task(void *arg) {
@@ -266,7 +326,7 @@ static int test_helper_create_failure_redirect(void) {
                                            memory_order_acquire);
     task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
     if (task == NULL) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: task spawn failed: errno=%d (%s)\n",
                 errno,
@@ -276,7 +336,7 @@ static int test_helper_create_failure_redirect(void) {
 
     llam_worker_test_force_helper_create_error(EAGAIN);
     if (llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper-create run/join failed: errno=%d (%s)\n",
                 errno,
@@ -290,24 +350,24 @@ static int test_helper_create_failure_redirect(void) {
     helper_failed = shard->opaque_helper_failed;
     pthread_mutex_unlock(&shard->opaque_lock);
     if (failure_result(&state.failure, "helper-create task failed")) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         return 1;
     }
     if (state.enter_errno != EAGAIN) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper-create failure did not preserve injected errno\n");
         return 1;
     }
     if (atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
                              memory_order_acquire) <= redirect_before) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper-create failure did not activate opaque redirect\n");
         return 1;
     }
     if (helper_started || helper_ready || !helper_failed) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper-create failure published an invalid helper state\n");
         return 1;
@@ -318,7 +378,7 @@ static int test_helper_create_failure_redirect(void) {
     atomic_init(&state.failure.failures, 0U);
     task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
     if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper-create one-shot rerun failed: errno=%d (%s)\n",
                 errno,
@@ -330,16 +390,16 @@ static int test_helper_create_failure_redirect(void) {
     helper_ready = shard->opaque_helper_ready;
     pthread_mutex_unlock(&shard->opaque_lock);
     if (failure_result(&state.failure, "helper-create one-shot task failed")) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         return 1;
     }
     if (!helper_started || !helper_ready) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper-create injection was not one-shot\n");
         return 1;
     }
-    llam_runtime_destroy(runtime);
+    destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
     return 0;
 }
 
@@ -507,7 +567,7 @@ static int test_primary_helper_takeover(void) {
                                            memory_order_acquire);
     root = llam_runtime_spawn_ex(runtime, role_root_task, &state, NULL, 0U);
     if (root == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(root) != 0) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: role takeover run/join failed: errno=%d (%s)\n",
                 errno,
@@ -515,7 +575,7 @@ static int test_primary_helper_takeover(void) {
         return 1;
     }
     if (failure_result(&state.failure, "role takeover task failed")) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         return 1;
     }
     helper_same_driver = atomic_load_explicit(&state.helper_driver_matches, memory_order_acquire) != 0U;
@@ -524,7 +584,7 @@ static int test_primary_helper_takeover(void) {
         state.root_after.shard != state.root_before.shard ||
         state.root_after.scheduler_context != state.root_before.scheduler_context ||
         state.root_after.primary_by_context != 1U || state.root_after.helper_by_context != 0U) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: root legacy context truth table changed\n");
         return 1;
@@ -533,7 +593,7 @@ static int test_primary_helper_takeover(void) {
         state.helper.scheduler_context == state.root_before.scheduler_context ||
         state.helper.primary_by_context != 0U || state.helper.helper_by_context != 1U ||
         atomic_load_explicit(&state.helper_ready, memory_order_acquire) == 0U || !helper_same_driver) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper legacy context truth table changed\n");
         return 1;
@@ -547,7 +607,7 @@ static int test_primary_helper_takeover(void) {
         state.helper_after_leave.scheduler_context != state.helper.scheduler_context ||
         state.helper_after_leave.primary_by_context != 0U ||
         state.helper_after_leave.helper_by_context != 1U) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper identity changed during blocking enter/leave\n");
         return 1;
@@ -556,7 +616,7 @@ static int test_primary_helper_takeover(void) {
         atomic_load_explicit(&state.root_depth_after_inner_leave, memory_order_acquire) != 1U ||
         atomic_load_explicit(&state.root_depth_after_outer_leave, memory_order_acquire) != 0U ||
         atomic_load_explicit(&state.root_compensation_after_nested_enter, memory_order_acquire) != 1U) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: nested primary blocking depth changed\n");
         return 1;
@@ -565,12 +625,12 @@ static int test_primary_helper_takeover(void) {
         atomic_load_explicit(&state.helper_redirect_depth, memory_order_acquire) == 0U ||
         atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
                              memory_order_acquire) <= redirect_before) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper blocking did not activate redirect\n");
         return 1;
     }
-    llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
     return 0;
 }
 
@@ -660,7 +720,7 @@ static int test_repeated_runs_distinct_host_threads(void) {
         return 1;
     }
     mutex_created = true;
-    if (pthread_cond_init(&state.condition, NULL) != 0) {
+    if (repeat_condition_init(&state.condition) != 0) {
         pthread_mutex_destroy(&state.lock);
         fprintf(stderr, "test_worker_identity_internal: repeat-run condition setup failed\n");
         return 1;
@@ -738,7 +798,7 @@ cleanup:
                                     "second run driver did not stop during bounded cleanup");
     }
     if (runtime != NULL) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "repeat-run runtime destroy exceeded the bounded deadline");
         runtime = NULL;
     }
     if (second_created) {
@@ -787,7 +847,7 @@ static int test_idle_helper_shutdown(void) {
     }
     task = llam_runtime_spawn_ex(runtime, idle_helper_task, &failure, NULL, 0U);
     if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "idle-helper runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: idle-helper run/join failed: errno=%d (%s)\n",
                 errno,
@@ -801,16 +861,16 @@ static int test_idle_helper_shutdown(void) {
     helper_active = shard->opaque_helper_active;
     pthread_mutex_unlock(&shard->opaque_lock);
     if (failure_result(&failure, "idle-helper task failed")) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "idle-helper runtime destroy exceeded the bounded deadline");
         return 1;
     }
     if (!helper_started || !helper_ready || helper_active) {
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "idle-helper runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper was not idle and ready before destruction\n");
         return 1;
     }
-    llam_runtime_destroy(runtime);
+    destroy_runtime_bounded(&runtime, "idle-helper runtime destroy exceeded the bounded deadline");
     return 0;
 }
 
@@ -978,7 +1038,7 @@ cleanup:
             require_flag_before_cleanup(&state.run_done,
                                         "active-helper run thread did not stop during bounded cleanup");
         }
-        llam_runtime_destroy(runtime);
+        destroy_runtime_bounded(&runtime, "active-helper runtime destroy exceeded the bounded deadline");
         runtime = NULL;
     }
     if (run_created) {
