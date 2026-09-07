@@ -45,6 +45,37 @@ static bool g_llam_process_segv_installed;
 static struct sigaction g_llam_process_previous_preempt_action;
 static struct sigaction g_llam_process_previous_segv_action;
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_int g_llam_test_sigaltstack_primary_error;
+static atomic_int g_llam_test_sigaltstack_helper_error;
+
+void llam_worker_test_force_sigaltstack_error(llam_worker_role_t role, int error_code) {
+    atomic_int *slot = NULL;
+
+    if (role == LLAM_WORKER_ROLE_PRIMARY) {
+        slot = &g_llam_test_sigaltstack_primary_error;
+    } else if (role == LLAM_WORKER_ROLE_OPAQUE_HELPER) {
+        slot = &g_llam_test_sigaltstack_helper_error;
+    }
+    if (slot != NULL) {
+        atomic_store_explicit(slot, error_code, memory_order_release);
+    }
+}
+
+static int llam_worker_test_consume_sigaltstack_error(const llam_worker_t *worker) {
+    atomic_int *slot = NULL;
+
+    if (worker != NULL && worker->role == LLAM_WORKER_ROLE_PRIMARY) {
+        slot = &g_llam_test_sigaltstack_primary_error;
+    } else if (worker != NULL && worker->role == LLAM_WORKER_ROLE_OPAQUE_HELPER) {
+        slot = &g_llam_test_sigaltstack_helper_error;
+    }
+    return slot != NULL
+               ? atomic_exchange_explicit(slot, 0, memory_order_acq_rel)
+               : 0;
+}
+#endif
+
 /**
  * @brief Optionally bind the current thread to a CPU.
  *
@@ -396,49 +427,78 @@ void llam_restore_process_signal_handlers(llam_runtime_t *rt) {
 /**
  * @brief Install a per-thread alternate signal stack for guard-page diagnostics.
  *
- * @param shard Shard whose allocated signal stack should be installed.
+ * @param worker Worker whose allocated signal stack should be installed.
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int llam_install_thread_signal_stack(llam_shard_t *shard) {
+int llam_install_thread_signal_stack(llam_worker_t *worker) {
     stack_t stack;
+    uint64_t incarnation;
 
-    if (shard->signal_stack == NULL || shard->signal_stack_size == 0U) {
+    if (worker == NULL || g_llam_tls_worker != worker ||
+        g_llam_tls_processor != worker->associated_processor ||
+        worker->signal_stack == NULL ||
+        worker->signal_stack_size < (size_t)SIGSTKSZ ||
+        worker->sigaltstack_installed) {
         errno = EINVAL;
         return -1;
     }
+    incarnation = atomic_load_explicit(&worker->incarnation, memory_order_acquire);
+    if (incarnation == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    {
+        int forced_error = llam_worker_test_consume_sigaltstack_error(worker);
+
+        if (forced_error != 0) {
+            errno = forced_error;
+            return -1;
+        }
+    }
+#endif
 
     memset(&stack, 0, sizeof(stack));
-    stack.ss_sp = shard->signal_stack;
-    stack.ss_size = shard->signal_stack_size;
+    stack.ss_sp = worker->signal_stack;
+    stack.ss_size = worker->signal_stack_size;
     stack.ss_flags = 0;
-    if (sigaltstack(&stack, &shard->previous_sigaltstack) != 0) {
+    if (sigaltstack(&stack, &worker->previous_sigaltstack) != 0) {
         return -1;
     }
 
-    shard->sigaltstack_installed = true;
+    worker->sigaltstack_installed = true;
+    worker->signal_stack_incarnation = incarnation;
     return 0;
 }
 
 /**
  * @brief Disable and restore a thread's previous alternate signal stack.
  *
- * @param shard Shard whose alternate stack was installed.
+ * @param worker Worker whose alternate stack was installed.
  */
-void llam_uninstall_thread_signal_stack(llam_shard_t *shard) {
+void llam_uninstall_thread_signal_stack(llam_worker_t *worker) {
     stack_t disabled;
+    uint64_t incarnation;
 
-    if (!shard->sigaltstack_installed) {
+    if (worker == NULL || !worker->sigaltstack_installed) {
         return;
+    }
+    incarnation = atomic_load_explicit(&worker->incarnation, memory_order_acquire);
+    if (g_llam_tls_worker != worker ||
+        g_llam_tls_processor != worker->associated_processor ||
+        incarnation == 0U || incarnation != worker->signal_stack_incarnation) {
+        abort();
     }
 
     memset(&disabled, 0, sizeof(disabled));
     disabled.ss_flags = SS_DISABLE;
     (void)sigaltstack(&disabled, NULL);
-    if ((shard->previous_sigaltstack.ss_flags & SS_DISABLE) == 0) {
-        (void)sigaltstack(&shard->previous_sigaltstack, NULL);
+    if ((worker->previous_sigaltstack.ss_flags & SS_DISABLE) == 0) {
+        (void)sigaltstack(&worker->previous_sigaltstack, NULL);
     }
-    shard->sigaltstack_installed = false;
+    worker->sigaltstack_installed = false;
+    worker->signal_stack_incarnation = 0U;
 }
 
 /**

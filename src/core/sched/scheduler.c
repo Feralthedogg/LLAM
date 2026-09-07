@@ -52,10 +52,10 @@ static bool llam_scheduler_signal_stack_failure_is_fatal(int err) {
     return err != EAGAIN;
 }
 
-static int llam_scheduler_try_install_signal_stack(llam_shard_t *shard) {
+static int llam_scheduler_try_install_signal_stack(llam_worker_t *worker) {
     int saved_errno;
 
-    if (llam_install_thread_signal_stack(shard) == 0) {
+    if (llam_install_thread_signal_stack(worker) == 0) {
         return 0;
     }
 
@@ -333,7 +333,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     shard->primary_thread = pthread_self();
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, false);
-    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
+    if (llam_scheduler_try_install_signal_stack(&shard->primary_worker) != 0) {
         llam_record_fatal(rt, errno);
         llam_scheduler_clear_identity();
         return;
@@ -413,7 +413,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         }
     }
 
-    llam_uninstall_thread_signal_stack(shard);
+    llam_uninstall_thread_signal_stack(&shard->primary_worker);
     llam_channel_tls_cache_drain();
     /*
      * The caller returns to unmanaged host code after driving shard 0. Leaving
@@ -442,7 +442,7 @@ void *llam_opaque_helper_main(void *arg) {
     llam_scheduler_bind_identity(shard, &shard->opaque_helper_worker, &shard->opaque_scheduler_ctx);
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, true);
-    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
+    if (llam_scheduler_try_install_signal_stack(&shard->opaque_helper_worker) != 0) {
         pthread_mutex_lock(&shard->opaque_lock);
         shard->opaque_helper_failed = true;
         shard->opaque_helper_ready = false;
@@ -595,7 +595,7 @@ void *llam_opaque_helper_main(void *arg) {
     }
 
 out:
-    llam_uninstall_thread_signal_stack(shard);
+    llam_uninstall_thread_signal_stack(&shard->opaque_helper_worker);
     llam_channel_tls_cache_drain();
     llam_scheduler_clear_identity();
     pthread_mutex_lock(&shard->opaque_lock);

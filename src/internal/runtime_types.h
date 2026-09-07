@@ -1106,6 +1106,11 @@ struct llam_worker {
     llam_processor_t *associated_processor;
     llam_worker_role_t role;
     atomic_uint_fast64_t incarnation;
+    void *signal_stack;
+    size_t signal_stack_size;
+    stack_t previous_sigaltstack;
+    bool sigaltstack_installed;
+    uint64_t signal_stack_incarnation;
 };
 
 /**
@@ -1152,10 +1157,8 @@ struct llam_shard {
 #endif
     pthread_t opaque_helper_thread;
     pthread_t primary_thread;
-    void *signal_stack;
-    size_t signal_stack_size;
-    stack_t previous_sigaltstack;
-    bool sigaltstack_installed;
+    void *signal_stack_mapping;
+    size_t signal_stack_mapping_size;
     bool opaque_helper_thread_started;
     bool opaque_helper_ready;
     bool opaque_helper_active;

@@ -453,6 +453,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o \
+	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
 	$(TESTHOOK_OBJDIR)/src/core/time/timer.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
@@ -464,6 +465,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 		$(OBJDIR)/src/io/api/issue.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o \
+		$(OBJDIR)/src/core/platform/platform.o \
 		$(OBJDIR)/src/core/time/timer.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
@@ -847,9 +849,9 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static
 	@if command -v nm >/dev/null 2>&1; then \
-		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_worker_test_force_helper_create_error|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_worker_test_force_(helper_create|sigaltstack)_error|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
 			echo "production static runtime exports test fault-injection hooks" >&2; \
-			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_worker_test_force_helper_create_error|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_worker_test_force_(helper_create|sigaltstack)_error|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
 			exit 1; \
 		fi; \
 	fi
@@ -1884,6 +1886,7 @@ ASAN_TEST_TARGETS = \
 	asan-test_runtime_core \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
+	asan-test_worker_identity_internal \
 	asan-test_multi_runtime_core \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability
@@ -1894,6 +1897,7 @@ NOOWNER_TEST_TARGETS = \
 TSAN_TEST_TARGETS = \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
+	tsan-test_worker_identity_internal \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
@@ -1928,6 +1932,7 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_core; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_worker_identity_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
@@ -1977,6 +1982,7 @@ test-tsan:
 		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_worker_identity_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
@@ -2138,6 +2144,9 @@ asan-test_io_buffers: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_IO_BUFFERS
 
 asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_worker_identity_internal tsan-test_worker_identity_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS) $(LDLIBS)
 
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)

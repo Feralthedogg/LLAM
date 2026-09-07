@@ -35,6 +35,8 @@
 
 #include "runtime_internal.h"
 
+#include <assert.h>
+
 /**
  * @brief Initialize per-shard diagnostic counters after runtime storage reset.
  *
@@ -467,7 +469,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     unsigned *cpus = NULL;
     unsigned *locality_node_ids;
     unsigned *io_node_ids = NULL;
-    size_t altstack_size;
+    size_t slice_size;
+    size_t mapping_size;
     const char *light_safepoint_env;
     const char *spawn_fanout_env;
     const char *task_list_eager_env;
@@ -816,10 +819,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_store_explicit(&rt->next_spawn_shard, 0U, memory_order_relaxed);
     rt->allowed_cpus = cpus;
     (void)llam_detect_xsave_support(rt);
-    altstack_size = LLAM_ALTSTACK_BYTES;
-    if (altstack_size < (size_t)SIGSTKSZ) {
-        altstack_size = (size_t)SIGSTKSZ;
+    slice_size = LLAM_ALTSTACK_BYTES;
+    if (slice_size < (size_t)SIGSTKSZ) {
+        slice_size = (size_t)SIGSTKSZ;
     }
+    if (slice_size > SIZE_MAX / 2U) {
+        return llam_runtime_init_fail_registered(rt, ENOMEM);
+    }
+    mapping_size = slice_size * 2U;
 
     rt->shards = calloc(rt->active_shards, sizeof(*rt->shards));
     if (rt->shards == NULL) {
@@ -968,21 +975,58 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             llam_runtime_shutdown_rt(rt);
             return -1;
         }
-        rt->shards[i].signal_stack = mmap(NULL,
-                                          altstack_size,
-                                          PROT_READ | PROT_WRITE,
-                                          MAP_PRIVATE | MAP_ANONYMOUS,
-                                          -1,
-                                          0);
-        if (rt->shards[i].signal_stack == MAP_FAILED) {
-            rt->shards[i].signal_stack = NULL;
-            free(io_node_ids);
-            free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
-            return -1;
+        {
+            void *mapping = mmap(NULL,
+                                 mapping_size,
+                                 PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS,
+                                 -1,
+                                 0);
+            uintptr_t mapping_base;
+            uintptr_t mapping_end;
+            uintptr_t primary_end;
+            uintptr_t helper_base;
+            uintptr_t helper_end;
+
+            if (mapping == MAP_FAILED) {
+                mapping = NULL;
+                free(io_node_ids);
+                free(locality_node_ids);
+                llam_runtime_shutdown_rt(rt);
+                return -1;
+            }
+            mapping_base = (uintptr_t)mapping;
+            if (mapping_base > UINTPTR_MAX - mapping_size ||
+                mapping_base > UINTPTR_MAX - slice_size) {
+                (void)munmap(mapping, mapping_size);
+                free(io_node_ids);
+                free(locality_node_ids);
+                return llam_runtime_init_fail_registered(rt, ENOMEM);
+            }
+            mapping_end = mapping_base + mapping_size;
+            helper_base = mapping_base + slice_size;
+            primary_end = helper_base;
+            if (helper_base > UINTPTR_MAX - slice_size) {
+                (void)munmap(mapping, mapping_size);
+                free(io_node_ids);
+                free(locality_node_ids);
+                return llam_runtime_init_fail_registered(rt, ENOMEM);
+            }
+            helper_end = helper_base + slice_size;
+            assert(primary_end <= mapping_end);
+            assert(helper_end <= mapping_end);
+            assert(primary_end <= helper_base);
+            assert(mapping_base <= mapping_end);
+
+            rt->shards[i].signal_stack_mapping = mapping;
+            rt->shards[i].signal_stack_mapping_size = mapping_size;
+            rt->shards[i].primary_worker.signal_stack = (void *)mapping_base;
+            rt->shards[i].primary_worker.signal_stack_size = slice_size;
+            rt->shards[i].opaque_helper_worker.signal_stack = (void *)helper_base;
+            rt->shards[i].opaque_helper_worker.signal_stack_size = slice_size;
         }
-        rt->shards[i].signal_stack_size = altstack_size;
-        rt->shards[i].previous_sigaltstack.ss_flags = SS_DISABLE;
+        rt->shards[i].primary_worker.previous_sigaltstack.ss_flags = SS_DISABLE;
+        rt->shards[i].opaque_helper_worker.previous_sigaltstack.ss_flags = SS_DISABLE;
         if (llam_allocator_init(&rt->shards[i].allocator) != 0) {
             free(io_node_ids);
             free(locality_node_ids);

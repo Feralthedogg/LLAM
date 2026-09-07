@@ -257,7 +257,10 @@ int llam_detect_xsave_support(llam_runtime_t *rt);
 void llam_release_xsave_globals(llam_runtime_t *rt);
 void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext);
 int llam_install_process_signal_handlers(llam_runtime_t *rt);
-int llam_install_thread_signal_stack(llam_shard_t *shard);
+int llam_install_thread_signal_stack(llam_worker_t *worker);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_worker_test_force_sigaltstack_error(llam_worker_role_t role, int error_code);
+#endif
 void llam_preempt_signal_handler(int signo);
 void llam_restore_process_signal_handlers(llam_runtime_t *rt);
 
@@ -353,6 +356,6 @@ void llam_trace_shard(llam_shard_t *shard,
                     llam_task_state_id_t from,
                     llam_task_state_id_t to,
                     llam_wait_reason_t reason);
-void llam_uninstall_thread_signal_stack(llam_shard_t *shard);
+void llam_uninstall_thread_signal_stack(llam_worker_t *worker);
 
 #endif

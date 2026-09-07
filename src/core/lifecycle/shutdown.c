@@ -29,6 +29,8 @@
 
 #include "runtime_internal.h"
 
+#include <assert.h>
+
 /**
  * @brief Close an accepted socket descriptor retained by a backend watch.
  *
@@ -120,6 +122,26 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     // as their loops exit before the joins above complete.
     llam_channel_tls_cache_drain();
     llam_channel_global_cache_drain();
+
+    if (rt->shards != NULL) {
+        for (i = 0; i < rt->active_shards; ++i) {
+            if (rt->shards[i].opaque_helper_thread_started) {
+                // Opaque helpers may be asleep on their private wake path; set
+                // the stop flag under lock and signal both helper and shard.
+                pthread_mutex_lock(&rt->shards[i].opaque_lock);
+                rt->shards[i].opaque_helper_stop = true;
+                llam_opaque_wake_signal(&rt->shards[i]);
+                pthread_mutex_unlock(&rt->shards[i].opaque_lock);
+                llam_kick_shard(&rt->shards[i]);
+                pthread_join(rt->shards[i].opaque_helper_thread, NULL);
+                rt->shards[i].opaque_helper_thread_started = false;
+            }
+            assert(!rt->shards[i].primary_worker.sigaltstack_installed);
+            assert(!rt->shards[i].opaque_helper_worker.sigaltstack_installed);
+            assert(rt->shards[i].primary_worker.signal_stack_incarnation == 0U);
+            assert(rt->shards[i].opaque_helper_worker.signal_stack_incarnation == 0U);
+        }
+    }
 
     if (rt->nodes != NULL) {
         for (i = 0; i < rt->active_nodes; ++i) {
@@ -289,23 +311,15 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 
     if (rt->shards != NULL) {
         for (i = 0; i < rt->active_shards; ++i) {
-            if (rt->shards[i].opaque_helper_thread_started) {
-                // Opaque helpers may be asleep on their private wake path; set
-                // the stop flag under lock and signal both helper and shard.
-                pthread_mutex_lock(&rt->shards[i].opaque_lock);
-                rt->shards[i].opaque_helper_stop = true;
-                llam_opaque_wake_signal(&rt->shards[i]);
-                pthread_mutex_unlock(&rt->shards[i].opaque_lock);
-                llam_kick_shard(&rt->shards[i]);
-                pthread_join(rt->shards[i].opaque_helper_thread, NULL);
-                rt->shards[i].opaque_helper_thread_started = false;
-            }
             if (rt->shards[i].event_fd >= 0) {
                 llam_wake_handle_close(rt->shards[i].event_fd);
                 rt->shards[i].event_fd = -1;
             }
-            if (rt->shards[i].signal_stack != NULL) {
-                munmap(rt->shards[i].signal_stack, rt->shards[i].signal_stack_size);
+            if (rt->shards[i].signal_stack_mapping != NULL) {
+                (void)munmap(rt->shards[i].signal_stack_mapping,
+                             rt->shards[i].signal_stack_mapping_size);
+                rt->shards[i].signal_stack_mapping = NULL;
+                rt->shards[i].signal_stack_mapping_size = 0U;
             }
             llam_ctx_destroy_fp_state(&rt->shards[i].scheduler_ctx);
             llam_ctx_destroy_fp_state(&rt->shards[i].opaque_scheduler_ctx);

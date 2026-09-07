@@ -56,6 +56,19 @@ typedef struct worker_identity_observation {
     unsigned role;
 } worker_identity_observation_t;
 
+#if !LLAM_PLATFORM_WINDOWS
+typedef struct worker_signal_observation {
+    uintptr_t worker_stack_base;
+    size_t worker_stack_size;
+    uintptr_t installed_stack_base;
+    size_t installed_stack_size;
+    uint64_t worker_incarnation;
+    uint64_t installed_incarnation;
+    unsigned installed;
+    int query_errno;
+} worker_signal_observation_t;
+#endif
+
 typedef struct test_failure_state {
     atomic_uint failures;
     const char *first_failure;
@@ -63,9 +76,14 @@ typedef struct test_failure_state {
 
 typedef struct helper_failure_state {
     test_failure_state_t failure;
+    llam_runtime_t *runtime;
     int enter_rc;
     int enter_errno;
     int leave_rc;
+    atomic_int run_rc;
+    atomic_int run_errno;
+    atomic_uint run_done;
+    atomic_uint task_done;
 } helper_failure_state_t;
 
 typedef struct role_state role_state_t;
@@ -83,6 +101,11 @@ struct role_state {
     worker_identity_observation_t helper_identity;
     worker_identity_observation_t helper_identity_after_enter;
     worker_identity_observation_t helper_identity_after_leave;
+#if !LLAM_PLATFORM_WINDOWS
+    worker_signal_observation_t root_signal_before;
+    worker_signal_observation_t root_signal_after;
+    worker_signal_observation_t helper_signal;
+#endif
     atomic_uint helper_copied;
     atomic_uint helper_done;
     atomic_uint root_depth_after_nested_enter;
@@ -201,6 +224,73 @@ static void observe_worker_identity(worker_identity_observation_t *out) {
         atomic_load_explicit(&worker->incarnation, memory_order_acquire);
     out->role = (unsigned)worker->role;
 }
+
+#if !LLAM_PLATFORM_WINDOWS
+static void observe_current_signal_stack(worker_signal_observation_t *out) {
+    stack_t active;
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    memset(out, 0, sizeof(*out));
+    if (worker == NULL) {
+        out->query_errno = EINVAL;
+        return;
+    }
+    if (sigaltstack(NULL, &active) != 0) {
+        out->query_errno = errno;
+        return;
+    }
+    out->worker_stack_base = (uintptr_t)worker->signal_stack;
+    out->worker_stack_size = worker->signal_stack_size;
+    out->installed_stack_base = (uintptr_t)active.ss_sp;
+    out->installed_stack_size = active.ss_size;
+    out->worker_incarnation = atomic_load_explicit(
+        &worker->incarnation, memory_order_acquire);
+    out->installed_incarnation = worker->signal_stack_incarnation;
+    out->installed = worker->sigaltstack_installed ? 1U : 0U;
+}
+
+static unsigned signal_range_contains(uintptr_t outer_base,
+                                      size_t outer_size,
+                                      uintptr_t inner_base,
+                                      size_t inner_size) {
+    if (outer_base > UINTPTR_MAX - outer_size ||
+        inner_base > UINTPTR_MAX - inner_size) {
+        return 0U;
+    }
+    return inner_base >= outer_base &&
+                   inner_base + inner_size <= outer_base + outer_size
+               ? 1U
+               : 0U;
+}
+
+static unsigned signal_ranges_disjoint(const worker_signal_observation_t *left,
+                                       const worker_signal_observation_t *right) {
+    uintptr_t left_end;
+    uintptr_t right_end;
+
+    if (left == NULL || right == NULL ||
+        left->worker_stack_base > UINTPTR_MAX - left->worker_stack_size ||
+        right->worker_stack_base > UINTPTR_MAX - right->worker_stack_size) {
+        return 0U;
+    }
+    left_end = left->worker_stack_base + left->worker_stack_size;
+    right_end = right->worker_stack_base + right->worker_stack_size;
+    return left_end <= right->worker_stack_base || right_end <= left->worker_stack_base
+               ? 1U
+               : 0U;
+}
+
+static unsigned signal_observation_valid(const worker_signal_observation_t *obs) {
+    return obs != NULL && obs->query_errno == 0 && obs->installed != 0U &&
+                   obs->worker_stack_base != 0U && obs->worker_stack_size >= (size_t)SIGSTKSZ &&
+                   obs->installed_stack_base == obs->worker_stack_base &&
+                   obs->installed_stack_size == obs->worker_stack_size &&
+                   obs->worker_incarnation != 0U &&
+                   obs->installed_incarnation == obs->worker_incarnation
+               ? 1U
+               : 0U;
+}
+#endif
 
 static unsigned worker_identity_tuple_is_clear(void) {
     return g_llam_tls_shard == NULL &&
@@ -413,7 +503,12 @@ static void helper_failure_task(void *arg) {
     if (state->enter_rc != 0 || state->leave_rc != 0) {
         test_fail(&state->failure, "helper-create failure did not preserve blocking lifecycle");
     }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
 }
+
+#if !LLAM_PLATFORM_WINDOWS
+static void role_root_task(void *arg);
+#endif
 
 static int test_helper_create_failure_redirect(void) {
     helper_failure_state_t state;
@@ -427,6 +522,7 @@ static int test_helper_create_failure_redirect(void) {
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_done, 0U);
     if (create_deterministic_runtime(&runtime) != 0) {
         fprintf(stderr,
                 "test_worker_identity_internal: runtime create failed: errno=%d (%s)\n",
@@ -489,6 +585,7 @@ static int test_helper_create_failure_redirect(void) {
     /* The injected error is one-shot: a later enter may create the helper. */
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_done, 0U);
     task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
     if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
         destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
@@ -516,6 +613,165 @@ static int test_helper_create_failure_redirect(void) {
     return 0;
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static void *helper_signal_failure_run_main(void *arg) {
+    helper_failure_state_t *state = arg;
+    int saved_errno;
+    int rc;
+
+    errno = 0;
+    rc = llam_runtime_run_handle(state->runtime);
+    saved_errno = errno;
+    atomic_store_explicit(&state->run_rc, rc, memory_order_release);
+    atomic_store_explicit(&state->run_errno, saved_errno, memory_order_release);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void init_helper_failure_state(helper_failure_state_t *state) {
+    memset(state, 0, sizeof(*state));
+    atomic_init(&state->failure.failures, 0U);
+    atomic_init(&state->run_rc, 0);
+    atomic_init(&state->run_errno, 0);
+    atomic_init(&state->run_done, 0U);
+    atomic_init(&state->task_done, 0U);
+}
+
+static void init_role_state(role_state_t *state) {
+    memset(state, 0, sizeof(*state));
+    atomic_init(&state->failure.failures, 0U);
+    atomic_init(&state->helper_copied, 0U);
+    atomic_init(&state->helper_done, 0U);
+    atomic_init(&state->root_depth_after_nested_enter, 0U);
+    atomic_init(&state->root_depth_after_inner_leave, 0U);
+    atomic_init(&state->root_depth_after_outer_leave, 0U);
+    atomic_init(&state->root_compensation_after_nested_enter, 0U);
+    atomic_init(&state->helper_enter_rc, 0);
+    atomic_init(&state->helper_leave_rc, 0);
+    atomic_init(&state->helper_redirect_active, 0U);
+    atomic_init(&state->helper_redirect_depth, 0U);
+    atomic_init(&state->helper_ready, 0U);
+    atomic_init(&state->helper_thread_started, 0U);
+    atomic_init(&state->helper_driver_matches, 0U);
+    atomic_init(&state->helper_identity_preserved, 0U);
+}
+
+static int test_helper_signal_stack_eagain(void) {
+    role_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *root = NULL;
+    llam_shard_t *shard;
+
+    init_role_state(&state);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    llam_worker_test_force_sigaltstack_error(LLAM_WORKER_ROLE_OPAQUE_HELPER, EAGAIN);
+    root = llam_runtime_spawn_ex(runtime, role_root_task, &state, NULL, 0U);
+    if (root == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(root) != 0) {
+        destroy_runtime_bounded(&runtime, "helper-sigaltstack EAGAIN runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: helper sigaltstack EAGAIN run/join failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    if (failure_result(&state.failure, "helper sigaltstack EAGAIN task failed")) {
+        destroy_runtime_bounded(&runtime, "helper-sigaltstack EAGAIN runtime destroy exceeded the bounded deadline");
+        return 1;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!shard->opaque_helper_thread_started ||
+        !shard->opaque_helper_ready || shard->opaque_helper_failed) {
+        pthread_mutex_unlock(&shard->opaque_lock);
+        destroy_runtime_bounded(&runtime, "helper-sigaltstack EAGAIN runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: helper sigaltstack EAGAIN did not leave helper ready\n");
+        return 1;
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != 0 ||
+        state.root_signal_before.query_errno != 0 ||
+        state.root_signal_before.installed == 0U ||
+        state.helper_signal.query_errno != 0 ||
+        state.helper_signal.worker_stack_base == 0U ||
+        state.helper_signal.worker_stack_size < (size_t)SIGSTKSZ ||
+        state.helper_signal.installed != 0U ||
+        state.helper_signal.installed_incarnation != 0U) {
+        destroy_runtime_bounded(&runtime, "helper-sigaltstack EAGAIN runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: helper sigaltstack EAGAIN changed fatal or installed state\n");
+        return 1;
+    }
+    destroy_runtime_bounded(&runtime, "helper-sigaltstack EAGAIN runtime destroy exceeded the bounded deadline");
+    return 0;
+}
+
+static int test_helper_signal_stack_einval(void) {
+    helper_failure_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    bool run_created = false;
+    int run_rc;
+    int run_errno;
+
+    init_helper_failure_state(&state);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    llam_worker_test_force_sigaltstack_error(LLAM_WORKER_ROLE_OPAQUE_HELPER, EINVAL);
+    task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
+    if (task == NULL || pthread_create(&run_thread, NULL, helper_signal_failure_run_main, &state) != 0) {
+        destroy_runtime_bounded(&runtime, "helper-sigaltstack EINVAL runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: helper sigaltstack EINVAL setup failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    run_created = true;
+    if (wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "helper sigaltstack EINVAL did not wake the primary run");
+    }
+    if (run_created) {
+        pthread_join(run_thread, NULL);
+        run_created = false;
+    }
+    run_rc = atomic_load_explicit(&state.run_rc, memory_order_acquire);
+    run_errno = atomic_load_explicit(&state.run_errno, memory_order_acquire);
+    if (task != NULL) {
+        errno = 0;
+        if (llam_join(task) == 0 || errno != EINVAL ||
+            atomic_load_explicit(&state.task_done, memory_order_acquire) == 0U) {
+            test_fail(&state.failure, "helper sigaltstack EINVAL primary task did not complete");
+        }
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!shard->opaque_helper_thread_started || shard->opaque_helper_ready ||
+        !shard->opaque_helper_failed) {
+        test_fail(&state.failure, "helper sigaltstack EINVAL did not publish failed/not-ready");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (run_rc != -1 || run_errno != EINVAL ||
+        atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != EINVAL ||
+        state.enter_rc != 0 || state.leave_rc != 0) {
+        test_fail(&state.failure, "helper sigaltstack EINVAL did not preserve fatal runtime semantics");
+    }
+    if (failure_result(&state.failure, "helper sigaltstack EINVAL failure semantics changed")) {
+        destroy_runtime_bounded(&runtime, "helper-sigaltstack EINVAL runtime destroy exceeded the bounded deadline");
+        return 1;
+    }
+    destroy_runtime_bounded(&runtime, "helper-sigaltstack EINVAL runtime destroy exceeded the bounded deadline");
+    return 0;
+}
+#endif
+
 static void helper_role_task(void *arg) {
     role_state_t *state = arg;
     llam_shard_t *shard;
@@ -528,6 +784,9 @@ static void helper_role_task(void *arg) {
     observe_legacy_worker(&state->helper);
     verify_worker_role_observation(&state->failure, &state->helper);
     observe_worker_identity(&state->helper_identity);
+#if !LLAM_PLATFORM_WINDOWS
+    observe_current_signal_stack(&state->helper_signal);
+#endif
     shard = g_llam_tls_shard;
     pthread_mutex_lock(&shard->opaque_lock);
     atomic_store_explicit(&state->helper_ready,
@@ -594,6 +853,9 @@ static void role_root_task(void *arg) {
     observe_legacy_worker(&state->root_before);
     verify_worker_role_observation(&state->failure, &state->root_before);
     observe_worker_identity(&state->root_identity_before);
+#if !LLAM_PLATFORM_WINDOWS
+    observe_current_signal_stack(&state->root_signal_before);
+#endif
     if (state->root_before.primary_by_context == 0U ||
         state->root_before.helper_by_context != 0U) {
         test_fail(&state->failure, "root task did not observe the primary scheduler context");
@@ -648,6 +910,9 @@ static void role_root_task(void *arg) {
     observe_legacy_worker(&state->root_after);
     verify_worker_role_observation(&state->failure, &state->root_after);
     observe_worker_identity(&state->root_identity_after);
+#if !LLAM_PLATFORM_WINDOWS
+    observe_current_signal_stack(&state->root_signal_after);
+#endif
     if (state->root_after.primary_by_context == 0U ||
         state->root_after.helper_by_context != 0U) {
         test_fail(&state->failure, "primary did not regain its scheduler context after helper return");
@@ -770,6 +1035,28 @@ static int test_primary_helper_takeover(void) {
                 "test_worker_identity_internal: helper identity changed during blocking enter/leave\n");
         return 1;
     }
+#if !LLAM_PLATFORM_WINDOWS
+    if (!signal_observation_valid(&state.root_signal_before) ||
+        !signal_observation_valid(&state.root_signal_after) ||
+        !signal_observation_valid(&state.helper_signal) ||
+        state.root_signal_before.worker_stack_base != state.root_signal_after.worker_stack_base ||
+        state.root_signal_before.worker_stack_size != state.root_signal_after.worker_stack_size ||
+        state.root_signal_before.worker_incarnation != state.root_signal_after.worker_incarnation ||
+        !signal_ranges_disjoint(&state.root_signal_before, &state.helper_signal) ||
+        !signal_range_contains((uintptr_t)shard->signal_stack_mapping,
+                               shard->signal_stack_mapping_size,
+                               state.root_signal_before.worker_stack_base,
+                               state.root_signal_before.worker_stack_size) ||
+        !signal_range_contains((uintptr_t)shard->signal_stack_mapping,
+                               shard->signal_stack_mapping_size,
+                               state.helper_signal.worker_stack_base,
+                               state.helper_signal.worker_stack_size)) {
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: primary/helper signal-stack ranges were not isolated\n");
+        return 1;
+    }
+#endif
     if (atomic_load_explicit(&state.root_depth_after_nested_enter, memory_order_acquire) != 2U ||
         atomic_load_explicit(&state.root_depth_after_inner_leave, memory_order_acquire) != 1U ||
         atomic_load_explicit(&state.root_depth_after_outer_leave, memory_order_acquire) != 0U ||
@@ -1351,6 +1638,10 @@ cleanup:
 int main(void) {
     if (test_helper_create_failure_redirect() != 0 ||
         test_primary_helper_takeover() != 0 ||
+#if !LLAM_PLATFORM_WINDOWS
+        test_helper_signal_stack_eagain() != 0 ||
+        test_helper_signal_stack_einval() != 0 ||
+#endif
         test_repeated_runs_distinct_host_threads() != 0 ||
         test_nested_runtime_preserves_identity_tls() != 0 ||
         test_idle_helper_shutdown() != 0 ||
