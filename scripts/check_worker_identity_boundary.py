@@ -33,6 +33,7 @@ FUTURE_EXECUTION_AUTHORITY_NAMES = frozenset(
     {
         "worker_is_executor",
         "worker_owns_processor",
+        "can_execute_processor",
         "processor_current_worker",
     }
 )
@@ -61,6 +62,13 @@ CONTEXT_MEMBERS = frozenset({"scheduler_ctx", "opaque_scheduler_ctx"})
 class _Token:
     value: str
     line: int
+
+
+@dataclass
+class _ConditionalFrame:
+    debug_guard: bool
+    branch: int = 0
+    guard_name: str = ""
 
 
 def _mask_comments_and_literals(text: str) -> str:
@@ -164,8 +172,8 @@ def _debug_equivalence_lines(relative_path: str, text: str) -> set[int]:
         return set()
 
     lines: set[int] = set()
-    block_stack: list[bool] = []
-    directive_re = re.compile(r"^\s*#\s*(ifn?def|if|else|endif)\b(.*)$")
+    block_stack: list[_ConditionalFrame] = []
+    directive_re = re.compile(r"^\s*#\s*(ifn?def|if|elif|else|endif)\b(.*)$")
     for number, raw_line in enumerate(_mask_comments_and_literals(text).splitlines(), start=1):
         match = directive_re.match(raw_line)
         if match is not None:
@@ -174,15 +182,45 @@ def _debug_equivalence_lines(relative_path: str, text: str) -> set[int]:
             if directive == "endif":
                 if block_stack:
                     block_stack.pop()
-            elif directive == "else":
+            elif directive in {"elif", "else"}:
                 if block_stack:
-                    block_stack[-1] = not block_stack[-1]
+                    block_stack[-1].branch += 1
             elif directive == "ifndef":
-                block_stack.append(expression == "NDEBUG")
+                block_stack.append(
+                    _ConditionalFrame(
+                        debug_guard=expression == "NDEBUG", guard_name=expression
+                    )
+                )
             elif directive == "if":
-                block_stack.append(bool(re.fullmatch(r"!?\s*defined\s*\(\s*NDEBUG\s*\)", expression)))
+                block_stack.append(
+                    _ConditionalFrame(
+                        debug_guard=bool(
+                            re.fullmatch(
+                                r"!\s*defined\s*\(\s*NDEBUG\s*\)", expression
+                            )
+                        )
+                    )
+                )
 
-        if any(block_stack):
+        debug_guard_index = next(
+            (
+                index
+                for index, frame in enumerate(block_stack)
+                if frame.debug_guard and frame.branch == 0
+            ),
+            None,
+        )
+        enclosing = block_stack[:debug_guard_index] if debug_guard_index is not None else []
+        intended_outer_guard = not enclosing or (
+            len(enclosing) == 1
+            and enclosing[0].guard_name == "LLAM_RUNTIME_STATE_H"
+            and enclosing[0].branch == 0
+        )
+        if (
+            debug_guard_index is not None
+            and debug_guard_index == len(block_stack) - 1
+            and intended_outer_guard
+        ):
             lines.add(number)
     return lines
 
@@ -190,19 +228,55 @@ def _debug_equivalence_lines(relative_path: str, text: str) -> set[int]:
 def _context_operand(tokens: Sequence[_Token], start: int, step: int) -> bool:
     """Check one side of a comparison for a direct scheduler context operand."""
 
-    delimiters = {";", "{", "}", ",", "?", ":", "&&", "||", "==", "!=", "="}
-    for offset in range(16):
-        index = start + step * offset
+    delimiters = {";", "{", "}", ",", "&&", "||", "==", "!=", "="}
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+    saw_context = False
+    saw_nested_conditional = False
+    index = start
+    while 0 <= index < len(tokens):
         if index < 0 or index >= len(tokens):
             break
         value = tokens[index].value
-        if value in delimiters:
+        at_top_level = paren_depth == 0 and bracket_depth == 0 and brace_depth == 0
+        if at_top_level and (value in delimiters or value in {"?", ":"}):
             break
-        if value == "NULL":
+        if value == "NULL" and not saw_context and at_top_level and index == start:
             return False
         if value in CONTEXT_MEMBERS:
-            return True
-    return False
+            saw_context = True
+        if value in {"?", ":"}:
+            saw_nested_conditional = True
+
+        if step > 0:
+            if value == "(":
+                paren_depth += 1
+            elif value == ")" and paren_depth:
+                paren_depth -= 1
+            elif value == "[":
+                bracket_depth += 1
+            elif value == "]" and bracket_depth:
+                bracket_depth -= 1
+            elif value == "{":
+                brace_depth += 1
+            elif value == "}" and brace_depth:
+                brace_depth -= 1
+        else:
+            if value == ")":
+                paren_depth += 1
+            elif value == "(" and paren_depth:
+                paren_depth -= 1
+            elif value == "]":
+                bracket_depth += 1
+            elif value == "[" and bracket_depth:
+                bracket_depth -= 1
+            elif value == "}":
+                brace_depth += 1
+            elif value == "{" and brace_depth:
+                brace_depth -= 1
+        index += step
+    return saw_context and not saw_nested_conditional
 
 
 def _raw_context_role_checks(
@@ -309,15 +383,14 @@ def scan_source(relative_path: str, text: str) -> list[str]:
                 errors.append(f"{token.line}: Phase 0 execution authority identifier: {token.value}")
                 authority_reported.add(key)
             continue
+        if token.value in FUTURE_EXECUTION_AUTHORITY_MEMBERS:
+            key = (token.line, token.value)
+            if key not in authority_reported:
+                errors.append(f"{token.line}: Phase 0 execution authority member: {token.value}")
+                authority_reported.add(key)
+            continue
         if token.value in {"->", "."} and index + 1 < len(tokens):
             member = tokens[index + 1]
-            if member.value in FUTURE_EXECUTION_AUTHORITY_MEMBERS:
-                key = (member.line, member.value)
-                if key not in authority_reported:
-                    errors.append(
-                        f"{member.line}: Phase 0 execution authority member: {member.value}"
-                    )
-                    authority_reported.add(key)
             if member.value in OBSOLETE_SIGNAL_STACK_MEMBERS and _receiver_is_shard(tokens, index):
                 key = (member.line, member.value)
                 if key not in signal_reported:

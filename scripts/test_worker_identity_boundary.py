@@ -57,6 +57,14 @@ class WorkerIdentityBoundaryTest(unittest.TestCase):
             "raw scheduler-context role check",
         )
 
+    def test_rejects_long_raw_context_expression(self) -> None:
+        self.assert_error(
+            "src/core/task/example.c",
+            "if (g_llam_tls_scheduler_ctx == "
+            "&rt->shards[0].a.b.c.d.e.f.g.scheduler_ctx) {}",
+            "raw scheduler-context role check",
+        )
+
     def test_allows_context_routing_expression(self) -> None:
         errors = scan_source(
             "src/core/task/example.c",
@@ -81,6 +89,28 @@ class WorkerIdentityBoundaryTest(unittest.TestCase):
         )
         self.assertEqual([], errors)
 
+    def test_rejects_debug_comparison_in_runtime_state_elif_branch(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_state.h",
+            "#ifndef NDEBUG\n"
+            "bool legacy = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;\n"
+            "#elif defined(LLAM_RELEASE_POLICY)\n"
+            "bool production = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;\n"
+            "#endif\n",
+            "raw scheduler-context role check",
+        )
+
+    def test_rejects_debug_comparison_under_unrelated_outer_guard(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_state.h",
+            "#if defined(LLAM_PLATFORM)\n"
+            "#ifndef NDEBUG\n"
+            "bool legacy = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;\n"
+            "#endif\n"
+            "#endif\n",
+            "raw scheduler-context role check",
+        )
+
     def test_rejects_debug_equivalence_checks_outside_runtime_state(self) -> None:
         self.assert_error(
             "src/core/task/example.c",
@@ -95,6 +125,43 @@ class WorkerIdentityBoundaryTest(unittest.TestCase):
             "src/internal/runtime_state.h",
             "bool worker_is_executor(llam_worker_t *worker);",
             "Phase 0 execution authority",
+        )
+
+    def test_rejects_can_execute_processor_name(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_state.h",
+            "bool can_execute_processor(const llam_processor_t *processor);",
+            "Phase 0 execution authority",
+        )
+
+    def test_rejects_future_authority_member_declarations(self) -> None:
+        forbidden = (
+            "active_g",
+            "owns_processor",
+            "preempt_target",
+            "executor",
+            "current_g",
+            "lease_epoch",
+        )
+        for member in forbidden:
+            with self.subTest(member=member):
+                self.assert_error(
+                    "src/internal/runtime_types.h",
+                    f"struct phase_zero_worker {{ unsigned {member}; }};",
+                    "Phase 0 execution authority",
+                )
+
+    def test_rejects_production_selected_elif_comparison(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_state.h",
+            "#ifndef NDEBUG\n"
+            "#if defined(LLAM_DEBUG_EQUIVALENCE)\n"
+            "bool legacy = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;\n"
+            "#elif defined(LLAM_RELEASE_POLICY)\n"
+            "bool production = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;\n"
+            "#endif\n"
+            "#endif\n",
+            "raw scheduler-context role check",
         )
 
     def test_rejects_every_future_execution_authority_identifier(self) -> None:
