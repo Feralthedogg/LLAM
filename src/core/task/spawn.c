@@ -123,7 +123,7 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
     }
     if (LLAM_UNLIKELY(g_llam_tls_shard != target ||
                       g_llam_tls_task == NULL ||
-                      g_llam_tls_scheduler_ctx != &target->scheduler_ctx ||
+                      !llam_tls_has_legacy_direct_handoff_context(target) ||
                       rt->trace_events_enabled != 0U ||
                       !llam_shard_accepts_new_work(target) ||
                       !llam_lockfree_normq_enabled(rt))) {
@@ -151,7 +151,7 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
 static uint64_t llam_spawn_next_task_id(llam_runtime_t *rt, llam_shard_t *target, bool local_spawn) {
     if (LLAM_LIKELY(target != NULL &&
                     local_spawn &&
-                    g_llam_tls_scheduler_ctx == &target->scheduler_ctx)) {
+                    llam_tls_has_legacy_direct_handoff_context(target))) {
         uint64_t seq = ++target->next_task_seq;
 
         return (((uint64_t)(target->id + 1U) & 0xffffULL) << 48U) |

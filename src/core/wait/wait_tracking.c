@@ -122,7 +122,7 @@ static llam_wake_handoff_fail_t llam_wake_handoff_precheck(llam_runtime_t *rt,
 
     if (rt == NULL || task == NULL || shard == NULL || current == NULL ||
         rt->active_shards == 0U || parked_shard >= rt->active_shards ||
-        g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+        !llam_tls_has_legacy_direct_handoff_context(shard)) {
         return LLAM_WAKE_HANDOFF_FAIL_CONTEXT;
     }
     if (shard->runtime != rt || shard->id != parked_shard || current == task) {

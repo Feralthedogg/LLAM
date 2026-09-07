@@ -205,7 +205,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
 #if LLAM_REINJECT_DIRECT_OWNER_HANDOFF
-    if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx &&
+    if (llam_tls_has_legacy_direct_handoff_context(target) &&
         rt->trace_events_enabled == 0U &&
         rt->run_timing_enabled == 0U &&
         rt->wake_latency_metrics_enabled == 0U &&

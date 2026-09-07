@@ -467,7 +467,7 @@ int llam_enter_blocking(void) {
         task->wait_reason = LLAM_WAIT_BLOCKING;
         task->opaque_uses_helper = false;
         task->opaque_uses_redirect = false;
-        from_primary = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
+        from_primary = llam_tls_is_primary_scheduler_for(shard);
         prefer_redirect = from_primary &&
                           shard->runtime->active_shards > 1U &&
                           (llam_opaque_redirect_fastpath_enabled() || g_llam_tls_opaque_redirect_hint != 0U);
@@ -579,7 +579,7 @@ int llam_leave_blocking(void) {
         bool helper_started;
         bool used_helper = task->opaque_uses_helper;
         bool used_redirect = task->opaque_uses_redirect;
-        bool from_opaque_helper = g_llam_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
+        bool from_opaque_helper = llam_tls_is_opaque_helper_for(shard);
         bool deactivate_redirect = false;
         bool timing = llam_opaque_timing_enabled();
         uint64_t now_ns = timing ? llam_now_ns() : 0U;

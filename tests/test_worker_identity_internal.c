@@ -43,6 +43,9 @@ typedef struct legacy_worker_observation {
     uintptr_t scheduler_context;
     unsigned primary_by_context;
     unsigned helper_by_context;
+    unsigned primary_predicate;
+    unsigned helper_predicate;
+    unsigned direct_predicate;
 } legacy_worker_observation_t;
 
 typedef struct worker_identity_observation {
@@ -179,6 +182,9 @@ static void observe_legacy_worker(legacy_worker_observation_t *out) {
         out->helper_by_context =
             g_llam_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
     }
+    out->primary_predicate = llam_tls_is_primary_scheduler_for(shard);
+    out->helper_predicate = llam_tls_is_opaque_helper_for(shard);
+    out->direct_predicate = llam_tls_has_legacy_direct_handoff_context(shard);
 }
 
 static void observe_worker_identity(worker_identity_observation_t *out) {
@@ -324,6 +330,22 @@ static int repeat_condition_init(pthread_cond_t *condition) {
 static void test_fail(test_failure_state_t *state, const char *message) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_acq_rel) == 0U) {
         state->first_failure = message;
+    }
+}
+
+static void verify_worker_role_observation(test_failure_state_t *failure,
+                                           const legacy_worker_observation_t *obs) {
+    if (failure == NULL || obs == NULL) {
+        return;
+    }
+    if (obs->primary_predicate != obs->primary_by_context) {
+        test_fail(failure, "primary predicate changed the legacy truth value");
+    }
+    if (obs->helper_predicate != obs->helper_by_context) {
+        test_fail(failure, "helper predicate changed the legacy truth value");
+    }
+    if (obs->direct_predicate != obs->primary_by_context) {
+        test_fail(failure, "direct-handoff predicate changed the legacy truth value");
     }
 }
 
@@ -504,6 +526,7 @@ static void helper_role_task(void *arg) {
 
     helper_before = pthread_self();
     observe_legacy_worker(&state->helper);
+    verify_worker_role_observation(&state->failure, &state->helper);
     observe_worker_identity(&state->helper_identity);
     shard = g_llam_tls_shard;
     pthread_mutex_lock(&shard->opaque_lock);
@@ -526,6 +549,7 @@ static void helper_role_task(void *arg) {
 
     atomic_store_explicit(&state->helper_enter_rc, llam_enter_blocking(), memory_order_release);
     observe_legacy_worker(&state->helper_after_enter);
+    verify_worker_role_observation(&state->failure, &state->helper_after_enter);
     observe_worker_identity(&state->helper_identity_after_enter);
     if (atomic_load_explicit(&state->helper_enter_rc, memory_order_acquire) == 0) {
         pthread_mutex_lock(&shard->lock);
@@ -538,6 +562,7 @@ static void helper_role_task(void *arg) {
         pthread_mutex_unlock(&shard->lock);
         atomic_store_explicit(&state->helper_leave_rc, llam_leave_blocking(), memory_order_release);
         observe_legacy_worker(&state->helper_after_leave);
+        verify_worker_role_observation(&state->failure, &state->helper_after_leave);
         observe_worker_identity(&state->helper_identity_after_leave);
     } else {
         atomic_store_explicit(&state->helper_leave_rc, -1, memory_order_release);
@@ -567,6 +592,7 @@ static void role_root_task(void *arg) {
     uint64_t deadline;
 
     observe_legacy_worker(&state->root_before);
+    verify_worker_role_observation(&state->failure, &state->root_before);
     observe_worker_identity(&state->root_identity_before);
     if (state->root_before.primary_by_context == 0U ||
         state->root_before.helper_by_context != 0U) {
@@ -620,6 +646,7 @@ static void role_root_task(void *arg) {
                           g_llam_tls_task->opaque_blocking_depth,
                           memory_order_release);
     observe_legacy_worker(&state->root_after);
+    verify_worker_role_observation(&state->failure, &state->root_after);
     observe_worker_identity(&state->root_identity_after);
     if (state->root_after.primary_by_context == 0U ||
         state->root_after.helper_by_context != 0U) {
@@ -771,6 +798,7 @@ static void repeat_observer_task(void *arg) {
     legacy_worker_observation_t *observation = &state->observations[task_arg->index];
 
     observe_legacy_worker(observation);
+    verify_worker_role_observation(&state->failure, observation);
     observe_worker_identity(&state->identity_observations[task_arg->index]);
     if (observation->primary_by_context == 0U || observation->helper_by_context != 0U) {
         test_fail(&state->failure, "repeat-run task did not observe primary context");

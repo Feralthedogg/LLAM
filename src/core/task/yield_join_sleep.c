@@ -211,7 +211,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     bool push_failed = false;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+    if (shard == NULL || current == NULL || !llam_tls_has_legacy_direct_handoff_context(shard)) {
         if (fail_reason != NULL) {
             *fail_reason = LLAM_YIELD_DIRECT_FAIL_CONTEXT;
         }
@@ -506,7 +506,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     llam_runtime_t *rt;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+    if (shard == NULL || current == NULL || !llam_tls_has_legacy_direct_handoff_context(shard)) {
         return false;
     }
     rt = shard->runtime;

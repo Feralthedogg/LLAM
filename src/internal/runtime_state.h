@@ -28,6 +28,8 @@
 #ifndef LLAM_RUNTIME_STATE_H
 #define LLAM_RUNTIME_STATE_H
 
+#include <assert.h>
+
 #include "runtime_types.h"
 
 // Process-default runtime used by legacy init/spawn/run/shutdown wrappers.
@@ -44,6 +46,85 @@ extern _Thread_local llam_worker_t *g_llam_tls_worker;
 extern _Thread_local llam_processor_t *g_llam_tls_processor;
 extern _Thread_local llam_task_t *g_llam_tls_task;
 extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
+
+/**
+ * @brief Match the current worker/P TLS tuple to one descriptive worker role.
+ *
+ * This is a legacy-role observation only.  Scheduler ownership, current-task
+ * authority, and all other runtime state remain on @c llam_shard_t.
+ */
+static inline bool llam_tls_matches_worker_role(const llam_shard_t *shard,
+                                                const llam_worker_t *worker,
+                                                llam_worker_role_t role) {
+    return shard != NULL && worker != NULL &&
+           g_llam_tls_shard == shard &&
+           g_llam_tls_worker == worker &&
+           g_llam_tls_processor == &shard->processor &&
+           shard->processor.runtime == shard->runtime &&
+           shard->processor.compat_shard == shard &&
+           worker->compat_shard == shard &&
+           worker->associated_processor == &shard->processor &&
+           worker->role == role;
+}
+
+/**
+ * @brief Return whether the current TLS tuple describes a shard's primary.
+ *
+ * The assertion-only check keeps this new observation exactly equivalent to
+ * the legacy scheduler-context address while allowing production role checks
+ * to use the explicit worker identity tuple.
+ */
+static inline bool llam_tls_is_primary_scheduler_for(const llam_shard_t *shard) {
+    bool matched = llam_tls_matches_worker_role(
+        shard,
+        shard != NULL ? &shard->primary_worker : NULL,
+        LLAM_WORKER_ROLE_PRIMARY);
+
+#ifndef NDEBUG
+    if (shard != NULL) {
+        bool legacy = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
+
+        if (matched || legacy) {
+            assert(matched == legacy);
+        }
+    }
+#endif
+    return matched;
+}
+
+/**
+ * @brief Return whether the current TLS tuple describes a shard's opaque helper.
+ *
+ * The assertion-only check keeps this new observation exactly equivalent to
+ * the legacy opaque-helper scheduler-context address.
+ */
+static inline bool llam_tls_is_opaque_helper_for(const llam_shard_t *shard) {
+    bool matched = llam_tls_matches_worker_role(
+        shard,
+        shard != NULL ? &shard->opaque_helper_worker : NULL,
+        LLAM_WORKER_ROLE_OPAQUE_HELPER);
+
+#ifndef NDEBUG
+    if (shard != NULL) {
+        bool legacy = g_llam_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
+
+        if (matched || legacy) {
+            assert(matched == legacy);
+        }
+    }
+#endif
+    return matched;
+}
+
+/**
+ * @brief Return whether the current TLS tuple may use a legacy direct handoff.
+ *
+ * Direct handoff retains the legacy primary-context condition; this predicate
+ * does not grant any ownership or execution authority beyond that observation.
+ */
+static inline bool llam_tls_has_legacy_direct_handoff_context(const llam_shard_t *shard) {
+    return llam_tls_is_primary_scheduler_for(shard);
+}
 
 /**
  * @brief Return the current managed runtime without touching default runtime state.
