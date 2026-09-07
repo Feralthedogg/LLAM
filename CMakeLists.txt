@@ -753,6 +753,17 @@ add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
 if(Python3_FOUND)
     add_test(
+        NAME test_worker_identity_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_worker_identity_boundary.py
+    )
+    add_test(
+        NAME check_worker_identity_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_worker_identity_boundary.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
         NAME test_bench_lcwe_model
         COMMAND ${CMAKE_COMMAND} -E env
                 "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"

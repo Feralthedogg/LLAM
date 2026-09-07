@@ -92,6 +92,23 @@ needed. Automatic preemption is request-based; watchdog/runtime policy can mark
 a task, but a task switches only at LLAM boundaries such as yields, waits, I/O,
 or safepoints.
 
+### Phase 0 Worker Identity Boundary
+
+Phase 0 keeps the shard as the scheduling authority. In particular,
+`shard->current`, `shard->preempt_thread`, and the shard's P-like resources
+remain authoritative for scheduling decisions and resource ownership.
+Processor and worker cells are descriptive identity scaffolding: they record
+the associated shard, processor, role, and incarnation, but they do not form
+an executor lease or a second current/watchdog authority. The primary worker
+and opaque helper worker each receive a distinct slice of the shard's combined
+alternate-signal-stack mapping; each owning thread installs, restores, and
+clears only its own slice.
+
+Phase 1A is the first phase allowed to introduce executor, current-worker, or
+worker-local watchdog authority. Until then, source audits reject those names,
+raw scheduler-context role decisions outside the explicit debug-equivalence
+checks, and obsolete shard-level signal-stack accesses.
+
 ## Wake Handoff Fusion
 
 The normal wake path publishes a waiter as runnable, enqueues it on the owner
