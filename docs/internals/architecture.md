@@ -109,18 +109,15 @@ worker-local watchdog authority. Until then, source audits reject those names,
 raw scheduler-context role decisions outside the explicit debug-equivalence
 checks, and obsolete shard-level signal-stack accesses.
 
-### Phase 1A characterization boundary
+### Phase 1A lease transition boundary
 
-The `test_legacy_lease_internal` target freezes the Phase 0 behavior before
-lease authority is introduced. Its gate and snapshot declarations are guarded
-by `LLAM_ENABLE_TEST_HOOKS`; the snapshot only observes the existing atomic
-current publication and lock-protected helper/redirect state. It does not add
-lease fields, change scheduling, or make a test observation authoritative.
-Task 1 intentionally has no production call sites for `llam_lease_test_wait_gate`:
-the transfer-request, owner-clear, grant, handback, and watchdog transition
-windows are deferred to Task 3, which owns those production transitions. The
-characterization scenarios therefore assert legacy state and lock observations
-only; they do not claim to hold a real lease transition window.
+The `test_legacy_lease_internal` target observes the Phase 1A coordinator only
+through declarations guarded by `LLAM_ENABLE_TEST_HOOKS`. Its snapshot copies
+the lock-protected lease record; it does not derive ownership from the legacy
+`current` or helper/redirect flags. The transfer-request, owner-clear, grant,
+and handback gates are called only after releasing scheduler locks, so focused
+tests can inspect each publication window without changing production
+behavior. The watchdog gate remains reserved for the later target migration.
 
 The following is the complete Phase 0 ownership inventory for the fields that
 Phase 1A will migrate. Line numbers are intentionally omitted so the inventory
@@ -142,7 +139,7 @@ remains useful across mechanical edits; function names identify each access.
   (`llam_shard_can_offline_locked` and `llam_shard_can_start_merge_locked`),
   and `watchdog_scale.c` (the offline diagnostic) read it; `debug.c`
   (`llam_dump_runtime_state`) reads it in both the busy-lock and normal dump
-  paths; and the test-hook snapshot reads the atomic while holding
+  paths; the test-hook snapshot reads the coordinator while holding
   `opaque_lock` before `shard->lock`.
 * `shard->preempt_thread`: `scheduler.c`
   (`llam_shard_publish_preempt_thread`) writes the mutable watchdog target at

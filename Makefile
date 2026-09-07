@@ -464,7 +464,9 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o \
 	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
-	$(TESTHOOK_OBJDIR)/src/core/time/timer.o
+	$(TESTHOOK_OBJDIR)/src/core/time/timer.o \
+	$(TESTHOOK_OBJDIR)/src/core/api/blocking_api.o \
+	$(TESTHOOK_OBJDIR)/src/core/sched/scheduler.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/registry/capability.o \
@@ -476,7 +478,9 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/io/api/issue.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o \
 		$(OBJDIR)/src/core/platform/platform.o \
-		$(OBJDIR)/src/core/time/timer.o, \
+		$(OBJDIR)/src/core/time/timer.o \
+		$(OBJDIR)/src/core/api/blocking_api.o \
+		$(OBJDIR)/src/core/sched/scheduler.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \

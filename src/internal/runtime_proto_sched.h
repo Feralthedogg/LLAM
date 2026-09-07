@@ -31,11 +31,47 @@
 
 #include "runtime_state.h"
 
+/* Numeric values are available in production for the no-op pause calls. */
+#define LLAM_LEASE_TEST_POINT_AFTER_TRANSFER_REQUEST 1U
+#define LLAM_LEASE_TEST_POINT_AFTER_OWNER_CLEAR 2U
+#define LLAM_LEASE_TEST_POINT_AFTER_GRANT 3U
+#define LLAM_LEASE_TEST_POINT_AFTER_HANDBACK_ACK 4U
+#define LLAM_LEASE_TEST_POINT_BEFORE_WATCHDOG_SIGNAL 5U
+
 /*
- * Legacy execution-lease and worker binding lifecycle.
+ * Legacy execution-lease and worker binding lifecycle. Every `_locked`
+ * transition below requires `shard->opaque_lock`; when shard state is also
+ * needed, callers acquire `shard->lock` only after that handoff lock.
  */
 void llam_legacy_lease_init(llam_shard_t *shard);
 void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard);
+bool llam_legacy_lease_request_helper_locked(llam_shard_t *shard,
+                                             llam_worker_t *primary,
+                                             uint64_t *sequence_out);
+bool llam_legacy_lease_grant_helper_locked(llam_shard_t *shard,
+                                           llam_worker_t *helper,
+                                           uint64_t sequence);
+bool llam_legacy_lease_request_return_locked(llam_shard_t *shard,
+                                             llam_worker_t *claimant,
+                                             uint64_t claimant_incarnation,
+                                             uint64_t *sequence_out);
+bool llam_legacy_lease_complete_handback_locked(llam_shard_t *shard,
+                                                llam_worker_t *worker,
+                                                uint64_t sequence);
+bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
+                                             llam_worker_t *return_worker,
+                                             uint64_t return_incarnation);
+bool llam_legacy_lease_can_reacquire_locked(const llam_shard_t *shard,
+                                            const llam_worker_t *worker,
+                                            uint64_t incarnation);
+bool llam_legacy_lease_clear_owner_locked(llam_shard_t *shard,
+                                          llam_worker_t *worker,
+                                          uint64_t incarnation,
+                                          uint64_t sequence);
+bool llam_legacy_lease_rollback_helper_locked(llam_shard_t *shard,
+                                              llam_worker_t *primary,
+                                              uint64_t incarnation,
+                                              uint64_t sequence);
 bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation);
 void llam_scheduler_bind_identity(llam_shard_t *shard,
                                   llam_worker_t *worker,
@@ -66,8 +102,8 @@ typedef enum llam_lease_test_point {
 /**
  * @brief Test-only observation of the execution lease boundary.
  *
- * The implementation takes `opaque_lock` before the shard lock to combine
- * legacy helper and current/redirect projections safely.
+ * The implementation takes `opaque_lock` before the shard lock and copies the
+ * coordinator's lease state without deriving ownership from legacy flags.
  */
 typedef struct llam_lease_test_snapshot {
     unsigned state;
@@ -81,13 +117,30 @@ typedef struct llam_lease_test_snapshot {
 } llam_lease_test_snapshot_t;
 
 void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled);
-/* Task 1 provides the gate storage; transition call sites are wired in Task 3. */
+/* Gate storage is test-hook-only; production transition calls compile to no-ops. */
 bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns);
 bool llam_legacy_lease_snapshot_locked(const llam_shard_t *shard,
                                        llam_lease_test_snapshot_t *out);
 int llam_lease_test_snapshot(llam_runtime_t *runtime,
                              unsigned shard_id,
                              llam_lease_test_snapshot_t *out);
+#endif
+
+/**
+ * @brief Pause at a lease publication point when test hooks are enabled.
+ *
+ * The helper is deliberately a no-op in production builds.  Callers invoke it
+ * only after releasing scheduler locks so a focused test can inspect the
+ * intermediate lease state without blocking a producer or worker.
+ */
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static inline void llam_legacy_lease_test_pause(llam_lease_test_point_t point) {
+    (void)llam_lease_test_wait_gate(point, UINT64_MAX);
+}
+#else
+static inline void llam_legacy_lease_test_pause(unsigned point) {
+    (void)point;
+}
 #endif
 
 /*

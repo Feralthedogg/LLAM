@@ -2,10 +2,10 @@
  * @file tests/test_legacy_lease_internal.c
  * @brief Phase 1A characterization tests for the legacy scheduler handoff.
  *
- * These tests deliberately observe the Phase 0 scheduler through its existing
- * worker identity, helper, redirect, pause, and watchdog state.  They do not
- * make a lease field authoritative; the lease snapshot calls only establish
- * the test-hook boundary consumed by later Phase 1A work.
+ * These tests observe the legacy scheduler through the Phase 1A lease test
+ * boundary.  The queue/timer/allocator behavior remains the legacy behavior;
+ * the lease snapshots and gates make the handoff publication windows
+ * deterministic enough to assert ordering.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -368,11 +368,32 @@ static void reset_lease_test_gates(void) {
     }
 }
 
-/*
- * Phase 1A Task 1 only provides the gate storage/API. Production transition
- * call sites are owned by Task 3, so these tests deliberately keep every gate
- * disabled and use task/lock observations for the legacy windows.
- */
+static int wait_for_lease_state(llam_runtime_t *runtime,
+                                unsigned shard_id,
+                                unsigned expected_state,
+                                uintptr_t expected_owner,
+                                uint64_t minimum_sequence,
+                                bool handback_ack,
+                                llam_lease_test_snapshot_t *out) {
+    uint64_t deadline = legacy_deadline();
+
+    while (llam_now_ns() < deadline) {
+        llam_lease_test_snapshot_t snapshot;
+
+        if (llam_lease_test_snapshot(runtime, shard_id, &snapshot) == 0 &&
+            snapshot.state == expected_state &&
+            snapshot.owner_worker == expected_owner &&
+            snapshot.transfer_sequence >= minimum_sequence &&
+            (!handback_ack || snapshot.handback_ack_sequence >= minimum_sequence)) {
+            if (out != NULL) {
+                *out = snapshot;
+            }
+            return 0;
+        }
+        llam_pause_cpu();
+    }
+    return -1;
+}
 
 static int assert_snapshot_values(llam_runtime_t *runtime,
                                   unsigned shard_id,
@@ -383,6 +404,11 @@ static int assert_snapshot_values(llam_runtime_t *runtime,
                                   const char *message) {
     llam_lease_test_snapshot_t snapshot;
 
+    /* The characterization calls passed zero for the old ownerless view. */
+    if (expected_state == 0U) {
+        expected_state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
+    }
+
     memset(&snapshot, 0, sizeof(snapshot));
     if (llam_lease_test_snapshot(runtime, shard_id, &snapshot) != 0 ||
         snapshot.state != expected_state ||
@@ -390,13 +416,6 @@ static int assert_snapshot_values(llam_runtime_t *runtime,
         (expected_owner != 0U && snapshot.owner_incarnation != expected_incarnation) ||
         (expected_owner == 0U && snapshot.owner_incarnation != 0U)) {
         test_fail(failure, message);
-        return -1;
-    }
-    /* The legacy Phase 0 has no lease counters or return claimant. */
-    if (snapshot.epoch != 0U || snapshot.return_worker != 0U ||
-        snapshot.return_incarnation != 0U || snapshot.transfer_sequence != 0U ||
-        snapshot.handback_ack_sequence != 0U) {
-        test_fail(failure, "legacy snapshot unexpectedly published lease counters");
         return -1;
     }
     return 0;
@@ -441,13 +460,13 @@ static void helper_activation_task(void *arg) {
                   "helper activation did not publish a live native binding");
     }
     if (llam_lease_test_snapshot(state->runtime, shard->id, &state->helper_snapshot) != 0 ||
-        state->helper_snapshot.state != 3U ||
+        state->helper_snapshot.state != LLAM_LEASE_HELPER_OWNED ||
         state->helper_snapshot.owner_worker != (uintptr_t)&shard->opaque_helper_worker ||
         state->helper_snapshot.owner_incarnation !=
             atomic_load_explicit(&shard->opaque_helper_worker.incarnation, memory_order_acquire) ||
-        state->helper_snapshot.epoch != 0U || state->helper_snapshot.return_worker != 0U ||
+        state->helper_snapshot.epoch == 0U || state->helper_snapshot.return_worker != 0U ||
         state->helper_snapshot.return_incarnation != 0U ||
-        state->helper_snapshot.transfer_sequence != 0U ||
+        state->helper_snapshot.transfer_sequence == 0U ||
         state->helper_snapshot.handback_ack_sequence != 0U) {
         test_fail(&state->failure, "helper activation snapshot did not identify the helper owner");
     }
@@ -471,7 +490,7 @@ static void takeover_root_task(void *arg) {
     }
     state->root_worker = (uintptr_t)g_llam_tls_worker;
     if (llam_lease_test_snapshot(state->runtime, shard->id, &state->root_snapshot) != 0 ||
-        state->root_snapshot.state != 1U ||
+        state->root_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
         state->root_snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
         state->root_snapshot.owner_incarnation !=
             atomic_load_explicit(&shard->primary_worker.incarnation, memory_order_acquire) ||
@@ -625,6 +644,170 @@ static int test_primary_helper_activation_and_return(void) {
     return failure_result(&state.failure, "primary/helper activation characterization failed");
 }
 
+typedef struct gated_handoff_run_state {
+    takeover_state_t takeover;
+    atomic_uint run_done;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} gated_handoff_run_state_t;
+
+static void *gated_handoff_run(void *arg) {
+    gated_handoff_run_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->takeover.runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->takeover.runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int test_lease_handoff_windows(void) {
+    gated_handoff_run_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *root = NULL;
+    llam_shard_t *shard;
+    llam_lease_test_snapshot_t snapshot;
+    pthread_t run_thread;
+    bool run_created = false;
+    uint64_t transfer_sequence;
+    int rc;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.takeover.failure.failures, 0U);
+    atomic_init(&state.takeover.root_done, 0U);
+    atomic_init(&state.takeover.helper_started, 0U);
+    atomic_init(&state.takeover.helper_done, 0U);
+    atomic_init(&state.takeover.helper_entered, 0U);
+    atomic_init(&state.takeover.release_helper, 0U);
+    atomic_init(&state.run_done, 0U);
+    memset(&snapshot, 0, sizeof(snapshot));
+    transfer_sequence = 0U;
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.takeover.runtime = runtime;
+    shard = &runtime->shards[0];
+    root = llam_runtime_spawn_ex(runtime, takeover_root_task, &state.takeover, NULL, 0U);
+    if (root == NULL) {
+        test_fail(&state.takeover.failure, "lease-window root task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.takeover.failure,
+                              "lease-window characterization failed");
+    }
+
+    /* Each gate is released only after its lease snapshot is observable. */
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST, true);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_OWNER_CLEAR, true);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_GRANT, true);
+    if (pthread_create(&run_thread, NULL, gated_handoff_run, &state) != 0) {
+        test_fail(&state.takeover.failure, "lease-window run thread setup failed");
+        reset_lease_test_gates();
+        destroy_runtime(&runtime);
+        return failure_result(&state.takeover.failure,
+                              "lease-window characterization failed");
+    }
+    run_created = true;
+
+    if (wait_for_lease_state(runtime,
+                             0U,
+                             LLAM_LEASE_TRANSFER_TO_HELPER,
+                             (uintptr_t)&shard->primary_worker,
+                             0U,
+                             false,
+                             &snapshot) != 0 ||
+        snapshot.owner_incarnation == 0U || snapshot.transfer_sequence == 0U) {
+        test_fail(&state.takeover.failure,
+                  "transfer-request gate did not retain the primary owner and sequence");
+    }
+    transfer_sequence = snapshot.transfer_sequence;
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST, false);
+    if (wait_for_lease_state(runtime,
+                             0U,
+                             LLAM_LEASE_TRANSFER_TO_HELPER,
+                             0U,
+                             transfer_sequence,
+                             false,
+                             &snapshot) != 0) {
+        test_fail(&state.takeover.failure,
+                  "owner-clear gate did not retire the primary before grant");
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (llam_legacy_lease_can_reacquire_locked(
+            shard,
+            &shard->primary_worker,
+            atomic_load_explicit(&shard->primary_worker.incarnation,
+                                 memory_order_acquire)) ||
+        llam_legacy_lease_can_reacquire_locked(
+            shard,
+            &shard->opaque_helper_worker,
+            atomic_load_explicit(&shard->opaque_helper_worker.incarnation,
+                                 memory_order_acquire))) {
+        test_fail(&state.takeover.failure,
+                  "ownerless transfer allowed an arbitrary worker to claim the lease");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_OWNER_CLEAR, false);
+    if (wait_for_lease_state(runtime,
+                             0U,
+                             LLAM_LEASE_HELPER_OWNED,
+                             (uintptr_t)&shard->opaque_helper_worker,
+                             transfer_sequence,
+                             false,
+                             &snapshot) != 0 ||
+        snapshot.epoch == 0U || snapshot.owner_incarnation == 0U) {
+        test_fail(&state.takeover.failure,
+                  "grant gate published helper before the primary clear was complete");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_GRANT, false);
+    if (wait_flag(&state.takeover.helper_done, legacy_deadline()) != 0) {
+        test_fail(&state.takeover.failure,
+                  "helper did not complete its ownerless redirect handback");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, true);
+    if (wait_for_lease_state(runtime,
+                             0U,
+                             LLAM_LEASE_PRIMARY_OWNED,
+                             (uintptr_t)&shard->primary_worker,
+                             transfer_sequence,
+                             true,
+                             &snapshot) != 0 ||
+        snapshot.epoch < 2U || snapshot.handback_ack_sequence == 0U) {
+        test_fail(&state.takeover.failure,
+                  "handback gate did not publish an acknowledgement before return");
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!shard->opaque_helper_active || shard->opaque_compensation_depth != 0U) {
+        test_fail(&state.takeover.failure,
+                  "helper handback released active state before its acknowledgement gate");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
+
+    reset_lease_test_gates();
+    bounded_join_thread(run_thread,
+                        run_created,
+                        &state.run_done,
+                        release_runtime_stop,
+                        runtime,
+                        "lease-window run exceeded its deadline");
+    run_created = false;
+    bounded_join_task(root,
+                      &state.takeover.root_done,
+                      "lease-window root join exceeded its deadline");
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.takeover.failure,
+                  "lease-window transfer changed run or fatal semantics");
+    }
+    rc = failure_result(&state.takeover.failure,
+                        "lease handoff publication windows failed");
+    destroy_runtime(&runtime);
+    return rc;
+}
+
 static void redirect_helper_task(void *arg) {
     takeover_state_t *state = arg;
     llam_shard_t *shard = g_llam_tls_shard;
@@ -636,6 +819,22 @@ static void redirect_helper_task(void *arg) {
     errno = 0;
     state->helper_enter_rc = llam_enter_blocking();
     state->helper_enter_errno = errno;
+    {
+        llam_lease_test_snapshot_t snapshot;
+        uint64_t helper_incarnation = atomic_load_explicit(
+            &shard->opaque_helper_worker.incarnation,
+            memory_order_acquire);
+
+        if (llam_lease_test_snapshot(state->runtime, shard->id, &snapshot) != 0 ||
+            snapshot.state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+            snapshot.owner_worker != 0U ||
+            snapshot.return_worker != (uintptr_t)&shard->opaque_helper_worker ||
+            snapshot.return_incarnation != helper_incarnation ||
+            snapshot.transfer_sequence == 0U) {
+            test_fail(&state->failure,
+                      "helper re-blocking did not retain its lease return claimant");
+        }
+    }
     pthread_mutex_lock(&shard->lock);
     state->helper_redirect_active = shard->opaque_redirect_active ? 1U : 0U;
     state->helper_redirect_depth = shard->opaque_redirect_depth;
@@ -1909,6 +2108,7 @@ int main(void) {
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,
         test_primary_helper_activation_and_return,
+        test_lease_handoff_windows,
         test_helper_reblocking_through_redirect,
         test_ownerless_return_ordering,
         test_repeated_shard_zero_runs_two_callers,

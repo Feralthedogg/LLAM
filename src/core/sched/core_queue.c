@@ -572,6 +572,10 @@ static void llam_flush_queue_to_redirect_locked(llam_shard_t *shard, llam_queue_
  * @param current_task Task that triggered opaque blocking, if known.
  *
  * @note Caller must hold @p shard->lock.
+ *
+ * The lease transition is established by the caller under @c opaque_lock
+ * before this queue-only projection is published.  This function does not
+ * infer or grant execution ownership from the redirect flag.
  */
 void llam_activate_opaque_redirect_locked(llam_shard_t *shard, llam_task_t *current_task) {
     if (shard->opaque_redirect_active) {
@@ -610,6 +614,9 @@ void llam_activate_opaque_redirect_locked(llam_shard_t *shard, llam_task_t *curr
  * @param shard Shard whose redirect state should be cleared.
  *
  * @note Caller must hold @p shard->lock.
+ *
+ * Lease handback is completed before this compatibility projection is cleared;
+ * queue teardown therefore never serves as proof that a worker owns the shard.
  */
 void llam_deactivate_opaque_redirect_locked(llam_shard_t *shard) {
     shard->opaque_redirect_active = false;

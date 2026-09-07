@@ -101,11 +101,7 @@ int llam_lease_test_snapshot(llam_runtime_t *runtime,
                              unsigned shard_id,
                              llam_lease_test_snapshot_t *out) {
     llam_shard_t *shard;
-    llam_task_t *current;
-    bool helper_active;
-    bool redirect_active;
-    bool stopping;
-    llam_worker_t *owner = NULL;
+    bool snapshot_ok;
 
     if (out == NULL) {
         errno = EINVAL;
@@ -125,39 +121,13 @@ int llam_lease_test_snapshot(llam_runtime_t *runtime,
         return -1;
     }
 
-    /*
-     * Take the established handoff/lease lock before the shard lock.  The
-     * helper projection is written under opaque_lock, while redirect/current
-     * publication is written under shard->lock; holding both gives one
-     * coherent legacy observation and avoids an unprotected plain-field read.
-     */
+    /* Keep the established lock order for a coherent lease/queue observation. */
     pthread_mutex_lock(&shard->opaque_lock);
-    helper_active = shard->opaque_helper_active && !shard->opaque_helper_failed;
     pthread_mutex_lock(&shard->lock);
-    current = atomic_load_explicit(&shard->current, memory_order_acquire);
-    redirect_active = shard->opaque_redirect_active || shard->opaque_redirect_depth != 0U;
-    stopping = shard->opaque_helper_stop ||
-               atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire);
+    snapshot_ok = llam_legacy_lease_snapshot_locked(shard, out);
     pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
-
-    if (helper_active) {
-        owner = &shard->opaque_helper_worker;
-        out->state = 3U; /* LLAM_LEASE_HELPER_OWNED in the next phase. */
-    } else if (current != NULL) {
-        owner = &shard->primary_worker;
-        out->state = 1U; /* LLAM_LEASE_PRIMARY_OWNED in the next phase. */
-    } else if (stopping) {
-        out->state = 6U; /* LLAM_LEASE_STOPPING in the next phase. */
-    } else if (redirect_active) {
-        out->state = 5U; /* LLAM_LEASE_REDIRECTED_NO_EXECUTOR in the next phase. */
-    }
-    if (owner != NULL) {
-        out->owner_worker = (uintptr_t)owner;
-        out->owner_incarnation =
-            atomic_load_explicit(&owner->incarnation, memory_order_acquire);
-    }
-    return 0;
+    return snapshot_ok ? 0 : -1;
 }
 #endif
 
@@ -847,6 +817,13 @@ static void llam_timeout_task_wait(llam_timer_node_t *timer) {
 int llam_ensure_opaque_helper_locked(llam_shard_t *shard) {
     int rc;
 
+    if (shard == NULL || shard->legacy_lease.state == LLAM_LEASE_STOPPING ||
+        (shard->runtime != NULL &&
+         (atomic_load_explicit(&shard->runtime->stop_requested, memory_order_acquire) ||
+          atomic_load_explicit(&shard->runtime->shutdown_requested, memory_order_acquire)))) {
+        errno = ECANCELED;
+        return -1;
+    }
     if (shard->opaque_helper_thread_started) {
         while (!shard->opaque_helper_ready && !shard->opaque_helper_failed) {
             llam_opaque_wake_wait(shard);

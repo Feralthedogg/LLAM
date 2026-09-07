@@ -102,6 +102,287 @@ void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard) {
     lease->transfer_sequence = 0U;
     lease->handback_ack_sequence = 0U;
     lease->state = LLAM_LEASE_STOPPING;
+    llam_legacy_lease_assert_consistent_locked(shard);
+}
+
+/* Keep sequence/epoch values nonzero so zero remains the uninitialized value. */
+static uint64_t llam_legacy_lease_next_counter(uint64_t value) {
+    return value == UINT64_MAX ? 1U : value + 1U;
+}
+
+static bool llam_legacy_lease_runtime_stopping(const llam_shard_t *shard) {
+    const llam_runtime_t *runtime = shard != NULL ? shard->runtime : NULL;
+
+    return runtime != NULL &&
+           (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
+            atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire));
+}
+
+static bool llam_legacy_lease_matches_worker(const llam_legacy_lease_t *lease,
+                                             const llam_worker_t *worker,
+                                             uint64_t incarnation) {
+    return lease != NULL && worker != NULL && incarnation != 0U &&
+           llam_worker_binding_live(worker, incarnation);
+}
+
+bool llam_legacy_lease_request_helper_locked(llam_shard_t *shard,
+                                             llam_worker_t *primary,
+                                             uint64_t *sequence_out) {
+    llam_legacy_lease_t *lease;
+    uint64_t sequence;
+
+    if (sequence_out != NULL) {
+        *sequence_out = 0U;
+    }
+    if (shard == NULL || primary == NULL || sequence_out == NULL) {
+        return false;
+    }
+    if (llam_legacy_lease_runtime_stopping(shard)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (lease->state != LLAM_LEASE_PRIMARY_OWNED ||
+        lease->owner != primary ||
+        !llam_legacy_lease_matches_worker(lease,
+                                          primary,
+                                          lease->owner_incarnation)) {
+        return false;
+    }
+    if (primary != &shard->primary_worker ||
+        primary->role != LLAM_WORKER_ROLE_PRIMARY ||
+        primary->compat_shard != shard) {
+        return false;
+    }
+    sequence = llam_legacy_lease_next_counter(lease->transfer_sequence);
+    lease->transfer_sequence = sequence;
+    lease->state = LLAM_LEASE_TRANSFER_TO_HELPER;
+    *sequence_out = sequence;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
+bool llam_legacy_lease_grant_helper_locked(llam_shard_t *shard,
+                                           llam_worker_t *helper,
+                                           uint64_t sequence) {
+    llam_legacy_lease_t *lease;
+    uint64_t incarnation;
+
+    if (shard == NULL || helper == NULL || sequence == 0U) {
+        return false;
+    }
+    if (llam_legacy_lease_runtime_stopping(shard)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    incarnation = atomic_load_explicit(&helper->incarnation, memory_order_acquire);
+    if (lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||
+        lease->transfer_sequence != sequence ||
+        lease->owner != NULL ||
+        helper != &shard->opaque_helper_worker ||
+        helper->role != LLAM_WORKER_ROLE_OPAQUE_HELPER ||
+        helper->compat_shard != shard ||
+        !llam_worker_binding_live(helper, incarnation) ||
+        lease->state == LLAM_LEASE_STOPPING) {
+        return false;
+    }
+    lease->owner = helper;
+    lease->owner_incarnation = incarnation;
+    lease->epoch = llam_legacy_lease_next_counter(lease->epoch);
+    lease->return_worker = NULL;
+    lease->return_incarnation = 0U;
+    lease->state = LLAM_LEASE_HELPER_OWNED;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
+bool llam_legacy_lease_request_return_locked(llam_shard_t *shard,
+                                             llam_worker_t *claimant,
+                                             uint64_t claimant_incarnation,
+                                             uint64_t *sequence_out) {
+    llam_legacy_lease_t *lease;
+    uint64_t sequence;
+
+    if (sequence_out != NULL) {
+        *sequence_out = 0U;
+    }
+    if (shard == NULL || claimant == NULL || sequence_out == NULL ||
+        claimant_incarnation == 0U ||
+        !llam_worker_binding_live(claimant, claimant_incarnation)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (lease->state == LLAM_LEASE_STOPPING) {
+        return false;
+    }
+    if (lease->state == LLAM_LEASE_HELPER_OWNED) {
+        if (lease->owner != &shard->opaque_helper_worker ||
+            claimant != &shard->primary_worker ||
+            lease->owner_incarnation == 0U ||
+            !llam_legacy_lease_matches_worker(lease,
+                                              &shard->opaque_helper_worker,
+                                              lease->owner_incarnation)) {
+            return false;
+        }
+    } else if (lease->state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR) {
+        if (lease->owner != NULL || lease->return_worker != claimant ||
+            lease->return_incarnation != claimant_incarnation) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    sequence = llam_legacy_lease_next_counter(lease->transfer_sequence);
+    lease->transfer_sequence = sequence;
+    lease->return_worker = claimant;
+    lease->return_incarnation = claimant_incarnation;
+    lease->state = LLAM_LEASE_TRANSFER_TO_PRIMARY;
+    *sequence_out = sequence;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
+bool llam_legacy_lease_complete_handback_locked(llam_shard_t *shard,
+                                                llam_worker_t *worker,
+                                                uint64_t sequence) {
+    llam_legacy_lease_t *lease;
+    llam_worker_t *claimant;
+    uint64_t claimant_incarnation;
+
+    if (shard == NULL || worker == NULL || sequence == 0U) {
+        return false;
+    }
+    if (llam_legacy_lease_runtime_stopping(shard)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (lease->state != LLAM_LEASE_TRANSFER_TO_PRIMARY ||
+        lease->transfer_sequence != sequence ||
+        (lease->owner != NULL && lease->owner != worker) ||
+        (lease->owner != NULL && lease->owner_incarnation == 0U) ||
+        (lease->owner != NULL &&
+         !llam_legacy_lease_matches_worker(lease,
+                                           worker,
+                                           lease->owner_incarnation)) ||
+        worker->compat_shard != shard) {
+        return false;
+    }
+    claimant = lease->return_worker;
+    claimant_incarnation = lease->return_incarnation;
+    if (!llam_worker_binding_live(claimant, claimant_incarnation)) {
+        return false;
+    }
+    /* The acknowledgement is published only after the caller cleared active state. */
+    lease->handback_ack_sequence = sequence;
+    lease->owner = claimant;
+    lease->owner_incarnation = claimant_incarnation;
+    lease->epoch = llam_legacy_lease_next_counter(lease->epoch);
+    lease->return_worker = NULL;
+    lease->return_incarnation = 0U;
+    lease->state = claimant == &shard->primary_worker
+                       ? LLAM_LEASE_PRIMARY_OWNED
+                       : LLAM_LEASE_HELPER_OWNED;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
+bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
+                                             llam_worker_t *return_worker,
+                                             uint64_t return_incarnation) {
+    llam_legacy_lease_t *lease;
+
+    if (shard == NULL || return_worker == NULL || return_incarnation == 0U ||
+        !llam_worker_binding_live(return_worker, return_incarnation)) {
+        return false;
+    }
+    if (llam_legacy_lease_runtime_stopping(shard)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (lease->state == LLAM_LEASE_STOPPING) {
+        return false;
+    }
+    if (lease->state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR) {
+        return lease->owner == NULL && lease->return_worker == return_worker &&
+               lease->return_incarnation == return_incarnation;
+    }
+    if (lease->owner != return_worker ||
+        lease->owner_incarnation != return_incarnation ||
+        (lease->state != LLAM_LEASE_PRIMARY_OWNED &&
+         lease->state != LLAM_LEASE_HELPER_OWNED &&
+         lease->state != LLAM_LEASE_TRANSFER_TO_HELPER)) {
+        return false;
+    }
+    lease->owner = NULL;
+    lease->owner_incarnation = 0U;
+    lease->return_worker = return_worker;
+    lease->return_incarnation = return_incarnation;
+    lease->transfer_sequence = llam_legacy_lease_next_counter(lease->transfer_sequence);
+    lease->state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
+bool llam_legacy_lease_can_reacquire_locked(const llam_shard_t *shard,
+                                            const llam_worker_t *worker,
+                                            uint64_t incarnation) {
+    const llam_legacy_lease_t *lease;
+
+    if (shard == NULL || worker == NULL || incarnation == 0U) {
+        return false;
+    }
+    if (llam_legacy_lease_runtime_stopping(shard)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_const_locked(shard);
+    return (lease->state == LLAM_LEASE_PRIMARY_OWNED ||
+            lease->state == LLAM_LEASE_HELPER_OWNED) &&
+           lease->owner == worker && lease->owner_incarnation == incarnation &&
+           llam_worker_binding_live(worker, incarnation);
+}
+
+bool llam_legacy_lease_clear_owner_locked(llam_shard_t *shard,
+                                          llam_worker_t *worker,
+                                          uint64_t incarnation,
+                                          uint64_t sequence) {
+    llam_legacy_lease_t *lease;
+
+    if (shard == NULL || worker == NULL || incarnation == 0U || sequence == 0U) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||
+        lease->transfer_sequence != sequence || lease->owner != worker ||
+        lease->owner_incarnation != incarnation ||
+        !llam_worker_binding_live(worker, incarnation)) {
+        return false;
+    }
+    lease->owner = NULL;
+    lease->owner_incarnation = 0U;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
+}
+
+bool llam_legacy_lease_rollback_helper_locked(llam_shard_t *shard,
+                                              llam_worker_t *primary,
+                                              uint64_t incarnation,
+                                              uint64_t sequence) {
+    llam_legacy_lease_t *lease;
+
+    if (shard == NULL || primary == NULL || incarnation == 0U || sequence == 0U) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||
+        lease->transfer_sequence != sequence || lease->owner != NULL ||
+        !llam_worker_binding_live(primary, incarnation)) {
+        return false;
+    }
+    lease->owner = primary;
+    lease->owner_incarnation = incarnation;
+    lease->transfer_sequence = sequence == 1U ? UINT64_MAX : sequence - 1U;
+    lease->state = LLAM_LEASE_PRIMARY_OWNED;
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return true;
 }
 
 bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation) {
@@ -138,9 +419,13 @@ void llam_scheduler_bind_identity(llam_shard_t *shard,
                           memory_order_release);
     atomic_store_explicit(&worker->native_thread_live, true, memory_order_release);
     if (worker == &shard->primary_worker &&
-        shard->legacy_lease.state != LLAM_LEASE_STOPPING) {
+        shard->legacy_lease.state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR &&
+        shard->legacy_lease.owner == NULL &&
+        shard->legacy_lease.return_worker == NULL) {
         shard->legacy_lease.owner = worker;
         shard->legacy_lease.owner_incarnation = incarnation;
+        shard->legacy_lease.return_worker = NULL;
+        shard->legacy_lease.return_incarnation = 0U;
         shard->legacy_lease.state = LLAM_LEASE_PRIMARY_OWNED;
         llam_legacy_lease_assert_consistent_locked(shard);
     }
@@ -180,8 +465,13 @@ void llam_scheduler_unbind_identity(llam_shard_t *shard, llam_worker_t *worker) 
         if (shard->legacy_lease.state != LLAM_LEASE_STOPPING) {
             shard->legacy_lease.state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
         }
-        llam_legacy_lease_assert_consistent_locked(shard);
     }
+    if (shard->legacy_lease.return_worker == worker &&
+        shard->legacy_lease.return_incarnation == incarnation) {
+        shard->legacy_lease.return_worker = NULL;
+        shard->legacy_lease.return_incarnation = 0U;
+    }
+    llam_legacy_lease_assert_consistent_locked(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
 }
 
@@ -535,6 +825,66 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 }
 
 /**
+ * @brief Stop helper dispatch and publish its handback acknowledgement.
+ *
+ * The helper is in its scheduler context when this runs.  It first drops the
+ * opaque lock, clears the legacy current publication under the shard lock, and
+ * only then reacquires the opaque lock to complete the lease transition.  The
+ * test gate is likewise outside both locks so it cannot hide a lock-order
+ * violation in a focused transfer test.
+ */
+static void llam_opaque_helper_complete_handoff(llam_shard_t *shard,
+                                                bool stopping) {
+    uint64_t sequence = 0U;
+    bool acknowledged = false;
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!stopping && shard->legacy_lease.state == LLAM_LEASE_HELPER_OWNED) {
+        (void)llam_legacy_lease_request_return_locked(
+            shard,
+            &shard->primary_worker,
+            atomic_load_explicit(&shard->primary_worker.incarnation,
+                                 memory_order_acquire),
+            &sequence);
+    } else if (!stopping &&
+               shard->legacy_lease.state == LLAM_LEASE_TRANSFER_TO_PRIMARY) {
+        sequence = shard->legacy_lease.transfer_sequence;
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    /* No helper task may remain published when the handback is acknowledged. */
+    pthread_mutex_lock(&shard->lock);
+    atomic_store_explicit(&shard->current, NULL, memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+
+    if (sequence != 0U) {
+        pthread_mutex_lock(&shard->opaque_lock);
+        acknowledged = llam_legacy_lease_complete_handback_locked(
+            shard,
+            &shard->opaque_helper_worker,
+            sequence);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (acknowledged) {
+            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_HANDBACK_ACK);
+        }
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    shard->opaque_helper_active = false;
+    atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+    if (shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
+        llam_worker_binding_live(
+            &shard->primary_worker,
+            shard->legacy_lease.owner_incarnation)) {
+        llam_shard_publish_preempt_thread(shard, shard->primary_thread);
+    }
+#endif
+    llam_opaque_wake_signal(shard);
+    pthread_mutex_unlock(&shard->opaque_lock);
+}
+
+/**
  * @brief Opaque-blocking helper scheduler loop.
  *
  * A helper thread is created for shards that need compensation while their
@@ -575,25 +925,15 @@ void *llam_opaque_helper_main(void *arg) {
 
     for (;;) {
         pthread_mutex_lock(&shard->opaque_lock);
-        while (!shard->opaque_helper_stop && shard->opaque_compensation_depth == 0U) {
-            if (shard->opaque_helper_active) {
-                shard->opaque_helper_active = false;
-                atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-                llam_shard_publish_preempt_thread(shard, shard->primary_thread);
-#endif
-                llam_opaque_wake_signal(shard);
-            }
+        while (!shard->opaque_helper_stop &&
+               (shard->opaque_compensation_depth == 0U ||
+                shard->legacy_lease.state != LLAM_LEASE_HELPER_OWNED ||
+                shard->legacy_lease.owner != &shard->opaque_helper_worker)) {
             llam_opaque_wake_wait(shard);
         }
         if (shard->opaque_helper_stop) {
-            shard->opaque_helper_active = false;
-            atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-            llam_shard_publish_preempt_thread(shard, shard->primary_thread);
-#endif
-            llam_opaque_wake_signal(shard);
             pthread_mutex_unlock(&shard->opaque_lock);
+            llam_opaque_helper_complete_handoff(shard, true);
             break;
         }
         shard->opaque_helper_active = true;
@@ -647,14 +987,10 @@ void *llam_opaque_helper_main(void *arg) {
                 pthread_mutex_lock(&shard->opaque_lock);
                 stop_requested = shard->opaque_helper_stop;
                 keep_running = shard->opaque_compensation_depth > 0U;
-                if (!keep_running || stop_requested) {
-                    shard->opaque_helper_active = false;
-                    atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-                    llam_shard_publish_preempt_thread(shard, shard->primary_thread);
-#endif
-                    llam_opaque_wake_signal(shard);
+                if ((!keep_running && shard->legacy_lease.state != LLAM_LEASE_HELPER_OWNED) ||
+                    !keep_running || stop_requested) {
                     pthread_mutex_unlock(&shard->opaque_lock);
+                    llam_opaque_helper_complete_handoff(shard, stop_requested);
                     break;
                 }
 #if defined(__linux__)
@@ -689,13 +1025,8 @@ void *llam_opaque_helper_main(void *arg) {
             stop_requested = shard->opaque_helper_stop;
             keep_running = shard->opaque_compensation_depth > 0U;
             if (!keep_running || stop_requested) {
-                shard->opaque_helper_active = false;
-                atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-                llam_shard_publish_preempt_thread(shard, shard->primary_thread);
-#endif
-                llam_opaque_wake_signal(shard);
                 pthread_mutex_unlock(&shard->opaque_lock);
+                llam_opaque_helper_complete_handoff(shard, stop_requested);
                 if (stop_requested) {
                     goto out;
                 }
@@ -715,7 +1046,16 @@ out:
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-    llam_shard_publish_preempt_thread(shard, shard->primary_thread);
+    if (shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
+        shard->legacy_lease.owner == &shard->primary_worker &&
+        llam_worker_binding_live(&shard->primary_worker,
+                                 shard->legacy_lease.owner_incarnation)) {
+        llam_shard_publish_preempt_thread(shard, shard->primary_thread);
+    } else {
+        pthread_mutex_lock(&shard->lock);
+        memset(&shard->preempt_thread, 0, sizeof(shard->preempt_thread));
+        pthread_mutex_unlock(&shard->lock);
+    }
 #endif
     llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);

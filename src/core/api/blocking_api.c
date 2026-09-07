@@ -445,12 +445,15 @@ void *llam_call_blocking(llam_blocking_fn fn, void *arg) {
 int llam_enter_blocking(void) {
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
+    llam_worker_t *worker = g_llam_tls_worker;
     bool helper_active = false;
-    bool redirect_active = false;
     bool from_primary = false;
     bool prefer_redirect = false;
     bool wake_redirect_workers = false;
+    bool helper_requested = false;
     bool timing = false;
+    uint64_t worker_incarnation = 0U;
+    uint64_t transfer_sequence = 0U;
     uint64_t enter_wait_ns = 0U;
     uint64_t enter_wait_start_ns = 0U;
 
@@ -463,22 +466,91 @@ int llam_enter_blocking(void) {
     if (task->opaque_blocking_depth == 0U) {
         timing = llam_opaque_timing_enabled();
         task->opaque_block_started_ns = timing ? llam_now_ns() : 0U;
-        task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
-        task->wait_reason = LLAM_WAIT_BLOCKING;
         task->opaque_uses_helper = false;
         task->opaque_uses_redirect = false;
         from_primary = llam_tls_is_primary_scheduler_for(shard);
+        if (worker != NULL) {
+            worker_incarnation = atomic_load_explicit(&worker->incarnation,
+                                                      memory_order_acquire);
+        }
         prefer_redirect = from_primary &&
                           shard->runtime->active_shards > 1U &&
                           (llam_opaque_redirect_fastpath_enabled() || g_llam_tls_opaque_redirect_hint != 0U);
 
+        /* Reserve the transfer while the current primary binding is live. */
         pthread_mutex_lock(&shard->opaque_lock);
-        if (from_primary && !prefer_redirect) {
+        if (from_primary && !prefer_redirect &&
+            llam_legacy_lease_request_helper_locked(shard,
+                                                    &shard->primary_worker,
+                                                    &transfer_sequence)) {
+            helper_requested = true;
             shard->primary_thread = pthread_self();
+        }
+        pthread_mutex_unlock(&shard->opaque_lock);
+
+        if (helper_requested) {
+            /* The gate is intentionally outside both scheduler locks. */
+            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_TRANSFER_REQUEST);
+            pthread_mutex_lock(&shard->opaque_lock);
             if (timing) {
                 enter_wait_start_ns = llam_now_ns();
             }
-            if (llam_ensure_opaque_helper_locked(shard) == 0) {
+            if (llam_ensure_opaque_helper_locked(shard) != 0) {
+                (void)llam_legacy_lease_rollback_helper_locked(shard,
+                                                               &shard->primary_worker,
+                                                               worker_incarnation,
+                                                               transfer_sequence);
+                helper_requested = false;
+            }
+            pthread_mutex_unlock(&shard->opaque_lock);
+            if (timing && enter_wait_start_ns != 0U) {
+                uint64_t wait_end_ns = llam_now_ns();
+
+                if (wait_end_ns >= enter_wait_start_ns) {
+                    enter_wait_ns = wait_end_ns - enter_wait_start_ns;
+                }
+            }
+        }
+
+        if (helper_requested) {
+            /* Finish task/current cleanup before clearing the lease owner. */
+            pthread_mutex_lock(&shard->opaque_lock);
+            pthread_mutex_lock(&shard->lock);
+            task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
+            task->wait_reason = LLAM_WAIT_BLOCKING;
+            atomic_store_explicit(&shard->current, NULL, memory_order_release);
+            llam_trace_shard(shard,
+                           task,
+                           LLAM_TRACE_STATE,
+                           LLAM_TASK_STATE_RUNNING,
+                           LLAM_TASK_STATE_BLOCKED_OPAQUE,
+                           LLAM_WAIT_BLOCKING);
+            pthread_mutex_unlock(&shard->lock);
+            if (!llam_legacy_lease_clear_owner_locked(shard,
+                                                      &shard->primary_worker,
+                                                      worker_incarnation,
+                                                      transfer_sequence)) {
+                pthread_mutex_unlock(&shard->opaque_lock);
+                helper_requested = false;
+            } else {
+                pthread_mutex_unlock(&shard->opaque_lock);
+            }
+            if (helper_requested) {
+                llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_OWNER_CLEAR);
+                pthread_mutex_lock(&shard->opaque_lock);
+                if (!llam_legacy_lease_grant_helper_locked(
+                        shard, &shard->opaque_helper_worker, transfer_sequence)) {
+                    (void)llam_legacy_lease_rollback_helper_locked(shard,
+                                                                   &shard->primary_worker,
+                                                                   worker_incarnation,
+                                                                   transfer_sequence);
+                    helper_requested = false;
+                }
+                pthread_mutex_unlock(&shard->opaque_lock);
+            }
+            if (helper_requested) {
+                llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_GRANT);
+                pthread_mutex_lock(&shard->opaque_lock);
                 shard->opaque_compensation_depth += 1U;
                 if (shard->opaque_compensation_depth > shard->opaque_compensation_depth_peak) {
                     shard->opaque_compensation_depth_peak = shard->opaque_compensation_depth;
@@ -492,57 +564,58 @@ int llam_enter_blocking(void) {
                     llam_opaque_wake_wait(shard);
                 }
                 helper_active = shard->opaque_helper_active && !shard->opaque_helper_failed;
-            }
-            if (timing && enter_wait_start_ns != 0U) {
-                uint64_t wait_end_ns = llam_now_ns();
-
-                if (wait_end_ns >= enter_wait_start_ns) {
-                    enter_wait_ns = wait_end_ns - enter_wait_start_ns;
+                if (!helper_active && shard->opaque_compensation_depth > 0U) {
+                    shard->opaque_compensation_depth -= 1U;
                 }
-            }
-            if (!helper_active && shard->opaque_compensation_depth > 0U) {
-                shard->opaque_compensation_depth -= 1U;
+                pthread_mutex_unlock(&shard->opaque_lock);
             }
         }
+
         if (!helper_active) {
+            pthread_mutex_lock(&shard->opaque_lock);
+            /* Failed helper startup and preferred redirect both use a token. */
+            if (!llam_legacy_lease_enter_redirect_locked(shard,
+                                                         worker,
+                                                         worker_incarnation)) {
+                pthread_mutex_unlock(&shard->opaque_lock);
+                errno = ECANCELED;
+                return -1;
+            }
             shard->opaque_redirect_depth += 1U;
             if (shard->opaque_redirect_depth > shard->opaque_redirect_depth_peak) {
                 shard->opaque_redirect_depth_peak = shard->opaque_redirect_depth;
             }
-            redirect_active = true;
             wake_redirect_workers = shard->runtime->active_shards > 1U;
-        }
-        pthread_mutex_unlock(&shard->opaque_lock);
+            pthread_mutex_unlock(&shard->opaque_lock);
+            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_OWNER_CLEAR);
 
-        pthread_mutex_lock(&shard->lock);
-        atomic_store_explicit(&shard->current, NULL, memory_order_release);
-        if (helper_active) {
-            task->opaque_uses_helper = true;
-            shard->metrics.opaque_compensations += 1U;
-            if (timing) {
-                shard->metrics.opaque_enter_wait_ns += enter_wait_ns;
-                shard->metrics.opaque_enter_wait_samples += 1U;
-                if (enter_wait_ns > shard->metrics.opaque_enter_wait_max_ns) {
-                    shard->metrics.opaque_enter_wait_max_ns = enter_wait_ns;
-                }
-            }
-            llam_trace_shard(shard,
-                           task,
-                           LLAM_TRACE_STATE,
-                           LLAM_TASK_STATE_RUNNING,
-                           LLAM_TASK_STATE_BLOCKED_OPAQUE,
-                           LLAM_WAIT_BLOCKING);
-        }
-        if (redirect_active) {
+            pthread_mutex_lock(&shard->lock);
+            task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
+            task->wait_reason = LLAM_WAIT_BLOCKING;
+            atomic_store_explicit(&shard->current, NULL, memory_order_release);
             task->opaque_uses_redirect = true;
             if (shard->opaque_redirect_depth == 1U) {
                 shard->metrics.opaque_redirect_activations += 1U;
             }
             llam_activate_opaque_redirect_locked(shard, task);
-        }
-        pthread_mutex_unlock(&shard->lock);
-        if (wake_redirect_workers) {
-            llam_wake_opaque_redirect_worker(shard->runtime, shard);
+            pthread_mutex_unlock(&shard->lock);
+            if (wake_redirect_workers) {
+                llam_wake_opaque_redirect_worker(shard->runtime, shard);
+            }
+        } else {
+            task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
+            task->wait_reason = LLAM_WAIT_BLOCKING;
+            task->opaque_uses_helper = true;
+            shard->metrics.opaque_compensations += 1U;
+            if (timing) {
+                pthread_mutex_lock(&shard->lock);
+                shard->metrics.opaque_enter_wait_ns += enter_wait_ns;
+                shard->metrics.opaque_enter_wait_samples += 1U;
+                if (enter_wait_ns > shard->metrics.opaque_enter_wait_max_ns) {
+                    shard->metrics.opaque_enter_wait_max_ns = enter_wait_ns;
+                }
+                pthread_mutex_unlock(&shard->lock);
+            }
         }
     }
     task->opaque_blocking_depth += 1U;
@@ -565,6 +638,7 @@ int llam_enter_blocking(void) {
 int llam_leave_blocking(void) {
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
+    llam_worker_t *worker = g_llam_tls_worker;
 
     if (task == NULL || shard == NULL) {
         return 0;
@@ -576,12 +650,17 @@ int llam_leave_blocking(void) {
 
     task->opaque_blocking_depth -= 1U;
     if (task->opaque_blocking_depth == 0U) {
-        bool helper_started;
         bool used_helper = task->opaque_uses_helper;
         bool used_redirect = task->opaque_uses_redirect;
         bool from_opaque_helper = llam_tls_is_opaque_helper_for(shard);
         bool deactivate_redirect = false;
+        bool handback_acknowledged = false;
         bool timing = llam_opaque_timing_enabled();
+        uint64_t worker_incarnation = worker != NULL
+                                          ? atomic_load_explicit(&worker->incarnation,
+                                                                 memory_order_acquire)
+                                          : 0U;
+        uint64_t return_sequence = 0U;
         uint64_t now_ns = timing ? llam_now_ns() : 0U;
         uint64_t block_ns = 0U;
         uint64_t leave_wait_ns = 0U;
@@ -601,28 +680,59 @@ int llam_leave_blocking(void) {
             task->max_opaque_block_ns = block_ns;
         }
 
-        pthread_mutex_lock(&shard->opaque_lock);
-        helper_started = shard->opaque_helper_thread_started;
-        if (used_helper && shard->opaque_compensation_depth > 0U) {
+        if (used_helper) {
             if (timing && !from_opaque_helper) {
                 leave_wait_start_ns = llam_now_ns();
             }
-            shard->opaque_compensation_depth -= 1U;
+            pthread_mutex_lock(&shard->opaque_lock);
+            (void)llam_legacy_lease_request_return_locked(shard,
+                                                          &shard->primary_worker,
+                                                          atomic_load_explicit(
+                                                              &shard->primary_worker.incarnation,
+                                                              memory_order_acquire),
+                                                          &return_sequence);
+            if (shard->opaque_compensation_depth > 0U) {
+                shard->opaque_compensation_depth -= 1U;
+            }
             llam_opaque_wake_signal(shard);
-            if (helper_started
 #if defined(__linux__)
-                && atomic_load_explicit(&shard->opaque_helper_opaque_wait, memory_order_acquire) == 0U
-#endif
-            ) {
+            if (shard->opaque_helper_thread_started &&
+                atomic_load_explicit(&shard->opaque_helper_opaque_wait,
+                                     memory_order_acquire) == 0U) {
                 llam_kick_shard(shard);
             }
-            while (!from_opaque_helper && shard->opaque_helper_active && !shard->opaque_helper_failed) {
-                llam_opaque_spin_until_helper_hint(shard, 0U);
-                if (!shard->opaque_helper_active || shard->opaque_helper_failed) {
-                    break;
+#endif
+            pthread_mutex_unlock(&shard->opaque_lock);
+
+            /* The helper publishes its ACK only after clearing its active task. */
+            if (!from_opaque_helper) {
+                for (;;) {
+                    bool helper_active;
+                    bool helper_failed;
+
+                    pthread_mutex_lock(&shard->opaque_lock);
+                    helper_active = shard->opaque_helper_active;
+                    helper_failed = shard->opaque_helper_failed;
+                    if (!helper_active || helper_failed) {
+                        pthread_mutex_unlock(&shard->opaque_lock);
+                        break;
+                    }
+                    llam_opaque_spin_until_helper_hint(shard, 0U);
+                    if (!shard->opaque_helper_active || shard->opaque_helper_failed) {
+                        pthread_mutex_unlock(&shard->opaque_lock);
+                        break;
+                    }
+                    llam_opaque_wake_wait(shard);
+                    pthread_mutex_unlock(&shard->opaque_lock);
                 }
-                llam_opaque_wake_wait(shard);
             }
+            pthread_mutex_lock(&shard->opaque_lock);
+            handback_acknowledged = llam_legacy_lease_can_reacquire_locked(
+                shard,
+                &shard->primary_worker,
+                atomic_load_explicit(&shard->primary_worker.incarnation,
+                                     memory_order_acquire));
+            pthread_mutex_unlock(&shard->opaque_lock);
             if (timing && leave_wait_start_ns != 0U) {
                 uint64_t wait_end_ns = llam_now_ns();
 
@@ -631,11 +741,28 @@ int llam_leave_blocking(void) {
                 }
             }
         }
-        if (used_redirect && shard->opaque_redirect_depth > 0U) {
-            shard->opaque_redirect_depth -= 1U;
-            deactivate_redirect = shard->opaque_redirect_depth == 0U;
+
+        if (used_redirect) {
+            pthread_mutex_lock(&shard->opaque_lock);
+            if (shard->opaque_redirect_depth > 0U) {
+                shard->opaque_redirect_depth -= 1U;
+                deactivate_redirect = shard->opaque_redirect_depth == 0U;
+            }
+            if (deactivate_redirect &&
+                llam_legacy_lease_request_return_locked(shard,
+                                                       worker,
+                                                       worker_incarnation,
+                                                       &return_sequence)) {
+                handback_acknowledged =
+                    llam_legacy_lease_complete_handback_locked(shard,
+                                                               worker,
+                                                               return_sequence);
+            }
+            pthread_mutex_unlock(&shard->opaque_lock);
+            if (handback_acknowledged) {
+                llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_HANDBACK_ACK);
+            }
         }
-        pthread_mutex_unlock(&shard->opaque_lock);
 
         pthread_mutex_lock(&shard->lock);
         if (timing) {
@@ -665,6 +792,7 @@ int llam_leave_blocking(void) {
                        LLAM_TASK_STATE_RUNNING,
                        LLAM_WAIT_BLOCKING);
         pthread_mutex_unlock(&shard->lock);
+        (void)handback_acknowledged;
         atomic_store_explicit(&shard->last_safepoint_ns,
                               timing && now_ns != 0U ? now_ns : llam_now_ns(),
                               memory_order_relaxed);
