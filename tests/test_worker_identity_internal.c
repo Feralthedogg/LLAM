@@ -32,6 +32,9 @@
 
 #if LLAM_PLATFORM_POSIX
 #include <pthread.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #else
 #include <windows.h>
 #endif
@@ -612,6 +615,85 @@ static int test_helper_create_failure_redirect(void) {
     destroy_runtime_bounded(&runtime, "helper-failure runtime destroy exceeded the bounded deadline");
     return 0;
 }
+
+#if LLAM_PLATFORM_POSIX
+typedef struct wrong_owner_uninstall_state {
+    test_failure_state_t failure;
+} wrong_owner_uninstall_state_t;
+
+static void wrong_owner_uninstall_task(void *arg) {
+    wrong_owner_uninstall_state_t *state = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+    pid_t child;
+    int status;
+    pid_t waited;
+
+    if (shard == NULL || g_llam_tls_worker != &shard->primary_worker) {
+        test_fail(&state->failure,
+                  "wrong-owner uninstall task did not run on the primary worker");
+        return;
+    }
+
+    child = fork();
+    if (child < 0) {
+        test_fail(&state->failure, "wrong-owner uninstall fork failed");
+        return;
+    }
+    if (child == 0) {
+        /* The child inherits primary TLS; the helper worker is not current. */
+        llam_uninstall_thread_signal_stack(&shard->opaque_helper_worker);
+        _exit(0);
+    }
+
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
+        test_fail(&state->failure, "wrong-owner uninstall waitpid failed");
+    } else if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGABRT) {
+        test_fail(&state->failure,
+                  "wrong-owner uninstall did not terminate the child with SIGABRT");
+    }
+}
+
+static int test_wrong_owner_uninstall_aborts(void) {
+    wrong_owner_uninstall_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    if (create_deterministic_runtime(&runtime) != 0) {
+        fprintf(stderr,
+                "test_worker_identity_internal: wrong-owner runtime create failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    task = llam_runtime_spawn_ex(runtime,
+                                 wrong_owner_uninstall_task,
+                                 &state,
+                                 NULL,
+                                 0U);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        destroy_runtime_bounded(&runtime,
+                                "wrong-owner runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: wrong-owner run/join failed: errno=%d (%s)\n",
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    if (failure_result(&state.failure, "wrong-owner uninstall regression failed")) {
+        destroy_runtime_bounded(&runtime,
+                                "wrong-owner runtime destroy exceeded the bounded deadline");
+        return 1;
+    }
+    destroy_runtime_bounded(&runtime,
+                            "wrong-owner runtime destroy exceeded the bounded deadline");
+    return 0;
+}
+#endif
 
 #if !LLAM_PLATFORM_WINDOWS
 static void *helper_signal_failure_run_main(void *arg) {
@@ -1637,6 +1719,9 @@ cleanup:
 
 int main(void) {
     if (test_helper_create_failure_redirect() != 0 ||
+#if LLAM_PLATFORM_POSIX
+        test_wrong_owner_uninstall_aborts() != 0 ||
+#endif
         test_primary_helper_takeover() != 0 ||
 #if !LLAM_PLATFORM_WINDOWS
         test_helper_signal_stack_eagain() != 0 ||

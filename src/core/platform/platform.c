@@ -481,13 +481,19 @@ void llam_uninstall_thread_signal_stack(llam_worker_t *worker) {
     stack_t disabled;
     uint64_t incarnation;
 
-    if (worker == NULL || !worker->sigaltstack_installed) {
+    if (worker == NULL || g_llam_tls_shard == NULL ||
+        g_llam_tls_worker != worker || g_llam_tls_processor == NULL ||
+        g_llam_tls_processor != &g_llam_tls_shard->processor ||
+        worker->compat_shard != g_llam_tls_shard ||
+        worker->associated_processor != g_llam_tls_processor ||
+        g_llam_tls_processor->compat_shard != g_llam_tls_shard) {
+        abort();
+    }
+    if (!worker->sigaltstack_installed) {
         return;
     }
     incarnation = atomic_load_explicit(&worker->incarnation, memory_order_acquire);
-    if (g_llam_tls_worker != worker ||
-        g_llam_tls_processor != worker->associated_processor ||
-        incarnation == 0U || incarnation != worker->signal_stack_incarnation) {
+    if (incarnation == 0U || incarnation != worker->signal_stack_incarnation) {
         abort();
     }
 

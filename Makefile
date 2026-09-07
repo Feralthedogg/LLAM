@@ -80,12 +80,14 @@ CLEAN_FILES = \
 	asan-test_runtime_core \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
+	asan-test_worker_identity_internal \
 	asan-test_multi_runtime_core \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability \
 	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
+	tsan-test_worker_identity_internal \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability \
@@ -123,6 +125,8 @@ CLEAN_FILES = \
 	test_windows_handle_io.exe \
 	test_security_capability.exe \
 	test_shared_load.exe \
+	asan-test_worker_identity_internal.exe \
+	tsan-test_worker_identity_internal.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
 	libllam_runtime.so \
