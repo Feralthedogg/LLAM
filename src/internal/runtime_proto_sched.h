@@ -41,6 +41,33 @@ int llam_ensure_opaque_helper_locked(llam_shard_t *shard);
 void *llam_opaque_helper_main(void *arg);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 void llam_worker_test_force_helper_create_error(int error_code);
+
+/** @brief Handoff points that a focused lease test may hold. */
+typedef enum llam_lease_test_point {
+    LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST = 1,
+    LLAM_LEASE_TEST_AFTER_OWNER_CLEAR = 2,
+    LLAM_LEASE_TEST_AFTER_GRANT = 3,
+    LLAM_LEASE_TEST_AFTER_HANDBACK_ACK = 4,
+    LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL = 5
+} llam_lease_test_point_t;
+
+/** @brief Lock-free observation of the execution lease test boundary. */
+typedef struct llam_lease_test_snapshot {
+    unsigned state;
+    uintptr_t owner_worker;
+    uint64_t owner_incarnation;
+    uint64_t epoch;
+    uintptr_t return_worker;
+    uint64_t return_incarnation;
+    uint64_t transfer_sequence;
+    uint64_t handback_ack_sequence;
+} llam_lease_test_snapshot_t;
+
+void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled);
+bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns);
+int llam_lease_test_snapshot(llam_runtime_t *runtime,
+                             unsigned shard_id,
+                             llam_lease_test_snapshot_t *out);
 #endif
 
 /*

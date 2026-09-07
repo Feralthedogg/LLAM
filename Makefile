@@ -67,6 +67,7 @@ CLEAN_FILES = \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
 	test_worker_identity_internal \
+	test_legacy_lease_internal \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -81,6 +82,7 @@ CLEAN_FILES = \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_worker_identity_internal \
+	asan-test_legacy_lease_internal \
 	asan-test_multi_runtime_core \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability \
@@ -88,6 +90,7 @@ CLEAN_FILES = \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_worker_identity_internal \
+	tsan-test_legacy_lease_internal \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability \
@@ -116,6 +119,7 @@ CLEAN_FILES = \
 	test_runtime_invariants.exe \
 	test_runtime_shutdown_internal.exe \
 	test_worker_identity_internal.exe \
+	test_legacy_lease_internal.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -126,7 +130,9 @@ CLEAN_FILES = \
 	test_security_capability.exe \
 	test_shared_load.exe \
 	asan-test_worker_identity_internal.exe \
+	asan-test_legacy_lease_internal.exe \
 	tsan-test_worker_identity_internal.exe \
+	tsan-test_legacy_lease_internal.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
 	libllam_runtime.so \
@@ -536,6 +542,8 @@ TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_runtime_shutdown_internal.o
 TEST_WORKER_IDENTITY_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_worker_identity_internal.o
+TEST_LEGACY_LEASE_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_legacy_lease_internal.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -589,6 +597,7 @@ BUILD_OBJS = \
 	$(TEST_RUNTIME_INVARIANTS_OBJS) \
 	$(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) \
 	$(TEST_WORKER_IDENTITY_INTERNAL_OBJS) \
+	$(TEST_LEGACY_LEASE_INTERNAL_OBJS) \
 	$(TEST_SYNC_OBJS) \
 	$(TEST_IO_BUFFERS_OBJS) \
 	$(TEST_WINDOWS_POLICY_OBJS) \
@@ -624,6 +633,7 @@ LINK_TARGETS = \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
 	test_worker_identity_internal \
+	test_legacy_lease_internal \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -657,7 +667,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_worker_identity_internal|test_worker_identity_boundary|check_worker_identity_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_worker_identity_internal|test_legacy_lease_internal|test_worker_identity_boundary|check_worker_identity_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -683,6 +693,7 @@ WINDOWS_CMAKE_TARGETS = \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
 	test_worker_identity_internal \
+	test_legacy_lease_internal \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -856,16 +867,16 @@ audit-production-test-hooks: static shared
 		for artifact in libllam_runtime.a ./$(SHLIB_REAL); do \
 			if test -f "$$artifact"; then \
 				symbols="$$($$(command -v nm) -a "$$artifact" 2>/dev/null || $$(command -v nm) "$$artifact" 2>/dev/null || true)"; \
-				if printf '%s\n' "$$symbols" | grep -E 'llam_worker_test_|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
+				if printf '%s\n' "$$symbols" | grep -E 'llam_worker_test_|llam_lease_test_|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
 					echo "production artifact exports test fault-injection hooks: $$artifact" >&2; \
-					printf '%s\n' "$$symbols" | grep -E 'llam_worker_test_|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
+					printf '%s\n' "$$symbols" | grep -E 'llam_worker_test_|llam_lease_test_|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
 					exit 1; \
 				fi; \
 			fi; \
 		done; \
 	fi
 
-test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_legacy_lease_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 	python3 scripts/test_worker_identity_boundary.py
@@ -885,6 +896,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	./test_runtime_invariants
 	./test_runtime_shutdown_internal
 	./test_worker_identity_internal
+	./test_legacy_lease_internal
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -1898,6 +1910,7 @@ ASAN_TEST_TARGETS = \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_worker_identity_internal \
+	asan-test_legacy_lease_internal \
 	asan-test_multi_runtime_core \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability
@@ -1909,6 +1922,7 @@ TSAN_TEST_TARGETS = \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_worker_identity_internal \
+	tsan-test_legacy_lease_internal \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
@@ -1944,6 +1958,7 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_worker_identity_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_legacy_lease_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
@@ -1994,6 +2009,7 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_worker_identity_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_legacy_lease_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
@@ -2135,6 +2151,9 @@ test_runtime_shutdown_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN
 test_worker_identity_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS) $(LDLIBS)
 
+test_legacy_lease_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS) $(LDLIBS)
+
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
 
@@ -2158,6 +2177,9 @@ asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: require
 
 asan-test_worker_identity_internal tsan-test_worker_identity_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_legacy_lease_internal tsan-test_legacy_lease_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS) $(LDLIBS)
 
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
@@ -2391,6 +2413,10 @@ $(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_in
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/tests/test_worker_identity_internal.o: tests/test_worker_identity_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_legacy_lease_internal.o: tests/test_legacy_lease_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 

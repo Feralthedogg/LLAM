@@ -109,6 +109,69 @@ worker-local watchdog authority. Until then, source audits reject those names,
 raw scheduler-context role decisions outside the explicit debug-equivalence
 checks, and obsolete shard-level signal-stack accesses.
 
+### Phase 1A characterization boundary
+
+The `test_legacy_lease_internal` target freezes the Phase 0 behavior before
+lease authority is introduced. Its gate and snapshot declarations are guarded
+by `LLAM_ENABLE_TEST_HOOKS`; the snapshot only observes the existing atomic
+current publication and lock-protected helper/redirect state. It does not add
+lease fields, change scheduling, or make a test observation authoritative.
+
+The following is the complete Phase 0 ownership inventory for the fields that
+Phase 1A will migrate. Line numbers are intentionally omitted so the inventory
+remains useful across mechanical edits; function names identify each access.
+
+* `shard->current`: `init.c` initializes the atomic; `scheduler.c`
+  (`llam_set_task_running`, `llam_clear_current_task`, and
+  `llam_shard_has_local_work`) publishes, clears, or reads it;
+  `blocking_api.c` (`llam_enter_blocking`, `llam_leave_blocking`) clears and
+  republishes it; `yield_join_sleep.c`
+  (`llam_yield_to_local_runnable_unlocked`, the portable locked branch of
+  `llam_yield_to_local_runnable`, and both direct-handoff branches of
+  `llam_join_try_local_handoff`) writes direct-handoff successors;
+  `reinject.c` (`llam_reinject_task_on_shard_and_yield_current`) writes the
+  direct wake successor; `core_queue.c` (`llam_snapshot_shard_load`) reads it;
+  `watchdog_probe.c` (`llam_watchdog_check_shard`,
+  `llam_runtime_has_runnable_work`, and
+  `llam_watchdog_snapshot_shard_load`), `watchdog_merge.c`
+  (`llam_shard_can_offline_locked` and `llam_shard_can_start_merge_locked`),
+  and `watchdog_scale.c` (the offline diagnostic) read it; `debug.c`
+  (`llam_dump_runtime_state`) reads it in both the busy-lock and normal dump
+  paths; and the test-hook snapshot reads the atomic under the shard lock.
+* `shard->preempt_thread`: `scheduler.c`
+  (`llam_shard_publish_preempt_thread`) writes the mutable watchdog target at
+  primary entry and helper activation/idle/exit; `watchdog_probe.c`
+  (`llam_watchdog_check_shard`) reads it for `pthread_kill`; the field is
+  declared in `runtime_types.h` as the current independent target authority.
+* `opaque_helper_active`: `scheduler.c` (`llam_opaque_helper_main`) writes
+  helper readiness/activation and exit projections; `blocking_api.c`
+  (`llam_enter_blocking`, `llam_leave_blocking`) reads the projection while
+  waiting for helper activation/return; `watchdog_probe.c`
+  (`llam_runtime_has_opaque_blocking`) reads it under `opaque_lock`; `debug.c`
+  (`llam_dump_runtime_state`) reports it; and `timer.c`'s test-hook snapshot
+  reads it under `opaque_lock`.
+* `opaque_compensation_depth`: `blocking_api.c` (`llam_enter_blocking`,
+  `llam_leave_blocking`) increments/decrements it and maintains its peak;
+  `scheduler.c` (`llam_opaque_helper_main`) reads it to decide whether the
+  helper should fetch or hand back; `watchdog_probe.c`
+  (`llam_runtime_has_opaque_blocking`) reads it under `opaque_lock`; and
+  `debug.c` (`llam_dump_runtime_state`) reports both depth values.
+* Pause acknowledgements: `init.c` initializes `merge_pause_ack` and
+  `steal_pause_ack`; `watchdog_merge.c` (`llam_runtime_set_steal_pause`,
+  `llam_runtime_wait_steal_pause_ack`, `llam_shard_request_merge_pause`,
+  `llam_shard_release_merge_pause`, `llam_shard_wait_merge_pause_ack`, and
+  `llam_merge_lockfree_normq_locked`) clears, waits on, or validates them;
+  `scheduler.c` (`llam_shard_pause_for_merge`) publishes and clears both
+  acknowledgements while pausing; and `watchdog_scale.c`
+  (`llam_runtime_offline_one_shard`) consumes the pause-wait results. The
+  acknowledgement fields remain atomic, but are not yet versioned by a lease
+  epoch or worker incarnation.
+
+This inventory is the explicit handoff point for later Phase 1A commits:
+transfers, current-G publication, watchdog targeting, and pause generations
+must migrate these accesses without introducing a second authority. Public
+headers, public statistics, and the exported ABI remain unchanged.
+
 ## Wake Handoff Fusion
 
 The normal wake path publishes a waiter as runnable, enqueues it on the owner

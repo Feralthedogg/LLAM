@@ -33,11 +33,107 @@
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_int g_llam_test_helper_create_error;
+static atomic_bool g_llam_lease_test_gate[6];
+
+static bool llam_lease_test_point_valid(llam_lease_test_point_t point) {
+    return point >= LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST &&
+           point <= LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL;
+}
 
 void llam_worker_test_force_helper_create_error(int error_code) {
     atomic_store_explicit(&g_llam_test_helper_create_error,
                           error_code,
                           memory_order_release);
+}
+
+void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled) {
+    if (!llam_lease_test_point_valid(point)) {
+        return;
+    }
+    atomic_store_explicit(&g_llam_lease_test_gate[(unsigned)point],
+                          enabled,
+                          memory_order_release);
+}
+
+bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns) {
+    uint64_t start_ns;
+    uint64_t deadline_ns;
+
+    if (!llam_lease_test_point_valid(point)) {
+        return false;
+    }
+    start_ns = llam_now_ns();
+    deadline_ns = timeout_ns > UINT64_MAX - start_ns
+                      ? UINT64_MAX
+                      : start_ns + timeout_ns;
+    while (atomic_load_explicit(&g_llam_lease_test_gate[(unsigned)point],
+                                memory_order_acquire)) {
+        if (llam_now_ns() >= deadline_ns) {
+            return false;
+        }
+        llam_pause_cpu();
+    }
+    return true;
+}
+
+int llam_lease_test_snapshot(llam_runtime_t *runtime,
+                             unsigned shard_id,
+                             llam_lease_test_snapshot_t *out) {
+    llam_shard_t *shard;
+    llam_task_t *current;
+    bool helper_active;
+    bool redirect_active;
+    bool stopping;
+    llam_worker_t *owner = NULL;
+
+    if (out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    if (runtime == NULL || runtime->shards == NULL ||
+        shard_id >= runtime->active_shards ||
+        !atomic_load_explicit(&runtime->initialized, memory_order_acquire)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    shard = &runtime->shards[shard_id];
+    if (!shard->lock_initialized || !shard->opaque_lock_initialized) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Read the task publication under its existing shard lock. */
+    pthread_mutex_lock(&shard->lock);
+    current = atomic_load_explicit(&shard->current, memory_order_acquire);
+    pthread_mutex_unlock(&shard->lock);
+
+    /* Compatibility helper/redirect state is protected by opaque_lock. */
+    pthread_mutex_lock(&shard->opaque_lock);
+    helper_active = shard->opaque_helper_active && !shard->opaque_helper_failed;
+    redirect_active = shard->opaque_redirect_active || shard->opaque_redirect_depth != 0U;
+    stopping = shard->opaque_helper_stop ||
+               atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire);
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    if (helper_active) {
+        owner = &shard->opaque_helper_worker;
+        out->state = 3U; /* LLAM_LEASE_HELPER_OWNED in the next phase. */
+    } else if (current != NULL) {
+        owner = &shard->primary_worker;
+        out->state = 1U; /* LLAM_LEASE_PRIMARY_OWNED in the next phase. */
+    } else if (stopping) {
+        out->state = 6U; /* LLAM_LEASE_STOPPING in the next phase. */
+    } else if (redirect_active) {
+        out->state = 5U; /* LLAM_LEASE_REDIRECTED_NO_EXECUTOR in the next phase. */
+    }
+    if (owner != NULL) {
+        out->owner_worker = (uintptr_t)owner;
+        out->owner_incarnation =
+            atomic_load_explicit(&owner->incarnation, memory_order_acquire);
+    }
+    return 0;
 }
 #endif
 
