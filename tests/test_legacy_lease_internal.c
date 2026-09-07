@@ -1392,6 +1392,8 @@ static void *watchdog_overlap_run_typed(void *arg) {
     errno = 0;
     driver->state->run_rc = llam_runtime_run_handle(driver->runtime);
     driver->state->run_errno = errno;
+    driver->state->fatal_errno = atomic_load_explicit(&driver->runtime->fatal_errno,
+                                                      memory_order_acquire);
     atomic_store_explicit(&driver->state->run_done, 1U, memory_order_release);
     return NULL;
 }
@@ -1571,10 +1573,9 @@ static int test_partial_helper_start_failure(void) {
     run_rc = task == NULL ? -1 : llam_runtime_run_handle(runtime);
     run_errno = errno;
     if (task != NULL) {
-        errno = 0;
-        if (llam_join(task) != 0) {
-            test_fail(&failure, "partial helper failure task join failed");
-        }
+        bounded_join_task(task,
+                          &status.done,
+                          "partial helper failure task join exceeded its deadline");
     }
     assert_no_fatal(runtime, run_rc, run_errno, &failure,
                     "partial helper failure changed run or fatal semantics");
@@ -1599,10 +1600,9 @@ static int test_partial_helper_start_failure(void) {
     run_rc = task == NULL ? -1 : llam_runtime_run_handle(runtime);
     run_errno = errno;
     if (task != NULL) {
-        errno = 0;
-        if (llam_join(task) != 0) {
-            test_fail(&failure, "partial helper retry task join failed");
-        }
+        bounded_join_task(task,
+                          &status.done,
+                          "partial helper retry task join exceeded its deadline");
     }
     assert_no_fatal(runtime, run_rc, run_errno, &failure,
                     "partial helper retry changed run or fatal semantics");
