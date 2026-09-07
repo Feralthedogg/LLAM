@@ -81,6 +81,8 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     // The calling thread is no longer considered a runtime worker while
     // teardown is in progress.
     g_llam_tls_shard = NULL;
+    g_llam_tls_worker = NULL;
+    g_llam_tls_processor = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
     atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);

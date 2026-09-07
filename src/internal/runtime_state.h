@@ -40,6 +40,8 @@ extern uint32_t g_llam_fp_control_context;
 
 // Scheduler TLS. These are set only while a runtime worker or managed task runs.
 extern _Thread_local llam_shard_t *g_llam_tls_shard;
+extern _Thread_local llam_worker_t *g_llam_tls_worker;
+extern _Thread_local llam_processor_t *g_llam_tls_processor;
 extern _Thread_local llam_task_t *g_llam_tls_task;
 extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 

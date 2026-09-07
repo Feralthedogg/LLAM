@@ -199,6 +199,10 @@ _Static_assert((LLAM_NORM_QUEUE_CAP & (LLAM_NORM_QUEUE_CAP - 1U)) == 0U, "LLAM_N
 typedef struct llam_runtime llam_runtime_t;
 /** @brief Scheduler worker/shard state type. */
 typedef struct llam_shard llam_shard_t;
+/** @brief Embedded processor identity cell associated with one shard. */
+typedef struct llam_processor llam_processor_t;
+/** @brief Embedded primary/helper worker identity slot. */
+typedef struct llam_worker llam_worker_t;
 /** @brief Platform I/O node state type. */
 typedef struct llam_node llam_node_t;
 /** @brief Metadata entry describing a cached stack mapping. */
@@ -1073,6 +1077,37 @@ struct llam_task_group {
     bool lock_initialized;
 };
 
+/** @brief Scheduler worker role represented by an embedded identity slot. */
+typedef enum llam_worker_role {
+    LLAM_WORKER_ROLE_PRIMARY = 1,
+    LLAM_WORKER_ROLE_OPAQUE_HELPER = 2,
+} llam_worker_role_t;
+
+/**
+ * @brief Minimal processor identity cell associated with one scheduler shard.
+ *
+ * The shard remains authoritative for scheduler state.  This cell only gives
+ * worker-side code a stable processor identity to pair with its worker slot.
+ */
+struct llam_processor {
+    llam_runtime_t *runtime;
+    llam_shard_t *compat_shard;
+    unsigned id;
+};
+
+/**
+ * @brief Minimal primary/helper worker identity slot.
+ *
+ * Incarnation changes whenever the owning native scheduler entry starts.  No
+ * scheduler state is mirrored here; all such state remains on llam_shard_t.
+ */
+struct llam_worker {
+    llam_shard_t *compat_shard;
+    llam_processor_t *associated_processor;
+    llam_worker_role_t role;
+    atomic_uint_fast64_t incarnation;
+};
+
 /**
  * @brief Scheduler shard.  Each shard owns a worker thread, runnable queues, timer
  * heap, allocator, stack caches, metrics, and opaque-blocking compensation
@@ -1081,6 +1116,9 @@ struct llam_task_group {
 struct llam_shard {
     llam_runtime_t *runtime;
     unsigned id;
+    llam_processor_t processor;
+    llam_worker_t primary_worker;
+    llam_worker_t opaque_helper_worker;
     unsigned cpu_id;
     unsigned node_index;
     unsigned io_node_index;

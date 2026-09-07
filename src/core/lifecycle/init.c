@@ -563,6 +563,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
     g_llam_tls_shard = NULL;
+    g_llam_tls_worker = NULL;
+    g_llam_tls_processor = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
     rt->init_thread = pthread_self();
@@ -867,6 +869,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 
         rt->shards[i].runtime = rt;
         rt->shards[i].id = i;
+        rt->shards[i].processor.runtime = rt;
+        rt->shards[i].processor.compat_shard = &rt->shards[i];
+        rt->shards[i].processor.id = i;
+        rt->shards[i].primary_worker.compat_shard = &rt->shards[i];
+        rt->shards[i].primary_worker.associated_processor = &rt->shards[i].processor;
+        rt->shards[i].primary_worker.role = LLAM_WORKER_ROLE_PRIMARY;
+        atomic_init(&rt->shards[i].primary_worker.incarnation, 0U);
+        rt->shards[i].opaque_helper_worker.compat_shard = &rt->shards[i];
+        rt->shards[i].opaque_helper_worker.associated_processor = &rt->shards[i].processor;
+        rt->shards[i].opaque_helper_worker.role = LLAM_WORKER_ROLE_OPAQUE_HELPER;
+        atomic_init(&rt->shards[i].opaque_helper_worker.incarnation, 0U);
         rt->shards[i].cpu_id = rt->allowed_cpus[i];
         rt->shards[i].node_index = node_index;
         rt->shards[i].io_node_index = rt->experimental_shard_rings != 0U ? i : node_index;
@@ -1222,6 +1235,8 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          size_t opts_size,
                          bool heap_allocated) {
     llam_shard_t *saved_tls_shard = g_llam_tls_shard;
+    llam_worker_t *saved_tls_worker = g_llam_tls_worker;
+    llam_processor_t *saved_tls_processor = g_llam_tls_processor;
     llam_task_t *saved_tls_task = g_llam_tls_task;
     llam_ctx_t *saved_tls_scheduler_ctx = g_llam_tls_scheduler_ctx;
     int rc;
@@ -1245,8 +1260,11 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
      * before returning; otherwise a successful create corrupts the caller's
      * managed execution frame.
      */
-    if (saved_tls_task != NULL || saved_tls_scheduler_ctx != NULL) {
+    if (saved_tls_task != NULL || saved_tls_scheduler_ctx != NULL ||
+        saved_tls_worker != NULL || saved_tls_processor != NULL) {
         g_llam_tls_shard = saved_tls_shard;
+        g_llam_tls_worker = saved_tls_worker;
+        g_llam_tls_processor = saved_tls_processor;
         g_llam_tls_task = saved_tls_task;
         g_llam_tls_scheduler_ctx = saved_tls_scheduler_ctx;
     }

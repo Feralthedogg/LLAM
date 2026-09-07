@@ -45,6 +45,14 @@ typedef struct legacy_worker_observation {
     unsigned helper_by_context;
 } legacy_worker_observation_t;
 
+typedef struct worker_identity_observation {
+    uintptr_t shard;
+    uintptr_t worker;
+    uintptr_t processor;
+    uint64_t incarnation;
+    unsigned role;
+} worker_identity_observation_t;
+
 typedef struct test_failure_state {
     atomic_uint failures;
     const char *first_failure;
@@ -64,9 +72,14 @@ struct role_state {
     llam_runtime_t *runtime;
     legacy_worker_observation_t root_before;
     legacy_worker_observation_t root_after;
+    worker_identity_observation_t root_identity_before;
+    worker_identity_observation_t root_identity_after;
     legacy_worker_observation_t helper;
     legacy_worker_observation_t helper_after_enter;
     legacy_worker_observation_t helper_after_leave;
+    worker_identity_observation_t helper_identity;
+    worker_identity_observation_t helper_identity_after_enter;
+    worker_identity_observation_t helper_identity_after_leave;
     atomic_uint helper_copied;
     atomic_uint helper_done;
     atomic_uint root_depth_after_nested_enter;
@@ -92,12 +105,15 @@ typedef struct repeat_state {
     test_failure_state_t failure;
     llam_runtime_t *runtime;
     legacy_worker_observation_t observations[2];
+    worker_identity_observation_t identity_observations[2];
     atomic_uint first_seen;
     atomic_uint first_run_done;
     atomic_uint first_driver_done;
     atomic_uint second_seen;
     atomic_uint second_run_done;
     atomic_uint second_driver_done;
+    unsigned first_exit_tls_clear;
+    unsigned second_exit_tls_clear;
     pthread_mutex_t lock;
     pthread_cond_t condition;
     unsigned release_first;
@@ -147,6 +163,31 @@ static void observe_legacy_worker(legacy_worker_observation_t *out) {
         out->helper_by_context =
             g_llam_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
     }
+}
+
+static void observe_worker_identity(worker_identity_observation_t *out) {
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    memset(out, 0, sizeof(*out));
+    out->shard = (uintptr_t)g_llam_tls_shard;
+    out->worker = (uintptr_t)worker;
+    out->processor = (uintptr_t)g_llam_tls_processor;
+    if (worker == NULL || g_llam_tls_processor == NULL) {
+        return;
+    }
+    out->incarnation =
+        atomic_load_explicit(&worker->incarnation, memory_order_acquire);
+    out->role = (unsigned)worker->role;
+}
+
+static unsigned worker_identity_tuple_is_clear(void) {
+    return g_llam_tls_shard == NULL &&
+                   g_llam_tls_worker == NULL &&
+                   g_llam_tls_processor == NULL &&
+                   g_llam_tls_task == NULL &&
+                   g_llam_tls_scheduler_ctx == NULL
+               ? 1U
+               : 0U;
 }
 
 static uint64_t legacy_deadline(void) {
@@ -413,6 +454,7 @@ static void helper_role_task(void *arg) {
 
     helper_before = pthread_self();
     observe_legacy_worker(&state->helper);
+    observe_worker_identity(&state->helper_identity);
     shard = g_llam_tls_shard;
     pthread_mutex_lock(&shard->opaque_lock);
     atomic_store_explicit(&state->helper_ready,
@@ -434,6 +476,7 @@ static void helper_role_task(void *arg) {
 
     atomic_store_explicit(&state->helper_enter_rc, llam_enter_blocking(), memory_order_release);
     observe_legacy_worker(&state->helper_after_enter);
+    observe_worker_identity(&state->helper_identity_after_enter);
     if (atomic_load_explicit(&state->helper_enter_rc, memory_order_acquire) == 0) {
         pthread_mutex_lock(&shard->lock);
         atomic_store_explicit(&state->helper_redirect_active,
@@ -445,6 +488,7 @@ static void helper_role_task(void *arg) {
         pthread_mutex_unlock(&shard->lock);
         atomic_store_explicit(&state->helper_leave_rc, llam_leave_blocking(), memory_order_release);
         observe_legacy_worker(&state->helper_after_leave);
+        observe_worker_identity(&state->helper_identity_after_leave);
     } else {
         atomic_store_explicit(&state->helper_leave_rc, -1, memory_order_release);
         memset(&state->helper_after_leave, 0, sizeof(state->helper_after_leave));
@@ -473,6 +517,7 @@ static void role_root_task(void *arg) {
     uint64_t deadline;
 
     observe_legacy_worker(&state->root_before);
+    observe_worker_identity(&state->root_identity_before);
     if (state->root_before.primary_by_context == 0U ||
         state->root_before.helper_by_context != 0U) {
         test_fail(&state->failure, "root task did not observe the primary scheduler context");
@@ -525,6 +570,7 @@ static void role_root_task(void *arg) {
                           g_llam_tls_task->opaque_blocking_depth,
                           memory_order_release);
     observe_legacy_worker(&state->root_after);
+    observe_worker_identity(&state->root_identity_after);
     if (state->root_after.primary_by_context == 0U ||
         state->root_after.helper_by_context != 0U) {
         test_fail(&state->failure, "primary did not regain its scheduler context after helper return");
@@ -589,6 +635,21 @@ static int test_primary_helper_takeover(void) {
                 "test_worker_identity_internal: root legacy context truth table changed\n");
         return 1;
     }
+    if (state.root_identity_before.shard != state.root_before.shard ||
+        state.root_identity_before.worker == 0U ||
+        state.root_identity_before.processor == 0U ||
+        state.root_identity_before.incarnation == 0U ||
+        state.root_identity_before.role != LLAM_WORKER_ROLE_PRIMARY ||
+        state.root_identity_before.processor != (uintptr_t)&shard->processor ||
+        state.root_identity_after.worker != state.root_identity_before.worker ||
+        state.root_identity_after.processor != state.root_identity_before.processor ||
+        state.root_identity_after.incarnation != state.root_identity_before.incarnation ||
+        state.root_identity_after.role != LLAM_WORKER_ROLE_PRIMARY) {
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: primary identity tuple changed during helper takeover\n");
+        return 1;
+    }
     if (state.helper.shard != state.root_before.shard ||
         state.helper.scheduler_context == state.root_before.scheduler_context ||
         state.helper.primary_by_context != 0U || state.helper.helper_by_context != 1U ||
@@ -596,6 +657,26 @@ static int test_primary_helper_takeover(void) {
         destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper legacy context truth table changed\n");
+        return 1;
+    }
+    if (state.helper_identity.shard != state.root_identity_before.shard ||
+        state.helper_identity.worker == 0U ||
+        state.helper_identity.worker == state.root_identity_before.worker ||
+        state.helper_identity.processor != state.root_identity_before.processor ||
+        state.helper_identity.processor != (uintptr_t)&shard->processor ||
+        state.helper_identity.incarnation == 0U ||
+        state.helper_identity.role != LLAM_WORKER_ROLE_OPAQUE_HELPER ||
+        state.helper_identity_after_enter.worker != state.helper_identity.worker ||
+        state.helper_identity_after_enter.processor != state.helper_identity.processor ||
+        state.helper_identity_after_enter.incarnation != state.helper_identity.incarnation ||
+        state.helper_identity_after_enter.role != LLAM_WORKER_ROLE_OPAQUE_HELPER ||
+        state.helper_identity_after_leave.worker != state.helper_identity.worker ||
+        state.helper_identity_after_leave.processor != state.helper_identity.processor ||
+        state.helper_identity_after_leave.incarnation != state.helper_identity.incarnation ||
+        state.helper_identity_after_leave.role != LLAM_WORKER_ROLE_OPAQUE_HELPER) {
+        destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
+        fprintf(stderr,
+                "test_worker_identity_internal: helper identity tuple was not stable\n");
         return 1;
     }
     if (atomic_load_explicit(&state.helper_identity_preserved, memory_order_acquire) == 0U ||
@@ -640,6 +721,7 @@ static void repeat_observer_task(void *arg) {
     legacy_worker_observation_t *observation = &state->observations[task_arg->index];
 
     observe_legacy_worker(observation);
+    observe_worker_identity(&state->identity_observations[task_arg->index]);
     if (observation->primary_by_context == 0U || observation->helper_by_context != 0U) {
         test_fail(&state->failure, "repeat-run task did not observe primary context");
     }
@@ -656,6 +738,7 @@ static void *first_runtime_driver(void *arg) {
 
     state->first_driver = pthread_self();
     state->first_run_rc = llam_runtime_run_handle(state->runtime);
+    state->first_exit_tls_clear = worker_identity_tuple_is_clear();
     atomic_store_explicit(&state->first_run_done, 1U, memory_order_release);
     pthread_mutex_lock(&state->lock);
     pthread_cond_broadcast(&state->condition);
@@ -684,6 +767,7 @@ static void *second_runtime_driver(void *arg) {
 
     state->second_driver = pthread_self();
     state->second_run_rc = llam_runtime_run_handle(state->runtime);
+    state->second_exit_tls_clear = worker_identity_tuple_is_clear();
     atomic_store_explicit(&state->second_run_done, 1U, memory_order_release);
     pthread_mutex_lock(&state->lock);
     pthread_cond_broadcast(&state->condition);
@@ -778,6 +862,21 @@ static int test_repeated_runs_distinct_host_threads(void) {
         state.observations[0].scheduler_context != state.observations[1].scheduler_context ||
         pthread_equal(state.first_driver, state.second_driver) != 0) {
         test_fail(&state.failure, "repeated runs changed legacy shard/context or recycled the host thread");
+        goto cleanup;
+    }
+    if (state.identity_observations[0].shard != state.identity_observations[1].shard ||
+        state.identity_observations[0].worker == 0U ||
+        state.identity_observations[0].worker != state.identity_observations[1].worker ||
+        state.identity_observations[0].processor == 0U ||
+        state.identity_observations[0].processor != state.identity_observations[1].processor ||
+        state.identity_observations[0].role != LLAM_WORKER_ROLE_PRIMARY ||
+        state.identity_observations[1].role != LLAM_WORKER_ROLE_PRIMARY ||
+        state.identity_observations[1].incarnation <= state.identity_observations[0].incarnation) {
+        test_fail(&state.failure, "repeated runs did not preserve the primary slot or advance incarnation");
+        goto cleanup;
+    }
+    if (state.first_exit_tls_clear == 0U || state.second_exit_tls_clear == 0U) {
+        test_fail(&state.failure, "scheduler exit did not clear the complete identity TLS tuple");
         goto cleanup;
     }
     rc = failure_result(&state.failure, "repeat-run characterization failed");

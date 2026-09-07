@@ -39,6 +39,10 @@ uint32_t g_llam_xsave_mask_hi;
 uint32_t g_llam_fp_control_context;
 /** @brief Thread-local shard currently running on this native thread. */
 _Thread_local llam_shard_t *g_llam_tls_shard;
+/** @brief Thread-local worker identity slot currently running on this native thread. */
+_Thread_local llam_worker_t *g_llam_tls_worker;
+/** @brief Thread-local processor identity cell currently running on this native thread. */
+_Thread_local llam_processor_t *g_llam_tls_processor;
 /** @brief Thread-local task currently executing on this native thread. */
 _Thread_local llam_task_t *g_llam_tls_task;
 /** @brief Thread-local scheduler context for returning from task fibers. */

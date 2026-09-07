@@ -69,6 +69,26 @@ static int llam_scheduler_try_install_signal_stack(llam_shard_t *shard) {
     return -1;
 }
 
+static llam_worker_t *llam_scheduler_bind_identity(llam_shard_t *shard,
+                                                   llam_worker_t *worker,
+                                                   llam_ctx_t *ctx) {
+    atomic_fetch_add_explicit(&worker->incarnation, 1U, memory_order_acq_rel);
+    g_llam_tls_shard = shard;
+    g_llam_tls_worker = worker;
+    g_llam_tls_processor = &shard->processor;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = ctx;
+    return worker;
+}
+
+static void llam_scheduler_clear_identity(void) {
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = NULL;
+    g_llam_tls_processor = NULL;
+    g_llam_tls_worker = NULL;
+    g_llam_tls_shard = NULL;
+}
+
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
 static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thread) {
     /*
@@ -306,9 +326,7 @@ static void llam_opaque_helper_wait_for_signal_locked(llam_shard_t *shard) {
 void llam_scheduler_loop(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
 
-    g_llam_tls_shard = shard;
-    g_llam_tls_task = NULL;
-    g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
+    llam_scheduler_bind_identity(shard, &shard->primary_worker, &shard->scheduler_ctx);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
     llam_shard_publish_preempt_thread(shard, pthread_self());
 #endif
@@ -317,9 +335,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     llam_tune_scheduler_thread(shard, false);
     if (llam_scheduler_try_install_signal_stack(shard) != 0) {
         llam_record_fatal(rt, errno);
-        g_llam_tls_shard = NULL;
-        g_llam_tls_task = NULL;
-        g_llam_tls_scheduler_ctx = NULL;
+        llam_scheduler_clear_identity();
         return;
     }
 
@@ -405,9 +421,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
      * managed task from the last runtime, which can falsely reject explicit
      * handles from another runtime with EXDEV.
      */
-    g_llam_tls_shard = NULL;
-    g_llam_tls_task = NULL;
-    g_llam_tls_scheduler_ctx = NULL;
+    llam_scheduler_clear_identity();
 }
 
 /**
@@ -425,9 +439,7 @@ void *llam_opaque_helper_main(void *arg) {
     llam_shard_t *shard = arg;
     llam_runtime_t *rt = shard->runtime;
 
-    g_llam_tls_shard = shard;
-    g_llam_tls_task = NULL;
-    g_llam_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
+    llam_scheduler_bind_identity(shard, &shard->opaque_helper_worker, &shard->opaque_scheduler_ctx);
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, true);
     if (llam_scheduler_try_install_signal_stack(shard) != 0) {
@@ -438,6 +450,7 @@ void *llam_opaque_helper_main(void *arg) {
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
         llam_record_fatal(rt, errno);
+        llam_scheduler_clear_identity();
         return NULL;
     }
 
@@ -584,7 +597,7 @@ void *llam_opaque_helper_main(void *arg) {
 out:
     llam_uninstall_thread_signal_stack(shard);
     llam_channel_tls_cache_drain();
-    g_llam_tls_scheduler_ctx = NULL;
+    llam_scheduler_clear_identity();
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
