@@ -23,12 +23,18 @@
 #include "runtime_internal.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+#if LLAM_PLATFORM_POSIX
+#include <pthread.h>
+#else
+#include <windows.h>
+#endif
 
 #define LEGACY_TEST_WAIT_NS (3ULL * 1000ULL * 1000ULL * 1000ULL)
 
@@ -59,6 +65,8 @@ struct role_state {
     legacy_worker_observation_t root_before;
     legacy_worker_observation_t root_after;
     legacy_worker_observation_t helper;
+    legacy_worker_observation_t helper_after_enter;
+    legacy_worker_observation_t helper_after_leave;
     atomic_uint helper_copied;
     atomic_uint helper_done;
     atomic_uint root_depth_after_nested_enter;
@@ -72,6 +80,7 @@ struct role_state {
     atomic_uint helper_ready;
     atomic_uint helper_thread_started;
     atomic_uint helper_driver_matches;
+    atomic_uint helper_identity_preserved;
 };
 
 typedef struct repeat_task_arg {
@@ -85,8 +94,10 @@ typedef struct repeat_state {
     legacy_worker_observation_t observations[2];
     atomic_uint first_seen;
     atomic_uint first_run_done;
+    atomic_uint first_driver_done;
     atomic_uint second_seen;
     atomic_uint second_run_done;
+    atomic_uint second_driver_done;
     pthread_mutex_t lock;
     pthread_cond_t condition;
     unsigned release_first;
@@ -100,11 +111,17 @@ typedef struct active_shutdown_state {
     test_failure_state_t failure;
     llam_runtime_t *runtime;
     atomic_uint primary_entered;
+    atomic_uint helper_state_observed;
+    atomic_uint helper_started;
+    atomic_uint helper_ready;
+    atomic_uint helper_active;
     atomic_uint release_primary;
     atomic_uint destroy_started;
     atomic_uint task_done;
     atomic_uint release_thread_done;
-    int run_rc;
+    atomic_uint destroy_done;
+    atomic_int run_rc;
+    atomic_uint run_done;
 } active_shutdown_state_t;
 
 static int create_deterministic_runtime(llam_runtime_t **out) {
@@ -146,6 +163,45 @@ static int wait_flag(const atomic_uint *flag, uint64_t deadline_ns) {
     return 0;
 }
 
+static int repeat_cond_timedwait(repeat_state_t *state, uint64_t deadline_ns) {
+    uint64_t now_ns = llam_now_ns();
+    uint64_t remaining_ns;
+
+    if (now_ns >= deadline_ns) {
+        return ETIMEDOUT;
+    }
+    remaining_ns = deadline_ns - now_ns;
+#if LLAM_PLATFORM_WINDOWS
+    {
+        uint64_t timeout_ms = (remaining_ns + 999999ULL) / 1000000ULL;
+        DWORD timeout = timeout_ms >= (uint64_t)INFINITE ? INFINITE - 1U : (DWORD)timeout_ms;
+
+        if (SleepConditionVariableSRW(&state->condition.cv,
+                                      &state->lock.lock,
+                                      timeout,
+                                      0U)) {
+            return 0;
+        }
+        return GetLastError() == ERROR_TIMEOUT ? ETIMEDOUT : EINVAL;
+    }
+#else
+    {
+        struct timespec deadline;
+
+        if (timespec_get(&deadline, TIME_UTC) != TIME_UTC) {
+            return EINVAL;
+        }
+        deadline.tv_sec += (time_t)(remaining_ns / 1000000000ULL);
+        deadline.tv_nsec += (long)(remaining_ns % 1000000000ULL);
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec += 1;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        return pthread_cond_timedwait(&state->condition, &state->lock, &deadline);
+    }
+#endif
+}
+
 static void test_fail(test_failure_state_t *state, const char *message) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_acq_rel) == 0U) {
         state->first_failure = message;
@@ -160,6 +216,18 @@ static int failure_result(const test_failure_state_t *state, const char *fallbac
         return 1;
     }
     return 0;
+}
+
+static void fail_safe_cleanup(const char *message) {
+    fprintf(stderr, "test_worker_identity_internal: %s\n", message);
+    fflush(stderr);
+    _Exit(1);
+}
+
+static void require_flag_before_cleanup(const atomic_uint *flag, const char *message) {
+    if (wait_flag(flag, legacy_deadline()) != 0) {
+        fail_safe_cleanup(message);
+    }
 }
 
 static void helper_failure_task(void *arg) {
@@ -278,7 +346,12 @@ static int test_helper_create_failure_redirect(void) {
 static void helper_role_task(void *arg) {
     role_state_t *state = arg;
     llam_shard_t *shard;
+    pthread_t helper_before;
+    pthread_t configured_before;
+    pthread_t configured_after;
+    bool helper_started;
 
+    helper_before = pthread_self();
     observe_legacy_worker(&state->helper);
     shard = g_llam_tls_shard;
     pthread_mutex_lock(&shard->opaque_lock);
@@ -288,9 +361,11 @@ static void helper_role_task(void *arg) {
     atomic_store_explicit(&state->helper_thread_started,
                           shard->opaque_helper_thread_started ? 1U : 0U,
                           memory_order_release);
+    helper_started = shard->opaque_helper_thread_started;
+    configured_before = helper_started ? shard->opaque_helper_thread : helper_before;
     atomic_store_explicit(&state->helper_driver_matches,
-                          shard->opaque_helper_thread_started &&
-                                  pthread_equal(pthread_self(), shard->opaque_helper_thread) != 0
+                          helper_started &&
+                                  pthread_equal(helper_before, shard->opaque_helper_thread) != 0
                               ? 1U
                               : 0U,
                           memory_order_release);
@@ -298,6 +373,7 @@ static void helper_role_task(void *arg) {
     atomic_store_explicit(&state->helper_copied, 1U, memory_order_release);
 
     atomic_store_explicit(&state->helper_enter_rc, llam_enter_blocking(), memory_order_release);
+    observe_legacy_worker(&state->helper_after_enter);
     if (atomic_load_explicit(&state->helper_enter_rc, memory_order_acquire) == 0) {
         pthread_mutex_lock(&shard->lock);
         atomic_store_explicit(&state->helper_redirect_active,
@@ -308,9 +384,22 @@ static void helper_role_task(void *arg) {
                               memory_order_release);
         pthread_mutex_unlock(&shard->lock);
         atomic_store_explicit(&state->helper_leave_rc, llam_leave_blocking(), memory_order_release);
+        observe_legacy_worker(&state->helper_after_leave);
     } else {
         atomic_store_explicit(&state->helper_leave_rc, -1, memory_order_release);
+        memset(&state->helper_after_leave, 0, sizeof(state->helper_after_leave));
     }
+    pthread_mutex_lock(&shard->opaque_lock);
+    configured_after = helper_started ? shard->opaque_helper_thread : helper_before;
+    pthread_mutex_unlock(&shard->opaque_lock);
+    atomic_store_explicit(&state->helper_identity_preserved,
+                          helper_started &&
+                                  pthread_equal(helper_before, configured_before) != 0 &&
+                                  pthread_equal(helper_before, pthread_self()) != 0 &&
+                                  pthread_equal(configured_before, configured_after) != 0
+                              ? 1U
+                              : 0U,
+                          memory_order_release);
     if (atomic_load_explicit(&state->helper_enter_rc, memory_order_acquire) != 0 ||
         atomic_load_explicit(&state->helper_leave_rc, memory_order_acquire) != 0) {
         test_fail(&state->failure, "helper-dispatched blocking lifecycle failed");
@@ -408,6 +497,7 @@ static int test_primary_helper_takeover(void) {
     atomic_init(&state.helper_ready, 0U);
     atomic_init(&state.helper_thread_started, 0U);
     atomic_init(&state.helper_driver_matches, 0U);
+    atomic_init(&state.helper_identity_preserved, 0U);
     if (create_deterministic_runtime(&runtime) != 0) {
         return 1;
     }
@@ -446,6 +536,20 @@ static int test_primary_helper_takeover(void) {
         llam_runtime_destroy(runtime);
         fprintf(stderr,
                 "test_worker_identity_internal: helper legacy context truth table changed\n");
+        return 1;
+    }
+    if (atomic_load_explicit(&state.helper_identity_preserved, memory_order_acquire) == 0U ||
+        state.helper_after_enter.shard != state.helper.shard ||
+        state.helper_after_enter.scheduler_context != state.helper.scheduler_context ||
+        state.helper_after_enter.primary_by_context != 0U ||
+        state.helper_after_enter.helper_by_context != 1U ||
+        state.helper_after_leave.shard != state.helper.shard ||
+        state.helper_after_leave.scheduler_context != state.helper.scheduler_context ||
+        state.helper_after_leave.primary_by_context != 0U ||
+        state.helper_after_leave.helper_by_context != 1U) {
+        llam_runtime_destroy(runtime);
+        fprintf(stderr,
+                "test_worker_identity_internal: helper identity changed during blocking enter/leave\n");
         return 1;
     }
     if (atomic_load_explicit(&state.root_depth_after_nested_enter, memory_order_acquire) != 2U ||
@@ -488,6 +592,7 @@ static void repeat_observer_task(void *arg) {
 
 static void *first_runtime_driver(void *arg) {
     repeat_state_t *state = arg;
+    uint64_t deadline_ns = legacy_deadline();
 
     state->first_driver = pthread_self();
     state->first_run_rc = llam_runtime_run_handle(state->runtime);
@@ -495,7 +600,14 @@ static void *first_runtime_driver(void *arg) {
     pthread_mutex_lock(&state->lock);
     pthread_cond_broadcast(&state->condition);
     while (state->release_first == 0U) {
-        if (pthread_cond_wait(&state->condition, &state->lock) != 0) {
+        int rc = repeat_cond_timedwait(state, deadline_ns);
+
+        if (rc == ETIMEDOUT) {
+            test_fail(&state->failure, "first run driver was not released by the bounded condition wait");
+            state->release_first = 1U;
+            break;
+        }
+        if (rc != 0) {
             test_fail(&state->failure, "first run driver condition wait failed");
             state->release_first = 1U;
             break;
@@ -503,6 +615,7 @@ static void *first_runtime_driver(void *arg) {
     }
     pthread_cond_broadcast(&state->condition);
     pthread_mutex_unlock(&state->lock);
+    atomic_store_explicit(&state->first_driver_done, 1U, memory_order_release);
     return NULL;
 }
 
@@ -515,6 +628,7 @@ static void *second_runtime_driver(void *arg) {
     pthread_mutex_lock(&state->lock);
     pthread_cond_broadcast(&state->condition);
     pthread_mutex_unlock(&state->lock);
+    atomic_store_explicit(&state->second_driver_done, 1U, memory_order_release);
     return NULL;
 }
 
@@ -537,8 +651,10 @@ static int test_repeated_runs_distinct_host_threads(void) {
     atomic_init(&state.failure.failures, 0U);
     atomic_init(&state.first_seen, 0U);
     atomic_init(&state.first_run_done, 0U);
+    atomic_init(&state.first_driver_done, 0U);
     atomic_init(&state.second_seen, 0U);
     atomic_init(&state.second_run_done, 0U);
+    atomic_init(&state.second_driver_done, 0U);
     if (pthread_mutex_init(&state.lock, NULL) != 0) {
         fprintf(stderr, "test_worker_identity_internal: repeat-run mutex setup failed\n");
         return 1;
@@ -613,14 +729,26 @@ cleanup:
         pthread_cond_broadcast(&state.condition);
         pthread_mutex_unlock(&state.lock);
     }
+    if (first_created) {
+        require_flag_before_cleanup(&state.first_run_done,
+                                    "first run driver did not stop during bounded cleanup");
+    }
+    if (second_created) {
+        require_flag_before_cleanup(&state.second_run_done,
+                                    "second run driver did not stop during bounded cleanup");
+    }
     if (runtime != NULL) {
         llam_runtime_destroy(runtime);
         runtime = NULL;
     }
     if (second_created) {
+        require_flag_before_cleanup(&state.second_driver_done,
+                                    "second run thread did not finish during bounded cleanup");
         pthread_join(second_thread, NULL);
     }
     if (first_created) {
+        require_flag_before_cleanup(&state.first_driver_done,
+                                    "first run thread did not finish during bounded cleanup");
         pthread_join(first_thread, NULL);
     }
     if (state.failure.first_failure != NULL && rc == 1) {
@@ -688,6 +816,7 @@ static int test_idle_helper_shutdown(void) {
 
 static void active_shutdown_task(void *arg) {
     active_shutdown_state_t *state = arg;
+    llam_shard_t *shard;
     uint64_t deadline;
 
     if (llam_enter_blocking() != 0) {
@@ -695,6 +824,19 @@ static void active_shutdown_task(void *arg) {
         atomic_store_explicit(&state->primary_entered, 1U, memory_order_release);
         return;
     }
+    shard = g_llam_tls_shard;
+    pthread_mutex_lock(&shard->opaque_lock);
+    atomic_store_explicit(&state->helper_started,
+                          shard->opaque_helper_thread_started ? 1U : 0U,
+                          memory_order_release);
+    atomic_store_explicit(&state->helper_ready,
+                          shard->opaque_helper_ready ? 1U : 0U,
+                          memory_order_release);
+    atomic_store_explicit(&state->helper_active,
+                          shard->opaque_helper_active ? 1U : 0U,
+                          memory_order_release);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    atomic_store_explicit(&state->helper_state_observed, 1U, memory_order_release);
     atomic_store_explicit(&state->primary_entered, 1U, memory_order_release);
     deadline = legacy_deadline();
     if (wait_flag(&state->release_primary, deadline) != 0) {
@@ -720,8 +862,20 @@ static void *active_shutdown_release_thread(void *arg) {
 
 static void *active_shutdown_run_thread(void *arg) {
     active_shutdown_state_t *state = arg;
+    int run_rc;
 
-    state->run_rc = llam_runtime_run_handle(state->runtime);
+    run_rc = llam_runtime_run_handle(state->runtime);
+    atomic_store_explicit(&state->run_rc, run_rc, memory_order_release);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *active_shutdown_destroy_thread(void *arg) {
+    active_shutdown_state_t *state = arg;
+
+    atomic_store_explicit(&state->destroy_started, 1U, memory_order_release);
+    llam_runtime_destroy(state->runtime);
+    atomic_store_explicit(&state->destroy_done, 1U, memory_order_release);
     return NULL;
 }
 
@@ -731,16 +885,25 @@ static int test_active_helper_shutdown(void) {
     llam_task_t *task = NULL;
     pthread_t run_thread;
     pthread_t release_thread;
+    pthread_t destroy_thread;
     bool run_created = false;
     bool release_created = false;
+    bool destroy_created = false;
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failure.failures, 0U);
     atomic_init(&state.primary_entered, 0U);
+    atomic_init(&state.helper_state_observed, 0U);
+    atomic_init(&state.helper_started, 0U);
+    atomic_init(&state.helper_ready, 0U);
+    atomic_init(&state.helper_active, 0U);
     atomic_init(&state.release_primary, 0U);
     atomic_init(&state.destroy_started, 0U);
     atomic_init(&state.task_done, 0U);
     atomic_init(&state.release_thread_done, 0U);
+    atomic_init(&state.destroy_done, 0U);
+    atomic_init(&state.run_rc, 0);
+    atomic_init(&state.run_done, 0U);
     if (create_deterministic_runtime(&runtime) != 0) {
         return 1;
     }
@@ -756,15 +919,30 @@ static int test_active_helper_shutdown(void) {
         goto cleanup;
     }
     release_created = true;
-    if (wait_flag(&state.primary_entered, legacy_deadline()) != 0) {
-        test_fail(&state.failure, "active-helper primary did not enter before the bounded deadline");
+    if (wait_flag(&state.primary_entered, legacy_deadline()) != 0 ||
+        wait_flag(&state.helper_state_observed, legacy_deadline()) != 0 ||
+        atomic_load_explicit(&state.helper_started, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&state.helper_ready, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&state.helper_active, memory_order_acquire) == 0U) {
+        test_fail(&state.failure, "active-helper state was not ready and active before destroy publication");
     }
-    atomic_store_explicit(&state.destroy_started, 1U, memory_order_release);
-    llam_runtime_destroy(runtime);
+    if (pthread_create(&destroy_thread, NULL, active_shutdown_destroy_thread, &state) != 0) {
+        test_fail(&state.failure, "active-helper destroy thread could not start");
+        goto cleanup;
+    }
+    destroy_created = true;
+    if (wait_flag(&state.destroy_started, legacy_deadline()) != 0 ||
+        wait_flag(&state.destroy_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "active-helper destroy did not complete before the bounded deadline");
+        goto cleanup;
+    }
     runtime = NULL;
-    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+    if (wait_flag(&state.run_done, legacy_deadline()) != 0 ||
+        (atomic_load_explicit(&state.run_done, memory_order_acquire) != 0U &&
+         atomic_load_explicit(&state.run_rc, memory_order_acquire) != 0) ||
+        wait_flag(&state.task_done, legacy_deadline()) != 0 ||
         wait_flag(&state.release_thread_done, legacy_deadline()) != 0 ||
-        state.run_rc != 0) {
+        atomic_load_explicit(&state.run_done, memory_order_acquire) == 0U) {
         test_fail(&state.failure, "active-helper shutdown did not drain the released primary");
     }
     if (failure_result(&state.failure, "active-helper shutdown characterization failed")) {
@@ -778,6 +956,10 @@ static int test_active_helper_shutdown(void) {
         pthread_join(release_thread, NULL);
         release_created = false;
     }
+    if (destroy_created) {
+        pthread_join(destroy_thread, NULL);
+        destroy_created = false;
+    }
     if (task == NULL) {
         return 1;
     }
@@ -786,14 +968,31 @@ static int test_active_helper_shutdown(void) {
 cleanup:
     atomic_store_explicit(&state.destroy_started, 1U, memory_order_release);
     atomic_store_explicit(&state.release_primary, 1U, memory_order_release);
+    if (destroy_created) {
+        require_flag_before_cleanup(&state.destroy_done,
+                                    "active-helper destroy thread did not finish during bounded cleanup");
+        runtime = NULL;
+    }
     if (runtime != NULL) {
+        if (run_created) {
+            require_flag_before_cleanup(&state.run_done,
+                                        "active-helper run thread did not stop during bounded cleanup");
+        }
         llam_runtime_destroy(runtime);
+        runtime = NULL;
     }
     if (run_created) {
+        require_flag_before_cleanup(&state.run_done,
+                                    "active-helper run thread did not finish during bounded cleanup");
         pthread_join(run_thread, NULL);
     }
     if (release_created) {
+        require_flag_before_cleanup(&state.release_thread_done,
+                                    "active-helper release thread did not finish during bounded cleanup");
         pthread_join(release_thread, NULL);
+    }
+    if (destroy_created) {
+        pthread_join(destroy_thread, NULL);
     }
     return failure_result(&state.failure, "active-helper shutdown characterization failed");
 }
