@@ -353,12 +353,32 @@ bool llam_legacy_lease_handback_acknowledged_locked(const llam_shard_t *shard,
     }
     lease = llam_shard_legacy_lease_const_locked(shard);
     if (lease->state == LLAM_LEASE_STOPPING) {
-        return lease->handback_ack_sequence == sequence &&
-               lease->transfer_sequence == sequence &&
-               lease->return_worker == worker &&
-               lease->return_incarnation == incarnation &&
-               lease->owner == worker &&
-               lease->owner_incarnation == incarnation &&
+        bool completed_before_stop =
+            lease->handback_ack_sequence == sequence &&
+            lease->transfer_sequence == sequence &&
+            lease->return_worker == NULL &&
+            lease->return_incarnation == 0U &&
+            lease->owner == worker &&
+            lease->owner_incarnation == incarnation &&
+            worker == &shard->primary_worker;
+        bool claimant_retained_for_stop =
+            lease->handback_ack_sequence == sequence &&
+            lease->transfer_sequence == sequence &&
+            lease->return_worker == worker &&
+            lease->return_incarnation == incarnation &&
+            lease->owner == worker &&
+            lease->owner_incarnation == incarnation;
+
+        /*
+         * STOPPING has two valid handback observations.  A stop can be
+         * published while a transfer is still in flight; that path retains
+         * the claimant until teardown, as above.  Alternatively, the helper
+         * may have already acknowledged the primary and cleared the claimant
+         * before shutdown changes PRIMARY_OWNED to STOPPING.  The matching
+         * transfer/ACK token and live primary binding make that second shape
+         * a completed handback rather than an ownerless grant.
+         */
+        return (completed_before_stop || claimant_retained_for_stop) &&
                llam_worker_binding_live(worker, incarnation);
     }
     return lease->handback_ack_sequence == sequence &&

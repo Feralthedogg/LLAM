@@ -179,10 +179,11 @@ typedef struct active_shutdown_state {
     atomic_uint release_primary;
     atomic_uint destroy_started;
     atomic_uint task_done;
-    atomic_uint release_thread_done;
     atomic_uint destroy_done;
     atomic_int run_rc;
     atomic_uint run_done;
+    int leave_rc;
+    int leave_errno;
 } active_shutdown_state_t;
 
 static int create_deterministic_runtime(llam_runtime_t **out) {
@@ -351,6 +352,85 @@ static int wait_flag(const atomic_uint *flag, uint64_t deadline_ns) {
         llam_pause_cpu();
     }
     return 0;
+}
+
+static int wait_for_lease_gate_reached(llam_lease_test_point_t point) {
+    uint64_t deadline = legacy_deadline();
+
+    while (!llam_lease_test_gate_reached(point)) {
+        if (llam_now_ns() >= deadline) {
+            return -1;
+        }
+        llam_pause_cpu();
+    }
+    return 0;
+}
+
+static bool active_shutdown_snapshot_matches(llam_runtime_t *runtime,
+                                             unsigned expected_state,
+                                             bool shutdown_expected,
+                                             bool helper_active_expected,
+                                             llam_lease_test_snapshot_t *out) {
+    llam_shard_t *shard;
+    llam_lease_test_snapshot_t snapshot;
+    bool matches;
+
+    if (runtime == NULL || runtime->shards == NULL || runtime->active_shards == 0U) {
+        return false;
+    }
+    shard = &runtime->shards[0];
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    matches = llam_legacy_lease_snapshot_locked(shard, &snapshot) &&
+              snapshot.state == expected_state &&
+              snapshot.owner_worker == (uintptr_t)&shard->primary_worker &&
+              snapshot.owner_incarnation != 0U &&
+              snapshot.owner_incarnation ==
+                  atomic_load_explicit(&shard->primary_worker.incarnation,
+                                       memory_order_acquire) &&
+              snapshot.return_worker == 0U &&
+              snapshot.return_incarnation == 0U &&
+              snapshot.transfer_sequence != 0U &&
+              snapshot.handback_ack_sequence == snapshot.transfer_sequence &&
+              (shutdown_expected
+                   ? atomic_load_explicit(&runtime->shutdown_requested,
+                                          memory_order_acquire)
+                   : !atomic_load_explicit(&runtime->shutdown_requested,
+                                           memory_order_acquire)) &&
+              shard->opaque_helper_active == helper_active_expected &&
+              !atomic_load_explicit(&shard->opaque_helper_exit_ack,
+                                    memory_order_acquire) &&
+              llam_worker_binding_live(&shard->primary_worker,
+                                       snapshot.owner_incarnation) &&
+              llam_worker_load_active_g(&shard->primary_worker) == NULL &&
+              llam_worker_load_active_g(&shard->opaque_helper_worker) == NULL &&
+              llam_shard_load_lease_current(shard) == NULL;
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (matches && out != NULL) {
+        *out = snapshot;
+    }
+    return matches;
+}
+
+static int wait_for_active_shutdown_snapshot(llam_runtime_t *runtime,
+                                             unsigned expected_state,
+                                             bool shutdown_expected,
+                                             bool helper_active_expected,
+                                             llam_lease_test_snapshot_t *out) {
+    uint64_t deadline = legacy_deadline();
+
+    while (llam_now_ns() < deadline) {
+        if (active_shutdown_snapshot_matches(runtime,
+                                              expected_state,
+                                              shutdown_expected,
+                                              helper_active_expected,
+                                              out)) {
+            return 0;
+        }
+        llam_pause_cpu();
+    }
+    return -1;
 }
 
 static int repeat_cond_timedwait(repeat_state_t *state, uint64_t deadline_ns) {
@@ -1542,6 +1622,7 @@ static void active_shutdown_task(void *arg) {
     if (llam_enter_blocking() != 0) {
         test_fail(&state->failure, "active-helper primary enter failed");
         atomic_store_explicit(&state->primary_entered, 1U, memory_order_release);
+        atomic_store_explicit(&state->task_done, 1U, memory_order_release);
         return;
     }
     shard = g_llam_tls_shard;
@@ -1562,22 +1643,13 @@ static void active_shutdown_task(void *arg) {
     if (wait_flag(&state->release_primary, deadline) != 0) {
         test_fail(&state->failure, "active-helper primary was not released before its bounded deadline");
     }
-    if (llam_leave_blocking() != 0) {
+    errno = 0;
+    state->leave_rc = llam_leave_blocking();
+    state->leave_errno = errno;
+    if (state->leave_rc != 0) {
         test_fail(&state->failure, "active-helper primary leave failed");
     }
     atomic_store_explicit(&state->task_done, 1U, memory_order_release);
-}
-
-static void *active_shutdown_release_thread(void *arg) {
-    active_shutdown_state_t *state = arg;
-    uint64_t deadline = legacy_deadline();
-
-    if (wait_flag(&state->destroy_started, deadline) != 0) {
-        test_fail(&state->failure, "release thread did not observe destroy publication");
-    }
-    atomic_store_explicit(&state->release_primary, 1U, memory_order_release);
-    atomic_store_explicit(&state->release_thread_done, 1U, memory_order_release);
-    return NULL;
 }
 
 static void *active_shutdown_run_thread(void *arg) {
@@ -1604,11 +1676,10 @@ static int test_active_helper_shutdown(void) {
     llam_runtime_t *runtime = NULL;
     llam_task_t *task = NULL;
     pthread_t run_thread;
-    pthread_t release_thread;
     pthread_t destroy_thread;
     bool run_created = false;
-    bool release_created = false;
     bool destroy_created = false;
+    int rc = 1;
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failure.failures, 0U);
@@ -1620,7 +1691,6 @@ static int test_active_helper_shutdown(void) {
     atomic_init(&state.release_primary, 0U);
     atomic_init(&state.destroy_started, 0U);
     atomic_init(&state.task_done, 0U);
-    atomic_init(&state.release_thread_done, 0U);
     atomic_init(&state.destroy_done, 0U);
     atomic_init(&state.run_rc, 0);
     atomic_init(&state.run_done, 0U);
@@ -1629,16 +1699,15 @@ static int test_active_helper_shutdown(void) {
     }
     state.runtime = runtime;
     task = llam_runtime_spawn_ex(runtime, active_shutdown_task, &state, NULL, 0U);
-    if (task == NULL || pthread_create(&run_thread, NULL, active_shutdown_run_thread, &state) != 0) {
+    if (task == NULL) {
+        test_fail(&state.failure, "active-helper run thread could not start");
+        goto cleanup;
+    }
+    if (pthread_create(&run_thread, NULL, active_shutdown_run_thread, &state) != 0) {
         test_fail(&state.failure, "active-helper run thread could not start");
         goto cleanup;
     }
     run_created = true;
-    if (pthread_create(&release_thread, NULL, active_shutdown_release_thread, &state) != 0) {
-        test_fail(&state.failure, "active-helper release thread could not start");
-        goto cleanup;
-    }
-    release_created = true;
     if (wait_flag(&state.primary_entered, legacy_deadline()) != 0 ||
         wait_flag(&state.helper_state_observed, legacy_deadline()) != 0 ||
         atomic_load_explicit(&state.helper_started, memory_order_acquire) == 0U ||
@@ -1646,58 +1715,70 @@ static int test_active_helper_shutdown(void) {
         atomic_load_explicit(&state.helper_active, memory_order_acquire) == 0U) {
         test_fail(&state.failure, "active-helper state was not ready and active before destroy publication");
     }
+    /* First complete the normal handback while the coordinator is still live. */
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, true);
+    atomic_store_explicit(&state.release_primary, 1U, memory_order_release);
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK) != 0 ||
+        wait_for_active_shutdown_snapshot(runtime,
+                                          LLAM_LEASE_PRIMARY_OWNED,
+                                          false,
+                                          true,
+                                          NULL) != 0) {
+        test_fail(&state.failure,
+                  "active-helper handback did not complete before shutdown publication");
+        goto cleanup;
+    }
+
+    /* Publish STOPPING after the ACK, but keep the helper at the ACK gate. */
     if (pthread_create(&destroy_thread, NULL, active_shutdown_destroy_thread, &state) != 0) {
         test_fail(&state.failure, "active-helper destroy thread could not start");
         goto cleanup;
     }
     destroy_created = true;
     if (wait_flag(&state.destroy_started, legacy_deadline()) != 0 ||
+        wait_for_active_shutdown_snapshot(runtime,
+                                          LLAM_LEASE_STOPPING,
+                                          true,
+                                          true,
+                                          NULL) != 0) {
+        test_fail(&state.failure,
+                  "active-helper shutdown did not publish STOPPING after handback ACK");
+        goto cleanup;
+    }
+
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0 ||
         wait_flag(&state.destroy_done, legacy_deadline()) != 0) {
-        test_fail(&state.failure, "active-helper destroy did not complete before the bounded deadline");
-        goto cleanup;
-    }
-    runtime = NULL;
-    if (wait_flag(&state.run_done, legacy_deadline()) != 0 ||
-        (atomic_load_explicit(&state.run_done, memory_order_acquire) != 0U &&
-         atomic_load_explicit(&state.run_rc, memory_order_acquire) != 0) ||
-        wait_flag(&state.task_done, legacy_deadline()) != 0 ||
-        wait_flag(&state.release_thread_done, legacy_deadline()) != 0 ||
-        atomic_load_explicit(&state.run_done, memory_order_acquire) == 0U) {
         test_fail(&state.failure, "active-helper shutdown did not drain the released primary");
-    }
-    if (failure_result(&state.failure, "active-helper shutdown characterization failed")) {
         goto cleanup;
     }
-    if (run_created) {
-        pthread_join(run_thread, NULL);
-        run_created = false;
+    if (state.leave_rc != 0) {
+        test_fail(&state.failure,
+                  "active-helper primary leave did not accept the completed handback ACK");
     }
-    if (release_created) {
-        pthread_join(release_thread, NULL);
-        release_created = false;
+    if (state.run_rc != 0) {
+        test_fail(&state.failure, "active-helper shutdown run returned an error");
     }
-    if (destroy_created) {
-        pthread_join(destroy_thread, NULL);
-        destroy_created = false;
-    }
-    if (task == NULL) {
-        return 1;
-    }
-    return 0;
+
+    runtime = NULL;
+    pthread_join(run_thread, NULL);
+    run_created = false;
+    pthread_join(destroy_thread, NULL);
+    destroy_created = false;
+    rc = 0;
 
 cleanup:
-    atomic_store_explicit(&state.destroy_started, 1U, memory_order_release);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
     atomic_store_explicit(&state.release_primary, 1U, memory_order_release);
     if (destroy_created) {
         require_flag_before_cleanup(&state.destroy_done,
                                     "active-helper destroy thread did not finish during bounded cleanup");
         runtime = NULL;
+        pthread_join(destroy_thread, NULL);
+        destroy_created = false;
     }
     if (runtime != NULL) {
-        if (run_created) {
-            require_flag_before_cleanup(&state.run_done,
-                                        "active-helper run thread did not stop during bounded cleanup");
-        }
         destroy_runtime_bounded(&runtime, "active-helper runtime destroy exceeded the bounded deadline");
         runtime = NULL;
     }
@@ -1706,15 +1787,12 @@ cleanup:
                                     "active-helper run thread did not finish during bounded cleanup");
         pthread_join(run_thread, NULL);
     }
-    if (release_created) {
-        require_flag_before_cleanup(&state.release_thread_done,
-                                    "active-helper release thread did not finish during bounded cleanup");
-        pthread_join(release_thread, NULL);
-    }
     if (destroy_created) {
         pthread_join(destroy_thread, NULL);
     }
-    return failure_result(&state.failure, "active-helper shutdown characterization failed");
+    return rc != 0 || atomic_load_explicit(&state.failure.failures, memory_order_acquire) != 0U
+               ? failure_result(&state.failure, "active-helper shutdown characterization failed")
+               : 0;
 }
 
 int main(void) {
