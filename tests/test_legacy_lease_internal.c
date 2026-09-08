@@ -347,6 +347,59 @@ typedef struct real_watchdog_race_driver {
     llam_runtime_t *runtime;
 } real_watchdog_race_driver_t;
 
+typedef struct stale_ack_handoff_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_channel_t *release_channel;
+    llam_task_t *root;
+    llam_shard_t *source;
+    atomic_uint root_started;
+    atomic_uint allow_handoff;
+    atomic_uint helper_started;
+    atomic_uint handoff_done;
+    atomic_uint root_done;
+    atomic_uint run_done;
+    int root_enter_rc;
+    int root_enter_errno;
+    int root_leave_rc;
+    int root_leave_errno;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+    llam_lease_test_snapshot_t helper_snapshot;
+    void *release_value;
+    llam_lease_test_snapshot_t handoff_snapshot;
+} stale_ack_handoff_state_t;
+
+typedef struct watchdog_handoff_race_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_task_t *task;
+    llam_task_t *task_identity;
+    atomic_uint task_started;
+    atomic_uint request_handoff;
+    atomic_uint handoff_done;
+    atomic_uint release_task;
+    atomic_uint task_done;
+    atomic_uint monitor_stop;
+    atomic_uint monitor_done;
+    atomic_uint run_done;
+    int enter_rc;
+    int enter_errno;
+    int leave_rc;
+    int leave_errno;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+    llam_lease_test_snapshot_t before_snapshot;
+    llam_lease_test_snapshot_t after_snapshot;
+} watchdog_handoff_race_state_t;
+
+typedef struct watchdog_handoff_race_driver {
+    watchdog_handoff_race_state_t *state;
+    llam_runtime_t *runtime;
+} watchdog_handoff_race_driver_t;
+
 static uint64_t legacy_deadline(void) {
     return llam_now_ns() + LEGACY_LEASE_TEST_TIMEOUT_NS;
 }
@@ -4385,6 +4438,402 @@ static int test_versioned_pause_ack_contract(void) {
                           "versioned pause ACK contract failed");
 }
 
+static void stale_ack_handoff_root_task(void *arg) {
+    stale_ack_handoff_state_t *state = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+    void *value;
+
+    state->source = shard;
+    state->release_channel = llam_channel_create(1U);
+    if (state->release_channel == NULL) {
+        test_fail(&state->failure,
+                  "stale-ACK handoff release channel creation failed in runtime owner");
+        atomic_store_explicit(&state->root_started, 1U, memory_order_release);
+        atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->root_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->allow_handoff, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+
+    errno = 0;
+    state->root_enter_rc = llam_enter_blocking();
+    state->root_enter_errno = errno;
+    if (state->root_enter_rc != 0) {
+        test_fail(&state->failure, "stale-ACK handoff root failed to enter blocking");
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (shard->opaque_helper_thread_started &&
+        shard->opaque_helper_active &&
+        shard->legacy_lease.state == LLAM_LEASE_HELPER_OWNED &&
+        shard->legacy_lease.owner == &shard->opaque_helper_worker) {
+        atomic_store_explicit(&state->helper_started, 1U, memory_order_release);
+    } else {
+        test_fail(&state->failure,
+                  "stale-ACK handoff did not grant the live helper lease");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (llam_lease_test_snapshot(state->runtime,
+                                 shard->id,
+                                 &state->helper_snapshot) != 0 ||
+        state->helper_snapshot.state != LLAM_LEASE_HELPER_OWNED ||
+        state->helper_snapshot.owner_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state->helper_snapshot.owner_incarnation == 0U) {
+        test_fail(&state->failure,
+                  "stale-ACK handoff helper snapshot did not identify its lease");
+    }
+    errno = 0;
+    state->root_leave_rc = llam_leave_blocking();
+    state->root_leave_errno = errno;
+    if (state->root_leave_rc != 0) {
+        test_fail(&state->failure, "stale-ACK handoff root failed to hand back");
+    }
+    if (llam_lease_test_snapshot(state->runtime,
+                                 shard->id,
+                                 &state->handoff_snapshot) != 0) {
+        test_fail(&state->failure,
+                  "stale-ACK handoff could not snapshot its completed lease episode");
+    }
+    atomic_store_explicit(&state->handoff_done, 1U, memory_order_release);
+
+    value = llam_channel_recv(state->release_channel);
+    if (value != state->release_value) {
+        test_fail(&state->failure,
+                  "stale-ACK handoff root did not receive its release token");
+    }
+    atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+}
+
+static void *stale_ack_handoff_run(void *arg) {
+    stale_ack_handoff_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+/*
+ * A real merge pause ACK must not survive a primary/helper lease handoff.  The
+ * fixture first captures the scheduler-published tuple, runs the actual
+ * helper-backed enter/leave protocol, then captures the next pause ACK while
+ * the task is parked.  The predicates are evaluated with a stale epoch
+ * injected into the ACK projection and with the fresh tuple restored, under
+ * the production opaque-lock -> shard-lock order.
+ */
+static int test_stale_merge_ack_rejected_after_helper_handoff(void) {
+    stale_ack_handoff_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *source = NULL;
+    llam_shard_t *target = NULL;
+    llam_shard_t *first;
+    llam_shard_t *second;
+    pthread_t run_thread;
+    cleanup_release_state_t run_release;
+    bool run_created = false;
+    bool root_joined = false;
+    uint64_t old_sequence = 0U;
+    uint64_t old_epoch = 0U;
+    uint64_t old_incarnation = 0U;
+    uint64_t new_sequence = 0U;
+    uint64_t new_epoch = 0U;
+    uint64_t new_incarnation = 0U;
+    unsigned stale_migrated = UINT_MAX;
+    unsigned fresh_migrated = UINT_MAX;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.root_started, 0U);
+    atomic_init(&state.allow_handoff, 0U);
+    atomic_init(&state.helper_started, 0U);
+    atomic_init(&state.handoff_done, 0U);
+    atomic_init(&state.root_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    state.release_value = (void *)(uintptr_t)0x5aCCu;
+    reset_lease_test_gates();
+
+    if (create_runtime_with_preempt(&runtime,
+                                    false,
+                                    false,
+                                    LLAM_PREEMPT_OFF,
+                                    0U) != 0) {
+        return 1;
+    }
+    if (runtime->active_shards < 2U) {
+        fprintf(stderr,
+                "test_legacy_lease_internal: SKIP stale merge ACK handoff (one shard)\n");
+        destroy_runtime(&runtime);
+        return 77;
+    }
+    state.runtime = runtime;
+    state.root = llam_runtime_spawn_ex(runtime,
+                                       stale_ack_handoff_root_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (state.root == NULL) {
+        test_fail(&state.failure, "stale-ACK handoff root task spawn failed");
+        goto cleanup;
+    }
+    run_release.runtime = runtime;
+    run_release.release_flag = &state.allow_handoff;
+    if (pthread_create(&run_thread, NULL, stale_ack_handoff_run, &state) != 0) {
+        test_fail(&state.failure, "stale-ACK handoff run thread setup failed");
+        goto cleanup;
+    }
+    run_created = true;
+
+    if (wait_flag(&state.root_started, legacy_deadline()) != 0 ||
+        state.source == NULL || state.release_channel == NULL) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff root did not publish its source shard");
+        goto cleanup;
+    }
+    source = state.source;
+    for (unsigned i = 0U; i < runtime->active_shards; ++i) {
+        if (i != source->id && llam_shard_is_online(&runtime->shards[i])) {
+            target = &runtime->shards[i];
+            break;
+        }
+    }
+    if (target == NULL) {
+        fprintf(stderr,
+                "test_legacy_lease_internal: SKIP stale merge ACK handoff (no online target)\n");
+        goto cleanup_skip;
+    }
+
+    llam_shard_request_merge_pause(source);
+    if (!llam_shard_wait_merge_pause_ack(source, legacy_deadline())) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff did not receive its first real merge ACK");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&source->opaque_lock);
+    old_sequence = atomic_load_explicit(&source->merge_pause_request_sequence,
+                                        memory_order_acquire);
+    if (old_sequence != atomic_load_explicit(&source->merge_pause_ack_sequence,
+                                             memory_order_acquire)) {
+        test_fail(&state.failure,
+                  "first merge ACK did not retain its request sequence");
+    }
+    old_epoch = atomic_load_explicit(&source->merge_pause_ack_lease_epoch,
+                                     memory_order_acquire);
+    old_incarnation = atomic_load_explicit(&source->merge_pause_ack_worker_incarnation,
+                                           memory_order_acquire);
+    if (old_sequence == 0U || old_incarnation == 0U ||
+        !llam_shard_merge_pause_ack_matches_locked(source,
+                                                   old_sequence,
+                                                   old_epoch,
+                                                   old_incarnation)) {
+        test_fail(&state.failure,
+                  "first merge ACK did not carry a valid live lease tuple");
+    }
+    pthread_mutex_unlock(&source->opaque_lock);
+    llam_shard_release_merge_pause(source);
+    atomic_store_explicit(&state.allow_handoff, 1U, memory_order_release);
+
+    if (wait_flag(&state.handoff_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff did not complete the helper return episode");
+        goto cleanup;
+    }
+    if (state.handoff_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        state.handoff_snapshot.owner_worker != (uintptr_t)&source->primary_worker ||
+        state.handoff_snapshot.epoch <= old_epoch ||
+        state.handoff_snapshot.transfer_sequence <= old_sequence ||
+        atomic_load_explicit(&state.helper_started, memory_order_acquire) == 0U ||
+        state.helper_snapshot.owner_worker ==
+            (uintptr_t)&source->primary_worker ||
+        state.helper_snapshot.epoch <= old_epoch ||
+        state.root_enter_rc != 0 || state.root_leave_rc != 0) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff did not change the live lease episode");
+        goto cleanup;
+    }
+
+    llam_shard_request_merge_pause(source);
+    if (!llam_shard_wait_merge_pause_ack(source, legacy_deadline())) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff did not receive its replacement merge ACK");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&source->opaque_lock);
+    new_sequence = atomic_load_explicit(&source->merge_pause_request_sequence,
+                                        memory_order_acquire);
+    new_epoch = atomic_load_explicit(&source->merge_pause_ack_lease_epoch,
+                                     memory_order_acquire);
+    new_incarnation = atomic_load_explicit(&source->merge_pause_ack_worker_incarnation,
+                                           memory_order_acquire);
+    if (new_sequence == old_sequence || new_epoch <= old_epoch ||
+        new_incarnation != old_incarnation ||
+        !llam_shard_merge_pause_ack_matches_locked(source,
+                                                   new_sequence,
+                                                   new_epoch,
+                                                   new_incarnation) ||
+        llam_shard_merge_pause_ack_matches_locked(source,
+                                                  old_sequence,
+                                                  old_epoch,
+                                                  old_incarnation)) {
+        test_fail(&state.failure,
+                  "replacement merge ACK did not invalidate the old tuple");
+    }
+    pthread_mutex_unlock(&source->opaque_lock);
+
+    first = source->id < target->id ? source : target;
+    second = first == source ? target : source;
+    pthread_mutex_lock(&first->opaque_lock);
+    pthread_mutex_lock(&second->opaque_lock);
+    pthread_mutex_lock(&first->lock);
+    pthread_mutex_lock(&second->lock);
+
+    /* Keep the current request live but replay the old lease epoch/incarnation. */
+    atomic_store_explicit(&source->merge_pause_ack_sequence,
+                          new_sequence,
+                          memory_order_release);
+    atomic_store_explicit(&source->merge_pause_ack_lease_epoch,
+                          old_epoch,
+                          memory_order_release);
+    atomic_store_explicit(&source->merge_pause_ack_worker_incarnation,
+                          old_incarnation,
+                          memory_order_release);
+    atomic_store_explicit(&source->merge_pause_ack, 1U, memory_order_release);
+    if (llam_shard_merge_pause_ack_matches_locked(source,
+                                                   new_sequence,
+                                                   old_epoch,
+                                                   old_incarnation) ||
+        llam_shard_can_start_merge_locked(source) ||
+        llam_shard_can_offline_locked(source) ||
+        llam_merge_runnable_queues_locked(source,
+                                          target,
+                                          &stale_migrated) ||
+        stale_migrated != 0U) {
+        test_fail(&state.failure,
+                  "stale merge ACK tuple authorized a merge or offline predicate");
+    }
+
+    /* Restore the scheduler-published tuple and prove the eligible path works. */
+    atomic_store_explicit(&source->merge_pause_ack_lease_epoch,
+                          new_epoch,
+                          memory_order_release);
+    atomic_store_explicit(&source->merge_pause_ack_worker_incarnation,
+                          new_incarnation,
+                          memory_order_release);
+    atomic_store_explicit(&source->merge_pause_ack_sequence,
+                          new_sequence,
+                          memory_order_release);
+    atomic_store_explicit(&source->merge_pause_ack, 1U, memory_order_release);
+    if (!llam_shard_merge_pause_ack_matches_locked(source,
+                                                    new_sequence,
+                                                    new_epoch,
+                                                    new_incarnation) ||
+        !llam_shard_can_start_merge_locked(source) ||
+        !llam_shard_can_offline_locked(source) ||
+        !llam_merge_runnable_queues_locked(source,
+                                           target,
+                                           &fresh_migrated) ||
+        fresh_migrated != 0U) {
+        test_fail(&state.failure,
+                  "fresh merge ACK tuple did not authorize eligible empty queues");
+    }
+    pthread_mutex_unlock(&second->lock);
+    pthread_mutex_unlock(&first->lock);
+    pthread_mutex_unlock(&second->opaque_lock);
+    pthread_mutex_unlock(&first->opaque_lock);
+
+    llam_shard_release_merge_pause(source);
+    if (llam_channel_try_send(state.release_channel, state.release_value) != 0) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff release token send failed");
+    }
+    if (wait_flag(&state.root_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff root/run did not finish after predicate checks");
+        goto cleanup;
+    }
+    bounded_join_task(state.root,
+                      &state.root_done,
+                      "stale-ACK handoff root join exceeded its deadline");
+    root_joined = true;
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "stale-ACK handoff run join exceeded its deadline");
+    run_created = false;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "stale-ACK handoff changed run or fatal semantics");
+    }
+    rc = failure_result(&state.failure,
+                        "stale merge ACK handoff coverage failed");
+    goto cleanup;
+
+cleanup_skip:
+    llam_shard_release_merge_pause(source);
+    atomic_store_explicit(&state.allow_handoff, 1U, memory_order_release);
+    if (state.release_channel != NULL) {
+        (void)llam_channel_try_send(state.release_channel, state.release_value);
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "stale-ACK handoff skip cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (state.root != NULL && !root_joined) {
+        bounded_join_task(state.root,
+                          &state.root_done,
+                          "stale-ACK handoff skip root cleanup exceeded its deadline");
+        root_joined = true;
+    }
+    if (state.release_channel != NULL) {
+        (void)llam_channel_destroy(state.release_channel);
+        state.release_channel = NULL;
+    }
+    destroy_runtime(&runtime);
+    return 77;
+
+cleanup:
+    llam_shard_release_merge_pause(source);
+    atomic_store_explicit(&state.allow_handoff, 1U, memory_order_release);
+    if (state.release_channel != NULL) {
+        (void)llam_channel_try_send(state.release_channel, state.release_value);
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "stale-ACK handoff run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (state.root != NULL && !root_joined) {
+        bounded_join_task(state.root,
+                          &state.root_done,
+                          "stale-ACK handoff root cleanup exceeded its deadline");
+        root_joined = true;
+    }
+    if (state.release_channel != NULL) {
+        (void)llam_channel_destroy(state.release_channel);
+        state.release_channel = NULL;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure,
+                                         "stale merge ACK handoff coverage failed");
+}
+
 static void startup_pause_task(void *arg) {
     startup_pause_state_t *state = arg;
 
@@ -4817,6 +5266,309 @@ cleanup:
                                          "watchdog signal suppression after reclaim failed");
 }
 
+static void watchdog_handoff_race_task(void *arg) {
+    watchdog_handoff_race_state_t *state = arg;
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    state->task_identity = g_llam_tls_task;
+    if (worker != NULL) {
+        atomic_store_explicit(&worker->last_safepoint_ns, 1U, memory_order_release);
+    }
+    atomic_store_explicit(&state->task_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->request_handoff, memory_order_acquire) == 0U) {
+        if (worker != NULL) {
+            atomic_store_explicit(&worker->last_safepoint_ns,
+                                  1U,
+                                  memory_order_release);
+        }
+        /* Keep the sampled task active while the watchdog owns its gate. */
+        llam_pause_cpu();
+    }
+
+    errno = 0;
+    state->enter_rc = llam_enter_blocking();
+    state->enter_errno = errno;
+    if (state->enter_rc != 0) {
+        test_fail(&state->failure,
+                  "watchdog helper-handoff race failed to enter blocking");
+    }
+    errno = 0;
+    state->leave_rc = llam_leave_blocking();
+    state->leave_errno = errno;
+    if (state->leave_rc != 0) {
+        test_fail(&state->failure,
+                  "watchdog helper-handoff race failed to hand back");
+    }
+    if (llam_lease_test_snapshot(state->runtime,
+                                 0U,
+                                 &state->after_snapshot) != 0) {
+        test_fail(&state->failure,
+                  "watchdog helper-handoff race could not snapshot the new lease");
+    }
+    atomic_store_explicit(&state->handoff_done, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_task, memory_order_acquire) == 0U) {
+        if (worker != NULL) {
+            atomic_store_explicit(&worker->last_safepoint_ns,
+                                  1U,
+                                  memory_order_release);
+        }
+        llam_pause_cpu();
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *watchdog_handoff_race_run(void *arg) {
+    watchdog_handoff_race_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *watchdog_handoff_race_monitor(void *arg) {
+    watchdog_handoff_race_driver_t *driver = arg;
+    watchdog_handoff_race_state_t *state = driver->state;
+    llam_shard_t *shard = &driver->runtime->shards[0];
+
+    while (atomic_load_explicit(&state->monitor_stop, memory_order_acquire) == 0U) {
+        llam_watchdog_check_shard(shard, llam_now_ns());
+        llam_pause_cpu();
+    }
+    atomic_store_explicit(&state->monitor_done, 1U, memory_order_release);
+    return NULL;
+}
+
+/*
+ * The watchdog's pre-signal sample must be rejected when the helper has
+ * handed the lease back.  The primary binding and native handle remain live,
+ * so this specifically exercises epoch revalidation rather than task-exit
+ * reclamation or a manually cleared target field.
+ */
+static int test_watchdog_signal_suppressed_after_helper_handoff(void) {
+    watchdog_handoff_race_state_t state;
+    watchdog_handoff_race_driver_t driver;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    llam_worker_t *before_owner = NULL;
+    llam_worker_t *after_owner = NULL;
+    pthread_t before_native;
+    pthread_t after_native;
+    uint64_t before_incarnation = 0U;
+    uint64_t before_epoch = 0U;
+    uint64_t after_incarnation = 0U;
+    uint64_t after_epoch = 0U;
+    uint64_t preempt_requests_before;
+    uint64_t preempt_signals_before;
+    pthread_t run_thread;
+    pthread_t monitor_thread;
+    bool run_created = false;
+    bool monitor_created = false;
+    bool task_joined = false;
+    cleanup_release_state_t run_release;
+    cleanup_release_state_t monitor_release;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&driver, 0, sizeof(driver));
+    memset(&before_native, 0, sizeof(before_native));
+    memset(&after_native, 0, sizeof(after_native));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_started, 0U);
+    atomic_init(&state.request_handoff, 0U);
+    atomic_init(&state.handoff_done, 0U);
+    atomic_init(&state.release_task, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.monitor_stop, 0U);
+    atomic_init(&state.monitor_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_STRICT,
+                                    1U) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    state.task = llam_runtime_spawn_ex(runtime,
+                                       watchdog_handoff_race_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (state.task == NULL) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure,
+                              "watchdog helper-handoff race coverage failed");
+    }
+    shard = &runtime->shards[0];
+    driver.state = &state;
+    driver.runtime = runtime;
+    run_release.runtime = runtime;
+    run_release.release_flag = &state.release_task;
+    monitor_release.runtime = runtime;
+    monitor_release.release_flag = &state.monitor_stop;
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, true);
+    if (pthread_create(&run_thread, NULL, watchdog_handoff_race_run, &state) != 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race run thread setup failed");
+        goto cleanup;
+    }
+    run_created = true;
+    if (pthread_create(&monitor_thread,
+                       NULL,
+                       watchdog_handoff_race_monitor,
+                       &driver) != 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race monitor setup failed");
+        goto cleanup;
+    }
+    monitor_created = true;
+    if (wait_flag(&state.task_started, legacy_deadline()) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL) != 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race did not reach its pre-signal gate");
+        goto cleanup;
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (!llam_legacy_lease_snapshot_locked(shard, &state.before_snapshot) ||
+        state.before_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        state.before_snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
+        state.task_identity == NULL ||
+        llam_worker_load_active_g(&shard->primary_worker) != state.task_identity ||
+        !llam_legacy_lease_snapshot_watchdog_locked(shard,
+                                                    &before_owner,
+                                                    &before_incarnation,
+                                                    &before_epoch,
+                                                    &before_native)) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race did not hold a live primary target");
+    }
+    preempt_requests_before = atomic_load_explicit(&shard->metrics.preempt_requests,
+                                                   memory_order_acquire);
+    preempt_signals_before = atomic_load_explicit(&shard->metrics.preempt_signals,
+                                                  memory_order_acquire);
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    atomic_store_explicit(&state.request_handoff, 1U, memory_order_release);
+    if (wait_flag(&state.handoff_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race did not complete helper return");
+        goto cleanup;
+    }
+    if (state.enter_rc != 0 || state.leave_rc != 0 ||
+        state.after_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        state.after_snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
+        state.after_snapshot.epoch <= state.before_snapshot.epoch ||
+        state.after_snapshot.transfer_sequence <= state.before_snapshot.transfer_sequence) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race did not advance the lease epoch");
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!llam_legacy_lease_snapshot_watchdog_locked(shard,
+                                                    &after_owner,
+                                                    &after_incarnation,
+                                                    &after_epoch,
+                                                    &after_native)) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race lost the live replacement target");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (before_owner != after_owner || before_incarnation != after_incarnation ||
+        before_epoch == after_epoch || before_epoch != state.before_snapshot.epoch ||
+        after_epoch != state.after_snapshot.epoch ||
+        pthread_equal(before_native, after_native) == 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race did not isolate the stale sample tuple");
+    }
+
+    /* Retire the post-handback task before releasing any concurrent watchdog
+     * sample; both the explicit monitor and the controller then revalidate a
+     * stale or empty active-G tuple. */
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race task/run did not retire before gate release");
+        goto cleanup;
+    }
+    atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, false);
+    bounded_join_thread(monitor_thread,
+                        true,
+                        &state.monitor_done,
+                        release_flag_and_runtime,
+                        &monitor_release,
+                        "watchdog helper-handoff monitor join exceeded its deadline");
+    monitor_created = false;
+    if (atomic_load_explicit(&shard->metrics.preempt_requests, memory_order_acquire) !=
+            preempt_requests_before ||
+        atomic_load_explicit(&shard->metrics.preempt_signals, memory_order_acquire) !=
+            preempt_signals_before) {
+        test_fail(&state.failure,
+                  "watchdog issued a late preempt request after helper handback");
+    }
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "watchdog helper-handoff task join exceeded its deadline");
+    task_joined = true;
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "watchdog helper-handoff run join exceeded its deadline");
+    run_created = false;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "watchdog helper-handoff race changed run or fatal semantics");
+    }
+    rc = failure_result(&state.failure,
+                        "watchdog helper-handoff race coverage failed");
+
+cleanup:
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, false);
+    atomic_store_explicit(&state.request_handoff, 1U, memory_order_release);
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    if (monitor_created) {
+        bounded_join_thread(monitor_thread,
+                            true,
+                            &state.monitor_done,
+                            release_flag_and_runtime,
+                            &monitor_release,
+                            "watchdog helper-handoff monitor cleanup exceeded its deadline");
+        monitor_created = false;
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "watchdog helper-handoff run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "watchdog helper-handoff task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure,
+                                         "watchdog helper-handoff race coverage failed");
+}
+
 static int test_runtime_steal_pause_generation_reuse(void) {
     dynamic_pause_state_t state;
     dynamic_pause_driver_t driver;
@@ -4969,9 +5721,11 @@ int main(void) {
         test_lease_test_gate_contract,
         test_watchdog_lease_snapshot_binding_contract,
         test_versioned_pause_ack_contract,
+        test_stale_merge_ack_rejected_after_helper_handoff,
         test_startup_during_merge_pause_reacquires_lease,
         test_redirect_rejected_during_merge_pause,
         test_watchdog_signal_suppressed_after_task_reclaim,
+        test_watchdog_signal_suppressed_after_helper_handoff,
         test_runtime_steal_pause_generation_reuse,
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,
