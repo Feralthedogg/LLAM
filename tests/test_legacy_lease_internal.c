@@ -874,6 +874,9 @@ static void takeover_root_task(void *arg) {
 
     if (shard == NULL || g_llam_tls_worker != &shard->primary_worker) {
         test_fail(&state->failure, "primary activation ran outside the primary worker");
+        atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
+        atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+        return;
     }
     state->root_worker = (uintptr_t)g_llam_tls_worker;
     if (llam_lease_test_snapshot(state->runtime, shard->id, &state->root_snapshot) != 0 ||
@@ -1731,6 +1734,8 @@ static void redirect_helper_task(void *arg) {
 
     if (shard == NULL || g_llam_tls_worker != &shard->opaque_helper_worker) {
         test_fail(&state->failure, "redirect helper task ran outside the opaque helper worker");
+        atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
+        return;
     }
     state->helper_worker = (uintptr_t)g_llam_tls_worker;
     errno = 0;

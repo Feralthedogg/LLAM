@@ -770,9 +770,14 @@ if(Python3_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_worker_identity_boundary.py
     )
     add_test(
-        NAME check_worker_identity_boundary
+        NAME test_legacy_lease_boundary
         COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_worker_identity_boundary.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_legacy_lease_boundary.py
+    )
+    add_test(
+        NAME check_legacy_lease_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_legacy_lease_boundary.py
                 --root ${CMAKE_CURRENT_SOURCE_DIR}
     )
     add_test(

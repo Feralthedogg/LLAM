@@ -163,6 +163,22 @@ transfers, current-G publication, watchdog targeting, and pause generations
 must migrate these accesses without introducing a second authority. Public
 headers, public statistics, and the exported ABI remain unchanged.
 
+### Phase 1A boundary audit
+
+`scripts/check_legacy_lease_boundary.py` composes the unchanged Phase 0
+worker-identity scanner with the narrow Phase 1A allowlist.  `active_g` is
+allowed only as the field of `struct llam_worker`, during initialization of the
+embedded `primary_worker` and `opaque_helper_worker` slots, and inside the
+three `llam_worker_{publish,load,clear}_active_g` helpers in `scheduler.c`.
+Every other direct `active_g` use remains a boundary error.  The audit also
+rejects a shard-level `current` or `preempt_thread` authority, copied queues/
+timers/allocator/cache/I/O/metrics on the processor identity shell, bare pause
+ACK decisions without request/epoch/incarnation matching, watchdog targets not
+held through the lease snapshot and revalidation, reverse `opaque_lock`/
+`shard->lock` acquisition, and ownerless lease grants without a validated
+claimant.  It scans only the native C runtime sources; Rust, Python, JVM,
+.NET, and Go language wrappers remain explicitly excluded until a later phase.
+
 ## Wake Handoff Fusion
 
 The normal wake path publishes a waiter as runnable, enqueues it on the owner

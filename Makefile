@@ -39,6 +39,7 @@ CLEAN_DIRS = \
 	CMakeFiles \
 	cmake-build-* \
 	.artifacts \
+	scripts/__pycache__ \
 	scripts/bench_tokio_compare/target \
 	build-* \
 	target
@@ -655,7 +656,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak test-license-policy check-license-policy check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak test-license-policy check-license-policy test_legacy_lease_boundary check_legacy_lease_boundary check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 test-license-policy:
@@ -664,6 +665,12 @@ test-license-policy:
 
 check-license-policy: test-license-policy
 	$(PYTHON) scripts/check_license_policy.py
+
+test_legacy_lease_boundary:
+	$(PYTHON) scripts/test_legacy_lease_boundary.py
+
+check_legacy_lease_boundary:
+	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 
 require-sanitizer-target:
 	@if [ "$(SANITIZER_TARGETS_ENABLED)" != "1" ]; then \
@@ -677,7 +684,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_worker_identity_internal|test_legacy_lease_internal|test_worker_identity_boundary|check_worker_identity_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_worker_identity_internal|test_legacy_lease_internal|test_worker_identity_boundary|test_legacy_lease_boundary|check_legacy_lease_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -890,7 +897,8 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 	python3 scripts/test_worker_identity_boundary.py
-	python3 scripts/check_worker_identity_boundary.py
+	python3 scripts/test_legacy_lease_boundary.py
+	python3 scripts/check_legacy_lease_boundary.py --root .
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -1974,7 +1982,9 @@ test-asan:
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
 	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
 	LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
-		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability; \
+	$(PYTHON) scripts/test_legacy_lease_boundary.py; \
+	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 
 test-no-owner:
 	@set -e; \
@@ -2023,7 +2033,9 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
-	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability; \
+	$(PYTHON) scripts/test_legacy_lease_boundary.py; \
+	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 
 analyze-cppcheck:
 	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
