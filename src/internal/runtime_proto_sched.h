@@ -74,6 +74,10 @@ bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
 bool llam_legacy_lease_can_reacquire_locked(const llam_shard_t *shard,
                                             const llam_worker_t *worker,
                                             uint64_t incarnation);
+/* Revalidate or publish a primary binding at the post-pause dispatch boundary. */
+bool llam_legacy_lease_reacquire_primary_locked(llam_shard_t *shard,
+                                                llam_worker_t *worker,
+                                                uint64_t incarnation);
 bool llam_legacy_lease_handback_acknowledged_locked(const llam_shard_t *shard,
                                                     const llam_worker_t *worker,
                                                     uint64_t incarnation,

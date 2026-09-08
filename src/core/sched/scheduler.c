@@ -415,12 +415,14 @@ bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
         return false;
     }
     lease = llam_shard_legacy_lease_locked(shard);
-    if (lease->state == LLAM_LEASE_STOPPING) {
-        return false;
-    }
     if (lease->state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR) {
         return lease->owner == NULL && lease->return_worker == return_worker &&
                lease->return_incarnation == return_incarnation;
+    }
+    /* A pause serializes new redirect mutations; reserved handoffs continue. */
+    if (llam_legacy_lease_merge_paused(shard) ||
+        lease->state == LLAM_LEASE_STOPPING) {
+        return false;
     }
     if (lease->owner != return_worker ||
         lease->owner_incarnation != return_incarnation ||
@@ -458,6 +460,91 @@ bool llam_legacy_lease_can_reacquire_locked(const llam_shard_t *shard,
             lease->state == LLAM_LEASE_HELPER_OWNED) &&
            lease->owner == worker && lease->owner_incarnation == incarnation &&
            llam_worker_binding_live(worker, incarnation);
+}
+
+/*
+ * Revalidate the primary at the scheduler dispatch boundary.  Binding a live
+ * primary while a pause is already requested publishes the owner tuple so the
+ * pause can be acknowledged, but leaves an atomic pending bit set until the
+ * pause has been released.  The caller must hold opaque_lock; no work is
+ * selected while this helper reports false.
+ */
+bool llam_legacy_lease_reacquire_primary_locked(llam_shard_t *shard,
+                                                llam_worker_t *worker,
+                                                uint64_t incarnation) {
+    llam_legacy_lease_t *lease;
+    bool pending;
+    bool paused;
+
+    if (shard == NULL || worker == NULL || worker != &shard->primary_worker ||
+        incarnation == 0U ||
+        !llam_worker_binding_live(worker, incarnation)) {
+        if (worker != NULL) {
+            atomic_store_explicit(&worker->lease_reacquire_pending,
+                                  false,
+                                  memory_order_release);
+        }
+        return false;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
+    if (llam_legacy_lease_runtime_stopping(shard)) {
+        /* A stopping coordinator may keep its already-live owner running so
+         * parked tasks can observe cancellation and drain the scheduler. */
+        if (lease->owner == worker && lease->owner_incarnation == incarnation &&
+            lease->state == LLAM_LEASE_STOPPING) {
+            atomic_store_explicit(&worker->lease_reacquire_pending,
+                                  false,
+                                  memory_order_release);
+            return true;
+        }
+        atomic_store_explicit(&worker->lease_reacquire_pending,
+                              false,
+                              memory_order_release);
+        return false;
+    }
+
+    paused = llam_legacy_lease_merge_paused(shard);
+    pending = atomic_load_explicit(&worker->lease_reacquire_pending,
+                                   memory_order_acquire);
+    if (lease->owner == worker && lease->owner_incarnation == incarnation &&
+        lease->state == LLAM_LEASE_PRIMARY_OWNED) {
+        if (paused) {
+            atomic_store_explicit(&worker->lease_reacquire_pending,
+                                  true,
+                                  memory_order_release);
+            return false;
+        }
+        /* A pending binding is consumed only after this post-pause lock turn. */
+        if (pending) {
+            atomic_store_explicit(&worker->lease_reacquire_pending,
+                                  false,
+                                  memory_order_release);
+            return true;
+        }
+        atomic_store_explicit(&worker->lease_reacquire_pending,
+                              false,
+                              memory_order_release);
+        return true;
+    }
+
+    /* A return claimant or another owner is never displaced by startup. */
+    if (lease->state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+        lease->owner != NULL || lease->return_worker != NULL) {
+        atomic_store_explicit(&worker->lease_reacquire_pending,
+                              false,
+                              memory_order_release);
+        return false;
+    }
+
+    /* Publish the live owner even during a pause so the pause can ACK. */
+    lease->owner = worker;
+    lease->owner_incarnation = incarnation;
+    lease->state = LLAM_LEASE_PRIMARY_OWNED;
+    atomic_store_explicit(&worker->lease_reacquire_pending,
+                          paused,
+                          memory_order_release);
+    llam_legacy_lease_assert_consistent_locked(shard);
+    return !paused;
 }
 
 bool llam_legacy_lease_clear_owner_locked(llam_shard_t *shard,
@@ -779,17 +866,16 @@ void llam_scheduler_bind_identity(llam_shard_t *shard,
                           incarnation,
                           memory_order_release);
     atomic_store_explicit(&worker->native_thread_live, true, memory_order_release);
-    if (worker == &shard->primary_worker &&
-        !llam_legacy_lease_merge_paused(shard) &&
-        shard->legacy_lease.state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR &&
-        shard->legacy_lease.owner == NULL &&
-        shard->legacy_lease.return_worker == NULL) {
-        shard->legacy_lease.owner = worker;
-        shard->legacy_lease.owner_incarnation = incarnation;
-        shard->legacy_lease.return_worker = NULL;
-        shard->legacy_lease.return_incarnation = 0U;
-        shard->legacy_lease.state = LLAM_LEASE_PRIMARY_OWNED;
-        llam_legacy_lease_assert_consistent_locked(shard);
+    if (worker == &shard->primary_worker) {
+        /*
+         * Publish/revalidate the binding under the lease lock.  If a merge
+         * pause is already active the helper publishes the owner tuple for a
+         * valid ACK but records an atomic deferral; dispatch is gated until a
+         * post-pause call observes the released boundary.
+         */
+        (void)llam_legacy_lease_reacquire_primary_locked(shard,
+                                                         worker,
+                                                         incarnation);
     }
     pthread_mutex_unlock(&shard->opaque_lock);
 
@@ -814,6 +900,9 @@ void llam_scheduler_unbind_identity(llam_shard_t *shard, llam_worker_t *worker) 
         /* Clear eligibility before the native handle can be reused. */
         atomic_store_explicit(&worker->native_thread_live, false, memory_order_release);
         atomic_store_explicit(&worker->binding_incarnation, 0U, memory_order_release);
+        atomic_store_explicit(&worker->lease_reacquire_pending,
+                              false,
+                              memory_order_release);
         memset(&worker->native_thread, 0, sizeof(worker->native_thread));
     }
     llam_worker_clear_active_g(worker);
@@ -1157,6 +1246,30 @@ static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
     return true;
 }
 
+/*
+ * Keep the primary scheduler ownerful before selecting any task.  This check
+ * is deliberately a short opaque-lock transaction: it may publish a startup
+ * owner or clear a pause deferral, but it never waits or switches context while
+ * the lease lock is held.
+ */
+static bool llam_scheduler_primary_lease_ready(llam_shard_t *shard) {
+    uint64_t incarnation;
+    bool ready;
+
+    if (shard == NULL) {
+        return false;
+    }
+    incarnation = atomic_load_explicit(&shard->primary_worker.binding_incarnation,
+                                       memory_order_acquire);
+    pthread_mutex_lock(&shard->opaque_lock);
+    ready = llam_legacy_lease_reacquire_primary_locked(
+        shard,
+        &shard->primary_worker,
+        incarnation);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    return ready;
+}
+
 #if defined(__linux__)
 /**
  * @brief Report whether the Linux opaque helper may block in the opaque wait path.
@@ -1234,6 +1347,23 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 
         if (llam_runtime_drained(rt)) {
             break;
+        }
+        if (!llam_scheduler_primary_lease_ready(shard)) {
+            /* Never select work while startup/return leaves the shard ownerless. */
+            if (llam_shard_pause_for_merge(shard)) {
+                continue;
+            }
+            if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
+                llam_runtime_drained(rt)) {
+                break;
+            }
+            if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire) &&
+                llam_runtime_has_live_tasks(rt)) {
+                /* Shutdown still needs to wake parked tasks while dispatch is deferred. */
+                llam_runtime_cancel_parked_waiters(rt);
+            }
+            llam_idle_wait(shard);
+            continue;
         }
         if (llam_shard_pause_for_merge(shard)) {
             continue;

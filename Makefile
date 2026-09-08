@@ -461,6 +461,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_probe.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o \
 	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
@@ -477,6 +478,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
 		$(OBJDIR)/src/core/registry/registry.o \
 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+		$(OBJDIR)/src/engine/watchdog/watchdog_probe.o \
 		$(OBJDIR)/src/io/api/issue.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o \
 		$(OBJDIR)/src/core/platform/platform.o \

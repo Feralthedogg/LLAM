@@ -1139,6 +1139,8 @@ struct llam_worker {
     pthread_t native_thread;
     atomic_bool native_thread_live;
     atomic_uint_fast64_t binding_incarnation;
+    /* Set while a live primary binding waits for a merge pause boundary. */
+    atomic_bool lease_reacquire_pending;
     /* Worker-local execution publication; the lease owner is its authority. */
     _Atomic(llam_task_t *) active_g;
     atomic_uint_fast64_t last_run_started_ns;

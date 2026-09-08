@@ -889,6 +889,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                sizeof(rt->shards[i].primary_worker.native_thread));
         atomic_init(&rt->shards[i].primary_worker.native_thread_live, false);
         atomic_init(&rt->shards[i].primary_worker.binding_incarnation, 0U);
+        atomic_init(&rt->shards[i].primary_worker.lease_reacquire_pending, false);
         atomic_init(&rt->shards[i].primary_worker.active_g, NULL);
         atomic_init(&rt->shards[i].primary_worker.last_run_started_ns, 0U);
         atomic_init(&rt->shards[i].primary_worker.last_safepoint_ns, 0U);
@@ -902,6 +903,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                sizeof(rt->shards[i].opaque_helper_worker.native_thread));
         atomic_init(&rt->shards[i].opaque_helper_worker.native_thread_live, false);
         atomic_init(&rt->shards[i].opaque_helper_worker.binding_incarnation, 0U);
+        atomic_init(&rt->shards[i].opaque_helper_worker.lease_reacquire_pending, false);
         atomic_init(&rt->shards[i].opaque_helper_worker.active_g, NULL);
         atomic_init(&rt->shards[i].opaque_helper_worker.last_run_started_ns, 0U);
         atomic_init(&rt->shards[i].opaque_helper_worker.last_safepoint_ns, 0U);

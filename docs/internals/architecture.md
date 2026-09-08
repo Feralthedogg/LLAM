@@ -153,8 +153,10 @@ scale paths, and `debug.c` inspect the validated lease owner's active-G through
   `scheduler.c` (`llam_shard_pause_for_merge`) publishes and clears both
   acknowledgements while pausing; and `watchdog_scale.c`
   (`llam_runtime_offline_one_shard`) consumes the pause-wait results. The
-  acknowledgement fields remain atomic, but are not yet versioned by a lease
-  epoch or worker incarnation.
+  acknowledgement fields remain atomic and are versioned by the pause request
+  sequence, lease epoch, and acknowledged worker incarnation. A boolean ACK is
+  valid only when all three values still match the live lease owner under
+  `opaque_lock`.
 
 This inventory is the explicit handoff point for later Phase 1A commits:
 transfers, current-G publication, watchdog targeting, and pause generations

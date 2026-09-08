@@ -341,6 +341,9 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 atomic_store_explicit(&rt->shards[i].primary_worker.binding_incarnation,
                                       0U,
                                       memory_order_release);
+                atomic_store_explicit(&rt->shards[i].primary_worker.lease_reacquire_pending,
+                                      false,
+                                      memory_order_release);
                 llam_worker_clear_active_g(&rt->shards[i].primary_worker);
                 atomic_store_explicit(&rt->shards[i].primary_worker.last_run_started_ns,
                                       0U,
@@ -359,6 +362,9 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                                       memory_order_release);
                 atomic_store_explicit(&rt->shards[i].opaque_helper_worker.binding_incarnation,
                                       0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.lease_reacquire_pending,
+                                      false,
                                       memory_order_release);
                 atomic_store_explicit(&rt->shards[i].merge_pause_requested,
                                       0U,

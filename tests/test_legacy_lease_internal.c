@@ -312,6 +312,41 @@ typedef struct direct_reinject_gate_state {
     int fatal_errno;
 } direct_reinject_gate_state_t;
 
+typedef struct startup_pause_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_task_t *task;
+    atomic_uint task_started;
+    atomic_uint release_task;
+    atomic_uint task_done;
+    atomic_uint run_done;
+    llam_lease_test_snapshot_t task_snapshot;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} startup_pause_state_t;
+
+typedef struct real_watchdog_race_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_task_t *task;
+    llam_task_t *task_identity;
+    atomic_uint task_started;
+    atomic_uint release_task;
+    atomic_uint task_done;
+    atomic_uint monitor_stop;
+    atomic_uint monitor_done;
+    atomic_uint run_done;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} real_watchdog_race_state_t;
+
+typedef struct real_watchdog_race_driver {
+    real_watchdog_race_state_t *state;
+    llam_runtime_t *runtime;
+} real_watchdog_race_driver_t;
+
 static uint64_t legacy_deadline(void) {
     return llam_now_ns() + LEGACY_LEASE_TEST_TIMEOUT_NS;
 }
@@ -4350,11 +4385,594 @@ static int test_versioned_pause_ack_contract(void) {
                           "versioned pause ACK contract failed");
 }
 
+static void startup_pause_task(void *arg) {
+    startup_pause_state_t *state = arg;
+
+    memset(&state->task_snapshot, 0, sizeof(state->task_snapshot));
+    if (llam_lease_test_snapshot(state->runtime, 0U, &state->task_snapshot) != 0) {
+        test_fail(&state->failure,
+                  "startup-pause task could not snapshot its execution lease");
+    }
+    atomic_store_explicit(&state->task_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_task, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *startup_pause_run(void *arg) {
+    startup_pause_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+/*
+ * Regression for a scheduler binding that starts while a merge pause is
+ * already requested.  The scheduler must acknowledge the pause and defer
+ * dispatch until the live primary binding has reacquired the lease.
+ */
+static int test_startup_during_merge_pause_reacquires_lease(void) {
+    startup_pause_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    bool run_created = false;
+    bool task_joined = false;
+    uint64_t deadline;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_started, 0U);
+    atomic_init(&state.release_task, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    state.task = llam_runtime_spawn_ex(runtime,
+                                       startup_pause_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (state.task == NULL) {
+        test_fail(&state.failure, "startup-pause task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure,
+                              "startup pause lease reacquire failed");
+    }
+
+    /* Establish the pause before the borrowed scheduler thread binds. */
+    llam_shard_request_merge_pause(shard);
+    if (pthread_create(&run_thread, NULL, startup_pause_run, &state) != 0) {
+        test_fail(&state.failure, "startup-pause run thread setup failed");
+        llam_shard_release_merge_pause(shard);
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "startup-pause task cleanup exceeded its deadline");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure,
+                              "startup pause lease reacquire failed");
+    }
+    run_created = true;
+
+    deadline = legacy_deadline();
+    while (!atomic_load_explicit(&shard->primary_worker.native_thread_live,
+                                 memory_order_acquire) &&
+           llam_now_ns() < deadline) {
+        llam_pause_cpu();
+    }
+    if (!atomic_load_explicit(&shard->primary_worker.native_thread_live,
+                              memory_order_acquire)) {
+        test_fail(&state.failure,
+                  "startup-pause scheduler did not publish its binding");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.task_started, memory_order_acquire) != 0U) {
+        test_fail(&state.failure,
+                  "scheduler dispatched work before the merge pause released");
+    }
+    deadline = llam_now_ns() + 100000000ULL;
+    while (!atomic_load_explicit(&shard->primary_worker.lease_reacquire_pending,
+                                 memory_order_acquire) &&
+           llam_now_ns() < deadline) {
+        llam_pause_cpu();
+    }
+    if (!atomic_load_explicit(&shard->primary_worker.lease_reacquire_pending,
+                              memory_order_acquire)) {
+        test_fail(&state.failure,
+                  "startup pause did not publish its atomic reacquire deferral");
+    }
+    if (!llam_shard_wait_merge_pause_ack(shard, llam_now_ns() + 100000000ULL)) {
+        test_fail(&state.failure,
+                  "live startup binding did not acknowledge the merge pause");
+    }
+
+    llam_shard_release_merge_pause(shard);
+    if (wait_flag(&state.task_started, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "startup-pause task did not run after pause release");
+        goto cleanup;
+    }
+    if (state.task_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        state.task_snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
+        state.task_snapshot.owner_incarnation == 0U ||
+        state.task_snapshot.epoch != 0U) {
+        test_fail(&state.failure,
+                  "post-pause dispatch ran without a live primary lease owner");
+    }
+
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "startup-pause task/run did not complete after release");
+        goto cleanup;
+    }
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "startup-pause task join exceeded its deadline");
+    task_joined = true;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "startup-pause lease reacquire changed run/fatal semantics");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "startup-pause run join exceeded its deadline");
+    run_created = false;
+    rc = failure_result(&state.failure,
+                        "startup pause lease reacquire failed");
+
+cleanup:
+    llam_shard_release_merge_pause(shard);
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_runtime_stop,
+                            runtime,
+                            "startup-pause run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "startup-pause task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure,
+                                         "startup pause lease reacquire failed");
+}
+
+/* A new redirect transition must not mutate the lease during a merge pause. */
+static int test_redirect_rejected_during_merge_pause(void) {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    llam_lease_test_snapshot_t before;
+    llam_lease_test_snapshot_t after;
+    uint64_t incarnation;
+    bool entered;
+
+    memset(&failure, 0, sizeof(failure));
+    atomic_init(&failure.failures, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    llam_scheduler_bind_identity(shard,
+                                 &shard->primary_worker,
+                                 &shard->scheduler_ctx);
+    incarnation = atomic_load_explicit(&shard->primary_worker.binding_incarnation,
+                                       memory_order_acquire);
+    if (snapshot_lease_locked_for_test(shard, &before) != 0 ||
+        before.state != LLAM_LEASE_PRIMARY_OWNED ||
+        before.owner_worker != (uintptr_t)&shard->primary_worker) {
+        test_fail(&failure,
+                  "redirect guard test did not establish a primary lease");
+    }
+    llam_shard_request_merge_pause(shard);
+    pthread_mutex_lock(&shard->opaque_lock);
+    entered = llam_legacy_lease_enter_redirect_locked(shard,
+                                                      &shard->primary_worker,
+                                                      incarnation);
+    (void)llam_legacy_lease_snapshot_locked(shard, &after);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (entered || after.state != before.state ||
+        after.owner_worker != before.owner_worker ||
+        after.owner_incarnation != before.owner_incarnation ||
+        after.return_worker != 0U || after.return_incarnation != 0U) {
+        test_fail(&failure,
+                  "redirect transition mutated the lease during merge pause");
+    }
+    llam_shard_release_merge_pause(shard);
+    llam_scheduler_unbind_identity(shard, &shard->primary_worker);
+    llam_scheduler_clear_identity();
+    destroy_runtime(&runtime);
+    return failure_result(&failure,
+                          "redirect merge-pause guard failed");
+}
+
+static void real_watchdog_race_task(void *arg) {
+    real_watchdog_race_state_t *state = arg;
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    state->task_identity = g_llam_tls_task;
+    if (worker != NULL) {
+        /* Force an overdue sample without introducing a scheduler yield. */
+        atomic_store_explicit(&worker->last_safepoint_ns, 1U, memory_order_release);
+    }
+    atomic_store_explicit(&state->task_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_task, memory_order_acquire) == 0U) {
+        /* Keep the task schedulable while forcing each sample overdue. */
+        if (worker != NULL) {
+            atomic_store_explicit(&worker->last_safepoint_ns,
+                                  1U,
+                                  memory_order_release);
+        }
+        llam_yield();
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *real_watchdog_race_run(void *arg) {
+    real_watchdog_race_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *real_watchdog_race_monitor(void *arg) {
+    real_watchdog_race_driver_t *driver = arg;
+    real_watchdog_race_state_t *state = driver->state;
+    llam_shard_t *shard = &driver->runtime->shards[0];
+
+    while (atomic_load_explicit(&state->monitor_stop, memory_order_acquire) == 0U) {
+        llam_watchdog_check_shard(shard, llam_now_ns());
+        llam_pause_cpu();
+    }
+    atomic_store_explicit(&state->monitor_done, 1U, memory_order_release);
+    return NULL;
+}
+
+/*
+ * Hold the real watchdog gate after its task scan reference is acquired, let
+ * the task retire and clear active-G, then prove the late signal is suppressed
+ * by owner/active-G revalidation rather than field equality alone.
+ */
+static int test_watchdog_signal_suppressed_after_task_reclaim(void) {
+    real_watchdog_race_state_t state;
+    real_watchdog_race_driver_t driver;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    pthread_t monitor_thread;
+    bool run_created = false;
+    bool monitor_created = false;
+    bool task_joined = false;
+    cleanup_release_state_t run_release;
+    cleanup_release_state_t monitor_release;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&driver, 0, sizeof(driver));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_started, 0U);
+    atomic_init(&state.release_task, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.monitor_stop, 0U);
+    atomic_init(&state.monitor_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_STRICT,
+                                    1U) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    state.task = llam_runtime_spawn_ex(runtime,
+                                       real_watchdog_race_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (state.task == NULL) {
+        test_fail(&state.failure, "watchdog race task spawn failed");
+        destroy_runtime(&runtime);
+        return 1;
+    }
+    driver.state = &state;
+    driver.runtime = runtime;
+    run_release.runtime = runtime;
+    run_release.release_flag = &state.release_task;
+    monitor_release.runtime = runtime;
+    monitor_release.release_flag = &state.monitor_stop;
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, true);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR, true);
+    if (pthread_create(&run_thread, NULL, real_watchdog_race_run, &state) != 0) {
+        test_fail(&state.failure, "watchdog race run thread setup failed");
+        goto cleanup;
+    }
+    run_created = true;
+    if (pthread_create(&monitor_thread, NULL, real_watchdog_race_monitor, &driver) != 0) {
+        test_fail(&state.failure, "watchdog race monitor setup failed");
+        goto cleanup;
+    }
+    monitor_created = true;
+    if (wait_flag(&state.task_started, legacy_deadline()) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL) != 0) {
+        test_fail(&state.failure,
+                  "watchdog did not reach its real pre-signal gate");
+        goto cleanup;
+    }
+
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR) != 0) {
+        test_fail(&state.failure,
+                  "watchdog race task did not clear active-G at exit");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+        llam_shard_load_lease_current(shard) != NULL ||
+        state.task_identity == NULL ||
+        atomic_load_explicit(&state.task_identity->scan_refs, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&state.task_identity->state, memory_order_acquire) != LLAM_TASK_STATE_DEAD) {
+        test_fail(&state.failure,
+                  "watchdog race retained a task target after task-exit clear");
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR, false);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, false);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "watchdog race task/run did not complete after revalidation");
+        goto cleanup;
+    }
+    atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    bounded_join_thread(monitor_thread,
+                        true,
+                        &state.monitor_done,
+                        release_flag_and_runtime,
+                        &monitor_release,
+                        "watchdog race monitor join exceeded its deadline");
+    monitor_created = false;
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "watchdog race task join exceeded its deadline");
+    task_joined = true;
+    if (atomic_load_explicit(&shard->metrics.preempt_requests, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&shard->metrics.preempt_signals, memory_order_acquire) != 0U ||
+        state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "watchdog delivered a late signal after task reclaim");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "watchdog race run join exceeded its deadline");
+    run_created = false;
+    rc = failure_result(&state.failure,
+                        "watchdog signal suppression after reclaim failed");
+
+cleanup:
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR, false);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, false);
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    if (monitor_created) {
+        bounded_join_thread(monitor_thread,
+                            true,
+                            &state.monitor_done,
+                            release_flag_and_runtime,
+                            &monitor_release,
+                            "watchdog race monitor cleanup exceeded its deadline");
+        monitor_created = false;
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "watchdog race run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "watchdog race task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure,
+                                         "watchdog signal suppression after reclaim failed");
+}
+
+static int test_runtime_steal_pause_generation_reuse(void) {
+    dynamic_pause_state_t state;
+    dynamic_pause_driver_t driver;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    bool run_created = false;
+    bool task_joined = false;
+    cleanup_release_state_t run_release;
+    uint64_t old_sequence;
+    uint64_t old_epoch;
+    uint64_t old_incarnation;
+    uint64_t old_owner_epoch;
+    uint64_t new_sequence;
+    uint64_t new_epoch;
+    uint64_t new_incarnation;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&driver, 0, sizeof(driver));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_started, 0U);
+    atomic_init(&state.release_task, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.task = llam_runtime_spawn_ex(runtime,
+                                       dynamic_pause_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (state.task == NULL) {
+        test_fail(&state.failure, "steal-pause generation task spawn failed");
+        destroy_runtime(&runtime);
+        return 1;
+    }
+    driver.state = &state;
+    driver.runtime = runtime;
+    run_release.runtime = runtime;
+    run_release.release_flag = &state.release_task;
+    if (pthread_create(&run_thread, NULL, dynamic_pause_run_typed, &driver) != 0) {
+        test_fail(&state.failure, "steal-pause generation run setup failed");
+        destroy_runtime(&runtime);
+        return 1;
+    }
+    run_created = true;
+    if (wait_flag(&state.task_started, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "steal-pause generation task did not start");
+        goto cleanup;
+    }
+    shard = &runtime->shards[0];
+    llam_runtime_set_steal_pause(runtime, true);
+    if (!llam_runtime_wait_steal_pause_ack(runtime, legacy_deadline())) {
+        test_fail(&state.failure, "first steal-pause request was not acknowledged");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    old_sequence = atomic_load_explicit(&shard->steal_pause_ack_sequence,
+                                        memory_order_acquire);
+    old_epoch = atomic_load_explicit(&shard->steal_pause_ack_lease_epoch,
+                                     memory_order_acquire);
+    old_incarnation = atomic_load_explicit(&shard->steal_pause_ack_worker_incarnation,
+                                           memory_order_acquire);
+    old_owner_epoch = shard->legacy_lease.epoch;
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (old_sequence == 0U || old_epoch != old_owner_epoch ||
+        old_incarnation == 0U) {
+        test_fail(&state.failure,
+                  "first steal-pause ACK did not carry a live lease tuple");
+    }
+    llam_runtime_set_steal_pause(runtime, false);
+    llam_runtime_set_steal_pause(runtime, true);
+    if (!llam_runtime_wait_steal_pause_ack(runtime, legacy_deadline())) {
+        test_fail(&state.failure, "second steal-pause request was not acknowledged");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    new_sequence = atomic_load_explicit(&shard->steal_pause_ack_sequence,
+                                        memory_order_acquire);
+    new_epoch = atomic_load_explicit(&shard->steal_pause_ack_lease_epoch,
+                                     memory_order_acquire);
+    new_incarnation = atomic_load_explicit(&shard->steal_pause_ack_worker_incarnation,
+                                           memory_order_acquire);
+    if (new_sequence == old_sequence ||
+        llam_shard_steal_pause_ack_matches_locked(shard,
+                                                  old_sequence,
+                                                  old_epoch,
+                                                  old_incarnation) ||
+        !llam_shard_steal_pause_ack_matches_locked(shard,
+                                                   new_sequence,
+                                                   new_epoch,
+                                                   new_incarnation)) {
+        test_fail(&state.failure,
+                  "stale steal-pause ACK tuple was accepted after generation reuse");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_runtime_set_steal_pause(runtime, false);
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "steal-pause generation task/run did not complete");
+        goto cleanup;
+    }
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "steal-pause generation task join exceeded its deadline");
+    task_joined = true;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "steal-pause generation reuse changed run/fatal semantics");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "steal-pause generation run join exceeded its deadline");
+    run_created = false;
+    rc = failure_result(&state.failure,
+                        "runtime steal-pause generation reuse failed");
+
+cleanup:
+    llam_runtime_set_steal_pause(runtime, false);
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "steal-pause generation run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "steal-pause generation task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure,
+                                         "runtime steal-pause generation reuse failed");
+}
+
 int main(void) {
     static int (*const tests[])(void) = {
         test_lease_test_gate_contract,
         test_watchdog_lease_snapshot_binding_contract,
         test_versioned_pause_ack_contract,
+        test_startup_during_merge_pause_reacquires_lease,
+        test_redirect_rejected_during_merge_pause,
+        test_watchdog_signal_suppressed_after_task_reclaim,
+        test_runtime_steal_pause_generation_reuse,
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,
         test_active_g_publication_ordering_gates,
