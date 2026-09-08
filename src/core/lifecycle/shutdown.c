@@ -514,8 +514,22 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
  * parked task is woken, preserving callback argument lifetime.
  */
 static void llam_runtime_request_destroy_stop(llam_runtime_t *rt) {
+    unsigned i;
+
     atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);
     llam_request_stop(rt);
+    /* Publish STOPPING before waiting for a scheduler run to drain. */
+    if (rt->shards == NULL) {
+        return;
+    }
+    for (i = 0; i < rt->active_shards; ++i) {
+        if (!rt->shards[i].opaque_lock_initialized) {
+            continue;
+        }
+        pthread_mutex_lock(&rt->shards[i].opaque_lock);
+        llam_legacy_lease_begin_stop_locked(&rt->shards[i]);
+        pthread_mutex_unlock(&rt->shards[i].opaque_lock);
+    }
 }
 
 /**

@@ -89,6 +89,9 @@ typedef struct takeover_state {
     uintptr_t helper_worker;
     llam_lease_test_snapshot_t root_snapshot;
     llam_lease_test_snapshot_t helper_snapshot;
+    llam_lease_test_snapshot_t ownerless_redirect_snapshot;
+    llam_lease_test_snapshot_t ownerless_helper_return_snapshot;
+    llam_lease_test_snapshot_t ownerless_primary_return_snapshot;
 } takeover_state_t;
 
 typedef struct repeat_observation {
@@ -878,13 +881,16 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "helper handback released active state before its acknowledgement gate");
     }
+    pthread_mutex_lock(&shard->lock);
     if (atomic_load_explicit(&shard->opaque_helper_worker.active_g,
                              memory_order_acquire) != NULL ||
         atomic_load_explicit(&shard->primary_worker.active_g,
-                             memory_order_acquire) != NULL) {
+                             memory_order_acquire) != NULL ||
+        atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
         test_fail(&state.takeover.failure,
-                  "handback ACK was published before worker active-G cleanup");
+                  "handback ACK was published before worker/current cleanup");
     }
+    pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
 
@@ -973,18 +979,31 @@ static int test_clean_stop_completes_handback(void) {
     if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK) != 0) {
         test_fail(&state.takeover.failure,
                   "clean-stop handback did not reach its enabled acknowledgement gate");
-    } else if (llam_lease_test_snapshot(runtime, 0U, &snapshot) != 0 ||
-               snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
-               snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
-               snapshot.return_worker != 0U || snapshot.return_incarnation != 0U ||
-               snapshot.transfer_sequence != 4U || snapshot.handback_ack_sequence != 4U ||
-               snapshot.epoch != 3U ||
-               atomic_load_explicit(&shard->primary_worker.active_g,
-                                    memory_order_acquire) != NULL ||
-               atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                                    memory_order_acquire) != NULL) {
-        test_fail(&state.takeover.failure,
-                  "clean-stop handback ACK was not after active-G cleanup");
+    } else {
+        bool handback_cleanup_ok;
+
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        handback_cleanup_ok = llam_legacy_lease_snapshot_locked(shard, &snapshot) &&
+                              snapshot.state == LLAM_LEASE_PRIMARY_OWNED &&
+                              snapshot.owner_worker == (uintptr_t)&shard->primary_worker &&
+                              snapshot.return_worker == 0U &&
+                              snapshot.return_incarnation == 0U &&
+                              snapshot.transfer_sequence == 4U &&
+                              snapshot.handback_ack_sequence == 4U &&
+                              snapshot.epoch == 3U &&
+                              atomic_load_explicit(&shard->primary_worker.active_g,
+                                                   memory_order_acquire) == NULL &&
+                              atomic_load_explicit(&shard->opaque_helper_worker.active_g,
+                                                   memory_order_acquire) == NULL &&
+                              atomic_load_explicit(&shard->current,
+                                                   memory_order_acquire) == NULL;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (!handback_cleanup_ok) {
+            test_fail(&state.takeover.failure,
+                      "clean-stop handback ACK was not after worker/current cleanup");
+        }
     }
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
 
@@ -1259,6 +1278,27 @@ static void ownerless_helper_task(void *arg) {
     errno = 0;
     state->helper_enter_rc = llam_enter_blocking();
     state->helper_enter_errno = errno;
+    state->helper_worker = (uintptr_t)g_llam_tls_worker;
+    state->helper_incarnation = atomic_load_explicit(&shard->opaque_helper_worker.incarnation,
+                                                     memory_order_acquire);
+    if (llam_lease_test_snapshot(state->runtime,
+                                 shard->id,
+                                 &state->ownerless_redirect_snapshot) != 0 ||
+        state->ownerless_redirect_snapshot.state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+        state->ownerless_redirect_snapshot.owner_worker != 0U ||
+        state->ownerless_redirect_snapshot.owner_incarnation != 0U ||
+        state->ownerless_redirect_snapshot.epoch != 1U ||
+        state->ownerless_redirect_snapshot.return_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state->ownerless_redirect_snapshot.return_incarnation !=
+            state->helper_incarnation ||
+        state->ownerless_redirect_snapshot.transfer_sequence != 2U ||
+        state->ownerless_redirect_snapshot.transfer_sequence == 0U ||
+        state->ownerless_redirect_snapshot.epoch == 0U ||
+        state->ownerless_redirect_snapshot.handback_ack_sequence != 0U) {
+        test_fail(&state->failure,
+                  "ownerless redirect did not retain the exact helper return token");
+    }
     pthread_mutex_lock(&shard->lock);
     state->helper_redirect_active = shard->opaque_redirect_active ? 1U : 0U;
     state->helper_redirect_depth = shard->opaque_redirect_depth;
@@ -1316,11 +1356,42 @@ static void ownerless_root_task(void *arg) {
         test_fail(&state->failure, "ownerless return ordering released redirect out of order");
     }
     pthread_mutex_unlock(&shard->lock);
+    if (llam_lease_test_snapshot(state->runtime,
+                                 shard->id,
+                                 &state->ownerless_helper_return_snapshot) != 0 ||
+        state->ownerless_helper_return_snapshot.state != LLAM_LEASE_HELPER_OWNED ||
+        state->ownerless_helper_return_snapshot.owner_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state->ownerless_helper_return_snapshot.owner_incarnation !=
+            state->helper_incarnation ||
+        state->ownerless_helper_return_snapshot.epoch != 2U ||
+        state->ownerless_helper_return_snapshot.transfer_sequence != 3U ||
+        state->ownerless_helper_return_snapshot.handback_ack_sequence != 3U ||
+        state->ownerless_helper_return_snapshot.return_worker != 0U ||
+        state->ownerless_helper_return_snapshot.return_incarnation != 0U) {
+        test_fail(&state->failure,
+                  "ownerless helper return did not complete its exact handback episode");
+    }
     errno = 0;
     state->root_leave_rc = llam_leave_blocking();
     state->root_leave_errno = errno;
     if (state->root_leave_rc != 0) {
         test_fail(&state->failure, "ownerless primary return failed");
+    }
+    if (llam_lease_test_snapshot(state->runtime,
+                                 shard->id,
+                                 &state->ownerless_primary_return_snapshot) != 0 ||
+        state->ownerless_primary_return_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        state->ownerless_primary_return_snapshot.owner_worker !=
+            (uintptr_t)&shard->primary_worker ||
+        state->ownerless_primary_return_snapshot.owner_incarnation == 0U ||
+        state->ownerless_primary_return_snapshot.epoch != 3U ||
+        state->ownerless_primary_return_snapshot.transfer_sequence != 4U ||
+        state->ownerless_primary_return_snapshot.handback_ack_sequence != 4U ||
+        state->ownerless_primary_return_snapshot.return_worker != 0U ||
+        state->ownerless_primary_return_snapshot.return_incarnation != 0U) {
+        test_fail(&state->failure,
+                  "ownerless primary return did not complete its exact handback episode");
     }
     bounded_join_task(helper_task,
                       &state->helper_done,
@@ -1333,6 +1404,7 @@ static int test_ownerless_return_ordering(void) {
     llam_runtime_t *runtime = NULL;
     llam_task_t *root = NULL;
     llam_shard_t *shard;
+    llam_lease_test_snapshot_t final_snapshot;
     int run_rc;
     int run_errno;
 
@@ -1372,13 +1444,18 @@ static int test_ownerless_return_ordering(void) {
         test_fail(&state.failure, "ownerless return did not preserve one helper lifecycle");
     }
     pthread_mutex_unlock(&shard->opaque_lock);
-    assert_snapshot_values(runtime,
-                           0U,
-                           0U,
-                           0U,
-                           0U,
-                           &state.failure,
-                           "ownerless snapshot after run failed");
+    if (llam_lease_test_snapshot(runtime, 0U, &final_snapshot) != 0 ||
+        final_snapshot.state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+        final_snapshot.owner_worker != 0U ||
+        final_snapshot.owner_incarnation != 0U ||
+        final_snapshot.return_worker != 0U ||
+        final_snapshot.return_incarnation != 0U ||
+        final_snapshot.epoch != 3U ||
+        final_snapshot.transfer_sequence != 4U ||
+        final_snapshot.handback_ack_sequence != 4U) {
+        test_fail(&state.failure,
+                  "ownerless snapshot after run did not preserve exact sequence/epoch");
+    }
     destroy_runtime(&runtime);
     return failure_result(&state.failure, "ownerless return characterization failed");
 }
@@ -1625,7 +1702,8 @@ static void active_shutdown_task(void *arg) {
     }
     atomic_store_explicit(&state->task_entered, 1U, memory_order_release);
     while (atomic_load_explicit(&state->release_task, memory_order_acquire) == 0U) {
-        llam_yield();
+        /* Keep the active shutdown task on its primary until the test releases it. */
+        llam_pause_cpu();
     }
     errno = 0;
     if (llam_leave_blocking() != 0) {
@@ -1714,6 +1792,8 @@ static int test_helper_shutdown_while_active(void) {
         test_fail(&state.failure, "active helper lifecycle changed its helper identity");
         goto cleanup;
     }
+    /* Arm before shutdown can stop the helper, so the handback window cannot race past us. */
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, true);
     if (pthread_create(&destroy_thread, NULL, active_shutdown_destroy, &state) != 0) {
         test_fail(&state.failure, "active helper destroy thread setup failed");
         goto cleanup;
@@ -1723,8 +1803,17 @@ static int test_helper_shutdown_while_active(void) {
         test_fail(&state.failure, "active helper destroy did not start");
         goto cleanup;
     }
-    /* Arm the handback gate before releasing the active foreign block. */
-    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, true);
+    if (wait_for_lease_state(runtime,
+                             0U,
+                             LLAM_LEASE_STOPPING,
+                             (uintptr_t)&runtime->shards[0].opaque_helper_worker,
+                             1U,
+                             false,
+                             NULL) != 0) {
+        test_fail(&state.failure,
+                  "active helper destroy did not publish STOPPING before release");
+        goto cleanup;
+    }
     atomic_store_explicit(&state.release_task, 1U, memory_order_release);
     if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK) != 0) {
         test_fail(&state.failure,
@@ -1732,19 +1821,57 @@ static int test_helper_shutdown_while_active(void) {
     } else {
         llam_lease_test_snapshot_t snapshot;
 
-        if (llam_lease_test_snapshot(runtime, 0U, &snapshot) != 0 ||
-            snapshot.return_worker != 0U || snapshot.return_incarnation != 0U ||
-            snapshot.handback_ack_sequence == 0U ||
-            snapshot.handback_ack_sequence != snapshot.transfer_sequence ||
-            atomic_load_explicit(&runtime->shards[0].primary_worker.active_g,
-                                 memory_order_acquire) != NULL ||
-            atomic_load_explicit(&runtime->shards[0].opaque_helper_worker.active_g,
-                                 memory_order_acquire) != NULL) {
+        llam_shard_t *shard = &runtime->shards[0];
+        bool handback_cleanup_ok;
+
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        handback_cleanup_ok = llam_legacy_lease_snapshot_locked(shard, &snapshot) &&
+                              snapshot.state == LLAM_LEASE_STOPPING &&
+                              snapshot.owner_worker == (uintptr_t)&shard->primary_worker &&
+                              snapshot.owner_incarnation != 0U &&
+                              snapshot.return_worker == (uintptr_t)&shard->primary_worker &&
+                              snapshot.return_incarnation == snapshot.owner_incarnation &&
+                              snapshot.transfer_sequence == 2U &&
+                              snapshot.handback_ack_sequence == 2U &&
+                              snapshot.epoch == 2U &&
+                              atomic_load_explicit(&shard->primary_worker.active_g,
+                                                   memory_order_acquire) == NULL &&
+                              atomic_load_explicit(&shard->opaque_helper_worker.active_g,
+                                                   memory_order_acquire) == NULL &&
+                              atomic_load_explicit(&shard->current,
+                                                   memory_order_acquire) == NULL;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (!handback_cleanup_ok) {
             test_fail(&state.failure,
-                      "active helper shutdown ACK was not after active-G cleanup");
+                      "active helper shutdown handback did not retain claimant after cleanup");
         }
     }
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK, true);
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK) != 0) {
+        test_fail(&state.failure,
+                  "active helper shutdown did not reach its enabled exit gate");
+    } else {
+        llam_shard_t *shard = &runtime->shards[0];
+        bool claimant_retained;
+
+        pthread_mutex_lock(&shard->opaque_lock);
+        claimant_retained = shard->legacy_lease.state == LLAM_LEASE_STOPPING &&
+                            shard->legacy_lease.return_worker ==
+                                &shard->primary_worker &&
+                            shard->legacy_lease.return_incarnation ==
+                                shard->legacy_lease.owner_incarnation &&
+                            atomic_load_explicit(&shard->opaque_helper_exit_ack,
+                                                 memory_order_acquire);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (!claimant_retained) {
+            test_fail(&state.failure,
+                      "active helper shutdown exit ACK cleared the return claimant");
+        }
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK, false);
     if (wait_flag(&state.destroy_done, legacy_deadline()) != 0 ||
         wait_flag(&state.run_done, legacy_deadline()) != 0 ||
         wait_flag(&state.task_done, legacy_deadline()) != 0) {
@@ -1774,6 +1901,7 @@ static int test_helper_shutdown_while_active(void) {
     rc = failure_result(&state.failure, "active helper shutdown characterization failed");
 
 cleanup:
+    reset_lease_test_gates();
     atomic_store_explicit(&state.release_task, 1U, memory_order_release);
     if (destroy_created) {
         release.runtime = runtime;

@@ -312,13 +312,13 @@ bool llam_legacy_lease_complete_handback_locked(llam_shard_t *shard,
     lease->owner = claimant;
     lease->owner_incarnation = claimant_incarnation;
     lease->epoch = llam_legacy_lease_next_counter(lease->epoch);
-    lease->return_worker = NULL;
-    lease->return_incarnation = 0U;
-    lease->state = lease->state == LLAM_LEASE_STOPPING
-                       ? LLAM_LEASE_STOPPING
-                       : (claimant == &shard->primary_worker
-                              ? LLAM_LEASE_PRIMARY_OWNED
-                              : LLAM_LEASE_HELPER_OWNED);
+    if (lease->state != LLAM_LEASE_STOPPING) {
+        lease->return_worker = NULL;
+        lease->return_incarnation = 0U;
+        lease->state = claimant == &shard->primary_worker
+                           ? LLAM_LEASE_PRIMARY_OWNED
+                           : LLAM_LEASE_HELPER_OWNED;
+    }
     llam_legacy_lease_assert_consistent_locked(shard);
     return true;
 }
@@ -333,13 +333,23 @@ bool llam_legacy_lease_handback_acknowledged_locked(const llam_shard_t *shard,
         return false;
     }
     lease = llam_shard_legacy_lease_const_locked(shard);
+    if (lease->state == LLAM_LEASE_STOPPING) {
+        return lease->handback_ack_sequence == sequence &&
+               lease->transfer_sequence == sequence &&
+               lease->return_worker == worker &&
+               lease->return_incarnation == incarnation &&
+               lease->owner == worker &&
+               lease->owner_incarnation == incarnation &&
+               llam_worker_binding_live(worker, incarnation);
+    }
     return lease->handback_ack_sequence == sequence &&
+           lease->transfer_sequence == sequence &&
            lease->return_worker == NULL &&
+           lease->return_incarnation == 0U &&
            lease->owner == worker &&
            lease->owner_incarnation == incarnation &&
            (lease->state == LLAM_LEASE_PRIMARY_OWNED ||
-            lease->state == LLAM_LEASE_HELPER_OWNED ||
-            lease->state == LLAM_LEASE_STOPPING) &&
+            lease->state == LLAM_LEASE_HELPER_OWNED) &&
            llam_worker_binding_live(worker, incarnation);
 }
 
@@ -359,7 +369,8 @@ bool llam_legacy_lease_teardown_return_locked(const llam_shard_t *shard,
     }
     lease = llam_shard_legacy_lease_const_locked(shard);
     if (lease->state != LLAM_LEASE_STOPPING || lease->owner != worker ||
-        lease->owner_incarnation != incarnation || lease->return_worker != NULL ||
+        lease->owner_incarnation != incarnation || lease->return_worker != worker ||
+        lease->return_incarnation != incarnation ||
         (lease->transfer_sequence != 0U &&
          lease->handback_ack_sequence != lease->transfer_sequence)) {
         return false;
