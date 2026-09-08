@@ -66,6 +66,8 @@ void llam_runtime_set_steal_pause(llam_runtime_t *rt, bool active);
 bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns);
 
 // Per-shard pause handshake used before moving queues out of a source shard.
+// ACKs are request/lease/worker-incarnation tuples; a boolean ACK is not enough
+// to authorize merge mutation after a handoff.
 void llam_shard_request_merge_pause(llam_shard_t *shard);
 void llam_shard_release_merge_pause(llam_shard_t *shard);
 bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns);

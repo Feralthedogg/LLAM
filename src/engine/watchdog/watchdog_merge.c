@@ -27,6 +27,32 @@
 
 #include "engine/runtime_watchdog_internal.h"
 
+/* Zero is reserved for an unpublished pause request. */
+static uint64_t llam_watchdog_next_pause_sequence(uint64_t value) {
+    return value == UINT64_MAX ? 1U : value + 1U;
+}
+
+static uint64_t llam_watchdog_reserve_pause_sequence(
+    atomic_uint_fast64_t *sequence) {
+    uint_fast64_t current;
+
+    if (sequence == NULL) {
+        return 0U;
+    }
+    current = atomic_load_explicit(sequence, memory_order_acquire);
+    for (;;) {
+        uint_fast64_t next = llam_watchdog_next_pause_sequence((uint64_t)current);
+
+        if (atomic_compare_exchange_weak_explicit(sequence,
+                                                  &current,
+                                                  next,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return (uint64_t)next;
+        }
+    }
+}
+
 /**
  * @brief Choose the best target shard for merging an offlined source shard.
  *
@@ -107,16 +133,46 @@ void llam_watchdog_pause_briefly(void) {
  * @param active Whether stealing should pause.
  */
 void llam_runtime_set_steal_pause(llam_runtime_t *rt, bool active) {
+    uint64_t request_sequence;
     unsigned i;
 
     if (rt == NULL) {
         return;
     }
 
-    for (i = 0U; i < rt->active_shards; ++i) {
-        atomic_store_explicit(&rt->shards[i].steal_pause_ack, 0U, memory_order_release);
+    if (active) {
+        request_sequence = llam_watchdog_reserve_pause_sequence(
+            &rt->steal_pause_request_sequence);
+    } else {
+        request_sequence = atomic_load_explicit(&rt->steal_pause_request_sequence,
+                                                memory_order_acquire);
+        atomic_store_explicit(&rt->steal_pause_active, 0U, memory_order_release);
     }
-    atomic_store_explicit(&rt->steal_pause_active, active ? 1U : 0U, memory_order_release);
+    for (i = 0U; i < rt->active_shards; ++i) {
+        llam_shard_t *shard = &rt->shards[i];
+
+        if (!shard->opaque_lock_initialized) {
+            continue;
+        }
+        pthread_mutex_lock(&shard->opaque_lock);
+        atomic_store_explicit(&shard->steal_pause_request_sequence,
+                              request_sequence,
+                              memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack_sequence,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack_lease_epoch,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack_worker_incarnation,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+    if (active) {
+        atomic_store_explicit(&rt->steal_pause_active, 1U, memory_order_release);
+    }
     llam_wake_all_shards(rt);
 }
 
@@ -129,7 +185,18 @@ void llam_runtime_set_steal_pause(llam_runtime_t *rt, bool active) {
  * @return @c true when all online shards acknowledged before the deadline.
  */
 bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns) {
+    uint64_t request_sequence;
+
     if (rt == NULL) {
+        return false;
+    }
+
+    if (!llam_runtime_steal_pause_active(rt)) {
+        return false;
+    }
+    request_sequence = atomic_load_explicit(&rt->steal_pause_request_sequence,
+                                            memory_order_acquire);
+    if (request_sequence == 0U) {
         return false;
     }
 
@@ -137,13 +204,38 @@ bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns)
         unsigned i;
         bool all_ack = true;
 
+        if (!llam_runtime_steal_pause_active(rt) ||
+            atomic_load_explicit(&rt->steal_pause_request_sequence,
+                                 memory_order_acquire) != request_sequence) {
+            return false;
+        }
+
         for (i = 0U; i < rt->active_shards; ++i) {
             llam_shard_t *shard = &rt->shards[i];
+            uint64_t epoch_value;
+            uint64_t worker_incarnation;
+            bool matched;
 
             if (!llam_shard_is_online(shard)) {
                 continue;
             }
-            if (atomic_load_explicit(&shard->steal_pause_ack, memory_order_acquire) == 0U) {
+            if (!shard->opaque_lock_initialized) {
+                all_ack = false;
+                break;
+            }
+            pthread_mutex_lock(&shard->opaque_lock);
+            epoch_value = atomic_load_explicit(&shard->steal_pause_ack_lease_epoch,
+                                               memory_order_acquire);
+            worker_incarnation = atomic_load_explicit(
+                &shard->steal_pause_ack_worker_incarnation,
+                memory_order_acquire);
+            matched = llam_shard_steal_pause_ack_matches_locked(
+                shard,
+                request_sequence,
+                epoch_value,
+                worker_incarnation);
+            pthread_mutex_unlock(&shard->opaque_lock);
+            if (!matched) {
                 all_ack = false;
                 break;
             }
@@ -162,11 +254,30 @@ bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns)
  * @param shard Shard to pause.
  */
 void llam_shard_request_merge_pause(llam_shard_t *shard) {
-    if (shard == NULL) {
+    uint64_t request_sequence;
+
+    if (shard == NULL || !shard->opaque_lock_initialized) {
         return;
     }
+    pthread_mutex_lock(&shard->opaque_lock);
+    request_sequence = llam_watchdog_next_pause_sequence(
+        atomic_load_explicit(&shard->merge_pause_request_sequence,
+                             memory_order_acquire));
+    atomic_store_explicit(&shard->merge_pause_request_sequence,
+                          request_sequence,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_sequence,
+                          0U,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_lease_epoch,
+                          0U,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation,
+                          0U,
+                          memory_order_release);
     atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
     atomic_store_explicit(&shard->merge_pause_requested, 1U, memory_order_release);
+    pthread_mutex_unlock(&shard->opaque_lock);
     llam_kick_shard(shard);
 }
 
@@ -176,11 +287,22 @@ void llam_shard_request_merge_pause(llam_shard_t *shard) {
  * @param shard Shard to release.
  */
 void llam_shard_release_merge_pause(llam_shard_t *shard) {
-    if (shard == NULL) {
+    if (shard == NULL || !shard->opaque_lock_initialized) {
         return;
     }
+    pthread_mutex_lock(&shard->opaque_lock);
     atomic_store_explicit(&shard->merge_pause_requested, 0U, memory_order_release);
     atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_sequence,
+                          0U,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_lease_epoch,
+                          0U,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation,
+                          0U,
+                          memory_order_release);
+    pthread_mutex_unlock(&shard->opaque_lock);
     llam_kick_shard(shard);
 }
 
@@ -193,20 +315,67 @@ void llam_shard_release_merge_pause(llam_shard_t *shard) {
  * @return @c true when the shard acknowledged before the deadline.
  */
 bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns) {
-    if (shard == NULL) {
+    uint64_t request_sequence;
+
+    if (shard == NULL || !shard->opaque_lock_initialized) {
+        return false;
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    request_sequence = atomic_load_explicit(&shard->merge_pause_request_sequence,
+                                            memory_order_acquire);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (request_sequence == 0U) {
         return false;
     }
 
     while (llam_now_ns() < deadline_ns) {
+        uint64_t epoch_value;
+        uint64_t worker_incarnation;
+        bool matched;
+
         if (!llam_shard_is_online(shard)) {
             return false;
         }
-        if (atomic_load_explicit(&shard->merge_pause_ack, memory_order_acquire) != 0U) {
+        pthread_mutex_lock(&shard->opaque_lock);
+        if (atomic_load_explicit(&shard->merge_pause_requested,
+                                 memory_order_acquire) == 0U ||
+            atomic_load_explicit(&shard->merge_pause_request_sequence,
+                                 memory_order_acquire) != request_sequence) {
+            pthread_mutex_unlock(&shard->opaque_lock);
+            return false;
+        }
+        epoch_value = atomic_load_explicit(&shard->merge_pause_ack_lease_epoch,
+                                           memory_order_acquire);
+        worker_incarnation = atomic_load_explicit(
+            &shard->merge_pause_ack_worker_incarnation,
+            memory_order_acquire);
+        matched = llam_shard_merge_pause_ack_matches_locked(
+            shard,
+            request_sequence,
+            epoch_value,
+            worker_incarnation);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (matched) {
             return true;
         }
         llam_watchdog_pause_briefly();
     }
     return false;
+}
+
+static bool llam_shard_merge_pause_ack_current_locked(const llam_shard_t *shard) {
+    if (shard == NULL) {
+        return false;
+    }
+    return llam_shard_merge_pause_ack_matches_locked(
+        shard,
+        atomic_load_explicit(&shard->merge_pause_request_sequence,
+                             memory_order_acquire),
+        atomic_load_explicit(&shard->merge_pause_ack_lease_epoch,
+                             memory_order_acquire),
+        atomic_load_explicit(&shard->merge_pause_ack_worker_incarnation,
+                             memory_order_acquire));
 }
 
 /**
@@ -219,6 +388,9 @@ bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns) 
  */
 bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
     return shard != NULL &&
+           atomic_load_explicit(&((llam_shard_t *)shard)->merge_pause_requested,
+                                memory_order_acquire) != 0U &&
+           llam_shard_merge_pause_ack_current_locked(shard) &&
            llam_shard_load_lease_current((llam_shard_t *)shard) == NULL &&
            atomic_load_explicit(&((llam_shard_t *)shard)->timer_callbacks_active, memory_order_acquire) == 0U &&
            shard->inject_q.depth == 0U &&
@@ -237,6 +409,9 @@ bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
  */
 bool llam_shard_can_start_merge_locked(const llam_shard_t *shard) {
     return shard != NULL &&
+           atomic_load_explicit(&((llam_shard_t *)shard)->merge_pause_requested,
+                                memory_order_acquire) != 0U &&
+           llam_shard_merge_pause_ack_current_locked(shard) &&
            llam_shard_load_lease_current((llam_shard_t *)shard) == NULL &&
            !shard->opaque_redirect_active;
 }
@@ -353,9 +528,26 @@ static bool llam_merge_lockfree_normq_locked(llam_shard_t *source, llam_shard_t 
         return true;
     }
     if (!llam_runtime_steal_pause_active(source->runtime) ||
-        !llam_shard_merge_pause_requested(source) ||
-        atomic_load_explicit(&source->merge_pause_ack, memory_order_acquire) == 0U) {
+        !llam_shard_merge_pause_requested(source)) {
         return llam_norm_queue_depth(source) == 0U;
+    }
+    {
+        uint64_t request_sequence = atomic_load_explicit(
+            &source->merge_pause_request_sequence,
+            memory_order_acquire);
+        uint64_t epoch_value = atomic_load_explicit(
+            &source->merge_pause_ack_lease_epoch,
+            memory_order_acquire);
+        uint64_t worker_incarnation = atomic_load_explicit(
+            &source->merge_pause_ack_worker_incarnation,
+            memory_order_acquire);
+
+        if (!llam_shard_merge_pause_ack_matches_locked(source,
+                                                       request_sequence,
+                                                       epoch_value,
+                                                       worker_incarnation)) {
+            return false;
+        }
     }
 
     while (staged_count < LLAM_NORM_QUEUE_CAP) {
@@ -404,6 +596,20 @@ bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *targe
         *migrated_out = 0U;
     }
     if (source == NULL || target == NULL || source == target) {
+        return false;
+    }
+    /* Queue mutation is legal only while the source pause is still held. */
+    if (!llam_shard_merge_pause_requested(source)) {
+        return false;
+    }
+    if (!llam_shard_merge_pause_ack_matches_locked(
+            source,
+            atomic_load_explicit(&source->merge_pause_request_sequence,
+                                 memory_order_acquire),
+            atomic_load_explicit(&source->merge_pause_ack_lease_epoch,
+                                 memory_order_acquire),
+            atomic_load_explicit(&source->merge_pause_ack_worker_incarnation,
+                                 memory_order_acquire))) {
         return false;
     }
     if (!llam_queue_can_merge_runnable(source, target, &source->inject_q) ||

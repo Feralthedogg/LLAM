@@ -66,6 +66,9 @@ bool llam_merge_shard_timers_locked(llam_shard_t *source, llam_shard_t *target, 
     if (source == NULL || target == NULL || source == target) {
         return false;
     }
+    if (!llam_shard_merge_pause_requested(source)) {
+        return false;
+    }
     // Timer nodes are heap-backed; do not migrate them with the old linked-list path.
     return source->timer_heap_len == 0U &&
            source->timers == NULL &&

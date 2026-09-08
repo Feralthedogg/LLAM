@@ -4192,9 +4192,169 @@ static int test_lease_test_gate_contract(void) {
     return failure_result(&failure, "lease test-hook contract failed");
 }
 
+/*
+ * Task 5 RED contract: watchdog target selection must come from a live lease
+ * binding, rather than a mutable shard-side signal target.  The coordinator is
+ * intentionally sampled while its opaque lock is held by the caller.
+ */
+static int test_watchdog_lease_snapshot_binding_contract(void) {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    llam_worker_t *owner = NULL;
+    uint64_t incarnation = 0U;
+    uint64_t old_incarnation = 0U;
+    uint64_t epoch = 0U;
+    pthread_t native_thread;
+    bool valid;
+
+    memset(&failure, 0, sizeof(failure));
+    atomic_init(&failure.failures, 0U);
+    memset(&native_thread, 0, sizeof(native_thread));
+    reset_lease_test_gates();
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_AUTO,
+                                    1000U) != 0) {
+        return 1;
+    }
+    shard = &runtime->shards[0];
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    valid = llam_legacy_lease_snapshot_watchdog_locked(shard,
+                                                       &owner,
+                                                       &incarnation,
+                                                       &epoch,
+                                                       &native_thread);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (valid || owner != NULL || incarnation != 0U || epoch != 0U) {
+        test_fail(&failure,
+                  "unbound watchdog snapshot claimed a target");
+    }
+
+    /* Binding the primary publishes the only eligible watchdog target. */
+    llam_scheduler_bind_identity(shard,
+                                 &shard->primary_worker,
+                                 &shard->scheduler_ctx);
+    owner = NULL;
+    incarnation = 0U;
+    epoch = 0U;
+    memset(&native_thread, 0, sizeof(native_thread));
+    pthread_mutex_lock(&shard->opaque_lock);
+    valid = llam_legacy_lease_snapshot_watchdog_locked(shard,
+                                                       &owner,
+                                                       &incarnation,
+                                                       &epoch,
+                                                       &native_thread);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (!valid || owner != &shard->primary_worker || incarnation == 0U ||
+        epoch != 0U || !pthread_equal(native_thread, pthread_self())) {
+        test_fail(&failure,
+                  "live lease binding was not returned as the watchdog target");
+    }
+
+    old_incarnation = incarnation;
+    llam_scheduler_unbind_identity(shard, &shard->primary_worker);
+    llam_scheduler_clear_identity();
+    if (llam_worker_binding_live(&shard->primary_worker, old_incarnation)) {
+        test_fail(&failure, "retired worker incarnation remained watchdog-live");
+    }
+    destroy_runtime(&runtime);
+    return failure_result(&failure,
+                          "watchdog lease snapshot binding contract failed");
+}
+
+/*
+ * Task 5 RED contract: an ACK is reusable only for the exact request and
+ * lease/worker incarnation that produced it.  This deliberately mutates the
+ * internal publication tuple so the test fails to compile until the versioned
+ * fields and matcher exist.
+ */
+static int test_versioned_pause_ack_contract(void) {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    uint64_t epoch_value;
+    uint64_t worker_incarnation;
+
+    memset(&failure, 0, sizeof(failure));
+    atomic_init(&failure.failures, 0U);
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_OFF,
+                                    0U) != 0) {
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    llam_scheduler_bind_identity(shard,
+                                 &shard->primary_worker,
+                                 &shard->scheduler_ctx);
+    epoch_value = shard->legacy_lease.epoch;
+    worker_incarnation = atomic_load_explicit(&shard->primary_worker.incarnation,
+                                              memory_order_acquire);
+
+    atomic_store_explicit(&shard->merge_pause_requested, 1U, memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_request_sequence,
+                          7U,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_sequence,
+                          7U,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_lease_epoch,
+                          epoch_value,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation,
+                          worker_incarnation,
+                          memory_order_release);
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!llam_shard_pause_ack_matches_locked(shard,
+                                             7U,
+                                             epoch_value,
+                                             worker_incarnation) ||
+        llam_shard_pause_ack_matches_locked(shard,
+                                            6U,
+                                            epoch_value,
+                                            worker_incarnation) ||
+        llam_shard_pause_ack_matches_locked(shard,
+                                            7U,
+                                            epoch_value + 1U,
+                                            worker_incarnation) ||
+        llam_shard_pause_ack_matches_locked(shard,
+                                            7U,
+                                            epoch_value,
+                                            worker_incarnation + 1U)) {
+        test_fail(&failure,
+                  "pause ACK matcher accepted a stale request or incarnation");
+    }
+    atomic_store_explicit(&shard->merge_pause_request_sequence,
+                          8U,
+                          memory_order_release);
+    if (llam_shard_merge_pause_ack_matches_locked(shard,
+                                                  8U,
+                                                  epoch_value,
+                                                  worker_incarnation)) {
+        test_fail(&failure,
+                  "pause ACK was reused after a request-generation handoff");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    atomic_store_explicit(&shard->merge_pause_requested, 0U, memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
+    llam_scheduler_unbind_identity(shard, &shard->primary_worker);
+    llam_scheduler_clear_identity();
+    destroy_runtime(&runtime);
+    return failure_result(&failure,
+                          "versioned pause ACK contract failed");
+}
+
 int main(void) {
     static int (*const tests[])(void) = {
         test_lease_test_gate_contract,
+        test_watchdog_lease_snapshot_binding_contract,
+        test_versioned_pause_ack_contract,
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,
         test_active_g_publication_ordering_gates,

@@ -87,60 +87,145 @@ static bool llam_watchdog_preempt_pressure_locked(llam_shard_t *shard) {
  * @param now_ns Current monotonic timestamp.
  */
 void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
-    llam_task_t *current;
-    llam_worker_t *owner;
     llam_runtime_t *rt = shard != NULL ? shard->runtime : NULL;
+    llam_worker_t *owner = NULL;
+    llam_worker_t *validated_owner = NULL;
+    llam_task_t *current = NULL;
+    uint64_t owner_incarnation = 0U;
+    uint64_t epoch = 0U;
+    uint64_t validated_incarnation = 0U;
+    uint64_t validated_epoch = 0U;
+    pthread_t native_thread;
+    pthread_t validated_native_thread;
+    bool scan_ref = false;
+    bool candidate = false;
 
     if (rt == NULL || rt->preempt_mode < LLAM_PREEMPT_AUTO) {
         return;
     }
+    memset(&native_thread, 0, sizeof(native_thread));
+    memset(&validated_native_thread, 0, sizeof(validated_native_thread));
+
+    /* The lease lock protects owner/incarnation/native-thread publication. */
     pthread_mutex_lock(&shard->opaque_lock);
+    if (!llam_legacy_lease_snapshot_watchdog_locked(shard,
+                                                     &owner,
+                                                     &owner_incarnation,
+                                                     &epoch,
+                                                     &native_thread)) {
+        pthread_mutex_unlock(&shard->opaque_lock);
+        return;
+    }
     pthread_mutex_lock(&shard->lock);
-    owner = shard->legacy_lease.owner;
-    current = llam_shard_load_lease_current(shard);
+    current = llam_worker_load_active_g(owner);
     if (current != NULL) {
-        uint64_t last_safepoint = owner != NULL
-                                      ? atomic_load_explicit(&owner->last_safepoint_ns,
-                                                             memory_order_acquire)
-                                      : 0U;
-        uint64_t slice_ns = rt->preempt_quantum_ns != 0U
-                                ? rt->preempt_quantum_ns
-                                : llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class, memory_order_acquire));
+        /* Keep the task object alive across the signal-target revalidation. */
+        scan_ref = llam_task_scan_ref_try_acquire(rt, current);
+        if (scan_ref) {
+            uint64_t last_safepoint = atomic_load_explicit(&owner->last_safepoint_ns,
+                                                           memory_order_acquire);
+            uint64_t slice_ns = rt->preempt_quantum_ns != 0U
+                                    ? rt->preempt_quantum_ns
+                                    : llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class,
+                                                                                             memory_order_acquire));
+            unsigned task_state = atomic_load_explicit(&current->state,
+                                                        memory_order_acquire);
 
-        if ((current->flags & LLAM_TASK_FLAG_NO_PREEMPT) != 0U ||
-            current->opaque_blocking_depth > 0U ||
-            current->state == LLAM_TASK_STATE_BLOCKED_OPAQUE) {
-            pthread_mutex_unlock(&shard->lock);
-            pthread_mutex_unlock(&shard->opaque_lock);
-            return;
-        }
-
-        if (rt->preempt_mode != LLAM_PREEMPT_STRICT && slice_ns <= UINT64_MAX / 2U) {
-            slice_ns *= 2U;
-        }
-        if (last_safepoint > 0U && now_ns > last_safepoint && now_ns - last_safepoint > slice_ns) {
-            if (!llam_watchdog_preempt_pressure_locked(shard)) {
-                shard->metrics.preempt_suppressed += 1U;
-                pthread_mutex_unlock(&shard->lock);
-                pthread_mutex_unlock(&shard->opaque_lock);
-                return;
-            }
-            if (atomic_exchange(&current->preempt_requested, 1U) == 0U) {
-                shard->metrics.watchdog_hits += 1U;
-                shard->metrics.long_no_safepoint += 1U;
-                shard->metrics.preempt_requests += 1U;
-                llam_trace_shard(shard,
-                               current,
-                               LLAM_TRACE_WATCHDOG,
-                               LLAM_TASK_STATE_RUNNING,
-                               LLAM_TASK_STATE_RUNNING,
-                               LLAM_WAIT_NONE);
-                if (pthread_kill(shard->preempt_thread, LLAM_PREEMPT_SIGNAL) == 0) {
-                    shard->metrics.preempt_signals += 1U;
+            if ((current->flags & LLAM_TASK_FLAG_NO_PREEMPT) == 0U &&
+                atomic_load_explicit(&current->opaque_blocking_depth,
+                                     memory_order_acquire) == 0U &&
+                task_state == LLAM_TASK_STATE_RUNNING) {
+                if (rt->preempt_mode != LLAM_PREEMPT_STRICT &&
+                    slice_ns <= UINT64_MAX / 2U) {
+                    slice_ns *= 2U;
+                }
+                candidate = last_safepoint > 0U && now_ns > last_safepoint &&
+                            now_ns - last_safepoint > slice_ns &&
+                            llam_watchdog_preempt_pressure_locked(shard);
+                if (!candidate && last_safepoint > 0U && now_ns > last_safepoint &&
+                    now_ns - last_safepoint > slice_ns) {
+                    shard->metrics.preempt_suppressed += 1U;
                 }
             }
         }
     }
+
+    if (!candidate) {
+        if (scan_ref) {
+            (void)llam_task_scan_ref_release(rt, current);
+        }
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        return;
+    }
+
+    /*
+     * Leave both locks for the optional deterministic test gate. The scan ref
+     * pins the task object while the worker binding is allowed to hand back;
+     * the target and active-G tuple is revalidated before pthread_kill().
+     */
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_BEFORE_WATCHDOG_SIGNAL);
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (!llam_legacy_lease_snapshot_watchdog_locked(shard,
+                                                     &validated_owner,
+                                                     &validated_incarnation,
+                                                     &validated_epoch,
+                                                     &validated_native_thread) ||
+        validated_owner != owner || validated_incarnation != owner_incarnation ||
+        validated_epoch != epoch ||
+        pthread_equal(validated_native_thread, native_thread) == 0 ||
+        llam_worker_load_active_g(validated_owner) != current ||
+        !llam_worker_binding_live(validated_owner, validated_incarnation)) {
+        (void)llam_task_scan_ref_release(rt, current);
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        return;
+    }
+
+    /* Recompute policy after the tuple validation; a late safepoint wins. */
+    {
+        uint64_t last_safepoint = atomic_load_explicit(&validated_owner->last_safepoint_ns,
+                                                       memory_order_acquire);
+        uint64_t slice_ns = rt->preempt_quantum_ns != 0U
+                                ? rt->preempt_quantum_ns
+                                : llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class,
+                                                                                         memory_order_acquire));
+        unsigned task_state = atomic_load_explicit(&current->state,
+                                                    memory_order_acquire);
+        bool overdue;
+
+        if (rt->preempt_mode != LLAM_PREEMPT_STRICT &&
+            slice_ns <= UINT64_MAX / 2U) {
+            slice_ns *= 2U;
+        }
+        overdue = last_safepoint > 0U && now_ns > last_safepoint &&
+                  now_ns - last_safepoint > slice_ns &&
+                  (current->flags & LLAM_TASK_FLAG_NO_PREEMPT) == 0U &&
+                  atomic_load_explicit(&current->opaque_blocking_depth,
+                                       memory_order_acquire) == 0U &&
+                  task_state == LLAM_TASK_STATE_RUNNING &&
+                  llam_watchdog_preempt_pressure_locked(shard);
+        if (overdue && atomic_exchange(&current->preempt_requested, 1U) == 0U) {
+            shard->metrics.watchdog_hits += 1U;
+            shard->metrics.long_no_safepoint += 1U;
+            shard->metrics.preempt_requests += 1U;
+            llam_trace_shard(shard,
+                             current,
+                             LLAM_TRACE_WATCHDOG,
+                             LLAM_TASK_STATE_RUNNING,
+                             LLAM_TASK_STATE_RUNNING,
+                             LLAM_WAIT_NONE);
+            /* Advisory only: no asynchronous context capture is attempted. */
+            if (pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL) == 0) {
+                shard->metrics.preempt_signals += 1U;
+            }
+        }
+    }
+    (void)llam_task_scan_ref_release(rt, current);
     pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
 }

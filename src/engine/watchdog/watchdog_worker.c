@@ -315,6 +315,7 @@ void *llam_ctrl_worker_main(void *arg) {
         }
 
         for (i = 0; i < rt->active_shards; ++i) {
+            /* The probe derives and validates each target from the live lease. */
             llam_watchdog_check_shard(&rt->shards[i], now_ns);
         }
 

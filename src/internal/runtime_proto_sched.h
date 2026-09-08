@@ -91,6 +91,30 @@ bool llam_legacy_lease_rollback_helper_locked(llam_shard_t *shard,
                                               uint64_t sequence);
 bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation);
 /*
+ * Snapshot a live lease target while `shard->opaque_lock` is held.  The
+ * snapshot is intentionally invalidated when the owner binding is absent or
+ * changes; callers must still validate the lease again before signalling.
+ */
+bool llam_legacy_lease_snapshot_watchdog_locked(
+    const llam_shard_t *shard,
+    llam_worker_t **owner_out,
+    uint64_t *incarnation_out,
+    uint64_t *epoch_out,
+    pthread_t *native_thread_out);
+/* Validate one versioned merge/steal pause acknowledgement under opaque_lock. */
+bool llam_shard_pause_ack_matches_locked(const llam_shard_t *shard,
+                                         uint64_t request_sequence,
+                                         uint64_t epoch,
+                                         uint64_t worker_incarnation);
+bool llam_shard_merge_pause_ack_matches_locked(const llam_shard_t *shard,
+                                               uint64_t request_sequence,
+                                               uint64_t epoch,
+                                               uint64_t worker_incarnation);
+bool llam_shard_steal_pause_ack_matches_locked(const llam_shard_t *shard,
+                                               uint64_t request_sequence,
+                                               uint64_t epoch,
+                                               uint64_t worker_incarnation);
+/*
  * Worker-local execution publication.  Active-G is the sole current-task
  * authority; callers publish only after task state, shard association, and
  * timestamps are complete.

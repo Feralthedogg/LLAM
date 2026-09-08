@@ -812,6 +812,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_store(&rt->online_shards_min, initial_online_shards);
     atomic_store(&rt->online_shards_max, initial_online_shards);
     atomic_store(&rt->steal_pause_active, 0U);
+    atomic_store(&rt->steal_pause_request_sequence, 0U);
     atomic_store(&rt->live_tasks, 0U);
     atomic_store(&rt->live_task_shards, 0U);
     atomic_store(&rt->active_io_waiters, 0U);
@@ -916,7 +917,15 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->shards[i].inflight_io_waiters, 0U);
         atomic_init(&rt->shards[i].merge_pause_requested, 0U);
         atomic_init(&rt->shards[i].merge_pause_ack, 0U);
+        atomic_init(&rt->shards[i].merge_pause_request_sequence, 0U);
+        atomic_init(&rt->shards[i].merge_pause_ack_sequence, 0U);
+        atomic_init(&rt->shards[i].merge_pause_ack_lease_epoch, 0U);
+        atomic_init(&rt->shards[i].merge_pause_ack_worker_incarnation, 0U);
         atomic_init(&rt->shards[i].steal_pause_ack, 0U);
+        atomic_init(&rt->shards[i].steal_pause_request_sequence, 0U);
+        atomic_init(&rt->shards[i].steal_pause_ack_sequence, 0U);
+        atomic_init(&rt->shards[i].steal_pause_ack_lease_epoch, 0U);
+        atomic_init(&rt->shards[i].steal_pause_ack_worker_incarnation, 0U);
         atomic_init(&rt->shards[i].live_tasks, 0U);
         llam_cldeque_init(&rt->shards[i].norm_cldeque);
         atomic_init(&rt->shards[i].inject_depth, 0U);

@@ -111,6 +111,12 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
         bool need_lockfree_quiesce;
         bool same_io_target;
         uint64_t pause_deadline_ns;
+        uint64_t merge_pause_sequence = 0U;
+        uint64_t merge_pause_epoch = 0U;
+        uint64_t merge_pause_incarnation = 0U;
+        uint64_t steal_pause_sequence = 0U;
+        uint64_t steal_pause_epoch = 0U;
+        uint64_t steal_pause_incarnation = 0U;
         const char *blocked_reason = NULL;
 
         if (atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
@@ -146,6 +152,46 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
             blocked_reason = "merge_pause_ack";
             goto release_pause;
         }
+        /* Capture the acknowledged tuple for the lock-protected final check. */
+        pthread_mutex_lock(&shard->opaque_lock);
+        merge_pause_sequence = atomic_load_explicit(
+            &shard->merge_pause_request_sequence,
+            memory_order_acquire);
+        merge_pause_epoch = atomic_load_explicit(
+            &shard->merge_pause_ack_lease_epoch,
+            memory_order_acquire);
+        merge_pause_incarnation = atomic_load_explicit(
+            &shard->merge_pause_ack_worker_incarnation,
+            memory_order_acquire);
+        if (!llam_shard_merge_pause_ack_matches_locked(shard,
+                                                       merge_pause_sequence,
+                                                       merge_pause_epoch,
+                                                       merge_pause_incarnation)) {
+            pthread_mutex_unlock(&shard->opaque_lock);
+            blocked_reason = "merge_pause_stale_ack";
+            goto release_pause;
+        }
+        if (steal_pause_set) {
+            steal_pause_sequence = atomic_load_explicit(
+                &shard->steal_pause_request_sequence,
+                memory_order_acquire);
+            steal_pause_epoch = atomic_load_explicit(
+                &shard->steal_pause_ack_lease_epoch,
+                memory_order_acquire);
+            steal_pause_incarnation = atomic_load_explicit(
+                &shard->steal_pause_ack_worker_incarnation,
+                memory_order_acquire);
+            if (!llam_shard_steal_pause_ack_matches_locked(
+                    shard,
+                    steal_pause_sequence,
+                    steal_pause_epoch,
+                    steal_pause_incarnation)) {
+                pthread_mutex_unlock(&shard->opaque_lock);
+                blocked_reason = "steal_pause_stale_ack";
+                goto release_pause;
+            }
+        }
+        pthread_mutex_unlock(&shard->opaque_lock);
         if (llam_shard_inflight_io_waiters(shard) > 0U) {
             llam_rehome_inflight_io_waiters(rt, shard, target, &inflight_migrated);
             if (llam_shard_inflight_io_waiters(shard) > 0U) {
@@ -202,7 +248,17 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
 
         if (atomic_load_explicit(&shard->online, memory_order_acquire) == 0U ||
             !llam_shard_accepts_new_work(target) ||
-            !llam_shard_can_start_merge_locked(shard)) {
+            !llam_shard_can_start_merge_locked(shard) ||
+            !llam_shard_merge_pause_ack_matches_locked(shard,
+                                                       merge_pause_sequence,
+                                                       merge_pause_epoch,
+                                                       merge_pause_incarnation) ||
+            (steal_pause_set &&
+             !llam_shard_steal_pause_ack_matches_locked(
+                 shard,
+                 steal_pause_sequence,
+                 steal_pause_epoch,
+                 steal_pause_incarnation))) {
             blocked_reason = "locked_start_state";
             pthread_mutex_unlock(&second->lock);
             pthread_mutex_unlock(&first->lock);

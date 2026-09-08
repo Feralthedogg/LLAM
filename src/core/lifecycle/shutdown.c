@@ -90,6 +90,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
     atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);
+    atomic_store_explicit(&rt->steal_pause_active, 0U, memory_order_release);
     llam_request_stop(rt);
 
     /*
@@ -357,6 +358,33 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                                       false,
                                       memory_order_release);
                 atomic_store_explicit(&rt->shards[i].opaque_helper_worker.binding_incarnation,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].merge_pause_requested,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].merge_pause_ack,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].merge_pause_ack_sequence,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].merge_pause_ack_lease_epoch,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].merge_pause_ack_worker_incarnation,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].steal_pause_ack,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].steal_pause_ack_sequence,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].steal_pause_ack_lease_epoch,
+                                      0U,
+                                      memory_order_release);
+                atomic_store_explicit(&rt->shards[i].steal_pause_ack_worker_incarnation,
                                       0U,
                                       memory_order_release);
                 llam_worker_clear_active_g(&rt->shards[i].opaque_helper_worker);

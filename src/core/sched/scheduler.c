@@ -134,6 +134,14 @@ static bool llam_legacy_lease_runtime_stopping(const llam_shard_t *shard) {
            atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire);
 }
 
+/* Merge pauses serialize queue mutation with new lease-transfer requests. */
+static bool llam_legacy_lease_merge_paused(const llam_shard_t *shard) {
+    return shard != NULL &&
+           !llam_legacy_lease_runtime_stopping(shard) &&
+           atomic_load_explicit(&shard->merge_pause_requested,
+                                memory_order_acquire) != 0U;
+}
+
 static bool llam_legacy_lease_matches_worker(const llam_legacy_lease_t *lease,
                                              const llam_worker_t *worker,
                                              uint64_t incarnation) {
@@ -154,6 +162,9 @@ bool llam_legacy_lease_request_helper_locked(llam_shard_t *shard,
         return false;
     }
     if (llam_legacy_lease_runtime_stopping(shard)) {
+        return false;
+    }
+    if (llam_legacy_lease_merge_paused(shard)) {
         return false;
     }
     lease = llam_shard_legacy_lease_locked(shard);
@@ -439,6 +450,9 @@ bool llam_legacy_lease_can_reacquire_locked(const llam_shard_t *shard,
     if (llam_legacy_lease_runtime_stopping(shard)) {
         return false;
     }
+    if (llam_legacy_lease_merge_paused(shard)) {
+        return false;
+    }
     lease = llam_shard_legacy_lease_const_locked(shard);
     return (lease->state == LLAM_LEASE_PRIMARY_OWNED ||
             lease->state == LLAM_LEASE_HELPER_OWNED) &&
@@ -526,6 +540,165 @@ bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation)
     return worker_incarnation == incarnation && binding_incarnation == incarnation;
 }
 
+/**
+ * @brief Snapshot the live native target of the current lease owner.
+ *
+ * @details
+ * The caller holds @c shard->opaque_lock.  This helper intentionally does not
+ * sample active-G: the watchdog takes @c shard->lock next, pins the task, and
+ * revalidates this tuple immediately before sending its cooperative signal.
+ * Keeping the native handle in the worker binding makes a recycled pthread
+ * handle ineligible until a new incarnation is published.
+ */
+bool llam_legacy_lease_snapshot_watchdog_locked(
+    const llam_shard_t *shard,
+    llam_worker_t **owner_out,
+    uint64_t *incarnation_out,
+    uint64_t *epoch_out,
+    pthread_t *native_thread_out) {
+    const llam_legacy_lease_t *lease;
+    llam_worker_t *owner;
+    uint64_t incarnation;
+    pthread_t empty_thread;
+
+    if (owner_out != NULL) {
+        *owner_out = NULL;
+    }
+    if (incarnation_out != NULL) {
+        *incarnation_out = 0U;
+    }
+    if (epoch_out != NULL) {
+        *epoch_out = 0U;
+    }
+    if (native_thread_out != NULL) {
+        memset(native_thread_out, 0, sizeof(*native_thread_out));
+    }
+    if (shard == NULL || owner_out == NULL || incarnation_out == NULL ||
+        epoch_out == NULL || native_thread_out == NULL || shard->runtime == NULL) {
+        return false;
+    }
+    if (atomic_load_explicit(&shard->runtime->shutdown_requested,
+                             memory_order_acquire)) {
+        return false;
+    }
+    memset(&empty_thread, 0, sizeof(empty_thread));
+
+    lease = &shard->legacy_lease;
+    owner = lease->owner;
+    incarnation = lease->owner_incarnation;
+    if (owner == NULL || incarnation == 0U || lease->state == LLAM_LEASE_STOPPING ||
+        (owner != &shard->primary_worker && owner != &shard->opaque_helper_worker) ||
+        owner->compat_shard != shard || owner->associated_processor != &shard->processor ||
+        (owner == &shard->primary_worker && owner->role != LLAM_WORKER_ROLE_PRIMARY) ||
+        (owner == &shard->opaque_helper_worker &&
+         owner->role != LLAM_WORKER_ROLE_OPAQUE_HELPER) ||
+        !llam_worker_binding_live(owner, incarnation) ||
+        memcmp(&owner->native_thread, &empty_thread, sizeof(empty_thread)) == 0) {
+        return false;
+    }
+
+    *owner_out = owner;
+    *incarnation_out = incarnation;
+    *epoch_out = lease->epoch;
+    *native_thread_out = owner->native_thread;
+    return true;
+}
+
+/**
+ * @brief Validate a versioned merge/steal pause acknowledgement.
+ *
+ * @details
+ * The caller holds @c shard->opaque_lock.  A boolean ACK alone is not a
+ * lifetime proof: the request, lease epoch, owner incarnation, and live worker
+ * binding all belong to the same publication episode.  Either pause channel is
+ * accepted here so merge code can use one final validation helper while the
+ * runtime-wide steal pause remains per-shard acknowledged.
+ */
+static bool llam_shard_pause_owner_matches_locked(const llam_shard_t *shard,
+                                                  uint64_t epoch_value,
+                                                  uint64_t worker_incarnation) {
+    const llam_legacy_lease_t *lease;
+    llam_worker_t *owner;
+
+    if (shard == NULL || shard->runtime == NULL || worker_incarnation == 0U) {
+        return false;
+    }
+    lease = &shard->legacy_lease;
+    owner = lease->owner;
+    return owner != NULL &&
+           (lease->state == LLAM_LEASE_PRIMARY_OWNED ||
+            lease->state == LLAM_LEASE_HELPER_OWNED) &&
+           (owner == &shard->primary_worker ||
+            owner == &shard->opaque_helper_worker) &&
+           owner->compat_shard == shard &&
+           ((owner == &shard->primary_worker &&
+             owner->role == LLAM_WORKER_ROLE_PRIMARY) ||
+            (owner == &shard->opaque_helper_worker &&
+             owner->role == LLAM_WORKER_ROLE_OPAQUE_HELPER)) &&
+           lease->owner_incarnation == worker_incarnation &&
+           lease->epoch == epoch_value &&
+           llam_worker_binding_live(owner, worker_incarnation);
+}
+
+bool llam_shard_merge_pause_ack_matches_locked(const llam_shard_t *shard,
+                                               uint64_t request_sequence,
+                                               uint64_t epoch_value,
+                                               uint64_t worker_incarnation) {
+    return shard != NULL && request_sequence != 0U &&
+           atomic_load_explicit(&shard->merge_pause_requested,
+                                memory_order_acquire) != 0U &&
+           atomic_load_explicit(&shard->merge_pause_ack,
+                                memory_order_acquire) != 0U &&
+           atomic_load_explicit(&shard->merge_pause_request_sequence,
+                                memory_order_acquire) == request_sequence &&
+           atomic_load_explicit(&shard->merge_pause_ack_sequence,
+                                memory_order_acquire) == request_sequence &&
+           atomic_load_explicit(&shard->merge_pause_ack_lease_epoch,
+                                       memory_order_acquire) == epoch_value &&
+           atomic_load_explicit(&shard->merge_pause_ack_worker_incarnation,
+                                memory_order_acquire) == worker_incarnation &&
+           llam_shard_pause_owner_matches_locked(shard,
+                                                 epoch_value,
+                                                 worker_incarnation);
+}
+
+bool llam_shard_steal_pause_ack_matches_locked(const llam_shard_t *shard,
+                                               uint64_t request_sequence,
+                                               uint64_t epoch_value,
+                                               uint64_t worker_incarnation) {
+    return shard != NULL && request_sequence != 0U &&
+           llam_runtime_steal_pause_active(shard->runtime) &&
+           atomic_load_explicit(&shard->runtime->steal_pause_request_sequence,
+                                memory_order_acquire) == request_sequence &&
+           atomic_load_explicit(&shard->steal_pause_ack,
+                                memory_order_acquire) != 0U &&
+           atomic_load_explicit(&shard->steal_pause_request_sequence,
+                                memory_order_acquire) == request_sequence &&
+           atomic_load_explicit(&shard->steal_pause_ack_sequence,
+                                memory_order_acquire) == request_sequence &&
+           atomic_load_explicit(&shard->steal_pause_ack_lease_epoch,
+                                       memory_order_acquire) == epoch_value &&
+           atomic_load_explicit(&shard->steal_pause_ack_worker_incarnation,
+                                memory_order_acquire) == worker_incarnation &&
+           llam_shard_pause_owner_matches_locked(shard,
+                                                 epoch_value,
+                                                 worker_incarnation);
+}
+
+bool llam_shard_pause_ack_matches_locked(const llam_shard_t *shard,
+                                         uint64_t request_sequence,
+                                         uint64_t epoch_value,
+                                         uint64_t worker_incarnation) {
+    return llam_shard_merge_pause_ack_matches_locked(shard,
+                                                     request_sequence,
+                                                     epoch_value,
+                                                     worker_incarnation) ||
+           llam_shard_steal_pause_ack_matches_locked(shard,
+                                                     request_sequence,
+                                                     epoch_value,
+                                                     worker_incarnation);
+}
+
 /** @brief Publish the task executing on a worker after its state is prepared. */
 void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task) {
     if (worker == NULL) {
@@ -607,6 +780,7 @@ void llam_scheduler_bind_identity(llam_shard_t *shard,
                           memory_order_release);
     atomic_store_explicit(&worker->native_thread_live, true, memory_order_release);
     if (worker == &shard->primary_worker &&
+        !llam_legacy_lease_merge_paused(shard) &&
         shard->legacy_lease.state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR &&
         shard->legacy_lease.owner == NULL &&
         shard->legacy_lease.return_worker == NULL) {
@@ -670,28 +844,6 @@ void llam_scheduler_clear_identity(void) {
     g_llam_tls_worker = NULL;
     g_llam_tls_shard = NULL;
 }
-
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-static bool llam_shard_primary_target_live_locked(const llam_shard_t *shard) {
-    return shard != NULL &&
-           llam_worker_binding_live(&shard->primary_worker,
-                                    shard->legacy_lease.owner_incarnation) &&
-           pthread_equal(shard->primary_thread,
-                         shard->primary_worker.native_thread) != 0;
-}
-
-static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thread) {
-    /*
-     * The join handle in shard->thread is written by pthread_create() and read by
-     * pthread_join().  The watchdog signal target is mutable while opaque-block
-     * helper compensation is active, so publish it under shard->lock instead of
-     * reusing the join handle and racing the run thread.
-     */
-    pthread_mutex_lock(&shard->lock);
-    shard->preempt_thread = thread;
-    pthread_mutex_unlock(&shard->lock);
-}
-#endif
 
 /**
  * @brief Mark a task as running on a shard and update dispatch metrics.
@@ -841,47 +993,167 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     g_llam_tls_task = NULL;
 }
 
+/* Publish a steal-pause ACK only for the worker that currently owns the lease. */
+static void llam_scheduler_publish_steal_pause_ack_locked(llam_shard_t *shard) {
+    llam_runtime_t *rt = shard != NULL ? shard->runtime : NULL;
+    llam_worker_t *worker = g_llam_tls_worker;
+    uint64_t request_sequence;
+    uint64_t incarnation;
+
+    if (shard == NULL || rt == NULL || !llam_runtime_steal_pause_active(rt)) {
+        if (shard != NULL) {
+            atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
+            atomic_store_explicit(&shard->steal_pause_ack_sequence,
+                                  0U,
+                                  memory_order_release);
+            atomic_store_explicit(&shard->steal_pause_ack_lease_epoch,
+                                  0U,
+                                  memory_order_release);
+            atomic_store_explicit(&shard->steal_pause_ack_worker_incarnation,
+                                  0U,
+                                  memory_order_release);
+        }
+        return;
+    }
+    request_sequence = atomic_load_explicit(&shard->steal_pause_request_sequence,
+                                            memory_order_acquire);
+    incarnation = worker != NULL
+                      ? atomic_load_explicit(&worker->binding_incarnation,
+                                             memory_order_acquire)
+                      : 0U;
+    if (request_sequence == 0U || worker == NULL ||
+        shard->legacy_lease.owner != worker ||
+        shard->legacy_lease.owner_incarnation != incarnation ||
+        !llam_worker_binding_live(worker, incarnation)) {
+        atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack_sequence,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack_lease_epoch,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->steal_pause_ack_worker_incarnation,
+                              0U,
+                              memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&shard->steal_pause_ack_lease_epoch,
+                          shard->legacy_lease.epoch,
+                          memory_order_release);
+    atomic_store_explicit(&shard->steal_pause_ack_worker_incarnation,
+                          incarnation,
+                          memory_order_release);
+    atomic_store_explicit(&shard->steal_pause_ack_sequence,
+                          request_sequence,
+                          memory_order_release);
+    atomic_store_explicit(&shard->steal_pause_ack, 1U, memory_order_release);
+}
+
+/* Publish a merge-pause ACK with the same lease/worker tuple as steal ACKs. */
+static void llam_scheduler_publish_merge_pause_ack_locked(llam_shard_t *shard) {
+    llam_worker_t *worker = g_llam_tls_worker;
+    uint64_t request_sequence;
+    uint64_t incarnation;
+
+    if (shard == NULL ||
+        atomic_load_explicit(&shard->merge_pause_requested,
+                             memory_order_acquire) == 0U) {
+        if (shard != NULL) {
+            atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
+            atomic_store_explicit(&shard->merge_pause_ack_sequence,
+                                  0U,
+                                  memory_order_release);
+            atomic_store_explicit(&shard->merge_pause_ack_lease_epoch,
+                                  0U,
+                                  memory_order_release);
+            atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation,
+                                  0U,
+                                  memory_order_release);
+        }
+        return;
+    }
+    request_sequence = atomic_load_explicit(&shard->merge_pause_request_sequence,
+                                            memory_order_acquire);
+    incarnation = worker != NULL
+                      ? atomic_load_explicit(&worker->binding_incarnation,
+                                             memory_order_acquire)
+                      : 0U;
+    if (request_sequence == 0U || worker == NULL ||
+        shard->legacy_lease.owner != worker ||
+        shard->legacy_lease.owner_incarnation != incarnation ||
+        !llam_worker_binding_live(worker, incarnation)) {
+        atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack_sequence,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack_lease_epoch,
+                              0U,
+                              memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation,
+                              0U,
+                              memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&shard->merge_pause_ack_lease_epoch,
+                          shard->legacy_lease.epoch,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation,
+                          incarnation,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack_sequence,
+                          request_sequence,
+                          memory_order_release);
+    atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
+}
+
 /**
  * @brief Cooperate with watchdog merge/steal pause requests.
  *
  * The watchdog can request a shard pause before merging or rehoming runtime
- * state.  The scheduler acknowledges the pause, idles until the request clears,
- * and then resumes normal work selection.
+ * state.  The scheduler acknowledges the pause with a request/lease/worker
+ * tuple, idles until the request clears, and then resumes normal work selection.
  *
  * @param shard Scheduler shard checking pause state.
  * @return true if the loop paused and should restart its iteration.
  */
 static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
+    bool merge_requested;
 
     if (rt == NULL) {
         return false;
     }
 
-    if (llam_runtime_steal_pause_active(rt)) {
-        atomic_store_explicit(&shard->steal_pause_ack, 1U, memory_order_release);
-    } else {
-        atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
+    pthread_mutex_lock(&shard->opaque_lock);
+    llam_scheduler_publish_steal_pause_ack_locked(shard);
+    merge_requested = atomic_load_explicit(&shard->merge_pause_requested,
+                                           memory_order_acquire) != 0U;
+    if (merge_requested) {
+        llam_scheduler_publish_merge_pause_ack_locked(shard);
     }
+    pthread_mutex_unlock(&shard->opaque_lock);
 
-    if (!llam_shard_merge_pause_requested(shard)) {
+    if (!merge_requested) {
         return false;
     }
 
-    atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
     while (llam_shard_merge_pause_requested(shard)) {
         if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
             llam_runtime_drained(rt)) {
             break;
         }
         llam_idle_wait(shard);
-        if (llam_runtime_steal_pause_active(rt)) {
-            atomic_store_explicit(&shard->steal_pause_ack, 1U, memory_order_release);
-        } else {
-            atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
+        pthread_mutex_lock(&shard->opaque_lock);
+        llam_scheduler_publish_steal_pause_ack_locked(shard);
+        if (llam_shard_merge_pause_requested(shard)) {
+            llam_scheduler_publish_merge_pause_ack_locked(shard);
         }
+        pthread_mutex_unlock(&shard->opaque_lock);
     }
-    atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
+    pthread_mutex_lock(&shard->opaque_lock);
+    llam_scheduler_publish_merge_pause_ack_locked(shard);
+    llam_scheduler_publish_steal_pause_ack_locked(shard);
+    pthread_mutex_unlock(&shard->opaque_lock);
     return true;
 }
 
@@ -945,9 +1217,6 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         g_llam_tls_processor != &shard->processor) {
         llam_scheduler_bind_identity(shard, &shard->primary_worker, &shard->scheduler_ctx);
     }
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-    llam_shard_publish_preempt_thread(shard, pthread_self());
-#endif
     shard->primary_thread = pthread_self();
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, false);
@@ -1095,13 +1364,6 @@ static void llam_opaque_helper_complete_handoff(llam_shard_t *shard,
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-    if (shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
-        shard->legacy_lease.owner == &shard->primary_worker &&
-        llam_shard_primary_target_live_locked(shard)) {
-        llam_shard_publish_preempt_thread(shard, shard->primary_thread);
-    }
-#endif
     llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
 }
@@ -1161,9 +1423,6 @@ void *llam_opaque_helper_main(void *arg) {
         }
         shard->opaque_helper_active = true;
         atomic_store_explicit(&shard->opaque_helper_active_hint, 1U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-        llam_shard_publish_preempt_thread(shard, pthread_self());
-#endif
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
 
@@ -1268,17 +1527,6 @@ out:
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-    if (shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
-        shard->legacy_lease.owner == &shard->primary_worker &&
-        llam_shard_primary_target_live_locked(shard)) {
-        llam_shard_publish_preempt_thread(shard, shard->primary_thread);
-    } else {
-        pthread_mutex_lock(&shard->lock);
-        memset(&shard->preempt_thread, 0, sizeof(shard->preempt_thread));
-        pthread_mutex_unlock(&shard->lock);
-    }
-#endif
     llam_opaque_wake_signal(shard);
     atomic_store_explicit(&shard->opaque_helper_exit_ack, true, memory_order_release);
     pthread_mutex_unlock(&shard->opaque_lock);

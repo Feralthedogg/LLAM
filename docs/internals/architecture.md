@@ -97,8 +97,9 @@ or safepoints.
 Phase 0 kept the shard as the scheduling authority. Phase 1A adds the single
 legacy execution lease and makes the validated lease owner's worker-local
 `active_g` plus run/safepoint/idle timestamps authoritative for execution
-publication. The shard still owns `preempt_thread`, queues, timers, P-like
-resources, and public metrics; worker cells do not copy those resources. The
+publication. The shard still owns queues, timers, P-like resources, and public
+metrics; worker cells do not copy those resources. Watchdog targets are derived
+from the validated lease owner's live worker binding. The
 primary worker and opaque helper worker each receive a distinct slice of the
 shard's combined alternate-signal-stack mapping; each owning thread installs,
 restores, and clears only its own slice.
@@ -111,7 +112,8 @@ the lock-protected lease record; it does not derive ownership from the legacy
 `current` or helper/redirect flags. The transfer-request, owner-clear, grant,
 and handback gates are called only after releasing scheduler locks, so focused
 tests can inspect each publication window without changing production
-behavior. The watchdog gate remains reserved for the later target migration.
+behavior. The watchdog gate covers the signal boundary after its task scan
+reference is held; a stale lease/binding skips the advisory signal.
 
 The Phase 1A execution-publication inventory is intentionally worker-local:
 `scheduler.c`, `blocking_api.c`, `yield_join_sleep.c`, `reinject.c`,
@@ -121,11 +123,12 @@ scale paths, and `debug.c` inspect the validated lease owner's active-G through
 `llam_shard_load_lease_current` while holding `opaque_lock` before
 `shard->lock`; no shard-level current field remains.
 
-* `shard->preempt_thread`: `scheduler.c`
-  (`llam_shard_publish_preempt_thread`) writes the mutable watchdog target at
-  primary entry and helper activation/idle/exit; `watchdog_probe.c`
-  (`llam_watchdog_check_shard`) reads it for `pthread_kill`; the field is
-  declared in `runtime_types.h` as the current independent target authority.
+* Watchdog target: `scheduler.c`
+  (`llam_legacy_lease_snapshot_watchdog_locked`) snapshots the validated lease
+  owner, incarnation, epoch, and native binding under `opaque_lock`;
+  `watchdog_probe.c` acquires a task scan reference, revalidates that tuple, and
+  sends only the existing advisory `pthread_kill` request. There is no mutable
+  shard-side target field.
 * `opaque_helper_active`: `timer.c` (`llam_ensure_opaque_helper_locked`) resets
   the projection under `opaque_lock` before helper creation; `scheduler.c`
   (`llam_opaque_helper_main`) writes helper readiness/activation and exit
@@ -142,7 +145,8 @@ scale paths, and `debug.c` inspect the validated lease owner's active-G through
   (`llam_runtime_has_opaque_blocking`) reads it under `opaque_lock`; and
   `debug.c` (`llam_dump_runtime_state`) reports both depth values.
 * Pause acknowledgements: `init.c` initializes `merge_pause_ack` and
-  `steal_pause_ack`; `watchdog_merge.c` (`llam_runtime_set_steal_pause`,
+  `steal_pause_ack` plus their request/ACK sequence, lease-epoch, and worker
+  incarnation fields; `watchdog_merge.c` (`llam_runtime_set_steal_pause`,
   `llam_runtime_wait_steal_pause_ack`, `llam_shard_request_merge_pause`,
   `llam_shard_release_merge_pause`, `llam_shard_wait_merge_pause_ack`, and
   `llam_merge_lockfree_normq_locked`) clears, waits on, or validates them;
