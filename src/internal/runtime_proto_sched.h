@@ -139,6 +139,24 @@ void llam_scheduler_bind_identity(llam_shard_t *shard,
 void llam_scheduler_unbind_identity(llam_shard_t *shard,
                                     llam_worker_t *worker);
 void llam_scheduler_clear_identity(void);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+/**
+ * @brief Replace the current primary binding from its owning scheduler thread.
+ *
+ * This test-only hook requests a short scheduler-context transaction; it never
+ * edits worker or lease matcher fields from the caller.  The scheduler clears
+ * the prior binding after a task switch, then performs the normal unbind/bind
+ * lifecycle so the worker receives a fresh incarnation.  The caller must hold
+ * no runtime locks and keep @p shard and its runtime alive with the shard-0
+ * scheduler running until this bounded call returns.
+ *
+ * @param shard     Running shard whose primary binding should be replaced.
+ * @param timeout_ns Maximum time to wait for the scheduler transaction.
+ * @return true when a fresh live primary incarnation was published.
+ */
+bool llam_scheduler_test_rebind_primary(llam_shard_t *shard,
+                                        uint64_t timeout_ns);
+#endif
 /*
  * Opaque-block redirect and helper compensation.
  */

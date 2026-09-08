@@ -400,6 +400,30 @@ typedef struct watchdog_handoff_race_driver {
     llam_runtime_t *runtime;
 } watchdog_handoff_race_driver_t;
 
+typedef struct watchdog_incarnation_race_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_task_t *task;
+    llam_task_t *task_identity;
+    atomic_uint task_started;
+    atomic_uint allow_rebind;
+    atomic_uint release_task;
+    atomic_uint task_done;
+    atomic_uint monitor_stop;
+    atomic_uint monitor_done;
+    atomic_uint run_done;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+    llam_lease_test_snapshot_t before_snapshot;
+    llam_lease_test_snapshot_t after_snapshot;
+} watchdog_incarnation_race_state_t;
+
+typedef struct watchdog_incarnation_race_driver {
+    watchdog_incarnation_race_state_t *state;
+    llam_runtime_t *runtime;
+} watchdog_incarnation_race_driver_t;
+
 static uint64_t legacy_deadline(void) {
     return llam_now_ns() + LEGACY_LEASE_TEST_TIMEOUT_NS;
 }
@@ -5268,6 +5292,7 @@ cleanup:
 
 static void watchdog_handoff_race_task(void *arg) {
     watchdog_handoff_race_state_t *state = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
     llam_worker_t *worker = g_llam_tls_worker;
 
     state->task_identity = g_llam_tls_task;
@@ -5291,6 +5316,33 @@ static void watchdog_handoff_race_task(void *arg) {
     if (state->enter_rc != 0) {
         test_fail(&state->failure,
                   "watchdog helper-handoff race failed to enter blocking");
+    }
+    /* Bind this fixture to the real helper path; redirect fallback must not
+     * make a successful enter look like a helper-backed handoff. */
+    {
+        uint64_t helper_incarnation;
+
+        if (shard == NULL) {
+            test_fail(&state->failure,
+                      "watchdog helper-handoff race lost its shard binding");
+        } else {
+            pthread_mutex_lock(&shard->opaque_lock);
+            helper_incarnation = atomic_load_explicit(
+                &shard->opaque_helper_worker.incarnation,
+                memory_order_acquire);
+            if (state->enter_rc != 0 ||
+                !shard->opaque_helper_thread_started ||
+                !shard->opaque_helper_active ||
+                shard->legacy_lease.state != LLAM_LEASE_HELPER_OWNED ||
+                shard->legacy_lease.owner != &shard->opaque_helper_worker ||
+                helper_incarnation == 0U ||
+                !llam_worker_binding_live(&shard->opaque_helper_worker,
+                                          helper_incarnation)) {
+                test_fail(&state->failure,
+                          "watchdog helper-handoff race did not select a live helper");
+            }
+            pthread_mutex_unlock(&shard->opaque_lock);
+        }
     }
     errno = 0;
     state->leave_rc = llam_leave_blocking();
@@ -5569,6 +5621,285 @@ cleanup:
                                          "watchdog helper-handoff race coverage failed");
 }
 
+static void watchdog_incarnation_race_task(void *arg) {
+    watchdog_incarnation_race_state_t *state = arg;
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    state->task_identity = g_llam_tls_task;
+    if (worker != NULL) {
+        atomic_store_explicit(&worker->last_safepoint_ns, 1U, memory_order_release);
+    }
+    atomic_store_explicit(&state->task_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_task, memory_order_acquire) == 0U) {
+        if (worker != NULL) {
+            /* Keep every real watchdog sample overdue while the task runs. */
+            atomic_store_explicit(&worker->last_safepoint_ns,
+                                  1U,
+                                  memory_order_release);
+        }
+        if (atomic_load_explicit(&state->allow_rebind, memory_order_acquire) != 0U) {
+            llam_yield();
+        } else {
+            llam_pause_cpu();
+        }
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *watchdog_incarnation_race_run(void *arg) {
+    watchdog_incarnation_race_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *watchdog_incarnation_race_monitor(void *arg) {
+    watchdog_incarnation_race_driver_t *driver = arg;
+    watchdog_incarnation_race_state_t *state = driver->state;
+    llam_shard_t *shard = &driver->runtime->shards[0];
+
+    while (atomic_load_explicit(&state->monitor_stop, memory_order_acquire) == 0U) {
+        llam_watchdog_check_shard(shard, llam_now_ns());
+        llam_pause_cpu();
+    }
+    atomic_store_explicit(&state->monitor_done, 1U, memory_order_release);
+    return NULL;
+}
+
+/*
+ * A watchdog sample must reject a primary worker whose binding was replaced
+ * while the sample's task scan reference is held.  The test-only scheduler
+ * hook performs the unbind/rebind on the owning scheduler thread, between
+ * task switches, so this is a real binding lifecycle rather than a matcher
+ * field mutation from the host thread.
+ */
+static int test_watchdog_signal_suppressed_after_worker_rebind(void) {
+    watchdog_incarnation_race_state_t state;
+    watchdog_incarnation_race_driver_t driver;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    pthread_t monitor_thread;
+    cleanup_release_state_t run_release;
+    cleanup_release_state_t monitor_release;
+    uint64_t before_incarnation = 0U;
+    uint64_t after_incarnation = 0U;
+    uint64_t preempt_requests_before = 0U;
+    uint64_t preempt_signals_before = 0U;
+    uint64_t deadline;
+    bool run_created = false;
+    bool monitor_created = false;
+    bool task_joined = false;
+    bool active_after_rebind = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&driver, 0, sizeof(driver));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_started, 0U);
+    atomic_init(&state.allow_rebind, 0U);
+    atomic_init(&state.release_task, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.monitor_stop, 0U);
+    atomic_init(&state.monitor_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_STRICT,
+                                    1U) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    state.task = llam_runtime_spawn_ex(runtime,
+                                       watchdog_incarnation_race_task,
+                                       &state,
+                                       NULL,
+                                       0U);
+    if (state.task == NULL) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure,
+                              "watchdog worker-rebind race coverage failed");
+    }
+    driver.state = &state;
+    driver.runtime = runtime;
+    run_release.runtime = runtime;
+    run_release.release_flag = &state.release_task;
+    monitor_release.runtime = runtime;
+    monitor_release.release_flag = &state.monitor_stop;
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, true);
+    if (pthread_create(&run_thread,
+                       NULL,
+                       watchdog_incarnation_race_run,
+                       &state) != 0) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race run thread setup failed");
+        goto cleanup;
+    }
+    run_created = true;
+    if (pthread_create(&monitor_thread,
+                       NULL,
+                       watchdog_incarnation_race_monitor,
+                       &driver) != 0) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race monitor setup failed");
+        goto cleanup;
+    }
+    monitor_created = true;
+    if (wait_flag(&state.task_started, legacy_deadline()) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL) != 0) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race did not reach its pre-signal gate");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (!llam_legacy_lease_snapshot_locked(shard, &state.before_snapshot) ||
+        state.before_snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
+        state.before_snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
+        state.before_snapshot.owner_incarnation == 0U ||
+        state.task_identity == NULL ||
+        llam_worker_load_active_g(&shard->primary_worker) != state.task_identity ||
+        atomic_load_explicit(&state.task_identity->scan_refs, memory_order_acquire) == 0U) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race did not pin a live scan target");
+    }
+    before_incarnation = state.before_snapshot.owner_incarnation;
+    preempt_requests_before = atomic_load_explicit(&shard->metrics.preempt_requests,
+                                                   memory_order_acquire);
+    preempt_signals_before = atomic_load_explicit(&shard->metrics.preempt_signals,
+                                                  memory_order_acquire);
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    /* The hook services on the owner thread, after active-G has been cleared. */
+    atomic_store_explicit(&state.allow_rebind, 1U, memory_order_release);
+    if (!llam_scheduler_test_rebind_primary(shard,
+                                            LEGACY_LEASE_TEST_TIMEOUT_NS)) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race could not replace the binding");
+        goto cleanup;
+    }
+    deadline = legacy_deadline();
+    while (llam_now_ns() < deadline) {
+        bool valid;
+
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        valid = llam_legacy_lease_snapshot_locked(shard, &state.after_snapshot) &&
+                state.after_snapshot.state == LLAM_LEASE_PRIMARY_OWNED &&
+                state.after_snapshot.owner_worker == (uintptr_t)&shard->primary_worker &&
+                state.after_snapshot.owner_incarnation > before_incarnation &&
+                llam_worker_binding_live(&shard->primary_worker,
+                                         state.after_snapshot.owner_incarnation) &&
+                llam_worker_load_active_g(&shard->primary_worker) == state.task_identity &&
+                atomic_load_explicit(&state.task_identity->scan_refs,
+                                     memory_order_acquire) != 0U;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (valid) {
+            active_after_rebind = true;
+            break;
+        }
+        llam_pause_cpu();
+    }
+    if (!active_after_rebind) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race did not republish active-G under its new incarnation");
+        goto cleanup;
+    }
+    after_incarnation = state.after_snapshot.owner_incarnation;
+    if (state.after_snapshot.epoch != state.before_snapshot.epoch ||
+        after_incarnation <= before_incarnation) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race did not isolate the binding incarnation");
+    }
+
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race task/run did not retire before gate release");
+        goto cleanup;
+    }
+    atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, false);
+    bounded_join_thread(monitor_thread,
+                        true,
+                        &state.monitor_done,
+                        release_flag_and_runtime,
+                        &monitor_release,
+                        "watchdog worker-rebind monitor join exceeded its deadline");
+    monitor_created = false;
+    if (atomic_load_explicit(&shard->metrics.preempt_requests, memory_order_acquire) !=
+            preempt_requests_before ||
+        atomic_load_explicit(&shard->metrics.preempt_signals, memory_order_acquire) !=
+            preempt_signals_before ||
+        atomic_load_explicit(&state.task_identity->preempt_requested,
+                             memory_order_acquire) != 0U) {
+        test_fail(&state.failure,
+                  "watchdog issued a stale preempt request after worker rebinding");
+    }
+    bounded_join_task(state.task,
+                      &state.task_done,
+                      "watchdog worker-rebind task join exceeded its deadline");
+    task_joined = true;
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "watchdog worker-rebind run join exceeded its deadline");
+    run_created = false;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "watchdog worker-rebind race changed run or fatal semantics");
+    }
+    rc = failure_result(&state.failure,
+                        "watchdog worker-rebind race coverage failed");
+
+cleanup:
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL, false);
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    atomic_store_explicit(&state.monitor_stop, 1U, memory_order_release);
+    if (monitor_created) {
+        bounded_join_thread(monitor_thread,
+                            true,
+                            &state.monitor_done,
+                            release_flag_and_runtime,
+                            &monitor_release,
+                            "watchdog worker-rebind monitor cleanup exceeded its deadline");
+        monitor_created = false;
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &run_release,
+                            "watchdog worker-rebind run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task != NULL) {
+        bounded_join_task(state.task,
+                          &state.task_done,
+                          "watchdog worker-rebind task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure,
+                                         "watchdog worker-rebind race coverage failed");
+}
+
 static int test_runtime_steal_pause_generation_reuse(void) {
     dynamic_pause_state_t state;
     dynamic_pause_driver_t driver;
@@ -5726,6 +6057,7 @@ int main(void) {
         test_redirect_rejected_during_merge_pause,
         test_watchdog_signal_suppressed_after_task_reclaim,
         test_watchdog_signal_suppressed_after_helper_handoff,
+        test_watchdog_signal_suppressed_after_worker_rebind,
         test_runtime_steal_pause_generation_reuse,
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,

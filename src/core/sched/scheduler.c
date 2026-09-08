@@ -934,6 +934,150 @@ void llam_scheduler_clear_identity(void) {
     g_llam_tls_shard = NULL;
 }
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+/*
+ * Test-only primary-binding replacement request.  The request is claimed and
+ * serviced by the owning scheduler context; the host thread never edits a
+ * worker's native binding or lease matcher fields.  Zero is idle, one is a
+ * pending request, two is a scheduler-owned transaction, three is complete,
+ * and four cancels a request that the scheduler has not yet claimed.
+ */
+static _Atomic(llam_shard_t *) g_llam_scheduler_test_rebind_shard;
+static atomic_uint g_llam_scheduler_test_rebind_state;
+static atomic_bool g_llam_scheduler_test_rebind_result;
+
+static void llam_scheduler_test_service_rebind_primary(llam_shard_t *shard) {
+    llam_shard_t *requested_shard;
+    unsigned expected_state = 1U;
+    bool valid = false;
+    uint64_t old_incarnation;
+    uint64_t new_incarnation;
+
+    requested_shard = atomic_load_explicit(&g_llam_scheduler_test_rebind_shard,
+                                            memory_order_acquire);
+    if (requested_shard != shard ||
+        !atomic_compare_exchange_strong_explicit(&g_llam_scheduler_test_rebind_state,
+                                                 &expected_state,
+                                                 2U,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire)) {
+        return;
+    }
+
+    /* This function runs at the scheduler boundary, after active-G cleanup. */
+    if (shard != NULL && shard->runtime != NULL &&
+        g_llam_tls_shard == shard &&
+        g_llam_tls_worker == &shard->primary_worker &&
+        g_llam_tls_processor == &shard->processor &&
+        g_llam_tls_task == NULL &&
+        atomic_load_explicit(&shard->runtime->shutdown_requested,
+                             memory_order_acquire) == 0U &&
+        atomic_load_explicit(&shard->runtime->stop_requested,
+                             memory_order_acquire) == 0U) {
+        old_incarnation = atomic_load_explicit(&shard->primary_worker.incarnation,
+                                               memory_order_acquire);
+        /* Signal-stack ownership is part of the same worker incarnation. */
+        if (shard->primary_worker.sigaltstack_installed) {
+            llam_uninstall_thread_signal_stack(&shard->primary_worker);
+            llam_scheduler_unbind_identity(shard, &shard->primary_worker);
+            llam_scheduler_bind_identity(shard,
+                                         &shard->primary_worker,
+                                         &shard->scheduler_ctx);
+            if (llam_scheduler_try_install_signal_stack(&shard->primary_worker) != 0) {
+                llam_record_fatal(shard->runtime, errno);
+            }
+        }
+        new_incarnation = atomic_load_explicit(&shard->primary_worker.incarnation,
+                                               memory_order_acquire);
+        valid = shard->primary_worker.sigaltstack_installed &&
+                new_incarnation != 0U && new_incarnation > old_incarnation &&
+                llam_worker_binding_live(&shard->primary_worker, new_incarnation);
+        if (valid) {
+            pthread_mutex_lock(&shard->opaque_lock);
+            valid = shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
+                    shard->legacy_lease.owner == &shard->primary_worker &&
+                    shard->legacy_lease.owner_incarnation == new_incarnation;
+            pthread_mutex_unlock(&shard->opaque_lock);
+        }
+    }
+
+    atomic_store_explicit(&g_llam_scheduler_test_rebind_result,
+                          valid,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_scheduler_test_rebind_shard,
+                          NULL,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_scheduler_test_rebind_state,
+                          3U,
+                          memory_order_release);
+}
+
+bool llam_scheduler_test_rebind_primary(llam_shard_t *shard,
+                                        uint64_t timeout_ns) {
+    llam_runtime_t *runtime;
+    uint64_t start_ns;
+    uint64_t deadline_ns;
+    unsigned expected_state = 0U;
+
+    if (shard == NULL || (runtime = shard->runtime) == NULL ||
+        !atomic_load_explicit(&runtime->initialized, memory_order_acquire) ||
+        !atomic_load_explicit(&runtime->exec_started, memory_order_acquire)) {
+        return false;
+    }
+    if (!atomic_compare_exchange_strong_explicit(&g_llam_scheduler_test_rebind_state,
+                                                 &expected_state,
+                                                 1U,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire)) {
+        return false;
+    }
+    atomic_store_explicit(&g_llam_scheduler_test_rebind_result,
+                          false,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_scheduler_test_rebind_shard,
+                          shard,
+                          memory_order_release);
+    llam_kick_shard(shard);
+
+    start_ns = llam_now_ns();
+    deadline_ns = timeout_ns > UINT64_MAX - start_ns
+                      ? UINT64_MAX
+                      : start_ns + timeout_ns;
+    for (;;) {
+        unsigned state = atomic_load_explicit(&g_llam_scheduler_test_rebind_state,
+                                              memory_order_acquire);
+
+        if (state == 3U) {
+            bool result = atomic_load_explicit(&g_llam_scheduler_test_rebind_result,
+                                               memory_order_acquire);
+
+            atomic_store_explicit(&g_llam_scheduler_test_rebind_state,
+                                  0U,
+                                  memory_order_release);
+            return result;
+        }
+        if (llam_now_ns() >= deadline_ns) {
+            expected_state = 1U;
+            if (atomic_compare_exchange_strong_explicit(&g_llam_scheduler_test_rebind_state,
+                                                        &expected_state,
+                                                        4U,
+                                                        memory_order_acq_rel,
+                                                        memory_order_acquire)) {
+                atomic_store_explicit(&g_llam_scheduler_test_rebind_shard,
+                                      NULL,
+                                      memory_order_release);
+                atomic_store_explicit(&g_llam_scheduler_test_rebind_state,
+                                      0U,
+                                      memory_order_release);
+                return false;
+            }
+            /* A claimed transaction has no wait points; let it publish done. */
+        }
+        llam_pause_cpu();
+    }
+}
+#endif
+
 /**
  * @brief Mark a task as running on a shard and update dispatch metrics.
  *
@@ -1345,6 +1489,9 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         uint64_t started_ns;
         bool pressure;
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        llam_scheduler_test_service_rebind_primary(shard);
+#endif
         if (llam_runtime_drained(rt)) {
             break;
         }
