@@ -877,7 +877,7 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 shared: $(SHLIB_LINK)
 
 audit-shared-exports: shared
-	python3 scripts/audit_shared_exports.py ./$(SHLIB_REAL)
+	$(PYTHON) scripts/audit_shared_exports.py ./$(SHLIB_REAL)
 
 audit-production-test-hooks: static shared
 	@if command -v nm >/dev/null 2>&1; then \

@@ -181,6 +181,21 @@ held through the lease snapshot and revalidation, reverse `opaque_lock`/
 claimant.  It scans only the native C runtime sources; Rust, Python, JVM,
 .NET, and Go language wrappers remain explicitly excluded until a later phase.
 
+The checker is intentionally a conservative lexical audit rather than a full C
+parser or preprocessor/data-flow engine.  It accepts only the direct source
+shapes used by the Phase 1A implementation: validated snapshot outputs and
+lock-held revalidation, direct atomic ACK expressions/publication helpers,
+direct lease-coordinator origins and transition values, and direct scheduler
+lock calls with simple shard aliases.  Reassignments, compound or
+macro-hidden writes, unknown ACK/lock wrappers, unsupported pointer aliases,
+and proof markers in unreachable branches fail closed.  Trylock/timedlock
+success is treated as held for ordering purposes.  Macro expansion and
+compiler-specific control-flow semantics are not inferred; any future source
+shape that needs those semantics must add an explicit audited helper or a
+dedicated checker update.  This limitation does not expand Phase 1A's scope:
+P-resource migration remains Phase 1B, foreign detach/reattach remains Phase 2,
+and language wrappers remain excluded.
+
 ## Wake Handoff Fusion
 
 The normal wake path publishes a waiter as runnable, enqueues it on the owner
