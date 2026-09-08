@@ -905,6 +905,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->shards[i].opaque_helper_worker.last_run_started_ns, 0U);
         atomic_init(&rt->shards[i].opaque_helper_worker.last_safepoint_ns, 0U);
         atomic_init(&rt->shards[i].opaque_helper_worker.last_idle_wake_ns, 0U);
+        atomic_init(&rt->shards[i].opaque_helper_exit_ack, false);
         llam_legacy_lease_init(&rt->shards[i]);
         rt->shards[i].cpu_id = rt->allowed_cpus[i];
         rt->shards[i].node_index = node_index;

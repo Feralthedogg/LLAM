@@ -1198,6 +1198,7 @@ struct llam_shard {
     void *signal_stack_mapping;
     size_t signal_stack_mapping_size;
     bool opaque_helper_thread_started;
+    atomic_bool opaque_helper_exit_ack;
     bool opaque_helper_ready;
     bool opaque_helper_active;
     bool stack_cache_lock_initialized;

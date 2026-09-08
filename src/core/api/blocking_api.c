@@ -518,6 +518,9 @@ int llam_enter_blocking(void) {
             pthread_mutex_lock(&shard->lock);
             task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
             task->wait_reason = LLAM_WAIT_BLOCKING;
+            if (worker != NULL && worker->compat_shard == shard) {
+                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+            }
             atomic_store_explicit(&shard->current, NULL, memory_order_release);
             llam_trace_shard(shard,
                            task,
@@ -592,6 +595,9 @@ int llam_enter_blocking(void) {
             pthread_mutex_lock(&shard->lock);
             task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
             task->wait_reason = LLAM_WAIT_BLOCKING;
+            if (worker != NULL && worker->compat_shard == shard) {
+                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+            }
             atomic_store_explicit(&shard->current, NULL, memory_order_release);
             task->opaque_uses_redirect = true;
             if (shard->opaque_redirect_depth == 1U) {
@@ -661,6 +667,8 @@ int llam_leave_blocking(void) {
                                                                  memory_order_acquire)
                                           : 0U;
         uint64_t return_sequence = 0U;
+        bool return_requested = false;
+        bool leave_validation_failed = false;
         uint64_t now_ns = timing ? llam_now_ns() : 0U;
         uint64_t block_ns = 0U;
         uint64_t leave_wait_ns = 0U;
@@ -684,13 +692,22 @@ int llam_leave_blocking(void) {
             if (timing && !from_opaque_helper) {
                 leave_wait_start_ns = llam_now_ns();
             }
+            /* Retire the primary's worker-local task before requesting ACK. */
+            if (worker != NULL && worker->compat_shard == shard) {
+                pthread_mutex_lock(&shard->lock);
+                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+                pthread_mutex_unlock(&shard->lock);
+            }
             pthread_mutex_lock(&shard->opaque_lock);
-            (void)llam_legacy_lease_request_return_locked(shard,
-                                                          &shard->primary_worker,
-                                                          atomic_load_explicit(
-                                                              &shard->primary_worker.incarnation,
-                                                              memory_order_acquire),
-                                                          &return_sequence);
+            uint64_t primary_incarnation = atomic_load_explicit(
+                &shard->primary_worker.incarnation,
+                memory_order_acquire);
+
+            return_requested = llam_legacy_lease_request_return_locked(
+                shard,
+                &shard->primary_worker,
+                primary_incarnation,
+                &return_sequence);
             if (shard->opaque_compensation_depth > 0U) {
                 shard->opaque_compensation_depth -= 1U;
             }
@@ -727,12 +744,20 @@ int llam_leave_blocking(void) {
                 }
             }
             pthread_mutex_lock(&shard->opaque_lock);
-            handback_acknowledged = llam_legacy_lease_can_reacquire_locked(
-                shard,
-                &shard->primary_worker,
-                atomic_load_explicit(&shard->primary_worker.incarnation,
-                                     memory_order_acquire));
+            handback_acknowledged = return_requested &&
+                                    llam_legacy_lease_handback_acknowledged_locked(
+                                        shard,
+                                        &shard->primary_worker,
+                                        primary_incarnation,
+                                        return_sequence);
+            if (!handback_acknowledged &&
+                llam_legacy_lease_teardown_return_locked(shard,
+                                                         &shard->primary_worker,
+                                                         primary_incarnation)) {
+                handback_acknowledged = true;
+            }
             pthread_mutex_unlock(&shard->opaque_lock);
+            leave_validation_failed = !handback_acknowledged;
             if (timing && leave_wait_start_ns != 0U) {
                 uint64_t wait_end_ns = llam_now_ns();
 
@@ -743,25 +768,55 @@ int llam_leave_blocking(void) {
         }
 
         if (used_redirect) {
+            /* A helper redirect must clear its local active task before ACK. */
+            if (worker != NULL && worker->compat_shard == shard) {
+                pthread_mutex_lock(&shard->lock);
+                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+                pthread_mutex_unlock(&shard->lock);
+            }
             pthread_mutex_lock(&shard->opaque_lock);
             if (shard->opaque_redirect_depth > 0U) {
                 shard->opaque_redirect_depth -= 1U;
                 deactivate_redirect = shard->opaque_redirect_depth == 0U;
             }
-            if (deactivate_redirect &&
-                llam_legacy_lease_request_return_locked(shard,
-                                                       worker,
-                                                       worker_incarnation,
-                                                       &return_sequence)) {
-                handback_acknowledged =
-                    llam_legacy_lease_complete_handback_locked(shard,
-                                                               worker,
-                                                               return_sequence);
+            if (deactivate_redirect) {
+                return_requested = llam_legacy_lease_request_return_locked(
+                    shard,
+                    worker,
+                    worker_incarnation,
+                    &return_sequence);
+                if (return_requested) {
+                    handback_acknowledged =
+                        llam_legacy_lease_complete_handback_locked(shard,
+                                                                   worker,
+                                                                   return_sequence);
+                }
+                if (!handback_acknowledged &&
+                    llam_legacy_lease_teardown_return_locked(shard,
+                                                             worker,
+                                                             worker_incarnation)) {
+                    handback_acknowledged = true;
+                }
+                leave_validation_failed = !handback_acknowledged;
             }
             pthread_mutex_unlock(&shard->opaque_lock);
             if (handback_acknowledged) {
                 llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_HANDBACK_ACK);
             }
+        }
+
+        if (leave_validation_failed) {
+            /* Keep the task on the return boundary; do not publish a false owner. */
+            if (used_redirect && deactivate_redirect) {
+                pthread_mutex_lock(&shard->opaque_lock);
+                shard->opaque_redirect_depth += 1U;
+                pthread_mutex_unlock(&shard->opaque_lock);
+            }
+            task->opaque_blocking_depth = 1U;
+            task->opaque_uses_helper = used_helper;
+            task->opaque_uses_redirect = used_redirect;
+            errno = ECANCELED;
+            return -1;
         }
 
         pthread_mutex_lock(&shard->lock);
@@ -781,6 +836,9 @@ int llam_leave_blocking(void) {
         }
         if (deactivate_redirect) {
             llam_deactivate_opaque_redirect_locked(shard);
+        }
+        if (worker != NULL && worker->compat_shard == shard) {
+            atomic_store_explicit(&worker->active_g, task, memory_order_release);
         }
         atomic_store_explicit(&shard->current, task, memory_order_release);
         task->state = LLAM_TASK_STATE_RUNNING;

@@ -33,11 +33,12 @@
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_int g_llam_test_helper_create_error;
-static atomic_bool g_llam_lease_test_gate[6];
+static atomic_bool g_llam_lease_test_gate[7];
+static atomic_bool g_llam_lease_test_gate_reached[7];
 
 static bool llam_lease_test_point_valid(llam_lease_test_point_t point) {
     return point >= LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST &&
-           point <= LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL;
+           point <= LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK;
 }
 
 void llam_worker_test_force_helper_create_error(int error_code) {
@@ -50,9 +51,22 @@ void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled) {
     if (!llam_lease_test_point_valid(point)) {
         return;
     }
+    if (enabled) {
+        atomic_store_explicit(&g_llam_lease_test_gate_reached[(unsigned)point],
+                              false,
+                              memory_order_release);
+    }
     atomic_store_explicit(&g_llam_lease_test_gate[(unsigned)point],
                           enabled,
                           memory_order_release);
+}
+
+bool llam_lease_test_gate_reached(llam_lease_test_point_t point) {
+    if (!llam_lease_test_point_valid(point)) {
+        return false;
+    }
+    return atomic_load_explicit(&g_llam_lease_test_gate_reached[(unsigned)point],
+                                memory_order_acquire);
 }
 
 bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns) {
@@ -68,6 +82,9 @@ bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_n
                       : start_ns + timeout_ns;
     while (atomic_load_explicit(&g_llam_lease_test_gate[(unsigned)point],
                                 memory_order_acquire)) {
+        atomic_store_explicit(&g_llam_lease_test_gate_reached[(unsigned)point],
+                              true,
+                              memory_order_release);
         if (llam_now_ns() >= deadline_ns) {
             return false;
         }
@@ -836,6 +853,7 @@ int llam_ensure_opaque_helper_locked(llam_shard_t *shard) {
     }
 
     shard->opaque_helper_stop = false;
+    atomic_store_explicit(&shard->opaque_helper_exit_ack, false, memory_order_release);
     shard->opaque_helper_failed = false;
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;

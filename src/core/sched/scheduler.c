@@ -94,6 +94,22 @@ void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard) {
         return;
     }
     lease = llam_shard_legacy_lease_locked(shard);
+    /*
+     * Teardown blocks new grants, but it cannot erase the current boundary.
+     * A helper may still need to clear its active task and acknowledge the
+     * recorded return sequence before the shutdown caller joins it.
+     */
+    lease->state = LLAM_LEASE_STOPPING;
+    llam_legacy_lease_assert_consistent_locked(shard);
+}
+
+void llam_legacy_lease_finalize_stop_locked(llam_shard_t *shard) {
+    llam_legacy_lease_t *lease;
+
+    if (shard == NULL) {
+        return;
+    }
+    lease = llam_shard_legacy_lease_locked(shard);
     lease->owner = NULL;
     lease->owner_incarnation = 0U;
     lease->epoch = 0U;
@@ -113,9 +129,9 @@ static uint64_t llam_legacy_lease_next_counter(uint64_t value) {
 static bool llam_legacy_lease_runtime_stopping(const llam_shard_t *shard) {
     const llam_runtime_t *runtime = shard != NULL ? shard->runtime : NULL;
 
+    /* Cooperative stop drains recorded handbacks; teardown is the hard gate. */
     return runtime != NULL &&
-           (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
-            atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire));
+           atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire);
 }
 
 static bool llam_legacy_lease_matches_worker(const llam_legacy_lease_t *lease,
@@ -212,9 +228,26 @@ bool llam_legacy_lease_request_return_locked(llam_shard_t *shard,
     }
     lease = llam_shard_legacy_lease_locked(shard);
     if (lease->state == LLAM_LEASE_STOPPING) {
-        return false;
-    }
-    if (lease->state == LLAM_LEASE_HELPER_OWNED) {
+        /*
+         * Shutdown may have marked the coordinator while a helper return was
+         * in flight. Re-observing the same token is idempotent; a live helper
+         * can also reserve the primary return boundary exactly once.
+         */
+        if (lease->return_worker == claimant &&
+            lease->return_incarnation == claimant_incarnation &&
+            lease->transfer_sequence != 0U) {
+            *sequence_out = lease->transfer_sequence;
+            return true;
+        }
+        if (lease->owner != &shard->opaque_helper_worker ||
+            claimant != &shard->primary_worker ||
+            lease->owner_incarnation == 0U ||
+            !llam_legacy_lease_matches_worker(lease,
+                                              &shard->opaque_helper_worker,
+                                              lease->owner_incarnation)) {
+            return false;
+        }
+    } else if (lease->state == LLAM_LEASE_HELPER_OWNED) {
         if (lease->owner != &shard->opaque_helper_worker ||
             claimant != &shard->primary_worker ||
             lease->owner_incarnation == 0U ||
@@ -235,7 +268,9 @@ bool llam_legacy_lease_request_return_locked(llam_shard_t *shard,
     lease->transfer_sequence = sequence;
     lease->return_worker = claimant;
     lease->return_incarnation = claimant_incarnation;
-    lease->state = LLAM_LEASE_TRANSFER_TO_PRIMARY;
+    if (lease->state != LLAM_LEASE_STOPPING) {
+        lease->state = LLAM_LEASE_TRANSFER_TO_PRIMARY;
+    }
     *sequence_out = sequence;
     llam_legacy_lease_assert_consistent_locked(shard);
     return true;
@@ -251,11 +286,9 @@ bool llam_legacy_lease_complete_handback_locked(llam_shard_t *shard,
     if (shard == NULL || worker == NULL || sequence == 0U) {
         return false;
     }
-    if (llam_legacy_lease_runtime_stopping(shard)) {
-        return false;
-    }
     lease = llam_shard_legacy_lease_locked(shard);
-    if (lease->state != LLAM_LEASE_TRANSFER_TO_PRIMARY ||
+    if ((lease->state != LLAM_LEASE_TRANSFER_TO_PRIMARY &&
+         lease->state != LLAM_LEASE_STOPPING) ||
         lease->transfer_sequence != sequence ||
         (lease->owner != NULL && lease->owner != worker) ||
         (lease->owner != NULL && lease->owner_incarnation == 0U) ||
@@ -268,6 +301,9 @@ bool llam_legacy_lease_complete_handback_locked(llam_shard_t *shard,
     }
     claimant = lease->return_worker;
     claimant_incarnation = lease->return_incarnation;
+    if (lease->owner == NULL && claimant != worker) {
+        return false;
+    }
     if (!llam_worker_binding_live(claimant, claimant_incarnation)) {
         return false;
     }
@@ -278,11 +314,63 @@ bool llam_legacy_lease_complete_handback_locked(llam_shard_t *shard,
     lease->epoch = llam_legacy_lease_next_counter(lease->epoch);
     lease->return_worker = NULL;
     lease->return_incarnation = 0U;
-    lease->state = claimant == &shard->primary_worker
-                       ? LLAM_LEASE_PRIMARY_OWNED
-                       : LLAM_LEASE_HELPER_OWNED;
+    lease->state = lease->state == LLAM_LEASE_STOPPING
+                       ? LLAM_LEASE_STOPPING
+                       : (claimant == &shard->primary_worker
+                              ? LLAM_LEASE_PRIMARY_OWNED
+                              : LLAM_LEASE_HELPER_OWNED);
     llam_legacy_lease_assert_consistent_locked(shard);
     return true;
+}
+
+bool llam_legacy_lease_handback_acknowledged_locked(const llam_shard_t *shard,
+                                                    const llam_worker_t *worker,
+                                                    uint64_t incarnation,
+                                                    uint64_t sequence) {
+    const llam_legacy_lease_t *lease;
+
+    if (shard == NULL || worker == NULL || incarnation == 0U || sequence == 0U) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_const_locked(shard);
+    return lease->handback_ack_sequence == sequence &&
+           lease->return_worker == NULL &&
+           lease->owner == worker &&
+           lease->owner_incarnation == incarnation &&
+           (lease->state == LLAM_LEASE_PRIMARY_OWNED ||
+            lease->state == LLAM_LEASE_HELPER_OWNED ||
+            lease->state == LLAM_LEASE_STOPPING) &&
+           llam_worker_binding_live(worker, incarnation);
+}
+
+bool llam_legacy_lease_teardown_return_locked(const llam_shard_t *shard,
+                                              const llam_worker_t *worker,
+                                              uint64_t incarnation) {
+    const llam_runtime_t *runtime;
+    const llam_legacy_lease_t *lease;
+
+    if (shard == NULL || worker == NULL || incarnation == 0U) {
+        return false;
+    }
+    runtime = shard->runtime;
+    if (runtime == NULL ||
+        !atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire)) {
+        return false;
+    }
+    lease = llam_shard_legacy_lease_const_locked(shard);
+    if (lease->state != LLAM_LEASE_STOPPING || lease->owner != worker ||
+        lease->owner_incarnation != incarnation || lease->return_worker != NULL ||
+        (lease->transfer_sequence != 0U &&
+         lease->handback_ack_sequence != lease->transfer_sequence)) {
+        return false;
+    }
+    /* A teardown return is valid only after a helper has acknowledged quiescence. */
+    return !shard->opaque_helper_thread_started ||
+           (atomic_load_explicit(&shard->opaque_helper_exit_ack,
+                                 memory_order_acquire) &&
+            !shard->opaque_helper_active &&
+            atomic_load_explicit(&shard->opaque_helper_worker.active_g,
+                                 memory_order_acquire) == NULL);
 }
 
 bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
@@ -458,15 +546,15 @@ void llam_scheduler_unbind_identity(llam_shard_t *shard, llam_worker_t *worker) 
     atomic_store_explicit(&worker->last_run_started_ns, 0U, memory_order_release);
     atomic_store_explicit(&worker->last_safepoint_ns, 0U, memory_order_release);
     atomic_store_explicit(&worker->last_idle_wake_ns, 0U, memory_order_release);
-    if (shard->legacy_lease.owner == worker &&
+    if (shard->legacy_lease.state != LLAM_LEASE_STOPPING &&
+        shard->legacy_lease.owner == worker &&
         shard->legacy_lease.owner_incarnation == incarnation) {
         shard->legacy_lease.owner = NULL;
         shard->legacy_lease.owner_incarnation = 0U;
-        if (shard->legacy_lease.state != LLAM_LEASE_STOPPING) {
-            shard->legacy_lease.state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
-        }
+        shard->legacy_lease.state = LLAM_LEASE_REDIRECTED_NO_EXECUTOR;
     }
-    if (shard->legacy_lease.return_worker == worker &&
+    if (shard->legacy_lease.state != LLAM_LEASE_STOPPING &&
+        shard->legacy_lease.return_worker == worker &&
         shard->legacy_lease.return_incarnation == incarnation) {
         shard->legacy_lease.return_worker = NULL;
         shard->legacy_lease.return_incarnation = 0U;
@@ -484,6 +572,14 @@ void llam_scheduler_clear_identity(void) {
 }
 
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
+static bool llam_shard_primary_target_live_locked(const llam_shard_t *shard) {
+    return shard != NULL &&
+           llam_worker_binding_live(&shard->primary_worker,
+                                    shard->legacy_lease.owner_incarnation) &&
+           pthread_equal(shard->primary_thread,
+                         shard->primary_worker.native_thread) != 0;
+}
+
 static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thread) {
     /*
      * The join handle in shard->thread is written by pthread_create() and read by
@@ -511,6 +607,7 @@ static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thr
  *         0.
  */
 static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
+    llam_worker_t *worker = g_llam_tls_worker;
     bool run_timing = shard->runtime->run_timing_enabled != 0U;
     bool wake_timing = task->last_runnable_ns > 0U;
     bool preempt_timing = shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO;
@@ -530,6 +627,9 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     atomic_store(&shard->last_run_started_ns, run_timing ? now_ns : 0U);
     if (now_ns != 0U) {
         atomic_store_explicit(&shard->last_safepoint_ns, now_ns, memory_order_relaxed);
+    }
+    if (worker != NULL && worker->compat_shard == shard) {
+        atomic_store_explicit(&worker->active_g, task, memory_order_release);
     }
     llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNING, LLAM_WAIT_NONE);
     return run_timing ? now_ns : 0U;
@@ -584,10 +684,14 @@ static bool llam_runtime_drained(llam_runtime_t *rt) {
  */
 static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     llam_task_t *task = g_llam_tls_task;
+    llam_worker_t *worker = g_llam_tls_worker;
     bool watchdog_may_sample_current =
         shard != NULL && shard->runtime != NULL && shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO;
 
     if (run_ns == 0U && !watchdog_may_sample_current) {
+        if (worker != NULL && worker->compat_shard == shard) {
+            atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+        }
         atomic_store_explicit(&shard->current, NULL, memory_order_release);
         g_llam_tls_task = NULL;
         return;
@@ -599,6 +703,9 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
      * completed task cannot be recycled while the watchdog is still inspecting it.
      */
     pthread_mutex_lock(&shard->lock);
+    if (worker != NULL && worker->compat_shard == shard) {
+        atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+    }
     atomic_store_explicit(&shard->current, NULL, memory_order_release);
     if (task != NULL && run_ns != 0U) {
         uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
@@ -838,22 +945,28 @@ static void llam_opaque_helper_complete_handoff(llam_shard_t *shard,
     uint64_t sequence = 0U;
     bool acknowledged = false;
 
+    (void)stopping;
     pthread_mutex_lock(&shard->opaque_lock);
-    if (!stopping && shard->legacy_lease.state == LLAM_LEASE_HELPER_OWNED) {
+    if (shard->legacy_lease.state == LLAM_LEASE_HELPER_OWNED &&
+        shard->legacy_lease.owner == &shard->opaque_helper_worker) {
         (void)llam_legacy_lease_request_return_locked(
             shard,
             &shard->primary_worker,
             atomic_load_explicit(&shard->primary_worker.incarnation,
                                  memory_order_acquire),
             &sequence);
-    } else if (!stopping &&
-               shard->legacy_lease.state == LLAM_LEASE_TRANSFER_TO_PRIMARY) {
+    } else if ((shard->legacy_lease.state == LLAM_LEASE_TRANSFER_TO_PRIMARY ||
+                shard->legacy_lease.state == LLAM_LEASE_STOPPING) &&
+               shard->legacy_lease.return_worker != NULL) {
         sequence = shard->legacy_lease.transfer_sequence;
     }
     pthread_mutex_unlock(&shard->opaque_lock);
 
     /* No helper task may remain published when the handback is acknowledged. */
     pthread_mutex_lock(&shard->lock);
+    atomic_store_explicit(&shard->opaque_helper_worker.active_g,
+                          NULL,
+                          memory_order_release);
     atomic_store_explicit(&shard->current, NULL, memory_order_release);
     pthread_mutex_unlock(&shard->lock);
 
@@ -874,9 +987,8 @@ static void llam_opaque_helper_complete_handoff(llam_shard_t *shard,
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
     if (shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
-        llam_worker_binding_live(
-            &shard->primary_worker,
-            shard->legacy_lease.owner_incarnation)) {
+        shard->legacy_lease.owner == &shard->primary_worker &&
+        llam_shard_primary_target_live_locked(shard)) {
         llam_shard_publish_preempt_thread(shard, shard->primary_thread);
     }
 #endif
@@ -907,6 +1019,7 @@ void *llam_opaque_helper_main(void *arg) {
         shard->opaque_helper_failed = true;
         shard->opaque_helper_ready = false;
         atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+        atomic_store_explicit(&shard->opaque_helper_exit_ack, true, memory_order_release);
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
         llam_record_fatal(rt, errno);
@@ -1048,8 +1161,7 @@ out:
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
     if (shard->legacy_lease.state == LLAM_LEASE_PRIMARY_OWNED &&
         shard->legacy_lease.owner == &shard->primary_worker &&
-        llam_worker_binding_live(&shard->primary_worker,
-                                 shard->legacy_lease.owner_incarnation)) {
+        llam_shard_primary_target_live_locked(shard)) {
         llam_shard_publish_preempt_thread(shard, shard->primary_thread);
     } else {
         pthread_mutex_lock(&shard->lock);
@@ -1058,7 +1170,9 @@ out:
     }
 #endif
     llam_opaque_wake_signal(shard);
+    atomic_store_explicit(&shard->opaque_helper_exit_ack, true, memory_order_release);
     pthread_mutex_unlock(&shard->opaque_lock);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_HELPER_EXIT_ACK);
     return NULL;
 }
 

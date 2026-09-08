@@ -31,6 +31,8 @@
 
 #include <assert.h>
 
+static void llam_runtime_wait_opaque_helper_exit_ack(llam_shard_t *shard);
+
 /**
  * @brief Close an accepted socket descriptor retained by a backend watch.
  *
@@ -149,6 +151,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 llam_opaque_wake_signal(&rt->shards[i]);
                 pthread_mutex_unlock(&rt->shards[i].opaque_lock);
                 llam_kick_shard(&rt->shards[i]);
+                llam_runtime_wait_opaque_helper_exit_ack(&rt->shards[i]);
                 pthread_join(rt->shards[i].opaque_helper_thread, NULL);
                 rt->shards[i].opaque_helper_thread_started = false;
             }
@@ -330,7 +333,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
             if (rt->shards[i].opaque_lock_initialized) {
                 pthread_mutex_lock(&rt->shards[i].opaque_lock);
                 /* Worker joins above make these stores race-free. */
-                llam_legacy_lease_begin_stop_locked(&rt->shards[i]);
+                llam_legacy_lease_finalize_stop_locked(&rt->shards[i]);
                 atomic_store_explicit(&rt->shards[i].primary_worker.native_thread_live,
                                       false,
                                       memory_order_release);
@@ -513,6 +516,24 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 static void llam_runtime_request_destroy_stop(llam_runtime_t *rt) {
     atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);
     llam_request_stop(rt);
+}
+
+/**
+ * @brief Wait for one opaque helper to publish its exit boundary.
+ *
+ * The helper publishes this acknowledgement only after active-G/current
+ * cleanup and lease handback have completed.  The wait intentionally performs
+ * no scheduler-lock acquisition so a helper can finish the boundary while
+ * teardown is waiting.
+ */
+static void llam_runtime_wait_opaque_helper_exit_ack(llam_shard_t *shard) {
+    if (shard == NULL) {
+        return;
+    }
+    while (!atomic_load_explicit(&shard->opaque_helper_exit_ack,
+                                 memory_order_acquire)) {
+        llam_pause_cpu();
+    }
 }
 
 /**

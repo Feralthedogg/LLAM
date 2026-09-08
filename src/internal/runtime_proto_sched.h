@@ -37,6 +37,7 @@
 #define LLAM_LEASE_TEST_POINT_AFTER_GRANT 3U
 #define LLAM_LEASE_TEST_POINT_AFTER_HANDBACK_ACK 4U
 #define LLAM_LEASE_TEST_POINT_BEFORE_WATCHDOG_SIGNAL 5U
+#define LLAM_LEASE_TEST_POINT_AFTER_HELPER_EXIT_ACK 6U
 
 /*
  * Legacy execution-lease and worker binding lifecycle. Every `_locked`
@@ -45,6 +46,7 @@
  */
 void llam_legacy_lease_init(llam_shard_t *shard);
 void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard);
+void llam_legacy_lease_finalize_stop_locked(llam_shard_t *shard);
 bool llam_legacy_lease_request_helper_locked(llam_shard_t *shard,
                                              llam_worker_t *primary,
                                              uint64_t *sequence_out);
@@ -64,6 +66,13 @@ bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
 bool llam_legacy_lease_can_reacquire_locked(const llam_shard_t *shard,
                                             const llam_worker_t *worker,
                                             uint64_t incarnation);
+bool llam_legacy_lease_handback_acknowledged_locked(const llam_shard_t *shard,
+                                                    const llam_worker_t *worker,
+                                                    uint64_t incarnation,
+                                                    uint64_t sequence);
+bool llam_legacy_lease_teardown_return_locked(const llam_shard_t *shard,
+                                              const llam_worker_t *worker,
+                                              uint64_t incarnation);
 bool llam_legacy_lease_clear_owner_locked(llam_shard_t *shard,
                                           llam_worker_t *worker,
                                           uint64_t incarnation,
@@ -96,7 +105,8 @@ typedef enum llam_lease_test_point {
     LLAM_LEASE_TEST_AFTER_OWNER_CLEAR = 2,
     LLAM_LEASE_TEST_AFTER_GRANT = 3,
     LLAM_LEASE_TEST_AFTER_HANDBACK_ACK = 4,
-    LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL = 5
+    LLAM_LEASE_TEST_BEFORE_WATCHDOG_SIGNAL = 5,
+    LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK = 6
 } llam_lease_test_point_t;
 
 /**
@@ -119,6 +129,8 @@ typedef struct llam_lease_test_snapshot {
 void llam_lease_test_set_gate(llam_lease_test_point_t point, bool enabled);
 /* Gate storage is test-hook-only; production transition calls compile to no-ops. */
 bool llam_lease_test_wait_gate(llam_lease_test_point_t point, uint64_t timeout_ns);
+/* True after production reached the corresponding gated transition. */
+bool llam_lease_test_gate_reached(llam_lease_test_point_t point);
 bool llam_legacy_lease_snapshot_locked(const llam_shard_t *shard,
                                        llam_lease_test_snapshot_t *out);
 int llam_lease_test_snapshot(llam_runtime_t *runtime,
