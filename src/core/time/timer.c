@@ -33,12 +33,12 @@
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_int g_llam_test_helper_create_error;
-static atomic_bool g_llam_lease_test_gate[7];
-static atomic_bool g_llam_lease_test_gate_reached[7];
+static atomic_bool g_llam_lease_test_gate[LLAM_LEASE_TEST_POINT_COUNT];
+static atomic_bool g_llam_lease_test_gate_reached[LLAM_LEASE_TEST_POINT_COUNT];
 
 static bool llam_lease_test_point_valid(llam_lease_test_point_t point) {
     return point >= LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST &&
-           point <= LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK;
+           point <= LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR;
 }
 
 void llam_worker_test_force_helper_create_error(int error_code) {

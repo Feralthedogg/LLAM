@@ -35,6 +35,29 @@
 #endif
 
 /**
+ * @brief Stamp and publish a directly reinjected task on the current worker.
+ *
+ * Direct reinjection skips the scheduler dispatch prologue, so it refreshes
+ * the worker safepoint before exposing the replacement active-G to watchdogs.
+ * The release publication is sequenced after that timestamp store.
+ */
+static void llam_publish_reinject_active_g(llam_shard_t *target,
+                                           llam_task_t *task) {
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    if (!llam_worker_matches_shard(worker, target)) {
+        return;
+    }
+    if (target != NULL && target->runtime != NULL &&
+        target->runtime->preempt_mode >= LLAM_PREEMPT_AUTO) {
+        atomic_store_explicit(&worker->last_safepoint_ns,
+                              llam_now_ns(),
+                              memory_order_release);
+    }
+    llam_worker_publish_active_g(worker, task);
+}
+
+/**
  * @brief Mark a task runnable and enqueue it on a shard while the shard lock is held.
  *
  * @param shard        Target shard.
@@ -237,7 +260,8 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             if (now_ns != 0U) {
                 llam_runtime_record_autotune_wake_latency(target, 0U);
             }
-            llam_worker_publish_active_g(g_llam_tls_worker, task);
+            llam_publish_reinject_active_g(target, task);
+            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_REINJECT);
             g_llam_tls_task = task;
             target->metrics.wakes += 1U;
             if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
@@ -292,7 +316,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             llam_runtime_record_autotune_wake_latency(target, 0U);
         }
     }
-    llam_worker_publish_active_g(g_llam_tls_worker, task);
+    llam_publish_reinject_active_g(target, task);
     g_llam_tls_task = task;
     target->metrics.wakes += 1U;
     if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
@@ -305,6 +329,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);
 
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_REINJECT);
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, task);
     return true;

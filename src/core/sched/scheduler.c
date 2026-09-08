@@ -731,8 +731,11 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
                                   now_ns,
                                   memory_order_release);
         }
+        /* Pause with state, shard association, and timestamps complete. */
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_TASK_STATE_PREPARE);
         /* Publish only after task state, shard association, and timestamps. */
         llam_worker_publish_active_g(worker, task);
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_ACTIVE_G_PUBLISH);
     }
     llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNING, LLAM_WAIT_NONE);
     return run_timing ? now_ns : 0U;

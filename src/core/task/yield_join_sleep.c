@@ -300,6 +300,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     llam_publish_direct_active_g(shard, next, 0U);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
     g_llam_tls_task = next;
 
     shard->metrics.yields += 1U;
@@ -500,6 +501,7 @@ bool llam_yield_to_local_runnable(void) {
     }
     pthread_mutex_unlock(&shard->lock);
 
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
@@ -566,6 +568,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     llam_publish_direct_active_g(shard, next, 0U);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
     g_llam_tls_task = next;
 
     shard->metrics.ctx_switches += 1U;
@@ -620,6 +623,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     }
     pthread_mutex_unlock(&shard->lock);
 
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
@@ -1069,6 +1073,13 @@ sleep_wait_ready:
     }
 
     if (llam_wait_node_should_park(node)) {
+        /* Retire execution publication before the task enters the sleep wait. */
+        pthread_mutex_lock(&shard->lock);
+        if (g_llam_tls_worker != NULL && g_llam_tls_worker->compat_shard == shard) {
+            llam_worker_clear_active_g(g_llam_tls_worker);
+        }
+        pthread_mutex_unlock(&shard->lock);
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_SLEEP_PARK);
         llam_task_sample_live_stack(task);
         llam_thread_errno_store(caller_errno);
         llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);

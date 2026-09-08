@@ -38,6 +38,8 @@
 #include <string.h>
 
 #if LLAM_PLATFORM_POSIX
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 #endif
 
@@ -245,6 +247,7 @@ typedef struct dynamic_pause_state {
 typedef struct watchdog_overlap_state {
     test_failure_state_t failure;
     llam_task_t *task;
+    llam_task_t *task_identity;
     atomic_uint task_started;
     atomic_uint task_done;
     atomic_uint monitor_stop;
@@ -254,6 +257,60 @@ typedef struct watchdog_overlap_state {
     int run_errno;
     int fatal_errno;
 } watchdog_overlap_state_t;
+
+typedef struct publication_gate_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_task_t *task_handle;
+    llam_task_t *task;
+    int read_fd;
+    int write_fd;
+    int wait_rc;
+    int wait_errno;
+    atomic_uint task_entered;
+    atomic_uint task_done;
+    atomic_uint run_done;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} publication_gate_state_t;
+
+typedef struct direct_yield_gate_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_task_t *first;
+    llam_task_t *second;
+    llam_task_t *first_identity;
+    llam_task_t *second_identity;
+    atomic_uint first_entered;
+    atomic_uint second_entered;
+    atomic_uint first_done;
+    atomic_uint second_done;
+    atomic_uint run_done;
+    atomic_uint_fast64_t before_safepoint_ns;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} direct_yield_gate_state_t;
+
+typedef struct direct_reinject_gate_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    llam_channel_t *channel;
+    llam_task_t *setup;
+    llam_task_t *receiver;
+    llam_task_t *sender;
+    llam_task_t *receiver_identity;
+    atomic_uint setup_done;
+    atomic_uint receiver_waiting;
+    atomic_uint receiver_done;
+    atomic_uint sender_done;
+    atomic_uint run_done;
+    atomic_uint_fast64_t before_safepoint_ns;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} direct_reinject_gate_state_t;
 
 static uint64_t legacy_deadline(void) {
     return llam_now_ns() + LEGACY_LEASE_TEST_TIMEOUT_NS;
@@ -482,10 +539,106 @@ static void reset_lease_test_gates(void) {
     unsigned point;
 
     for (point = (unsigned)LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST;
-         point <= (unsigned)LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK;
+         point <= (unsigned)LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR;
          ++point) {
         llam_lease_test_set_gate((llam_lease_test_point_t)point, false);
     }
+}
+
+static void *publication_gate_run(void *arg) {
+    publication_gate_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int inspect_parked_publication(llam_runtime_t *runtime,
+                                      llam_task_t *task,
+                                      llam_wait_reason_t reason,
+                                      test_failure_state_t *failure,
+                                      const char *message) {
+    llam_shard_t *shard;
+    llam_worker_t *worker;
+    llam_task_t *active;
+    llam_task_t *current;
+    bool valid;
+
+    if (runtime == NULL || runtime->shards == NULL || task == NULL) {
+        test_fail(failure, message);
+        return -1;
+    }
+    shard = &runtime->shards[0];
+    worker = &shard->primary_worker;
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    active = llam_worker_load_active_g(worker);
+    current = llam_shard_load_lease_current(shard);
+    valid = atomic_load_explicit(&task->state, memory_order_acquire) == LLAM_TASK_STATE_PARKED &&
+            (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) == reason &&
+            active == NULL && current == NULL;
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (!valid) {
+        test_fail(failure, message);
+        return -1;
+    }
+    return 0;
+}
+
+static void publication_order_task(void *arg) {
+    publication_gate_state_t *state = arg;
+
+    state->task = g_llam_tls_task;
+    atomic_store_explicit(&state->task_entered, 1U, memory_order_release);
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+#if LLAM_PLATFORM_POSIX
+static void io_park_publication_task(void *arg) {
+    publication_gate_state_t *state = arg;
+    short revents = 0;
+
+    state->task = g_llam_tls_task;
+    atomic_store_explicit(&state->task_entered, 1U, memory_order_release);
+    errno = 0;
+    state->wait_rc = llam_poll_fd((llam_fd_t)state->read_fd, POLLIN, -1, &revents);
+    state->wait_errno = errno;
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+#else
+static void io_park_publication_task(void *arg) {
+    (void)arg;
+}
+#endif
+
+static void sleep_park_publication_task(void *arg) {
+    publication_gate_state_t *state = arg;
+
+    state->task = g_llam_tls_task;
+    atomic_store_explicit(&state->task_entered, 1U, memory_order_release);
+    errno = 0;
+    state->wait_rc = llam_sleep_ns(250ULL * 1000ULL * 1000ULL);
+    state->wait_errno = errno;
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static int create_release_fast_runtime(llam_runtime_t **out) {
+    llam_runtime_opts_t opts;
+
+    if (out == NULL || llam_runtime_opts_init(&opts, sizeof(opts)) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.preempt_mode = LLAM_PREEMPT_STRICT;
+    opts.preempt_quantum_ns = 1U;
+    opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    return llam_runtime_create(&opts, sizeof(opts), out);
 }
 
 static int wait_for_lease_state(llam_runtime_t *runtime,
@@ -2762,6 +2915,7 @@ static void watchdog_overlap_task(void *arg) {
     watchdog_overlap_state_t *state = arg;
     unsigned i;
 
+    state->task_identity = g_llam_tls_task;
     atomic_store_explicit(&state->task_started, 1U, memory_order_release);
     for (i = 0U; i < 4096U; ++i) {
         llam_task_safepoint();
@@ -2841,6 +2995,7 @@ static int test_watchdog_task_exit_overlap(void) {
     run_release.release_flag = NULL;
     monitor_release.runtime = runtime;
     monitor_release.release_flag = &state.monitor_stop;
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR, true);
     if (pthread_create(&run_thread, NULL, watchdog_overlap_run_typed, &driver) != 0) {
         test_fail(&state.failure, "watchdog overlap run thread setup failed");
         goto cleanup;
@@ -2852,7 +3007,32 @@ static int test_watchdog_task_exit_overlap(void) {
     }
     monitor_created = true;
     if (wait_flag(&state.task_started, legacy_deadline()) != 0 ||
-        wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR) != 0) {
+        test_fail(&state.failure, "watchdog/task-exit overlap did not complete");
+        goto cleanup;
+    }
+    {
+        llam_runtime_stats_t stats;
+        llam_shard_t *shard = &runtime->shards[0];
+        int stats_rc;
+
+        stats_rc = llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats));
+        (void)llam_watchdog_snapshot_shard_load(shard);
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        if (stats_rc != 0 || state.task_identity == NULL ||
+            atomic_load_explicit(&state.task_identity->state, memory_order_acquire) != LLAM_TASK_STATE_DEAD ||
+            atomic_load_explicit(&state.task_identity->completed, memory_order_acquire) == 0U ||
+            llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+            llam_shard_load_lease_current(shard) != NULL) {
+            test_fail(&state.failure,
+                      "watchdog/debug sampling observed a stale active-G during task exit");
+        }
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR, false);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
         wait_flag(&state.run_done, legacy_deadline()) != 0) {
         test_fail(&state.failure, "watchdog/task-exit overlap did not complete");
         goto cleanup;
@@ -3238,6 +3418,692 @@ static void active_g_publication_task(void *arg) {
     atomic_store_explicit(&observation->entered, 1U, memory_order_release);
 }
 
+static int test_active_g_publication_ordering_gates(void) {
+    publication_gate_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    cleanup_release_state_t release;
+    bool run_created = false;
+    bool task_joined = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_entered, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    state.task_handle = llam_runtime_spawn_ex(runtime,
+                                               publication_order_task,
+                                               &state,
+                                               NULL,
+                                               0U);
+    if (state.task_handle == NULL) {
+        test_fail(&state.failure, "publication ordering task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "active-G publication ordering failed");
+    }
+
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_STATE_PREPARE, true);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_ACTIVE_G_PUBLISH, true);
+    release.runtime = runtime;
+    release.release_flag = NULL;
+    if (pthread_create(&run_thread, NULL, publication_gate_run, &state) != 0) {
+        test_fail(&state.failure, "publication ordering run thread setup failed");
+        reset_lease_test_gates();
+        bounded_join_task(state.task_handle,
+                          &state.task_done,
+                          "publication ordering task cleanup exceeded its deadline");
+        task_joined = true;
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "active-G publication ordering failed");
+    }
+    run_created = true;
+
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_TASK_STATE_PREPARE) != 0) {
+        test_fail(&state.failure,
+                  "task state preparation gate was not reached before active-G publication");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+        llam_shard_load_lease_current(shard) != NULL ||
+        atomic_load_explicit(&shard->primary_worker.last_safepoint_ns,
+                             memory_order_acquire) == 0U) {
+        test_fail(&state.failure,
+                  "task state preparation exposed active-G before publication ordering completed");
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_STATE_PREPARE, false);
+
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_ACTIVE_G_PUBLISH) != 0) {
+        test_fail(&state.failure,
+                  "active-G publication gate was not reached after task preparation");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    {
+        llam_task_t *active = llam_worker_load_active_g(&shard->primary_worker);
+
+        if (active == NULL ||
+            active != llam_shard_load_lease_current(shard) ||
+            atomic_load_explicit(&active->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+            atomic_load_explicit(&active->last_shard, memory_order_acquire) != shard->id ||
+            atomic_load_explicit(&shard->primary_worker.last_safepoint_ns,
+                                 memory_order_acquire) == 0U) {
+            test_fail(&state.failure,
+                      "active-G publication was not visible after state/timestamp preparation");
+        }
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_ACTIVE_G_PUBLISH, false);
+
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "publication ordering task/run did not complete");
+        goto cleanup;
+    }
+    bounded_join_task(state.task_handle,
+                      &state.task_done,
+                      "publication ordering task join exceeded its deadline");
+    task_joined = true;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure, "publication ordering changed run or fatal semantics");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "publication ordering run join exceeded its deadline");
+    run_created = false;
+    rc = failure_result(&state.failure, "active-G publication ordering failed");
+
+cleanup:
+    reset_lease_test_gates();
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_runtime_stop,
+                            runtime,
+                            "publication ordering run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task_handle != NULL) {
+        bounded_join_task(state.task_handle,
+                          &state.task_done,
+                          "publication ordering task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure, "active-G publication ordering failed");
+}
+
+static int run_park_publication_case(bool io_wait, int read_fd, int write_fd) {
+    publication_gate_state_t state;
+    llam_runtime_t *runtime = NULL;
+    pthread_t run_thread;
+    cleanup_release_state_t release;
+    llam_lease_test_point_t point = io_wait
+                                        ? LLAM_LEASE_TEST_AFTER_IO_PARK
+                                        : LLAM_LEASE_TEST_AFTER_SLEEP_PARK;
+    bool run_created = false;
+    bool task_joined = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    state.read_fd = read_fd;
+    state.write_fd = write_fd;
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.task_entered, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    state.task_handle = llam_runtime_spawn_ex(runtime,
+                                               io_wait ? io_park_publication_task
+                                                       : sleep_park_publication_task,
+                                               &state,
+                                               NULL,
+                                               0U);
+    if (state.task_handle == NULL) {
+        test_fail(&state.failure, "park publication task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "park publication cleanup failed");
+    }
+    llam_lease_test_set_gate(point, true);
+    release.runtime = runtime;
+    release.release_flag = NULL;
+    if (pthread_create(&run_thread, NULL, publication_gate_run, &state) != 0) {
+        test_fail(&state.failure, "park publication run thread setup failed");
+        reset_lease_test_gates();
+        bounded_join_task(state.task_handle,
+                          &state.task_done,
+                          "park publication task cleanup exceeded its deadline");
+        task_joined = true;
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "park publication cleanup failed");
+    }
+    run_created = true;
+    if (wait_flag(&state.task_entered, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "park publication task did not enter");
+        goto cleanup;
+    }
+    if (wait_for_lease_gate_reached(point) != 0) {
+        test_fail(&state.failure, io_wait
+                                      ? "I/O park gate was not reached after active-G cleanup"
+                                      : "sleep park gate was not reached after active-G cleanup");
+        goto cleanup;
+    }
+    if (inspect_parked_publication(runtime,
+                                   state.task,
+                                   io_wait ? LLAM_WAIT_IO : LLAM_WAIT_SLEEP,
+                                   &state.failure,
+                                   io_wait
+                                       ? "I/O park retained active-G while the task was PARKED"
+                                       : "sleep park retained active-G while the task was PARKED") != 0) {
+        goto cleanup;
+    }
+    llam_lease_test_set_gate(point, false);
+    if (io_wait && write_fd >= 0 && write(write_fd, "x", 1U) != 1) {
+        test_fail(&state.failure, "I/O park wake write failed");
+    }
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, io_wait
+                                      ? "I/O park task/run did not complete"
+                                      : "sleep park task/run did not complete");
+        goto cleanup;
+    }
+    bounded_join_task(state.task_handle,
+                      &state.task_done,
+                      "park publication task join exceeded its deadline");
+    task_joined = true;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure, io_wait
+                                      ? "I/O park changed run or fatal semantics"
+                                      : "sleep park changed run or fatal semantics");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "park publication run join exceeded its deadline");
+    run_created = false;
+    rc = failure_result(&state.failure, "park publication cleanup failed");
+
+cleanup:
+    reset_lease_test_gates();
+    if (run_created && io_wait && write_fd >= 0) {
+        (void)write(write_fd, "x", 1U);
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_runtime_stop,
+                            runtime,
+                            "park publication run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!task_joined && state.task_handle != NULL) {
+        bounded_join_task(state.task_handle,
+                          &state.task_done,
+                          "park publication task cleanup exceeded its deadline");
+        task_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure, "park publication cleanup failed");
+}
+
+static int test_park_publication_cleanup(void) {
+#if LLAM_PLATFORM_POSIX
+    int fds[2];
+    int flags;
+    int io_rc;
+    int sleep_rc;
+
+    if (pipe(fds) != 0) {
+        return 1;
+    }
+    flags = fcntl(fds[0], F_GETFL, 0);
+    if (flags < 0 || fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) != 0) {
+        (void)close(fds[0]);
+        (void)close(fds[1]);
+        return 1;
+    }
+    io_rc = run_park_publication_case(true, fds[0], fds[1]);
+    (void)close(fds[0]);
+    (void)close(fds[1]);
+    sleep_rc = run_park_publication_case(false, -1, -1);
+    return io_rc != 0 || sleep_rc != 0 ? 1 : 0;
+#else
+    return 77;
+#endif
+}
+
+static void direct_yield_gate_second_task(void *arg) {
+    direct_yield_gate_state_t *state = arg;
+
+    state->second_identity = g_llam_tls_task;
+    atomic_store_explicit(&state->second_entered, 1U, memory_order_release);
+    atomic_store_explicit(&state->second_done, 1U, memory_order_release);
+}
+
+static void direct_yield_gate_first_task(void *arg) {
+    direct_yield_gate_state_t *state = arg;
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    state->first_identity = g_llam_tls_task;
+    atomic_store_explicit(&state->first_entered, 1U, memory_order_release);
+    if (worker == NULL) {
+        test_fail(&state->failure, "direct-yield gate task had no worker");
+    } else {
+        atomic_store_explicit(&state->before_safepoint_ns,
+                              atomic_load_explicit(&worker->last_safepoint_ns,
+                                                   memory_order_acquire),
+                              memory_order_release);
+    }
+    state->second = llam_spawn(direct_yield_gate_second_task, state, NULL);
+    if (state->second == NULL) {
+        test_fail(&state->failure, "direct-yield peer spawn failed");
+    }
+    if (!llam_yield_to_local_runnable()) {
+        test_fail(&state->failure, "direct-yield gate did not take the direct path");
+    }
+    if (atomic_load_explicit(&state->second_entered, memory_order_acquire) == 0U) {
+        test_fail(&state->failure, "direct-yield peer did not run after the handoff");
+    }
+    atomic_store_explicit(&state->first_done, 1U, memory_order_release);
+}
+
+static void *direct_yield_gate_run(void *arg) {
+    direct_yield_gate_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int test_direct_yield_publication_gate(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
+    direct_yield_gate_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    bool run_created = false;
+    bool first_joined = false;
+    bool second_joined = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.first_entered, 0U);
+    atomic_init(&state.second_entered, 0U);
+    atomic_init(&state.first_done, 0U);
+    atomic_init(&state.second_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    atomic_init(&state.before_safepoint_ns, 0U);
+    reset_lease_test_gates();
+    if (create_release_fast_runtime(&runtime) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    /* Keep this focused fixture on the direct-yield policy's required guards. */
+    runtime->trace_events_enabled = 0U;
+    runtime->run_timing_enabled = 0U;
+    runtime->wake_latency_metrics_enabled = 0U;
+    runtime->experimental_lockfree_normq = 1U;
+    runtime->direct_handoff_allow_timers = 1U;
+    state.first = llam_runtime_spawn_ex(runtime,
+                                        direct_yield_gate_first_task,
+                                        &state,
+                                        NULL,
+                                        0U);
+    if (state.first == NULL) {
+        test_fail(&state.failure, "direct-yield gate task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "direct-yield publication gate failed");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_DIRECT_YIELD, true);
+    if (pthread_create(&run_thread, NULL, direct_yield_gate_run, &state) != 0) {
+        test_fail(&state.failure, "direct-yield gate run thread setup failed");
+        reset_lease_test_gates();
+        bounded_join_task(state.first,
+                          &state.first_done,
+                          "direct-yield first task cleanup exceeded its deadline");
+        first_joined = true;
+        bounded_join_task(state.second,
+                          &state.second_done,
+                          "direct-yield second task cleanup exceeded its deadline");
+        second_joined = true;
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "direct-yield publication gate failed");
+    }
+    run_created = true;
+    if (wait_flag(&state.first_entered, legacy_deadline()) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_DIRECT_YIELD) != 0) {
+        test_fail(&state.failure, "direct-yield publication gate was not reached");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    {
+        llam_task_t *active = llam_worker_load_active_g(&shard->primary_worker);
+        uint64_t before_ns = atomic_load_explicit(&state.before_safepoint_ns,
+                                                  memory_order_acquire);
+        uint64_t after_ns = atomic_load_explicit(&shard->primary_worker.last_safepoint_ns,
+                                                 memory_order_acquire);
+
+        if (active == NULL || active != llam_shard_load_lease_current(shard) ||
+            atomic_load_explicit(&active->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+            before_ns == 0U || after_ns < before_ns) {
+            test_fail(&state.failure,
+                      "direct-yield publication did not retain active-G or a monotonic safepoint");
+        }
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_DIRECT_YIELD, false);
+    if (wait_flag(&state.first_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.second_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "direct-yield gate tasks/run did not complete");
+        goto cleanup;
+    }
+    bounded_join_task(state.first,
+                      &state.first_done,
+                      "direct-yield first task join exceeded its deadline");
+    first_joined = true;
+    bounded_join_task(state.second,
+                      &state.second_done,
+                      "direct-yield second task join exceeded its deadline");
+    second_joined = true;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure, "direct-yield publication changed run or fatal semantics");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "direct-yield gate run join exceeded its deadline");
+    run_created = false;
+    rc = failure_result(&state.failure, "direct-yield publication gate failed");
+
+cleanup:
+    reset_lease_test_gates();
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_runtime_stop,
+                            runtime,
+                            "direct-yield gate run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!first_joined && state.first != NULL) {
+        bounded_join_task(state.first,
+                          &state.first_done,
+                          "direct-yield first task cleanup exceeded its deadline");
+        first_joined = true;
+    }
+    if (!second_joined && state.second != NULL) {
+        bounded_join_task(state.second,
+                          &state.second_done,
+                          "direct-yield second task cleanup exceeded its deadline");
+        second_joined = true;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure, "direct-yield publication gate failed");
+#else
+    return 77;
+#endif
+}
+
+static void direct_reinject_receiver_task(void *arg) {
+    direct_reinject_gate_state_t *state = arg;
+    void *value;
+
+    state->receiver_identity = g_llam_tls_task;
+    atomic_store_explicit(&state->receiver_waiting, 1U, memory_order_release);
+    errno = 0;
+    value = llam_channel_recv(state->channel);
+    if (value != (void *)(uintptr_t)0x5eEDU) {
+        test_fail(&state->failure, "direct-reinject receiver got the wrong payload");
+    }
+    atomic_store_explicit(&state->receiver_done, 1U, memory_order_release);
+}
+
+static void direct_reinject_sender_task(void *arg) {
+    direct_reinject_gate_state_t *state = arg;
+    llam_worker_t *worker;
+    unsigned i;
+
+    while (atomic_load_explicit(&state->receiver_waiting, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    /* Let the receiver finish publishing its wait node before waking it. */
+    for (i = 0U; i < 16U; ++i) {
+        llam_yield();
+    }
+    worker = g_llam_tls_worker;
+    atomic_store_explicit(&state->before_safepoint_ns,
+                          worker != NULL
+                              ? atomic_load_explicit(&worker->last_safepoint_ns,
+                                                     memory_order_acquire)
+                              : 0U,
+                          memory_order_release);
+    if (llam_channel_send(state->channel, (void *)(uintptr_t)0x5eEDU) != 0) {
+        test_fail(&state->failure, "direct-reinject sender failed to wake receiver");
+    }
+    atomic_store_explicit(&state->sender_done, 1U, memory_order_release);
+}
+
+static void direct_reinject_setup_task(void *arg) {
+    direct_reinject_gate_state_t *state = arg;
+
+    state->channel = llam_channel_create(1U);
+    if (state->channel == NULL) {
+        test_fail(&state->failure, "direct-reinject channel creation failed");
+        atomic_store_explicit(&state->setup_done, 1U, memory_order_release);
+        return;
+    }
+    state->receiver = llam_spawn(direct_reinject_receiver_task, state, NULL);
+    state->sender = llam_spawn(direct_reinject_sender_task, state, NULL);
+    if (state->receiver == NULL || state->sender == NULL) {
+        test_fail(&state->failure, "direct-reinject task spawn failed");
+    }
+    atomic_store_explicit(&state->setup_done, 1U, memory_order_release);
+}
+
+static void *direct_reinject_gate_run(void *arg) {
+    direct_reinject_gate_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int test_direct_reinject_publication_gate(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
+    direct_reinject_gate_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_shard_t *shard;
+    pthread_t run_thread;
+    bool run_created = false;
+    bool setup_joined = false;
+    bool receiver_joined = false;
+    bool sender_joined = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.setup_done, 0U);
+    atomic_init(&state.receiver_waiting, 0U);
+    atomic_init(&state.receiver_done, 0U);
+    atomic_init(&state.sender_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    atomic_init(&state.before_safepoint_ns, 0U);
+    reset_lease_test_gates();
+    if (create_release_fast_runtime(&runtime) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    runtime->trace_events_enabled = 0U;
+    runtime->run_timing_enabled = 0U;
+    runtime->wake_latency_metrics_enabled = 0U;
+    runtime->experimental_lockfree_normq = 1U;
+    runtime->wake_handoff_enabled = 1U;
+    runtime->channel_local_handoff_enabled = 1U;
+    runtime->direct_handoff_allow_timers = 1U;
+    state.setup = llam_runtime_spawn_ex(runtime,
+                                        direct_reinject_setup_task,
+                                        &state,
+                                        NULL,
+                                        0U);
+    if (state.setup == NULL) {
+        test_fail(&state.failure, "direct-reinject setup task spawn failed");
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "direct-reinject publication gate failed");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_DIRECT_REINJECT, true);
+    if (pthread_create(&run_thread, NULL, direct_reinject_gate_run, &state) != 0) {
+        test_fail(&state.failure, "direct-reinject gate run thread setup failed");
+        reset_lease_test_gates();
+        bounded_join_task(state.setup,
+                          &state.setup_done,
+                          "direct-reinject setup cleanup exceeded its deadline");
+        setup_joined = true;
+        destroy_runtime(&runtime);
+        return failure_result(&state.failure, "direct-reinject publication gate failed");
+    }
+    run_created = true;
+    if (wait_flag(&state.setup_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.receiver_waiting, legacy_deadline()) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_DIRECT_REINJECT) != 0) {
+        test_fail(&state.failure, "direct-reinject publication gate was not reached");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    {
+        llam_task_t *active = llam_worker_load_active_g(&shard->primary_worker);
+        uint64_t before_ns = atomic_load_explicit(&state.before_safepoint_ns,
+                                                  memory_order_acquire);
+        uint64_t after_ns = atomic_load_explicit(&shard->primary_worker.last_safepoint_ns,
+                                                 memory_order_acquire);
+
+        if (active == NULL || active != llam_shard_load_lease_current(shard) ||
+            active != state.receiver_identity ||
+            atomic_load_explicit(&active->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+            before_ns == 0U || after_ns < before_ns) {
+            test_fail(&state.failure,
+                      "direct-reinject publication did not retain active-G or a fresh safepoint");
+        }
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_DIRECT_REINJECT, false);
+    if (wait_flag(&state.receiver_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.sender_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure, "direct-reinject gate tasks/run did not complete");
+        goto cleanup;
+    }
+    bounded_join_task(state.setup,
+                      &state.setup_done,
+                      "direct-reinject setup join exceeded its deadline");
+    setup_joined = true;
+    bounded_join_task(state.receiver,
+                      &state.receiver_done,
+                      "direct-reinject receiver join exceeded its deadline");
+    receiver_joined = true;
+    bounded_join_task(state.sender,
+                      &state.sender_done,
+                      "direct-reinject sender join exceeded its deadline");
+    sender_joined = true;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure, "direct-reinject publication changed run or fatal semantics");
+    }
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "direct-reinject gate run join exceeded its deadline");
+    run_created = false;
+    if (state.channel != NULL && llam_channel_destroy(state.channel) != 0) {
+        test_fail(&state.failure, "direct-reinject channel cleanup failed");
+    }
+    state.channel = NULL;
+    rc = failure_result(&state.failure, "direct-reinject publication gate failed");
+
+cleanup:
+    reset_lease_test_gates();
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_runtime_stop,
+                            runtime,
+                            "direct-reinject gate run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (!setup_joined && state.setup != NULL) {
+        bounded_join_task(state.setup,
+                          &state.setup_done,
+                          "direct-reinject setup cleanup exceeded its deadline");
+        setup_joined = true;
+    }
+    if (!receiver_joined && state.receiver != NULL) {
+        bounded_join_task(state.receiver,
+                          &state.receiver_done,
+                          "direct-reinject receiver cleanup exceeded its deadline");
+        receiver_joined = true;
+    }
+    if (!sender_joined && state.sender != NULL) {
+        bounded_join_task(state.sender,
+                          &state.sender_done,
+                          "direct-reinject sender cleanup exceeded its deadline");
+        sender_joined = true;
+    }
+    if (state.channel != NULL) {
+        (void)llam_channel_destroy(state.channel);
+        state.channel = NULL;
+    }
+    destroy_runtime(&runtime);
+    return rc != 0 ? rc : failure_result(&state.failure, "direct-reinject publication gate failed");
+#else
+    return 77;
+#endif
+}
+
 static int test_active_g_publication_and_cleanup(void) {
     active_g_publication_observation_t observation;
     llam_runtime_t *runtime = NULL;
@@ -3331,6 +4197,8 @@ int main(void) {
         test_lease_test_gate_contract,
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,
+        test_active_g_publication_ordering_gates,
+        test_park_publication_cleanup,
         test_active_g_publication_and_cleanup,
         test_primary_helper_activation_and_return,
         test_lease_handoff_windows,
@@ -3347,6 +4215,8 @@ int main(void) {
         test_dynamic_merge_pause,
         test_watchdog_task_exit_overlap,
         test_partial_helper_start_failure,
+        test_direct_yield_publication_gate,
+        test_direct_reinject_publication_gate,
     };
     unsigned i;
     unsigned skipped = 0U;

@@ -104,6 +104,7 @@ void llam_task_exit_internal(void) {
     pthread_mutex_lock(&g_llam_tls_shard->lock);
     llam_worker_clear_active_g(g_llam_tls_worker);
     pthread_mutex_unlock(&g_llam_tls_shard->lock);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_TASK_EXIT_CLEAR);
     llam_trace_shard(g_llam_tls_shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_DEAD, LLAM_WAIT_NONE);
     llam_reinject_join_waiters(rt, task);
 
@@ -592,6 +593,13 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     if (wake_node != NULL) {
         llam_kick_node(wake_node);
     }
+    /* Retire execution publication before the task enters the I/O wait. */
+    pthread_mutex_lock(&shard->lock);
+    if (g_llam_tls_worker != NULL && g_llam_tls_worker->compat_shard == shard) {
+        llam_worker_clear_active_g(g_llam_tls_worker);
+    }
+    pthread_mutex_unlock(&shard->lock);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_IO_PARK);
     llam_task_sample_live_stack(task);
     llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
     if (has_deadline) {

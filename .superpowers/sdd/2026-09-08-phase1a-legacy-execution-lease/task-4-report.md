@@ -1,62 +1,66 @@
-# Task 4 report — publish current tasks through worker state
+# Task 4 report — current-G publication fix round 1
 
 ## Status
 
-Complete for the current-G and execution-publication migration.
+Complete for the reported current-G publication gaps. I/O and sleep park paths
+now retire the current worker's active-G under `shard->lock` before switching
+to the scheduler. Both direct reinject paths stamp the worker's monotonic
+`last_safepoint_ns` before release-publishing active-G. Test-hook-only reached
+gates cover state preparation/publication, direct yield/reinject, I/O/sleep
+parking, and task-exit sampling; production builds compile those calls as
+no-ops. The Make build now links test-hook variants of `reinject.c` and
+`yield_join_sleep.c`, so the new gates are active in focused tests.
 
-Worker-local `active_g`, run-start, safepoint, and idle-wake timestamps are now
-the execution publication authority. Dispatch, direct yield/reinject, blocking
-and redirect return, task park/exit, watchdog/debug sampling, queue load, and
-dynamic merge/offline checks use the worker helpers or the validated lease-owner
-accessor. The shard `current` and shard execution timestamps were removed.
-The active-G clear remains under the shard reclaim barrier before task scan
-references can be released, and helper handback/exit acknowledgements retain
-their existing cleanup ordering.
+## TDD evidence
+
+* RED: after adding the gates/tests but before production gate calls, the
+  focused binary failed at `task state preparation gate was not reached before
+  active-G publication`.
+* GREEN: after the scoped fixes, the focused lease binary passed, including
+  deterministic checks that PARKED I/O/sleep tasks have NULL active-G/current,
+  direct handoff timestamps are monotonic, and exit/reclaim sampling sees a
+  DEAD task with cleared publication.
 
 ## Commit
 
-`refactor: publish current tasks through worker state`
+`fix: retire active tasks before park and reinject`
 
 ## Tests
 
-RED evidence:
+Passed on Darwin arm64:
 
-* Before the helper declarations existed, `make test_legacy_lease_internal`
-  failed to compile with undeclared `llam_shard_load_lease_current` and
-  `llam_worker_load_active_g` calls.
-* The focused publication test then failed against the helper-only interim
-  implementation because the worker safepoint timestamp was not published;
-  it passed after the scheduler migration.
-
-GREEN evidence on Darwin arm64:
-
-* `test_legacy_lease_internal`, `test_runtime_core`, `test_runtime_stress`,
-  and `test_runtime_shutdown_internal` passed.
+* `make test_legacy_lease_internal`; focused lease binary 20/20 consecutive
+  runs.
+* `make test_runtime_core test_runtime_stress test_runtime_shutdown_internal
+  test_runtime_io_dump test_connect_io`; all binaries passed. `test_io_buffers`
+  and `test_worker_identity_internal` also passed in standalone reruns.
 * CMake Debug and Release focused CTest: 4/4 passed in each configuration.
-* `-DNDEBUG -Werror` focused build and all four focused binaries passed.
-* `make test-asan`: passed with ASan/UBSan; only the known Darwin
-  `__asan_handle_no_return` stack-switch warnings were emitted.
-* `make test-tsan`: passed with no TSan report. One earlier run had an
-  intermittent active-helper leave assertion; 20 focused TSan reruns plus the
-  final full matrix passed.
-* `make audit-production-test-hooks audit-shared-exports`: passed; shared
-  export audit reports 130 public symbols.
-* `test_abi_contract`, `test_abi_compat`, `test_worker_identity_boundary.py`,
-  `git diff --check`, and public-header identity against `eb0c014` passed.
-* The current/source audit finds no `shard->current` or `&shard->current`
-  references under `src` or tests.
-* `make test` reaches the expected pre-Task-6
-  `scripts/check_worker_identity_boundary.py` failure: six `active_g`
-  references are still rejected by the Phase 0 scanner. Updating that
-  phase-aware rule belongs to Task 6.
+* Separate `-DNDEBUG -Werror` build and focused lease/core/stress/shutdown
+  binaries passed.
+* `make test-asan`: full ASan/UBSan matrix passed; only the known Darwin
+  `__asan_handle_no_return` stack-switch warnings appeared.
+* `make test-tsan`: full TSan matrix passed with no TSan report.
+* `make audit-production-test-hooks audit-shared-exports`: passed; 130 public
+  shared symbols and no production test-hook symbols.
+* ABI contract/compatibility tests, worker-boundary unit tests (20/20),
+  `git diff --check`, and source audit for `shard->current` passed.
+
+`make test` ran all preceding suites successfully and stopped only at the
+expected pre-Task-6 Phase 0 scanner. The deterministic scanner reports these
+six known violations:
+
+```
+src/core/lifecycle/init.c:891,904
+src/core/sched/scheduler.c:534,542,550
+src/internal/runtime_types.h:1143
+```
+
+All six are the scanner's current prohibition on the worker-local `active_g`
+member; Task 6 owns the phase-aware scanner update.
 
 ## Concerns
 
-* Native Windows/BSD execution is unavailable on this Darwin host; the
-  platform-neutral source/build checks remain available.
-* The accessor requires callers to hold `opaque_lock` followed by `shard->lock`
-  and its returned pointer must not outlive the shard lock. This lock-protected
-  lifetime contract avoids relying on an atomic pointer/epoch alone.
-* No public headers, exported symbols, public stats schema, queues, timers,
-  allocator/cache, I/O routing, wrappers, metadata, or asynchronous
-  preemption behavior were changed.
+Native Windows/BSD execution was unavailable on this Darwin host. No public
+headers, public ABI/stat schema, queues, timers, allocator/I/O ownership,
+wrappers, metadata, watchdog target/preempt-thread migration, or asynchronous
+preemption behavior was changed.
