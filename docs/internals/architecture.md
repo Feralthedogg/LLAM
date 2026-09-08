@@ -158,10 +158,12 @@ scale paths, and `debug.c` inspect the validated lease owner's active-G through
   valid only when all three values still match the live lease owner under
   `opaque_lock`.
 
-This inventory is the explicit handoff point for later Phase 1A commits:
-transfers, current-G publication, watchdog targeting, and pause generations
-must migrate these accesses without introducing a second authority. Public
-headers, public statistics, and the exported ABI remain unchanged.
+Phase 1A has completed the migration of transfers, current-G publication,
+watchdog targeting, and pause generations into the shard-owned legacy lease
+boundary without introducing a second authority. Public headers, public
+statistics, and the exported ABI remain unchanged. The next explicit boundary
+is Phase 1B's P-resource field migration; Phase 2 separately covers foreign
+detach and wrapper ownership, which remain outside this lease audit.
 
 ### Phase 1A boundary audit
 

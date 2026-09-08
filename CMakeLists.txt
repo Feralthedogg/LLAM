@@ -763,6 +763,9 @@ add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
+# Python-backed source-audit tests are registered when an interpreter is
+# available.  The Make targets use $(PYTHON) so callers can explicitly select
+# a supported interpreter; CMake keeps the existing optional-Python behavior.
 if(Python3_FOUND)
     add_test(
         NAME test_worker_identity_boundary

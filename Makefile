@@ -881,24 +881,32 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static shared
 	@if command -v nm >/dev/null 2>&1; then \
+		test_hook_re='llam_[[:alnum:]_]*_test_[[:alnum:]_]*'; \
+		safe_self_test_re='llam_broker_client_self_test_'; \
 		for artifact in libllam_runtime.a ./$(SHLIB_REAL); do \
 			if test -f "$$artifact"; then \
 				symbols="$$($$(command -v nm) -a "$$artifact" 2>/dev/null || $$(command -v nm) "$$artifact" 2>/dev/null || true)"; \
-				if printf '%s\n' "$$symbols" | grep -E 'llam_worker_test_|llam_lease_test_|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
+				test_hooks="$$(printf '%s\n' "$$symbols" | grep -E "$$test_hook_re" | grep -Ev "$$safe_self_test_re" || true)"; \
+				if test -n "$$test_hooks"; then \
 					echo "production artifact exports test fault-injection hooks: $$artifact" >&2; \
-					printf '%s\n' "$$symbols" | grep -E 'llam_worker_test_|llam_lease_test_|llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
+					printf '%s\n' "$$test_hooks" >&2; \
 					exit 1; \
 				fi; \
 			fi; \
 		done; \
+		fixture_symbols='00000000 T llam_scheduler_test_rebind_primary'; \
+		if ! printf '%s\n' "$$fixture_symbols" | grep -E "$$test_hook_re" >/dev/null; then \
+			echo "production test-hook audit regression: scheduler hook prefix is not covered" >&2; \
+			exit 1; \
+		fi; \
 	fi
 
 test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_legacy_lease_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_lcwe_model
-	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
-	python3 scripts/test_worker_identity_boundary.py
-	python3 scripts/test_legacy_lease_boundary.py
-	python3 scripts/check_legacy_lease_boundary.py --root .
+	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model $(PYTHON) scripts/test_bench_lcwe_model.py
+	$(PYTHON) scripts/test_worker_identity_boundary.py
+	$(PYTHON) scripts/test_legacy_lease_boundary.py
+	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -924,8 +932,8 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	./test_windows_handle_io
 	./test_security_capability
 	./llam_broker --self-test
-	python3 scripts/test_broker_cli_parsing.py
-	python3 scripts/test_c_env_helpers.py
+	$(PYTHON) scripts/test_broker_cli_parsing.py
+	$(PYTHON) scripts/test_c_env_helpers.py
 	@broker_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-broker-test.$$$$.XXXXXX")"; \
 	chmod 700 "$$broker_dir"; \
 	broker_sock="$$broker_dir/broker.sock"; \
@@ -937,7 +945,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		if [ -S "$$broker_sock" ]; then break; fi; \
 		sleep 0.02; \
 	done; \
-	python3 -c 'import socket, sys; sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.connect(sys.argv[1]); sock.shutdown(socket.SHUT_RDWR); sock.close()' "$$broker_sock" && \
+	$(PYTHON) -c 'import socket, sys; sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.connect(sys.argv[1]); sock.shutdown(socket.SHUT_RDWR); sock.close()' "$$broker_sock" && \
 	./llam_broker --client-self-test "$$broker_sock" && \
 	./llam_broker --client-self-test "$$broker_sock"; \
 	client_rc="$$?"; \
@@ -958,10 +966,10 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	rm -f "$$broker_sock" "$$server_out"; \
 	rmdir "$$broker_dir" >/dev/null 2>&1 || true
 	./test_shared_load ./$(SHLIB_REAL)
-	python3 scripts/test_server_flood_cli.py ./server_flood
-	python3 scripts/test_server_flood_stats_security.py ./server_flood
-	python3 scripts/test_example_diagnostic_security.py ./server ./stress
-	python3 scripts/test_safe_output_security.py
+	$(PYTHON) scripts/test_server_flood_cli.py ./server_flood
+	$(PYTHON) scripts/test_server_flood_stats_security.py ./server_flood
+	$(PYTHON) scripts/test_example_diagnostic_security.py ./server ./stress
+	$(PYTHON) scripts/test_safe_output_security.py
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-dest-symlink.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib" "$$tmp_dir/outside" "$$tmp_dir/prefix"; \
