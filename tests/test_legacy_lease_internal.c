@@ -137,6 +137,16 @@ typedef struct lease_binding_observation {
     bool binding_live;
 } lease_binding_observation_t;
 
+typedef struct active_g_publication_observation {
+    test_failure_state_t failure;
+    atomic_uint entered;
+    uintptr_t task;
+    uintptr_t worker_active_g;
+    uintptr_t accessor_current;
+    uint64_t worker_run_started_ns;
+    uint64_t worker_safepoint_ns;
+} active_g_publication_observation_t;
+
 typedef struct active_shutdown_state {
     test_failure_state_t failure;
     llam_runtime_t *runtime;
@@ -174,7 +184,7 @@ typedef struct shutdown_transfer_state {
     unsigned task_depth;
     uintptr_t task_identity;
     uintptr_t primary_active_g;
-    uintptr_t current;
+    uintptr_t accessor_current;
     unsigned helper_active;
     unsigned helper_started;
     llam_lease_test_snapshot_t after_enter;
@@ -960,13 +970,11 @@ static int test_lease_handoff_windows(void) {
                   "helper handback released active state before its acknowledgement gate");
     }
     pthread_mutex_lock(&shard->lock);
-    if (atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                             memory_order_acquire) != NULL ||
-        atomic_load_explicit(&shard->primary_worker.active_g,
-                             memory_order_acquire) != NULL ||
-        atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+    if (llam_worker_load_active_g(&shard->opaque_helper_worker) != NULL ||
+        llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+        llam_shard_load_lease_current(shard) != NULL) {
         test_fail(&state.takeover.failure,
-                  "handback ACK was published before worker/current cleanup");
+                  "handback ACK was published before worker active-G cleanup");
     }
     pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
@@ -1070,17 +1078,14 @@ static int test_clean_stop_completes_handback(void) {
                               snapshot.transfer_sequence == 4U &&
                               snapshot.handback_ack_sequence == 4U &&
                               snapshot.epoch == 3U &&
-                              atomic_load_explicit(&shard->primary_worker.active_g,
-                                                   memory_order_acquire) == NULL &&
-                              atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                                                   memory_order_acquire) == NULL &&
-                              atomic_load_explicit(&shard->current,
-                                                   memory_order_acquire) == NULL;
+                              llam_worker_load_active_g(&shard->primary_worker) == NULL &&
+                              llam_worker_load_active_g(&shard->opaque_helper_worker) == NULL &&
+                              llam_shard_load_lease_current(shard) == NULL;
         pthread_mutex_unlock(&shard->lock);
         pthread_mutex_unlock(&shard->opaque_lock);
         if (!handback_cleanup_ok) {
             test_fail(&state.takeover.failure,
-                      "clean-stop handback ACK was not after worker/current cleanup");
+                      "clean-stop handback ACK was not after worker active-G cleanup");
         }
     }
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
@@ -1144,19 +1149,18 @@ static void invalid_handback_task(void *arg) {
     errno = 0;
     state->leave_rc = llam_leave_blocking();
     state->leave_errno = errno;
-    state->current_after_leave = shard != NULL
-                                     ? (uintptr_t)atomic_load_explicit(
-                                           &shard->current,
-                                           memory_order_acquire)
-                                     : 0U;
-    state->active_g_after_leave = shard != NULL
-                                      ? (uintptr_t)atomic_load_explicit(
-                                            &shard->primary_worker.active_g,
-                                            memory_order_acquire)
-                                      : 0U;
-    state->task_state_after_leave = g_llam_tls_task != NULL
-                                        ? (unsigned)g_llam_tls_task->state
-                                        : 0U;
+    if (shard != NULL) {
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        state->current_after_leave = (uintptr_t)llam_shard_load_lease_current(shard);
+        state->active_g_after_leave = (uintptr_t)llam_worker_load_active_g(
+            &shard->primary_worker);
+        state->task_state_after_leave = g_llam_tls_task != NULL
+                                            ? (unsigned)g_llam_tls_task->state
+                                            : 0U;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
     atomic_store_explicit(&state->done, 1U, memory_order_release);
 }
 
@@ -1193,7 +1197,7 @@ static int test_failed_handback_does_not_republish(void) {
         state.current_after_leave != 0U || state.active_g_after_leave != 0U ||
         state.task_state_after_leave != LLAM_TASK_STATE_BLOCKED_OPAQUE) {
         test_fail(&state.failure,
-                  "failed handback validation republished current/RUNNING state");
+                  "failed handback validation republished active-G/RUNNING state");
     }
     destroy_runtime(&runtime);
     return failure_result(&state.failure,
@@ -1218,11 +1222,9 @@ static void shutdown_transfer_task(void *arg) {
         state->task_identity = (uintptr_t)task;
         state->task_state = (unsigned)task->state;
         state->task_depth = task->opaque_blocking_depth;
-        state->primary_active_g = (uintptr_t)atomic_load_explicit(
-            &shard->primary_worker.active_g,
-            memory_order_acquire);
-        state->current = (uintptr_t)atomic_load_explicit(&shard->current,
-                                                         memory_order_acquire);
+        state->primary_active_g = (uintptr_t)llam_worker_load_active_g(
+            &shard->primary_worker);
+        state->accessor_current = (uintptr_t)llam_shard_load_lease_current(shard);
         state->helper_active = shard->opaque_helper_active ? 1U : 0U;
         state->helper_started = shard->opaque_helper_thread_started ? 1U : 0U;
         pthread_mutex_unlock(&shard->lock);
@@ -1312,10 +1314,8 @@ static int test_shutdown_raced_transfer_point(llam_lease_test_point_t gate) {
         pthread_mutex_unlock(&shard->opaque_lock);
         test_fail(&state.failure, "shutdown-raced transfer gate snapshot failed");
     } else if (gate == LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST) {
-        active_before = atomic_load_explicit(&shard->primary_worker.active_g,
-                                             memory_order_acquire);
-        current_before = atomic_load_explicit(&shard->current,
-                                              memory_order_acquire);
+        active_before = llam_worker_load_active_g(&shard->primary_worker);
+        current_before = llam_shard_load_lease_current(shard);
         helper_started_before = shard->opaque_helper_thread_started;
         pthread_mutex_unlock(&shard->lock);
         pthread_mutex_unlock(&shard->opaque_lock);
@@ -1330,9 +1330,8 @@ static int test_shutdown_raced_transfer_point(llam_lease_test_point_t gate) {
     } else if (before_stop.state != LLAM_LEASE_TRANSFER_TO_HELPER ||
                before_stop.owner_worker != 0U ||
                before_stop.transfer_sequence == 0U ||
-               atomic_load_explicit(&shard->primary_worker.active_g,
-                                    memory_order_acquire) != NULL ||
-               atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+               llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+               llam_shard_load_lease_current(shard) != NULL) {
         pthread_mutex_unlock(&shard->lock);
         pthread_mutex_unlock(&shard->opaque_lock);
         test_fail(&state.failure,
@@ -1374,7 +1373,7 @@ static int test_shutdown_raced_transfer_point(llam_lease_test_point_t gate) {
     if (state.enter_rc != -1 || state.enter_errno != ECANCELED ||
         state.task_state != LLAM_TASK_STATE_RUNNING || state.task_depth != 0U ||
         state.task_identity == 0U || state.primary_active_g != state.task_identity ||
-        state.current != state.task_identity ||
+        state.accessor_current != state.task_identity ||
         state.after_enter.state != LLAM_LEASE_STOPPING ||
         state.after_enter.owner_worker != (uintptr_t)&shard->primary_worker ||
         state.after_enter.return_worker != 0U ||
@@ -2029,11 +2028,9 @@ static int test_ownerless_redirect_active_destroy(void) {
         state.exit_snapshot.handback_ack_sequence == 0U ||
         !atomic_load_explicit(&shard->opaque_helper_exit_ack,
                               memory_order_acquire) ||
-        atomic_load_explicit(&shard->primary_worker.active_g,
-                             memory_order_acquire) != NULL ||
-        atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                             memory_order_acquire) != NULL ||
-        atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+        llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+        llam_worker_load_active_g(&shard->opaque_helper_worker) != NULL ||
+        llam_shard_load_lease_current(shard) != NULL) {
         test_fail(&state.failure,
                   "ownerless shutdown exit ACK did not retain helper claimant/cleanup");
     }
@@ -2482,12 +2479,9 @@ static int test_helper_shutdown_while_active(void) {
                               snapshot.transfer_sequence == 2U &&
                               snapshot.handback_ack_sequence == 2U &&
                               snapshot.epoch == 2U &&
-                              atomic_load_explicit(&shard->primary_worker.active_g,
-                                                   memory_order_acquire) == NULL &&
-                              atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                                                   memory_order_acquire) == NULL &&
-                              atomic_load_explicit(&shard->current,
-                                                   memory_order_acquire) == NULL;
+                              llam_worker_load_active_g(&shard->primary_worker) == NULL &&
+                              llam_worker_load_active_g(&shard->opaque_helper_worker) == NULL &&
+                              llam_shard_load_lease_current(shard) == NULL;
         pthread_mutex_unlock(&shard->lock);
         pthread_mutex_unlock(&shard->opaque_lock);
         if (!handback_cleanup_ok) {
@@ -3044,9 +3038,7 @@ static void lease_binding_observer_task(void *arg) {
     observation->binding_live = llam_worker_binding_live(worker,
                                                          observation->incarnation);
     observation->active_g = worker != NULL
-                                ? (uint64_t)(uintptr_t)atomic_load_explicit(
-                                      &worker->active_g,
-                                      memory_order_acquire)
+                                ? (uint64_t)(uintptr_t)llam_worker_load_active_g(worker)
                                 : 0U;
     observation->last_run_started_ns = worker != NULL
                                            ? atomic_load_explicit(
@@ -3119,9 +3111,8 @@ static int test_lease_binding_lifecycle(void) {
         test_fail(&observation.failure,
                   "runtime initialization did not leave an ownerless lease");
     }
-    if (atomic_load_explicit(&shard->primary_worker.active_g, memory_order_acquire) != NULL ||
-        atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                             memory_order_acquire) != NULL ||
+    if (llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+        llam_worker_load_active_g(&shard->opaque_helper_worker) != NULL ||
         atomic_load_explicit(&shard->primary_worker.last_run_started_ns,
                              memory_order_acquire) != 0U ||
         atomic_load_explicit(&shard->primary_worker.last_safepoint_ns,
@@ -3205,6 +3196,111 @@ static int test_shutdown_rejects_unbound_lease(void) {
     return failure_result(&failure, "shutdown rejected-unbound lease check failed");
 }
 
+static void active_g_publication_task(void *arg) {
+    active_g_publication_observation_t *observation = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_worker_t *worker = g_llam_tls_worker;
+    llam_task_t *task = g_llam_tls_task;
+    llam_task_t *accessor_current;
+
+    if (observation == NULL || shard == NULL || worker == NULL || task == NULL ||
+        worker != &shard->primary_worker) {
+        if (observation != NULL) {
+            test_fail(&observation->failure,
+                      "active-G publication task did not run on the primary worker");
+        }
+        return;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    accessor_current = llam_shard_load_lease_current(shard);
+    observation->task = (uintptr_t)task;
+    observation->worker_active_g = (uintptr_t)llam_worker_load_active_g(worker);
+    observation->accessor_current = (uintptr_t)accessor_current;
+    observation->worker_run_started_ns = atomic_load_explicit(
+        &worker->last_run_started_ns,
+        memory_order_acquire);
+    observation->worker_safepoint_ns = atomic_load_explicit(
+        &worker->last_safepoint_ns,
+        memory_order_acquire);
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_yield();
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (llam_worker_load_active_g(worker) != task ||
+        llam_shard_load_lease_current(shard) != task) {
+        test_fail(&observation->failure,
+                  "yield did not republish the worker-local active-G");
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    atomic_store_explicit(&observation->entered, 1U, memory_order_release);
+}
+
+static int test_active_g_publication_and_cleanup(void) {
+    active_g_publication_observation_t observation;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    llam_shard_t *shard;
+    llam_task_t *current_after;
+    int run_rc;
+    int run_errno;
+
+    memset(&observation, 0, sizeof(observation));
+    atomic_init(&observation.failure.failures, 0U);
+    atomic_init(&observation.entered, 0U);
+    reset_lease_test_gates();
+    if (create_runtime_with_preempt(&runtime,
+                                    true,
+                                    false,
+                                    LLAM_PREEMPT_OFF,
+                                    0U) != 0) {
+        return 1;
+    }
+    shard = &runtime->shards[0];
+    task = llam_runtime_spawn_ex(runtime,
+                                 active_g_publication_task,
+                                 &observation,
+                                 NULL,
+                                 0U);
+    errno = 0;
+    run_rc = task == NULL ? -1 : llam_runtime_run_handle(runtime);
+    run_errno = errno;
+    if (task != NULL) {
+        bounded_join_task(task,
+                          &observation.entered,
+                          "active-G publication task join exceeded its deadline");
+    }
+    assert_no_fatal(runtime,
+                    run_rc,
+                    run_errno,
+                    &observation.failure,
+                    "active-G publication changed run or fatal semantics");
+    if (atomic_load_explicit(&observation.entered, memory_order_acquire) == 0U ||
+        observation.task == 0U ||
+        observation.worker_active_g != observation.task ||
+        observation.accessor_current != observation.task ||
+        observation.worker_safepoint_ns == 0U) {
+        test_fail(&observation.failure,
+                  "active-G publication was not ordered after task preparation");
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    current_after = llam_shard_load_lease_current(shard);
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (current_after != NULL ||
+        llam_worker_load_active_g(&shard->primary_worker) != NULL ||
+        llam_worker_load_active_g(&shard->opaque_helper_worker) != NULL) {
+        test_fail(&observation.failure,
+                  "active-G cleanup did not retire the task before reclaim");
+    }
+    destroy_runtime(&runtime);
+    return failure_result(&observation.failure,
+                          "active-G publication and cleanup failed");
+}
+
 static int test_lease_test_gate_contract(void) {
     test_failure_state_t failure;
     llam_lease_test_snapshot_t snapshot;
@@ -3235,6 +3331,7 @@ int main(void) {
         test_lease_test_gate_contract,
         test_lease_binding_lifecycle,
         test_shutdown_rejects_unbound_lease,
+        test_active_g_publication_and_cleanup,
         test_primary_helper_activation_and_return,
         test_lease_handoff_windows,
         test_clean_stop_completes_handback,

@@ -212,13 +212,14 @@ bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns) 
 /**
  * @brief Check whether a locked shard is empty enough to mark offline.
  *
- * @param shard Locked shard to inspect.
+ * @param shard Locked shard to inspect.  The caller holds its opaque lease
+ * lock before the shard lock.
  *
  * @return @c true when no current task, queues, or redirect state remain.
  */
 bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
     return shard != NULL &&
-           atomic_load_explicit(&shard->current, memory_order_acquire) == NULL &&
+           llam_shard_load_lease_current((llam_shard_t *)shard) == NULL &&
            atomic_load_explicit(&((llam_shard_t *)shard)->timer_callbacks_active, memory_order_acquire) == 0U &&
            shard->inject_q.depth == 0U &&
            shard->hot_q.depth == 0U &&
@@ -229,13 +230,14 @@ bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
 /**
  * @brief Check whether a locked shard is safe to start merging.
  *
- * @param shard Locked shard to inspect.
+ * @param shard Locked shard to inspect.  The caller holds its opaque lease
+ * lock before the shard lock.
  *
  * @return @c true when no current task or opaque redirect is active.
  */
 bool llam_shard_can_start_merge_locked(const llam_shard_t *shard) {
     return shard != NULL &&
-           atomic_load_explicit(&shard->current, memory_order_acquire) == NULL &&
+           llam_shard_load_lease_current((llam_shard_t *)shard) == NULL &&
            !shard->opaque_redirect_active;
 }
 

@@ -1126,8 +1126,9 @@ struct llam_processor {
 /**
  * @brief Minimal primary/helper worker identity slot.
  *
- * Incarnation changes whenever the owning native scheduler entry starts.  No
- * scheduler state is mirrored here; all such state remains on llam_shard_t.
+ * Incarnation changes whenever the owning native scheduler entry starts.
+ * Execution publication and its sampling timestamps are local to this worker;
+ * queues, timers, allocator/cache, I/O, and public metrics remain on the shard.
  */
 struct llam_worker {
     llam_shard_t *compat_shard;
@@ -1138,7 +1139,7 @@ struct llam_worker {
     pthread_t native_thread;
     atomic_bool native_thread_live;
     atomic_uint_fast64_t binding_incarnation;
-    /* Worker-local execution publication storage consumed by later migration. */
+    /* Worker-local execution publication; the lease owner is its authority. */
     _Atomic(llam_task_t *) active_g;
     atomic_uint_fast64_t last_run_started_ns;
     atomic_uint_fast64_t last_safepoint_ns;
@@ -1236,11 +1237,7 @@ struct llam_shard {
     pthread_mutex_t stack_cache_lock;
     _Alignas(16) llam_ctx_t scheduler_ctx;
     _Alignas(16) llam_ctx_t opaque_scheduler_ctx;
-    _Atomic(llam_task_t *) current;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
-    atomic_uint_fast64_t last_safepoint_ns;
-    atomic_uint_fast64_t last_run_started_ns;
-    uint64_t last_idle_wake_ns;
     uint64_t next_task_seq;
     atomic_uint norm_depth;
     unsigned hot_streak;

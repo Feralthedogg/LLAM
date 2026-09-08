@@ -388,8 +388,7 @@ bool llam_legacy_lease_teardown_return_locked(const llam_shard_t *shard,
            (atomic_load_explicit(&shard->opaque_helper_exit_ack,
                                  memory_order_acquire) &&
             !shard->opaque_helper_active &&
-            atomic_load_explicit(&shard->opaque_helper_worker.active_g,
-                                 memory_order_acquire) == NULL);
+            llam_worker_load_active_g(&shard->opaque_helper_worker) == NULL);
 }
 
 bool llam_legacy_lease_enter_redirect_locked(llam_shard_t *shard,
@@ -527,6 +526,68 @@ bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation)
     return worker_incarnation == incarnation && binding_incarnation == incarnation;
 }
 
+/** @brief Publish the task executing on a worker after its state is prepared. */
+void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task) {
+    if (worker == NULL) {
+        return;
+    }
+    atomic_store_explicit(&worker->active_g, task, memory_order_release);
+}
+
+/** @brief Load a worker's current execution publication. */
+llam_task_t *llam_worker_load_active_g(const llam_worker_t *worker) {
+    if (worker == NULL) {
+        return NULL;
+    }
+    return atomic_load_explicit(&worker->active_g, memory_order_acquire);
+}
+
+/** @brief Retire a worker's execution publication before task reclaim. */
+void llam_worker_clear_active_g(llam_worker_t *worker) {
+    if (worker == NULL) {
+        return;
+    }
+    atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+    atomic_store_explicit(&worker->last_run_started_ns,
+                          0U,
+                          memory_order_release);
+}
+
+/**
+ * @brief Load the active-G belonging to a validated lease owner.
+ *
+ * @note The caller holds `shard->opaque_lock` followed by `shard->lock`.
+ */
+llam_task_t *llam_shard_load_lease_current(llam_shard_t *shard) {
+    llam_legacy_lease_t *lease;
+    llam_worker_t *owner;
+
+    if (shard == NULL) {
+        return NULL;
+    }
+    /*
+     * The caller holds opaque_lock -> shard->lock.  Reading the plain lease
+     * record and then loading the owner's active-G under that pair makes the
+     * worker selection and task lifetime one protected observation.  In
+     * particular, this is not an atomic pointer/epoch lifetime proof.
+     */
+    lease = &shard->legacy_lease;
+    owner = lease->owner;
+    if (owner == NULL ||
+        (owner != &shard->primary_worker &&
+         owner != &shard->opaque_helper_worker) ||
+        !llam_worker_matches_shard(owner, shard) ||
+        (owner == &shard->primary_worker &&
+         owner->role != LLAM_WORKER_ROLE_PRIMARY) ||
+        (owner == &shard->opaque_helper_worker &&
+         owner->role != LLAM_WORKER_ROLE_OPAQUE_HELPER) ||
+        lease->owner_incarnation == 0U ||
+        !llam_worker_binding_live(owner, lease->owner_incarnation)) {
+        return NULL;
+    }
+    return llam_worker_load_active_g(owner);
+}
+
 void llam_scheduler_bind_identity(llam_shard_t *shard,
                                   llam_worker_t *worker,
                                   llam_ctx_t *ctx) {
@@ -581,7 +642,7 @@ void llam_scheduler_unbind_identity(llam_shard_t *shard, llam_worker_t *worker) 
         atomic_store_explicit(&worker->binding_incarnation, 0U, memory_order_release);
         memset(&worker->native_thread, 0, sizeof(worker->native_thread));
     }
-    atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+    llam_worker_clear_active_g(worker);
     atomic_store_explicit(&worker->last_run_started_ns, 0U, memory_order_release);
     atomic_store_explicit(&worker->last_safepoint_ns, 0U, memory_order_release);
     atomic_store_explicit(&worker->last_idle_wake_ns, 0U, memory_order_release);
@@ -654,8 +715,6 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
                             (shard->metrics.ctx_switches & 63ULL) == 0U;
     uint64_t now_ns = (run_timing || wake_timing || preempt_timing || sample_safepoint) ? llam_now_ns() : 0U;
 
-    atomic_store_explicit(&shard->current, task, memory_order_release);
-
     g_llam_tls_task = task;
     atomic_store_explicit(&task->last_shard, shard->id, memory_order_relaxed);
     task->state = LLAM_TASK_STATE_RUNNING;
@@ -663,12 +722,17 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     if (wake_timing) {
         llam_runtime_record_dispatch_latency(shard, task, now_ns);
     }
-    atomic_store(&shard->last_run_started_ns, run_timing ? now_ns : 0U);
-    if (now_ns != 0U) {
-        atomic_store_explicit(&shard->last_safepoint_ns, now_ns, memory_order_relaxed);
-    }
     if (worker != NULL && worker->compat_shard == shard) {
-        atomic_store_explicit(&worker->active_g, task, memory_order_release);
+        atomic_store_explicit(&worker->last_run_started_ns,
+                              run_timing ? now_ns : 0U,
+                              memory_order_release);
+        if (now_ns != 0U) {
+            atomic_store_explicit(&worker->last_safepoint_ns,
+                                  now_ns,
+                                  memory_order_release);
+        }
+        /* Publish only after task state, shard association, and timestamps. */
+        llam_worker_publish_active_g(worker, task);
     }
     llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNING, LLAM_WAIT_NONE);
     return run_timing ? now_ns : 0U;
@@ -686,12 +750,14 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
 static bool llam_shard_has_local_work(llam_shard_t *shard) {
     bool has_work;
 
+    pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
     has_work = shard->inject_q.depth > 0U || shard->hot_q.depth > 0U || llam_norm_queue_depth(shard) > 0U ||
                shard->timers != NULL ||
-               atomic_load_explicit(&shard->current, memory_order_acquire) != NULL ||
+               llam_shard_load_lease_current(shard) != NULL ||
                shard->opaque_redirect_active;
     pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
     return has_work;
 }
 
@@ -728,24 +794,22 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
         shard != NULL && shard->runtime != NULL && shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO;
 
     if (run_ns == 0U && !watchdog_may_sample_current) {
+        pthread_mutex_lock(&shard->lock);
         if (worker != NULL && worker->compat_shard == shard) {
-            atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+            llam_worker_clear_active_g(worker);
         }
-        atomic_store_explicit(&shard->current, NULL, memory_order_release);
+        pthread_mutex_unlock(&shard->lock);
         g_llam_tls_task = NULL;
         return;
     }
 
     /*
-     * Auto-preemption watchdog samples shard->current while holding shard->lock.
-     * Even when run timing is disabled, clear current under the same lock so a
-     * completed task cannot be recycled while the watchdog is still inspecting it.
+     * The auto-preemption watchdog samples the lease owner's active-G while
+     * holding shard->lock.  Even when run timing is disabled, clear active-G
+     * under the same lock so a completed task cannot be recycled while the
+     * watchdog is still inspecting it.
      */
     pthread_mutex_lock(&shard->lock);
-    if (worker != NULL && worker->compat_shard == shard) {
-        atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
-    }
-    atomic_store_explicit(&shard->current, NULL, memory_order_release);
     if (task != NULL && run_ns != 0U) {
         uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
 
@@ -766,6 +830,9 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     }
     if (run_ns != 0U) {
         shard->metrics.total_run_ns += run_ns;
+    }
+    if (worker != NULL && worker->compat_shard == shard) {
+        llam_worker_clear_active_g(worker);
     }
     pthread_mutex_unlock(&shard->lock);
     g_llam_tls_task = NULL;
@@ -838,13 +905,17 @@ static void llam_opaque_helper_wait_for_signal_locked(llam_shard_t *shard) {
     atomic_store_explicit(&shard->opaque_helper_opaque_wait, 1U, memory_order_release);
     if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
         atomic_store_explicit(&shard->opaque_helper_opaque_wait, 0U, memory_order_release);
-        shard->last_idle_wake_ns = llam_now_ns();
+        atomic_store_explicit(&g_llam_tls_worker->last_idle_wake_ns,
+                              llam_now_ns(),
+                              memory_order_release);
         return;
     }
     llam_opaque_wake_wait(shard);
     atomic_store_explicit(&shard->opaque_helper_opaque_wait, 0U, memory_order_release);
     if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
-        shard->last_idle_wake_ns = llam_now_ns();
+        atomic_store_explicit(&g_llam_tls_worker->last_idle_wake_ns,
+                              llam_now_ns(),
+                              memory_order_release);
     }
 }
 #endif
@@ -974,10 +1045,10 @@ void llam_scheduler_loop(llam_shard_t *shard) {
  * @brief Stop helper dispatch and publish its handback acknowledgement.
  *
  * The helper is in its scheduler context when this runs.  It first drops the
- * opaque lock, clears the legacy current publication under the shard lock, and
- * only then reacquires the opaque lock to complete the lease transition.  The
- * test gate is likewise outside both locks so it cannot hide a lock-order
- * violation in a focused transfer test.
+ * opaque lock, clears its worker-local active-G publication under the shard
+ * lock, and only then reacquires the opaque lock to complete the lease
+ * transition.  The test gate is likewise outside both locks so it cannot hide
+ * a lock-order violation in a focused transfer test.
  */
 static void llam_opaque_helper_complete_handoff(llam_shard_t *shard,
                                                 bool stopping) {
@@ -1003,10 +1074,7 @@ static void llam_opaque_helper_complete_handoff(llam_shard_t *shard,
 
     /* No helper task may remain published when the handback is acknowledged. */
     pthread_mutex_lock(&shard->lock);
-    atomic_store_explicit(&shard->opaque_helper_worker.active_g,
-                          NULL,
-                          memory_order_release);
-    atomic_store_explicit(&shard->current, NULL, memory_order_release);
+    llam_worker_clear_active_g(&shard->opaque_helper_worker);
     pthread_mutex_unlock(&shard->lock);
 
     if (sequence != 0U) {

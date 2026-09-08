@@ -48,6 +48,18 @@ extern _Thread_local llam_task_t *g_llam_tls_task;
 extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 
 /**
+ * @brief Check whether a worker slot is the execution slot for a shard.
+ *
+ * Active-G and its timestamps are worker-local.  This small identity check is
+ * intentionally independent of lease ownership; callers that need ownership
+ * truth use the coordinator while holding `opaque_lock`.
+ */
+static inline bool llam_worker_matches_shard(const llam_worker_t *worker,
+                                             const llam_shard_t *shard) {
+    return worker != NULL && shard != NULL && worker->compat_shard == shard;
+}
+
+/**
  * @brief Return the embedded lease coordinator while its lock is held.
  *
  * The suffix documents the ownership contract: callers must hold
@@ -100,8 +112,9 @@ static inline void llam_legacy_lease_assert_consistent_locked(const llam_shard_t
 /**
  * @brief Match the current worker/P TLS tuple to one descriptive worker role.
  *
- * This is a legacy-role observation only.  Scheduler ownership, current-task
- * authority, and all other runtime state remain on @c llam_shard_t.
+ * This is a legacy-role observation only.  Lease ownership is validated by the
+ * shard coordinator and current-task publication by the worker active-G; all
+ * queue/resource state remains on @c llam_shard_t.
  */
 static inline bool llam_tls_matches_worker_role(const llam_shard_t *shard,
                                                 const llam_worker_t *worker,

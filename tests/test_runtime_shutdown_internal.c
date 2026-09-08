@@ -4148,7 +4148,6 @@ static int exercise_dynamic_scaler_live_saturation_fails_closed(void) {
         shards[i].runtime = &runtime;
         shards[i].id = i;
         atomic_init(&shards[i].online, 1U);
-        atomic_init(&shards[i].current, NULL);
         atomic_init(&shards[i].norm_depth, 0U);
         atomic_init(&shards[i].timer_callbacks_active, 0U);
         atomic_init(&shards[i].live_tasks, i == 0U ? UINT_MAX : 0U);

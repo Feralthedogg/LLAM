@@ -223,6 +223,7 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
 int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_runtime_t *rt;
     llam_task_t *task = g_llam_tls_task;
+    llam_worker_t *worker = g_llam_tls_worker;
     llam_cancel_token_t *token;
     llam_block_job_t *job;
     llam_wait_node_t *node;
@@ -403,6 +404,12 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
                    LLAM_TASK_STATE_PARKED,
                    LLAM_WAIT_BLOCKING);
     if (llam_wait_node_should_park(node)) {
+        /* Retire execution publication before handing the task to a wait. */
+        if (worker != NULL && worker->compat_shard == g_llam_tls_shard) {
+            pthread_mutex_lock(&g_llam_tls_shard->lock);
+            llam_worker_clear_active_g(worker);
+            pthread_mutex_unlock(&g_llam_tls_shard->lock);
+        }
         llam_task_sample_live_stack(task);
         llam_switch_task_to_scheduler(task,
                                     g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
@@ -432,11 +439,11 @@ void *llam_call_blocking(llam_blocking_fn fn, void *arg) {
 
 /*
  * A destructive shutdown can win after a helper transfer has retired the
- * primary publication but before the helper owner is granted.  Restore the
- * running task and both legacy/current publications as one opaque-lock ->
- * shard-lock boundary so the failed enter remains an ordinary cancellation
- * rather than a partially parked task. Callers hold `shard->opaque_lock` while
- * invoking it.
+ * primary publication but before the helper owner is granted. Restore the
+ * running task and its worker-local active-G publication as one
+ * opaque-lock -> shard-lock boundary so the failed enter remains an ordinary
+ * cancellation rather than a partially parked task. Callers hold
+ * `shard->opaque_lock` while invoking it.
  */
 static void llam_restore_running_after_lease_abort_locked(llam_shard_t *shard,
                                                           llam_task_t *task,
@@ -445,12 +452,15 @@ static void llam_restore_running_after_lease_abort_locked(llam_shard_t *shard,
         return;
     }
     pthread_mutex_lock(&shard->lock);
-    if (worker != NULL && worker->compat_shard == shard) {
-        atomic_store_explicit(&worker->active_g, task, memory_order_release);
-    }
-    atomic_store_explicit(&shard->current, task, memory_order_release);
     task->state = LLAM_TASK_STATE_RUNNING;
     task->wait_reason = LLAM_WAIT_NONE;
+    if (worker != NULL && worker->compat_shard == shard) {
+        atomic_store_explicit(&worker->last_safepoint_ns,
+                              llam_now_ns(),
+                              memory_order_release);
+        /* Publish only after the restored task boundary is complete. */
+        llam_worker_publish_active_g(worker, task);
+    }
     llam_trace_shard(shard,
                      task,
                      LLAM_TRACE_STATE,
@@ -494,7 +504,11 @@ int llam_enter_blocking(void) {
     if (task == NULL || shard == NULL) {
         return 0;
     }
-    atomic_store_explicit(&shard->last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
+    if (worker != NULL && worker->compat_shard == shard) {
+        atomic_store_explicit(&worker->last_safepoint_ns,
+                              llam_now_ns(),
+                              memory_order_release);
+    }
 
     if (task->opaque_blocking_depth == 0U) {
         timing = llam_opaque_timing_enabled();
@@ -557,15 +571,14 @@ int llam_enter_blocking(void) {
         }
 
         if (helper_requested) {
-            /* Finish task/current cleanup before clearing the lease owner. */
+            /* Finish task/active-G cleanup before clearing the lease owner. */
             pthread_mutex_lock(&shard->opaque_lock);
             pthread_mutex_lock(&shard->lock);
             task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
             task->wait_reason = LLAM_WAIT_BLOCKING;
             if (worker != NULL && worker->compat_shard == shard) {
-                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+                llam_worker_clear_active_g(worker);
             }
-            atomic_store_explicit(&shard->current, NULL, memory_order_release);
             task_publication_cleared = true;
             llam_trace_shard(shard,
                            task,
@@ -684,9 +697,8 @@ int llam_enter_blocking(void) {
             task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
             task->wait_reason = LLAM_WAIT_BLOCKING;
             if (worker != NULL && worker->compat_shard == shard) {
-                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+                llam_worker_clear_active_g(worker);
             }
-            atomic_store_explicit(&shard->current, NULL, memory_order_release);
             task->opaque_uses_redirect = true;
             if (shard->opaque_redirect_depth == 1U) {
                 shard->metrics.opaque_redirect_activations += 1U;
@@ -783,7 +795,7 @@ int llam_leave_blocking(void) {
             /* Retire the primary's worker-local task before requesting ACK. */
             if (worker != NULL && worker->compat_shard == shard) {
                 pthread_mutex_lock(&shard->lock);
-                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+                llam_worker_clear_active_g(worker);
                 pthread_mutex_unlock(&shard->lock);
             }
             pthread_mutex_lock(&shard->opaque_lock);
@@ -859,7 +871,7 @@ int llam_leave_blocking(void) {
             /* A helper redirect must clear its local active task before ACK. */
             if (worker != NULL && worker->compat_shard == shard) {
                 pthread_mutex_lock(&shard->lock);
-                atomic_store_explicit(&worker->active_g, NULL, memory_order_release);
+                llam_worker_clear_active_g(worker);
                 pthread_mutex_unlock(&shard->lock);
             }
             pthread_mutex_lock(&shard->opaque_lock);
@@ -925,12 +937,15 @@ int llam_leave_blocking(void) {
         if (deactivate_redirect) {
             llam_deactivate_opaque_redirect_locked(shard);
         }
-        if (worker != NULL && worker->compat_shard == shard) {
-            atomic_store_explicit(&worker->active_g, task, memory_order_release);
-        }
-        atomic_store_explicit(&shard->current, task, memory_order_release);
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
+        if (worker != NULL && worker->compat_shard == shard) {
+            atomic_store_explicit(&worker->last_safepoint_ns,
+                                  timing && now_ns != 0U ? now_ns : llam_now_ns(),
+                                  memory_order_release);
+            /* Publish only after the restored task boundary is complete. */
+            llam_worker_publish_active_g(worker, task);
+        }
         llam_trace_shard(shard,
                        task,
                        LLAM_TRACE_STATE,
@@ -939,9 +954,6 @@ int llam_leave_blocking(void) {
                        LLAM_WAIT_BLOCKING);
         pthread_mutex_unlock(&shard->lock);
         (void)handback_acknowledged;
-        atomic_store_explicit(&shard->last_safepoint_ns,
-                              timing && now_ns != 0U ? now_ns : llam_now_ns(),
-                              memory_order_relaxed);
     }
     return 0;
 }

@@ -58,8 +58,8 @@ void llam_runtime_adjust_online_shards(llam_runtime_t *rt);
  * Shard merge/offline helpers.
  *
  * Dynamic downscaling is conservative: a shard is paused, its ownership is
- * migrated, and it is marked offline only after its runnable queues and current
- * task state are empty under lock.
+ * migrated, and it is marked offline only after its runnable queues and
+ * lease-owner active-G state are empty under `opaque_lock -> shard->lock`.
  */
 llam_shard_t *llam_runtime_pick_merge_target(llam_runtime_t *rt, llam_shard_t *source);
 void llam_runtime_set_steal_pause(llam_runtime_t *rt, bool active);

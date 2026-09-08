@@ -293,9 +293,17 @@ static void inspect_task(void *arg) {
 static void direct_yield_no_work_task(void *arg) {
     core_state_t *state = arg;
     llam_task_t *self = llam_current_task();
+    llam_worker_t *worker = g_llam_tls_worker;
 
     if (self == NULL) {
         task_fail(state, "direct yield current task missing", EINVAL);
+        return;
+    }
+    if (g_llam_tls_shard == NULL || worker == NULL ||
+        llam_worker_load_active_g(worker) != g_llam_tls_task) {
+        task_fail(state,
+                  "direct-yield task did not observe worker-local active-G",
+                  EINVAL);
         return;
     }
     /*
@@ -309,6 +317,12 @@ static void direct_yield_no_work_task(void *arg) {
     }
     if (strcmp(llam_task_state_name(self), "RUNNING") != 0) {
         task_fail(state, "failed direct yield mutated current task state", EINVAL);
+        return;
+    }
+    if (llam_worker_load_active_g(worker) != g_llam_tls_task) {
+        task_fail(state,
+                  "failed direct yield lost worker-local active-G",
+                  EINVAL);
         return;
     }
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);

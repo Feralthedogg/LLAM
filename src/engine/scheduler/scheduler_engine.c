@@ -30,6 +30,24 @@
 
 #include "runtime_internal.h"
 
+static uint64_t llam_worker_idle_wake_load(const llam_shard_t *shard) {
+    const llam_worker_t *worker = g_llam_tls_worker;
+
+    if (worker == NULL || worker->compat_shard != shard) {
+        return 0U;
+    }
+    return atomic_load_explicit(&worker->last_idle_wake_ns, memory_order_acquire);
+}
+
+static void llam_worker_idle_wake_store(const llam_shard_t *shard, uint64_t now_ns) {
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    if (worker == NULL || worker->compat_shard != shard) {
+        return;
+    }
+    atomic_store_explicit(&worker->last_idle_wake_ns, now_ns, memory_order_release);
+}
+
 /**
  * @brief Snapshot the shard's normal runnable queue depth.
  *
@@ -334,11 +352,15 @@ static bool llam_should_idle_spin(llam_shard_t *shard, int timeout_ms, uint64_t 
     if (timeout_ms == 0) {
         return false;
     }
-    if (shard->last_idle_wake_ns == 0U || now_ns < shard->last_idle_wake_ns) {
-        return llam_runtime_pressure_signal(rt);
-    }
+    {
+        uint64_t last_idle_wake_ns = llam_worker_idle_wake_load(shard);
 
-    since_last_wake_ns = now_ns - shard->last_idle_wake_ns;
+        if (last_idle_wake_ns == 0U || now_ns < last_idle_wake_ns) {
+            return llam_runtime_pressure_signal(rt);
+        }
+
+        since_last_wake_ns = now_ns - last_idle_wake_ns;
+    }
     // Recent wakeups usually mean a short sleep would bounce immediately.
     if (since_last_wake_ns <= rt->idle_spin_ns * 4U) {
         return true;
@@ -379,7 +401,7 @@ static bool llam_idle_spin(llam_shard_t *shard, int timeout_ms) {
             shard->metrics.idle_spin_hits += 1U;
             shard->metrics.idle_spin_ns += done_ns - start_ns;
             pthread_mutex_unlock(&shard->lock);
-            shard->last_idle_wake_ns = done_ns;
+            llam_worker_idle_wake_store(shard, done_ns);
             return true;
         }
 
@@ -416,7 +438,7 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
     struct timespec *ts_ptr = NULL;
 
     if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
-        shard->last_idle_wake_ns = llam_now_ns();
+        llam_worker_idle_wake_store(shard, llam_now_ns());
         return;
     }
     if (wait_timeout_ms == 0) {
@@ -433,7 +455,7 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
 
         if (rc == 0) {
             atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
-            shard->last_idle_wake_ns = llam_now_ns();
+            llam_worker_idle_wake_store(shard, llam_now_ns());
             return;
         }
         if (errno == EINTR) {
@@ -441,7 +463,7 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
         }
         if (errno == EAGAIN) {
             atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
-            shard->last_idle_wake_ns = llam_now_ns();
+            llam_worker_idle_wake_store(shard, llam_now_ns());
         }
         return;
     }
@@ -500,7 +522,7 @@ void llam_idle_wait(llam_shard_t *shard) {
         }
         if (rc > 0) {
             llam_drain_shard_wake(shard);
-            shard->last_idle_wake_ns = llam_now_ns();
+            llam_worker_idle_wake_store(shard, llam_now_ns());
         }
         return;
     }

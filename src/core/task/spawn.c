@@ -391,6 +391,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
             llam_runtime_note_online_shards(rt,
                                           atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
         }
+        /* Newly spawned work is queued; only dispatch publishes worker active-G. */
         task->state = LLAM_TASK_STATE_RUNNABLE;
         if (target->opaque_redirect_active) {
             target->metrics.migrations += 1U;

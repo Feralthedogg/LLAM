@@ -1302,6 +1302,10 @@ void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
     task->wait_reason = reason;
     shard->metrics.parks += 1U;
     llam_trace_shard(shard, task, kind, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, reason);
+    /* Retire the worker publication before the task enters a wait. */
+    pthread_mutex_lock(&shard->lock);
+    llam_worker_clear_active_g(g_llam_tls_worker);
+    pthread_mutex_unlock(&shard->lock);
     llam_task_sample_live_stack(task);
     // The scheduler resumes after this context switch and will later reinject
     // the task when its wait completes.

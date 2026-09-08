@@ -237,7 +237,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             if (now_ns != 0U) {
                 llam_runtime_record_autotune_wake_latency(target, 0U);
             }
-            atomic_store_explicit(&target->current, task, memory_order_release);
+            llam_worker_publish_active_g(g_llam_tls_worker, task);
             g_llam_tls_task = task;
             target->metrics.wakes += 1U;
             if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
@@ -292,7 +292,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             llam_runtime_record_autotune_wake_latency(target, 0U);
         }
     }
-    atomic_store_explicit(&target->current, task, memory_order_release);
+    llam_worker_publish_active_g(g_llam_tls_worker, task);
     g_llam_tls_task = task;
     target->metrics.wakes += 1U;
     if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {

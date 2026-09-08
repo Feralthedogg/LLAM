@@ -94,20 +94,14 @@ or safepoints.
 
 ### Phase 0 Worker Identity Boundary
 
-Phase 0 keeps the shard as the scheduling authority. In particular,
-`shard->current`, `shard->preempt_thread`, and the shard's P-like resources
-remain authoritative for scheduling decisions and resource ownership.
-Processor and worker cells are descriptive identity scaffolding: they record
-the associated shard, processor, role, and incarnation, but they do not form
-an executor lease or a second current/watchdog authority. The primary worker
-and opaque helper worker each receive a distinct slice of the shard's combined
-alternate-signal-stack mapping; each owning thread installs, restores, and
-clears only its own slice.
-
-Phase 1A is the first phase allowed to introduce executor, current-worker, or
-worker-local watchdog authority. Until then, source audits reject those names,
-raw scheduler-context role decisions outside the explicit debug-equivalence
-checks, and obsolete shard-level signal-stack accesses.
+Phase 0 kept the shard as the scheduling authority. Phase 1A adds the single
+legacy execution lease and makes the validated lease owner's worker-local
+`active_g` plus run/safepoint/idle timestamps authoritative for execution
+publication. The shard still owns `preempt_thread`, queues, timers, P-like
+resources, and public metrics; worker cells do not copy those resources. The
+primary worker and opaque helper worker each receive a distinct slice of the
+shard's combined alternate-signal-stack mapping; each owning thread installs,
+restores, and clears only its own slice.
 
 ### Phase 1A lease transition boundary
 
@@ -119,28 +113,14 @@ and handback gates are called only after releasing scheduler locks, so focused
 tests can inspect each publication window without changing production
 behavior. The watchdog gate remains reserved for the later target migration.
 
-The following is the complete Phase 0 ownership inventory for the fields that
-Phase 1A will migrate. Line numbers are intentionally omitted so the inventory
-remains useful across mechanical edits; function names identify each access.
+The Phase 1A execution-publication inventory is intentionally worker-local:
+`scheduler.c`, `blocking_api.c`, `yield_join_sleep.c`, `reinject.c`,
+`wait_tracking.c`, and task-exit paths publish or clear `worker->active_g` only
+after state and timestamp preparation. `core_queue.c`, watchdog merge/probe/
+scale paths, and `debug.c` inspect the validated lease owner's active-G through
+`llam_shard_load_lease_current` while holding `opaque_lock` before
+`shard->lock`; no shard-level current field remains.
 
-* `shard->current`: `init.c` initializes the atomic; `scheduler.c`
-  (`llam_set_task_running`, `llam_clear_current_task`, and
-  `llam_shard_has_local_work`) publishes, clears, or reads it;
-  `blocking_api.c` (`llam_enter_blocking`, `llam_leave_blocking`) clears and
-  republishes it; `yield_join_sleep.c`
-  (`llam_yield_to_local_runnable_unlocked`, the portable locked branch of
-  `llam_yield_to_local_runnable`, and both direct-handoff branches of
-  `llam_join_try_local_handoff`) writes direct-handoff successors;
-  `reinject.c` (`llam_reinject_task_on_shard_and_yield_current`) writes the
-  direct wake successor; `core_queue.c` (`llam_snapshot_shard_load`) reads it;
-  `watchdog_probe.c` (`llam_watchdog_check_shard`,
-  `llam_runtime_has_runnable_work`, and
-  `llam_watchdog_snapshot_shard_load`), `watchdog_merge.c`
-  (`llam_shard_can_offline_locked` and `llam_shard_can_start_merge_locked`),
-  and `watchdog_scale.c` (the offline diagnostic) read it; `debug.c`
-  (`llam_dump_runtime_state`) reads it in both the busy-lock and normal dump
-  paths; the test-hook snapshot reads the coordinator while holding
-  `opaque_lock` before `shard->lock`.
 * `shard->preempt_thread`: `scheduler.c`
   (`llam_shard_publish_preempt_thread`) writes the mutable watchdog target at
   primary entry and helper activation/idle/exit; `watchdog_probe.c`

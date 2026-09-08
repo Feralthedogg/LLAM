@@ -168,15 +168,17 @@ bool llam_runtime_pressure_signal(llam_runtime_t *rt) {
 unsigned llam_snapshot_shard_load(llam_shard_t *shard) {
     unsigned load;
 
+    pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
     load = shard->inject_q.depth + shard->hot_q.depth + llam_norm_queue_depth(shard);
-    if (atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+    if (llam_shard_load_lease_current(shard) != NULL) {
         load += 1U;
     }
     if (shard->opaque_redirect_active) {
         load += LLAM_INJECT_QUEUE_CAP;
     }
     pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
     return load;
 }
 

@@ -100,6 +100,10 @@ void llam_task_exit_internal(void) {
     task->wait_reason = LLAM_WAIT_NONE;
     atomic_store_explicit(&task->completed, 1U, memory_order_release);
     pthread_mutex_unlock(&task->lock);
+    /* Clear execution publication before releasing any task scan references. */
+    pthread_mutex_lock(&g_llam_tls_shard->lock);
+    llam_worker_clear_active_g(g_llam_tls_worker);
+    pthread_mutex_unlock(&g_llam_tls_shard->lock);
     llam_trace_shard(g_llam_tls_shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_DEAD, LLAM_WAIT_NONE);
     llam_reinject_join_waiters(rt, task);
 
@@ -135,7 +139,9 @@ void llam_task_bootstrap(llam_task_t *task) {
     rt = task->owner_runtime;
     llam_task_restore_errno(task);
     if (rt->run_timing_enabled != 0U || rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {
-        atomic_store_explicit(&g_llam_tls_shard->last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
+        atomic_store_explicit(&g_llam_tls_worker->last_safepoint_ns,
+                              llam_now_ns(),
+                              memory_order_release);
     }
     task->entry(task->arg);
     llam_task_exit_internal();

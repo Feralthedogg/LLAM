@@ -44,6 +44,22 @@
 
 #define LLAM_DIRECT_YIELD_HANDOFF_AUTO 3
 
+static void llam_publish_direct_active_g(llam_shard_t *shard,
+                                         llam_task_t *task,
+                                         uint64_t now_ns) {
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    if (!llam_worker_matches_shard(worker, shard)) {
+        return;
+    }
+    if (shard->runtime != NULL && shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO) {
+        atomic_store_explicit(&worker->last_safepoint_ns,
+                              now_ns != 0U ? now_ns : llam_now_ns(),
+                              memory_order_release);
+    }
+    llam_worker_publish_active_g(worker, task);
+}
+
 typedef enum llam_yield_direct_fail {
     LLAM_YIELD_DIRECT_FAIL_NONE = 0,
     LLAM_YIELD_DIRECT_FAIL_CONTEXT,
@@ -283,7 +299,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         next->last_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
-    atomic_store_explicit(&shard->current, next, memory_order_release);
+    llam_publish_direct_active_g(shard, next, 0U);
     g_llam_tls_task = next;
 
     shard->metrics.yields += 1U;
@@ -367,6 +383,7 @@ void llam_yield(void) {
 
     pthread_mutex_lock(&shard->lock);
     (void)llam_norm_queue_push_yield_locked(shard, task);
+    llam_worker_clear_active_g(g_llam_tls_worker);
     shard->metrics.yields += 1U;
     llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&shard->lock);
@@ -471,7 +488,7 @@ bool llam_yield_to_local_runnable(void) {
         next->last_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
-    atomic_store_explicit(&shard->current, next, memory_order_release);
+    llam_publish_direct_active_g(shard, next, 0U);
     g_llam_tls_task = next;
 
     shard->metrics.yields += 1U;
@@ -548,7 +565,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         next->last_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
-    atomic_store_explicit(&shard->current, next, memory_order_release);
+    llam_publish_direct_active_g(shard, next, 0U);
     g_llam_tls_task = next;
 
     shard->metrics.ctx_switches += 1U;
@@ -594,7 +611,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     next->wait_reason = LLAM_WAIT_NONE;
     atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
     next->last_started_ns = 0U;
-    atomic_store_explicit(&shard->current, next, memory_order_release);
+    llam_publish_direct_active_g(shard, next, 0U);
     g_llam_tls_task = next;
 
     shard->metrics.ctx_switches += 1U;

@@ -88,15 +88,21 @@ static bool llam_watchdog_preempt_pressure_locked(llam_shard_t *shard) {
  */
 void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
     llam_task_t *current;
+    llam_worker_t *owner;
     llam_runtime_t *rt = shard != NULL ? shard->runtime : NULL;
 
     if (rt == NULL || rt->preempt_mode < LLAM_PREEMPT_AUTO) {
         return;
     }
+    pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
-    current = atomic_load_explicit(&shard->current, memory_order_acquire);
+    owner = shard->legacy_lease.owner;
+    current = llam_shard_load_lease_current(shard);
     if (current != NULL) {
-        uint64_t last_safepoint = atomic_load_explicit(&shard->last_safepoint_ns, memory_order_relaxed);
+        uint64_t last_safepoint = owner != NULL
+                                      ? atomic_load_explicit(&owner->last_safepoint_ns,
+                                                             memory_order_acquire)
+                                      : 0U;
         uint64_t slice_ns = rt->preempt_quantum_ns != 0U
                                 ? rt->preempt_quantum_ns
                                 : llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class, memory_order_acquire));
@@ -105,6 +111,7 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
             current->opaque_blocking_depth > 0U ||
             current->state == LLAM_TASK_STATE_BLOCKED_OPAQUE) {
             pthread_mutex_unlock(&shard->lock);
+            pthread_mutex_unlock(&shard->opaque_lock);
             return;
         }
 
@@ -115,6 +122,7 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
             if (!llam_watchdog_preempt_pressure_locked(shard)) {
                 shard->metrics.preempt_suppressed += 1U;
                 pthread_mutex_unlock(&shard->lock);
+                pthread_mutex_unlock(&shard->opaque_lock);
                 return;
             }
             if (atomic_exchange(&current->preempt_requested, 1U) == 0U) {
@@ -134,6 +142,7 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
         }
     }
     pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
 }
 
 /**
@@ -184,10 +193,12 @@ bool llam_runtime_has_runnable_work(llam_runtime_t *rt) {
     for (i = 0; i < rt->active_shards; ++i) {
         bool has_work;
 
+        pthread_mutex_lock(&rt->shards[i].opaque_lock);
         pthread_mutex_lock(&rt->shards[i].lock);
         has_work = rt->shards[i].inject_q.depth > 0U || rt->shards[i].hot_q.depth > 0U || llam_norm_queue_depth(&rt->shards[i]) > 0U ||
-                   atomic_load_explicit(&rt->shards[i].current, memory_order_acquire) != NULL;
+                   llam_shard_load_lease_current(&rt->shards[i]) != NULL;
         pthread_mutex_unlock(&rt->shards[i].lock);
+        pthread_mutex_unlock(&rt->shards[i].opaque_lock);
         if (has_work) {
             return true;
         }
@@ -309,9 +320,10 @@ unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard) {
         return UINT_MAX;
     }
 
+    pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
     load = shard->inject_q.depth + shard->hot_q.depth + llam_norm_queue_depth(shard);
-    if (atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+    if (llam_shard_load_lease_current(shard) != NULL) {
         load += 1U;
     }
     if (shard->timers != NULL) {
@@ -321,5 +333,6 @@ unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard) {
         load += LLAM_INJECT_QUEUE_CAP;
     }
     pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
     return load;
 }

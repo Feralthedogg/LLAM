@@ -103,7 +103,9 @@ void llam_task_safepoint(void) {
         // Full safepoints do all diagnostic/reclamation work every time.
         llam_task_sample_live_stack(task);
         now_ns = llam_now_ns();
-        atomic_store_explicit(&shard->last_safepoint_ns, now_ns, memory_order_relaxed);
+        atomic_store_explicit(&g_llam_tls_worker->last_safepoint_ns,
+                              now_ns,
+                              memory_order_release);
         llam_allocator_quiescent(shard);
     } else {
         unsigned clock_period = rt->safepoint_clock_period;
@@ -114,7 +116,9 @@ void llam_task_safepoint(void) {
         if (task->safepoint_tick >= clock_period) {
             task->safepoint_tick = 0U;
             now_ns = llam_now_ns();
-            atomic_store_explicit(&shard->last_safepoint_ns, now_ns, memory_order_relaxed);
+            atomic_store_explicit(&g_llam_tls_worker->last_safepoint_ns,
+                                  now_ns,
+                                  memory_order_release);
         }
     }
 

@@ -934,7 +934,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             }
             rt->shards[i].timer_heap_cap = timer_heap_prewarm;
         }
-        atomic_init(&rt->shards[i].current, NULL);
         atomic_init(&rt->shards[i].opaque_helper_active_hint, 0U);
 #if defined(__linux__)
         atomic_init(&rt->shards[i].opaque_helper_opaque_wait, 0U);
@@ -1095,8 +1094,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                 LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
         }
 #endif
-        atomic_store_explicit(&rt->shards[i].last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
-        atomic_store(&rt->shards[i].last_run_started_ns, 0U);
     }
     llam_runtime_prewarm_task_allocators(rt);
 

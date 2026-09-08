@@ -340,9 +340,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 atomic_store_explicit(&rt->shards[i].primary_worker.binding_incarnation,
                                       0U,
                                       memory_order_release);
-                atomic_store_explicit(&rt->shards[i].primary_worker.active_g,
-                                      NULL,
-                                      memory_order_release);
+                llam_worker_clear_active_g(&rt->shards[i].primary_worker);
                 atomic_store_explicit(&rt->shards[i].primary_worker.last_run_started_ns,
                                       0U,
                                       memory_order_release);
@@ -361,9 +359,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 atomic_store_explicit(&rt->shards[i].opaque_helper_worker.binding_incarnation,
                                       0U,
                                       memory_order_release);
-                atomic_store_explicit(&rt->shards[i].opaque_helper_worker.active_g,
-                                      NULL,
-                                      memory_order_release);
+                llam_worker_clear_active_g(&rt->shards[i].opaque_helper_worker);
                 atomic_store_explicit(&rt->shards[i].opaque_helper_worker.last_run_started_ns,
                                       0U,
                                       memory_order_release);
@@ -535,8 +531,8 @@ static void llam_runtime_request_destroy_stop(llam_runtime_t *rt) {
 /**
  * @brief Wait for one opaque helper to publish its exit boundary.
  *
- * The helper publishes this acknowledgement only after active-G/current
- * cleanup and lease handback have completed.  The wait intentionally performs
+ * The helper publishes this acknowledgement only after active-G cleanup and
+ * lease handback have completed.  The wait intentionally performs
  * no scheduler-lock acquisition so a helper can finish the boundary while
  * teardown is waiting.
  */

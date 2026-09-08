@@ -563,9 +563,12 @@ void llam_dump_runtime_state(int fd) {
         unsigned begin;
         unsigned j;
         llam_task_t *current;
+        llam_worker_t *owner;
+        uint64_t last_safepoint_ns = 0U;
+        uint64_t last_run_started_ns = 0U;
 
-        if (pthread_mutex_trylock(&shard->lock) != 0) {
-            current = atomic_load_explicit(&shard->current, memory_order_acquire);
+        if (pthread_mutex_trylock(&shard->opaque_lock) != 0) {
+            current = NULL;
             dprintf(fd,
                     "  shard=%u lock=busy online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu\n",
                     shard->id,
@@ -577,14 +580,39 @@ void llam_dump_runtime_state(int fd) {
                     atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
                     atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
                     atomic_load_explicit(&shard->event_pending, memory_order_acquire),
-                    (unsigned long long)atomic_load_explicit(&shard->last_safepoint_ns, memory_order_acquire),
-                    (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire));
+                    0ULL,
+                    0ULL);
+            continue;
+        }
+        if (pthread_mutex_trylock(&shard->lock) != 0) {
+            pthread_mutex_unlock(&shard->opaque_lock);
+            current = NULL;
+            dprintf(fd,
+                    "  shard=%u lock=busy online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu\n",
+                    shard->id,
+                    llam_shard_is_online(shard) ? 1U : 0U,
+                    shard->cpu_id,
+                    shard->node_index,
+                    shard->io_node_index,
+                    current != NULL ? (unsigned long long)current->id : 0ULL,
+                    atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
+                    atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
+                    atomic_load_explicit(&shard->event_pending, memory_order_acquire),
+                    0ULL,
+                    0ULL);
             continue;
         }
         trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
         trace_count = trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : trace_head;
         begin = trace_head > LLAM_TRACE_RING_CAP ? trace_head - LLAM_TRACE_RING_CAP : 0U;
-        current = atomic_load_explicit(&shard->current, memory_order_acquire);
+        owner = shard->legacy_lease.owner;
+        current = llam_shard_load_lease_current(shard);
+        if (owner != NULL) {
+            last_safepoint_ns = atomic_load_explicit(&owner->last_safepoint_ns,
+                                                     memory_order_acquire);
+            last_run_started_ns = atomic_load_explicit(&owner->last_run_started_ns,
+                                                       memory_order_acquire);
+        }
         dprintf(fd,
                 "  shard=%u online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu opaque_redirect=%u opaque_helper(started=%u ready=%u active=%u) opaque_depth=%u/%u redirect_depth=%u/%u queues(inject=%u hot=%u norm=%u timers=%u)\n",
                 shard->id,
@@ -596,8 +624,8 @@ void llam_dump_runtime_state(int fd) {
                 atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
                 atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
                 atomic_load_explicit(&shard->event_pending, memory_order_acquire),
-                (unsigned long long)atomic_load_explicit(&shard->last_safepoint_ns, memory_order_acquire),
-                (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire),
+                (unsigned long long)last_safepoint_ns,
+                (unsigned long long)last_run_started_ns,
                 shard->opaque_redirect_active ? 1U : 0U,
                 shard->opaque_helper_thread_started ? 1U : 0U,
                 shard->opaque_helper_ready ? 1U : 0U,
@@ -748,6 +776,7 @@ void llam_dump_runtime_state(int fd) {
                     llam_wait_reason_name((llam_wait_reason_t)reason));
         }
         pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
     }
 
     dprintf(fd, "tasks:\n");

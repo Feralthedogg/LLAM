@@ -193,7 +193,10 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
 
         first = shard->id < target->id ? shard : target;
         second = first == shard ? target : shard;
-        // Lock in shard-id order to avoid ABBA deadlocks with another merge.
+        // Lock in shard-id order to avoid ABBA deadlocks with another merge;
+        // each lease lock precedes its shard lock.
+        pthread_mutex_lock(&first->opaque_lock);
+        pthread_mutex_lock(&second->opaque_lock);
         pthread_mutex_lock(&first->lock);
         pthread_mutex_lock(&second->lock);
 
@@ -203,6 +206,8 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
             blocked_reason = "locked_start_state";
             pthread_mutex_unlock(&second->lock);
             pthread_mutex_unlock(&first->lock);
+            pthread_mutex_unlock(&second->opaque_lock);
+            pthread_mutex_unlock(&first->opaque_lock);
             goto release_pause;
         }
 
@@ -212,6 +217,8 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
             blocked_reason = "merge_or_offline_state";
             pthread_mutex_unlock(&second->lock);
             pthread_mutex_unlock(&first->lock);
+            pthread_mutex_unlock(&second->opaque_lock);
+            pthread_mutex_unlock(&first->opaque_lock);
             goto release_pause;
         }
 
@@ -222,6 +229,8 @@ static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
         kick_target = inflight_migrated > 0U || io_wait_migrated > 0U || runnable_migrated > 0U || migrated > 0U;
         pthread_mutex_unlock(&second->lock);
         pthread_mutex_unlock(&first->lock);
+        pthread_mutex_unlock(&second->opaque_lock);
+        pthread_mutex_unlock(&first->opaque_lock);
 
         if (offlined) {
             llam_rehome_parked_waiters(rt, shard, target, &parked_migrated);
@@ -239,16 +248,18 @@ release_pause:
             unsigned has_current;
             unsigned has_timers;
 
+            pthread_mutex_lock(&shard->opaque_lock);
             pthread_mutex_lock(&shard->lock);
             norm_depth = llam_norm_queue_depth(shard);
             hot_depth = shard->hot_q.depth;
             inject_depth = shard->inject_q.depth;
-            has_current = atomic_load_explicit(&shard->current, memory_order_acquire) != NULL ? 1U : 0U;
+            has_current = llam_shard_load_lease_current(shard) != NULL ? 1U : 0U;
             has_timers = (shard->timers != NULL ||
                           atomic_load_explicit(&shard->timer_callbacks_active, memory_order_acquire) != 0U)
                              ? 1U
                              : 0U;
             pthread_mutex_unlock(&shard->lock);
+            pthread_mutex_unlock(&shard->opaque_lock);
             fprintf(stderr,
                     "[dynamic] offline blocked shard=%u target=%u reason=%s online=%u live=%u active_io=%u norm=%u hot=%u inject=%u current=%u timers=%u\n",
                     shard->id,

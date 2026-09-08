@@ -82,6 +82,21 @@ bool llam_legacy_lease_rollback_helper_locked(llam_shard_t *shard,
                                               uint64_t incarnation,
                                               uint64_t sequence);
 bool llam_worker_binding_live(const llam_worker_t *worker, uint64_t incarnation);
+/*
+ * Worker-local execution publication.  Active-G is the sole current-task
+ * authority; callers publish only after task state, shard association, and
+ * timestamps are complete.
+ */
+void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task);
+llam_task_t *llam_worker_load_active_g(const llam_worker_t *worker);
+void llam_worker_clear_active_g(llam_worker_t *worker);
+/*
+ * Return the validated lease owner's active-G.  The caller must hold
+ * `shard->opaque_lock` and then `shard->lock`; the shard lock keeps the task
+ * object alive while the returned pointer is inspected.  The pointer must not
+ * be retained after the shard lock is released.
+ */
+llam_task_t *llam_shard_load_lease_current(llam_shard_t *shard);
 void llam_scheduler_bind_identity(llam_shard_t *shard,
                                   llam_worker_t *worker,
                                   llam_ctx_t *ctx);
