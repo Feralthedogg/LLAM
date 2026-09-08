@@ -784,6 +784,18 @@ if(Python3_FOUND)
                 --root ${CMAKE_CURRENT_SOURCE_DIR}
     )
     add_test(
+        NAME audit_production_test_hooks
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_production_test_hooks.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                $<TARGET_FILE:llam_runtime>
+                $<TARGET_FILE:llam_runtime_shared>
+    )
+    # POSIX builds use nm/llvm-nm.  A platform without either tool reports a
+    # deliberate CTest skip (77), while normal Debug/Release builds audit both
+    # production static and shared artifacts.
+    set_tests_properties(audit_production_test_hooks PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(
         NAME test_bench_lcwe_model
         COMMAND ${CMAKE_COMMAND} -E env
                 "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"

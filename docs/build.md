@@ -47,6 +47,16 @@ cmake --build build -j4
 ctest --test-dir build --output-on-failure
 ```
 
+When CMake finds Python 3, CTest also registers the Phase 0/Phase 1A source
+audits, shared-export audit, and `audit_production_test_hooks` for both
+production static/shared artifacts.  A configure with `-DPython3_ROOT_DIR=...`
+or a toolchain that cannot find Python omits those Python-backed tests; release
+validation must therefore require Python explicitly.  The production-hook
+audit uses `nm -a` (or `llvm-nm`), rejects uppercase externally defined
+`llam_*_test_*` symbols, and permits documented lowercase local fallback
+symbols.  If neither symbol tool exists, CTest marks that audit skipped (77),
+which is a platform limitation rather than a clean symbol result.
+
 Install to a local prefix:
 
 ```sh

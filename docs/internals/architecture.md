@@ -192,9 +192,26 @@ and proof markers in unreachable branches fail closed.  Trylock/timedlock
 success is treated as held for ordering purposes.  Macro expansion and
 compiler-specific control-flow semantics are not inferred; any future source
 shape that needs those semantics must add an explicit audited helper or a
-dedicated checker update.  This limitation does not expand Phase 1A's scope:
+dedicated checker update.  The watchdog proof is allowlisted to
+`llam_watchdog_check_shard`: its original and validated owner/incarnation/epoch
+and native-thread outputs, positive conjunction, active-G validation, and
+lock-held signal path must remain visible.  ACK matchers likewise require the
+actual request bit/generation and lease/worker tuple fields, while publication
+requires the tuple before every nonzero ACK.  This limitation does not expand
+Phase 1A's scope:
 P-resource migration remains Phase 1B, foreign detach/reattach remains Phase 2,
 and language wrappers remain excluded.
+
+The Make production-hook audit uses `nm -a` and its broad
+`llam_*_test_*` policy, including local symbols.  CMake's
+`audit_production_test_hooks` CTest uses `nm -a` as well, but has an explicit
+local-fallback policy: lowercase/local symbol types (the no-op test-hook
+fallbacks retained in unoptimized Debug static/shared artifacts) are allowed;
+only uppercase externally defined test-hook symbols are disallowed.  The
+existing `llam_broker_client_self_test_*` production self-test symbols remain
+the sole named exception.  CMake registers this audit only when Python 3 is
+found and skips with code 77 when no `nm`/`llvm-nm` is available; the native
+source and Phase 0 checks remain required for normal supported builds.
 
 ## Wake Handoff Fusion
 
