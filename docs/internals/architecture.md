@@ -197,7 +197,13 @@ dedicated checker update.  The watchdog proof is allowlisted to
 and native-thread outputs, positive conjunction, active-G validation, and
 lock-held signal path must remain visible.  ACK matchers likewise require the
 actual request bit/generation and lease/worker tuple fields, while publication
-requires the tuple before every nonzero ACK.  This limitation does not expand
+requires direct tuple stores on every unconditional path before a nonzero ACK;
+the sampling caller set and helper calls are also explicit.  Owner proofs
+require a returning failure guard and direct claimant provenance, and indexed
+lock receivers/wrappers outside the canonical forms are rejected rather than
+inferred.  These are lexical canonical-allowlist rules, not a replacement for
+a C parser, preprocessor, CFG, or whole-program data-flow analysis.  This
+limitation does not expand
 Phase 1A's scope:
 P-resource migration remains Phase 1B, foreign detach/reattach remains Phase 2,
 and language wrappers remain excluded.

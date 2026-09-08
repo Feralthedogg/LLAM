@@ -1022,6 +1022,296 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "Phase 0 execution authority member: active_g",
         )
 
+    def test_rejects_watchdog_conditional_failure_return(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            "void llam_watchdog_check_shard(llam_shard_t *shard) {\n"
+            "    pthread_mutex_lock(&shard->opaque_lock);\n"
+            "    pthread_mutex_lock(&shard->lock);\n"
+            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &owner, &owner_incarnation, &epoch, &native_thread);\n"
+            "    if (!llam_legacy_lease_snapshot_watchdog_locked(shard, &validated_owner, &validated_incarnation, &validated_epoch, &validated_native_thread) ||\n"
+            "        !llam_worker_binding_live(validated_owner, validated_incarnation) ||\n"
+            "        validated_owner != owner || validated_incarnation != owner_incarnation ||\n"
+            "        validated_epoch != epoch || pthread_equal(validated_native_thread, native_thread) == 0 ||\n"
+            "        llam_worker_load_active_g(validated_owner) != current) {\n"
+            "        if (other) return;\n"
+            "    }\n"
+            "    pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL);\n"
+            "}\n",
+            "watchdog target outside lease lifetime",
+        )
+
+    def test_rejects_watchdog_goto_into_positive_guard(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            "void llam_watchdog_check_shard(llam_shard_t *shard) {\n"
+            "    pthread_mutex_lock(&shard->opaque_lock);\n"
+            "    pthread_mutex_lock(&shard->lock);\n"
+            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &owner, &owner_incarnation, &epoch, &native_thread);\n"
+            "    goto signal;\n"
+            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &validated_owner, &validated_incarnation, &validated_epoch, &validated_native_thread);\n"
+            "    if (validated_owner == owner && validated_incarnation == owner_incarnation &&\n"
+            "        validated_epoch == epoch && pthread_equal(validated_native_thread, native_thread) &&\n"
+            "        llam_worker_load_active_g(validated_owner) == current &&\n"
+            "        llam_worker_binding_live(validated_owner, validated_incarnation)) {\n"
+            "signal:\n"
+            "        pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL);\n"
+            "    }\n"
+            "}\n",
+            "watchdog target outside lease lifetime",
+        )
+
+    def test_rejects_watchdog_snapshot_output_address_escape(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            "void llam_watchdog_check_shard(llam_shard_t *shard) {\n"
+            "    pthread_mutex_lock(&shard->opaque_lock);\n"
+            "    pthread_mutex_lock(&shard->lock);\n"
+            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &owner, &owner_incarnation, &epoch, &native_thread);\n"
+            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &validated_owner, &validated_incarnation, &validated_epoch, &validated_native_thread);\n"
+            "    pthread_t *slot = &validated_native_thread;\n"
+            "    *slot = attacker;\n"
+            "    if (validated_owner == owner && validated_incarnation == owner_incarnation &&\n"
+            "        validated_epoch == epoch && pthread_equal(validated_native_thread, native_thread) &&\n"
+            "        llam_worker_load_active_g(validated_owner) == current &&\n"
+            "        llam_worker_binding_live(validated_owner, validated_incarnation)) {\n"
+            "        pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL);\n"
+            "    }\n"
+            "}\n",
+            "watchdog target outside lease lifetime",
+        )
+
+    def test_rejects_watchdog_unbraced_conditional_snapshot(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            "void llam_watchdog_check_shard(llam_shard_t *shard) {\n"
+            "    pthread_mutex_lock(&shard->opaque_lock);\n"
+            "    pthread_mutex_lock(&shard->lock);\n"
+            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &owner, &owner_incarnation, &epoch, &native_thread);\n"
+            "    if (flag) llam_legacy_lease_snapshot_watchdog_locked(shard, &validated_owner, &validated_incarnation, &validated_epoch, &validated_native_thread);\n"
+            "    if (validated_owner == owner && validated_incarnation == owner_incarnation &&\n"
+            "        validated_epoch == epoch && pthread_equal(validated_native_thread, native_thread) &&\n"
+            "        llam_worker_load_active_g(validated_owner) == current &&\n"
+            "        llam_worker_binding_live(validated_owner, validated_incarnation)) {\n"
+            "        pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL);\n"
+            "    }\n"
+            "}\n",
+            "watchdog target outside lease lifetime",
+        )
+
+    def test_rejects_ack_tuple_field_routed_to_wrong_matcher_parameter(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_merge.c",
+            "bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard) {\n"
+            "    uint64_t request_sequence = 1U;\n"
+            "    uint64_t epoch_value = 1U;\n"
+            "    uint64_t worker_incarnation = atomic_load_explicit(&shard->merge_pause_ack_sequence, memory_order_acquire);\n"
+            "    return llam_shard_merge_pause_ack_matches_locked(shard, request_sequence, epoch_value, worker_incarnation);\n"
+            "}\n",
+            "unversioned pause acknowledgement",
+        )
+
+    def test_rejects_ack_request_alias_write_before_matcher(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_merge.c",
+            "bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard) {\n"
+            "    uint64_t request_sequence = atomic_load_explicit(&shard->merge_pause_request_sequence, memory_order_acquire);\n"
+            "    uint64_t epoch_value = atomic_load_explicit(&shard->merge_pause_ack_lease_epoch, memory_order_acquire);\n"
+            "    uint64_t worker_incarnation = atomic_load_explicit(&shard->merge_pause_ack_worker_incarnation, memory_order_acquire);\n"
+            "    uint64_t *slot = &request_sequence;\n"
+            "    *slot = attacker;\n"
+            "    return llam_shard_merge_pause_ack_matches_locked(shard, request_sequence, epoch_value, worker_incarnation);\n"
+            "}\n",
+            "unversioned pause acknowledgement",
+        )
+
+    def test_rejects_ack_publication_request_value_reassignment(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "void llam_scheduler_publish_merge_pause_ack_locked(llam_shard_t *shard) {\n"
+            "    request_sequence = attacker;\n"
+            "    atomic_store(&shard->merge_pause_ack_sequence, request_sequence);\n"
+            "    atomic_store(&shard->merge_pause_ack_lease_epoch, shard->legacy_lease.epoch);\n"
+            "    atomic_store(&shard->merge_pause_ack_worker_incarnation, worker_incarnation);\n"
+            "    atomic_store(&shard->merge_pause_ack, 1U);\n"
+            "}\n",
+            "unversioned pause acknowledgement",
+        )
+
+    def test_rejects_ack_unknown_sampling_helper_macro(self) -> None:
+        self.assert_error(
+            "src/engine/watchdog/watchdog_merge.c",
+            "bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard) {\n"
+            "    uint64_t request_sequence = 1U;\n"
+            "    uint64_t epoch_value = 1U;\n"
+            "    uint64_t worker_incarnation = 1U;\n"
+            "    (void)atomic_load(&shard->merge_pause_ack_sequence);\n"
+            "    return ACK_DECISION(shard, request_sequence, epoch_value, worker_incarnation);\n"
+            "}\n",
+            "unversioned pause acknowledgement",
+        )
+
+    def test_rejects_ack_matcher_with_wrong_steal_request_generation(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "bool llam_shard_steal_pause_ack_matches_locked(llam_shard_t *shard, uint64_t request, uint64_t epoch, uint64_t incarnation) {\n"
+            "    return llam_runtime_steal_pause_active(shard->runtime) &&\n"
+            "           atomic_load(&shard->runtime->steal_pause_request_sequence) == wrong &&\n"
+            "           atomic_load(&shard->steal_pause_ack) != 0U &&\n"
+            "           atomic_load(&shard->steal_pause_request_sequence) == request &&\n"
+            "           atomic_load(&shard->steal_pause_ack_sequence) == request &&\n"
+            "           atomic_load(&shard->steal_pause_ack_lease_epoch) == epoch &&\n"
+            "           atomic_load(&shard->steal_pause_ack_worker_incarnation) == incarnation;\n"
+            "}\n",
+            "unversioned pause acknowledgement",
+        )
+
+    def test_rejects_owner_marker_expressions_without_failure_guards(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "void llam_legacy_lease_grant_helper_locked(llam_shard_t *shard, llam_worker_t *helper) {\n"
+            "    llam_legacy_lease_t *lease = llam_shard_legacy_lease_locked(shard);\n"
+            "    (void)(lease->owner != NULL);\n"
+            "    (void)(lease->state != LLAM_LEASE_TRANSFER_TO_HELPER);\n"
+            "    (void)(lease->transfer_sequence != sequence);\n"
+            "    (void)(helper != &shard->opaque_helper_worker);\n"
+            "    (void)(helper->role != LLAM_WORKER_ROLE_OPAQUE_HELPER);\n"
+            "    (void)(helper->compat_shard != shard);\n"
+            "    (void)llam_worker_binding_live(helper, incarnation);\n"
+            "    lease->owner = helper;\n"
+            "}\n",
+            "ownerless lease grant",
+        )
+
+    def test_rejects_owner_lease_pointer_movement(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "void llam_legacy_lease_grant_helper_locked(llam_shard_t *shard, llam_worker_t *helper) {\n"
+            "    llam_legacy_lease_t *lease = llam_shard_legacy_lease_locked(shard);\n"
+            "    if (lease->owner != NULL || lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||\n"
+            "        lease->transfer_sequence != sequence || !llam_worker_binding_live(helper, incarnation)) return false;\n"
+            "    ++lease;\n"
+            "    lease->owner = helper;\n"
+            "}\n",
+            "ownerless lease grant",
+        )
+
+    def test_rejects_owner_slot_unary_or_compound_mutation(self) -> None:
+        for expression in ("(*slot)++;", "++(*slot);", "*slot += 1;"):
+            with self.subTest(expression=expression):
+                self.assert_error(
+                    "src/core/sched/scheduler.c",
+                    "void llam_legacy_lease_grant_helper_locked(llam_shard_t *shard, llam_worker_t *helper) {\n"
+                    "    llam_worker_t **slot = &shard->legacy_lease.owner;\n"
+                    "    if (shard->legacy_lease.owner != NULL || !llam_worker_binding_live(helper, incarnation)) return false;\n"
+                    f"    {expression}\n"
+                    "}\n",
+                    "ownerless lease grant",
+                )
+
+    def test_rejects_unrelated_designated_owner_initializer(self) -> None:
+        self.assert_error(
+            "src/core/sched/bad.c",
+            "void bad(llam_worker_t *worker) {\n"
+            "    llam_legacy_lease_t lease = { .owner = worker };\n"
+            "    (void)lease;\n"
+            "}\n",
+            "ownerless lease grant",
+        )
+
+    def test_rejects_owner_pointer_escape_after_direct_origin(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "void llam_legacy_lease_grant_helper_locked(llam_shard_t *shard, llam_worker_t *helper) {\n"
+            "    llam_legacy_lease_t *lease = llam_shard_legacy_lease_locked(shard);\n"
+            "    if (lease->owner != NULL || lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||\n"
+            "        lease->transfer_sequence != sequence || !llam_worker_binding_live(helper, incarnation)) return false;\n"
+            "    llam_legacy_lease_t **slot = &lease;\n"
+            "    *slot = attacker;\n"
+            "    lease->owner = helper;\n"
+            "}\n",
+            "ownerless lease grant",
+        )
+
+    def test_rejects_active_g_worker_address_escape(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "void llam_worker_publish_active_g(llam_worker_t *worker, llam_worker_t *other, llam_task_t *task) {\n"
+            "    llam_worker_t **slot = &worker;\n"
+            "    *slot = other;\n"
+            "    atomic_store_explicit(&worker->active_g, task, memory_order_release);\n"
+            "}\n",
+            "Phase 0 execution authority member: active_g",
+        )
+
+    def test_rejects_active_g_slot_writeback_without_direct_rebind(self) -> None:
+        self.assert_error(
+            "src/core/sched/scheduler.c",
+            "void llam_worker_publish_active_g(llam_worker_t *worker, llam_worker_t *other, llam_task_t *task) {\n"
+            "    llam_worker_t **slot;\n"
+            "    slot = &worker;\n"
+            "    *slot = other;\n"
+            "    atomic_store_explicit(&worker->active_g, task, memory_order_release);\n"
+            "}\n",
+            "Phase 0 execution authority member: active_g",
+        )
+
+    def test_rejects_generic_scheduler_lock_wrappers(self) -> None:
+        self.assert_error(
+            "src/core/sched/bad.c",
+            "void bad(llam_shard_t *shard) {\n"
+            "    lock_for_shard(shard);\n"
+            "    opaque_for_shard(shard);\n"
+            "}\n",
+            "opaque_lock must precede shard->lock",
+        )
+
+    def test_rejects_noncanonical_index_expression_lock_order(self) -> None:
+        for index in ("i + 0", "j + 0"):
+            with self.subTest(index=index):
+                self.assert_error(
+                    "src/core/sched/bad.c",
+                    "void bad(llam_runtime_t *rt) {\n"
+                    "    pthread_mutex_lock(&rt->shards[i].lock);\n"
+                    f"    pthread_mutex_lock(&rt->shards[{index}].opaque_lock);\n"
+                    "}\n",
+                    "opaque_lock must precede shard->lock",
+                )
+
+    def test_rejects_unordered_arbitrary_index_receivers(self) -> None:
+        self.assert_error(
+            "src/core/sched/bad.c",
+            "void bad(llam_runtime_t *rt, unsigned i, unsigned j) {\n"
+            "    pthread_mutex_lock(&rt->shards[i].lock);\n"
+            "    pthread_mutex_lock(&rt->shards[j].opaque_lock);\n"
+            "}\n",
+            "opaque_lock must precede shard->lock",
+        )
+
+    def test_production_hook_audit_rejects_external_definition(self) -> None:
+        from audit_production_test_hooks import audit, _nm_command
+
+        if _nm_command() is None:
+            self.skipTest("nm/llvm-nm unavailable")
+        with tempfile.TemporaryDirectory(prefix="llam-hook-audit-") as raw_root:
+            root = Path(raw_root)
+            source = root / "bad.c"
+            artifact = root / "bad.o"
+            source.write_text(
+                "void llam_scheduler_test_external(void) {}\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["cc", "-c", str(source), "-o", str(artifact)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode != 0:
+                self.skipTest(f"cc unavailable: {result.stderr}")
+            self.assertTrue(any("llam_scheduler_test_external" in v for v in audit((artifact,))))
+
     def test_production_hook_audit_covers_scheduler_test_hooks(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
