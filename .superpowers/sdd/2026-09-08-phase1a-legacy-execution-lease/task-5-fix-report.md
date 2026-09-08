@@ -52,4 +52,4 @@ and compiler metadata were not changed.
 
 ## Commit
 
-Pending final commit hash.
+Implementation commit: `bbb64ea` (`fix: close pause-boundary lease races`).
