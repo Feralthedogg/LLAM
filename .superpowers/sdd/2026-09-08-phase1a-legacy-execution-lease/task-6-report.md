@@ -2,99 +2,71 @@
 
 Status: complete for the Phase 1A integration boundary.
 
-Integration commit: `ea7fb79` (`test: enforce phase 1a lease boundaries`).
+Integration commits:
+
+* `ea7fb79` — initial Phase 1A boundary/build integration.
+* `018d920c8b393fbf19b04638162f084a367d4837` —
+  `fix: harden phase 1a boundary audit`.
+
+The follow-up hardening report is [boundary-fix-report.md](boundary-fix-report.md).
 
 ## Boundary audit
 
-The new `scripts/check_legacy_lease_boundary.py` delegates all existing Phase 0
-worker-identity checks to `check_worker_identity_boundary.py`.  The Phase 0
-scanner is otherwise unchanged.  Only these active-G references are allowed:
+The Phase 1A checker composes the unchanged Phase 0 worker-identity scanner
+with token-precise checks for the exact atomic `active_g` field/init/helper
+surfaces, versioned pause ACK tuple comparisons and publication order,
+lease-owner claimant/binding proof, watchdog snapshot/native-thread binding and
+lock lifetime, and all scheduler lock acquisition forms.  It rejects direct
+shard `current`/`preempt_thread` authority, copied processor resources,
+`owns_p`, owner aliases/slots, and unversioned ACK decisions.  The scanner
+walks only native C/H runtime sources; Rust, Python, JVM, .NET, and Go wrappers
+remain explicitly excluded.
 
-* the `active_g` member declaration inside `struct llam_worker`;
-* initialization of the embedded `primary_worker.active_g` and
-  `opaque_helper_worker.active_g` slots in `init.c`; and
-* atomic access inside `llam_worker_publish_active_g`,
-  `llam_worker_load_active_g`, and `llam_worker_clear_active_g` in
-  `scheduler.c`.
-
-The Phase 1A layer rejects direct shard `current`/`preempt_thread` authority,
-non-identity processor members and copied P resources, `owns_p`, unversioned
-merge/steal ACK reads or writes, watchdog target use without the lease snapshot
-and binding revalidation, reverse `shard->lock`/`opaque_lock` acquisition, and
-owner writes outside the validated lease transition helpers.  It scans only
-native C/H sources, so the explicitly excluded Rust, Python, JVM, .NET, and Go
-wrappers are not pulled into this phase's dependency or authority boundary.
-
-`scripts/test_legacy_lease_boundary.py` contains 13 fixture tests covering:
-
-* the three allowed active-G surfaces and rejection of active-G elsewhere;
-* direct and array-indexed second `shard->current` writers;
-* `processor->executor`, `worker->owns_p`, `worker->preempt_target`, and
-  `processor->current_g`;
-* processor queue/timer/allocator copies and copied-resource struct fields;
-* independent `shard->preempt_thread` reads and writes;
-* bare merge/steal pause ACK decisions and valid tuple-versioned publication/
-  matcher code;
-* watchdog native-thread/target reads and unvalidated `pthread_kill()` calls;
-* ownerless lease grants, including a guard that appears after the write; and
-* reverse scheduler lock order plus CLI repository failure reporting.
-
-The fixture test first produced the expected RED `ModuleNotFoundError` before
-the phase-aware checker existed.  After the checker and fixtures were added,
-the suite passed all 13 tests.
+The fixture suite now has 19 Phase 1A tests, including every reproduced false
+negative from the independent review: malformed active-G type/object/atomic
+surfaces, arbitrary or prematurely signalled watchdog targets, tautological
+or misbound ACK/watchdog equality, dead-branch and aliased ACKs, indirect
+owner writes, try/timed/aliased/reverse locks, a valid two-shard merge path,
+and the scheduler test-hook export regression.  The standalone Phase 0 suite
+remains 20/20.
 
 ## Build and registration
 
-Make now provides `test_legacy_lease_boundary` and
-`check_legacy_lease_boundary`, runs both from `make test`, and runs both in the
-ASan/UBSan and TSan recipes.  The Windows CTest regex includes both names.
-CMake/CTest registers both Python tests and keeps the existing Phase 0 unit
-test (`test_worker_identity_boundary`) intact; the old repository-level check
-is replaced by the phase-aware repository check so the full CTest matrix is
-green.  Generated Python caches are covered by `scripts/__pycache__` in
-`CLEAN_DIRS`; the scripts use temporary directories and leave no persistent
-fixture files.  Existing native and sanitizer test binaries remain in
-`CLEAN_FILES`.
+Make invokes both Phase 1A boundary checks from `test` and its ASan/UBSan and
+TSan recipes using `$(PYTHON)` consistently.  The production hook audit uses
+the broad `llam_*_test_*` policy with the known broker client self-test symbol
+family excluded, and the scheduler-hook fixture remains covered.  CMake/CTest
+retains the Python-conditional registration, now documented inline, and keeps
+the Phase 0 boundary test alongside the Phase 1A tests.
 
-The focused lease test received two test-only bounded failure returns for
-defensive `shard == NULL` branches, eliminating cppcheck's nullability
-warnings without changing runtime code or ABI.
+The architecture page records Phase 1A as completed and points future work to
+the Phase 1B P-resource field migration and Phase 2 foreign-detach boundary.
+Public headers and the exported ABI remain unchanged.
 
-## Verification evidence (Darwin arm64)
+## Verification evidence (Darwin arm64, 2026-09-09)
 
-* `make test`: passed, including the new boundary test/audit, all normal
-  runtime tests, no-owner tests, export audit, and production test-hook audit.
-* `make test-hardening`: completed after the focused-test nullability fix;
-  cppcheck, cargo-audit, ASan/UBSan, TSan, boundary tests, and the 2048/512
-  runtime fuzz matrix passed.  The first hardening attempt stopped only on the
-  two now-fixed cppcheck warnings.
-* `make test-fuzz-heavy`: passed (`2048` runtime and `512` multi-runtime
-  scenarios).
-* CMake Debug and Release full builds plus CTest: `29/29` tests passed in each
-  configuration.  New `test_legacy_lease_boundary` and
-  `check_legacy_lease_boundary` entries passed in both.
-* `make test-asan` and `make test-tsan`: passed, including the focused lease
-  binaries and the new Python boundary checks.  ASan emitted only the known
-  Darwin stack-switch `__asan_handle_no_return` warning.
+* `make test`: passed, including normal runtime, no-owner, boundary, export,
+  and production-hook checks.
+* `make test-asan` and `make test-tsan`: passed, including the focused legacy
+  lease binaries and boundary checks.  ASan emitted only the known Darwin
+  stack-switch warning.
+* CMake Debug configure/build passed; full CTest passed 29/29.  A final
+  post-edit CTest boundary/export subset passed 4/4.
+* `make analyze-cppcheck`: passed for 206 files.
+* `make audit-production-test-hooks audit-shared-exports`: passed with 130
+  public shared exports.
 * `python3 scripts/test_worker_identity_boundary.py`: 20/20 passed.
-* `python3 scripts/test_legacy_lease_boundary.py`: 13/13 passed.
-* `python3 scripts/check_legacy_lease_boundary.py --root .`: passed for 187
-  source/header files.
-* `make audit-production-test-hooks audit-shared-exports`: passed; 130 public
-  exports and no production test-hook symbols.
-* `git diff --check`: passed.
-* `git diff --exit-code 2cde642 -- include/llam`: passed; public headers are
-  byte-identical.
+* `python3 scripts/test_legacy_lease_boundary.py`: 19/19 passed.
+* `python3 scripts/check_legacy_lease_boundary.py --root .`: 187 source/header
+  files clean.
+* `PYTHON=python3.14 make test_legacy_lease_boundary
+  check_legacy_lease_boundary`: passed.
+* `git diff --check` passed; public headers are byte-identical to the pre-fix
+  `d47c87dbaf3a06477133ef25388675f374a0598d` tree.
 
-Native Windows and BSD execution was unavailable on this Darwin arm64 host;
-platform-neutral CMake/CTest registration and existing compatibility sources
-remain covered.  `make clean` was not run in the shared worktree while other
-task artifacts may still be owned by sibling work; sanitizer recipes removed
-their own binaries through their existing traps.  No unrelated files were
-deleted.
-
-The verified design spec required no clarification edits; its lease state
-machine, ownerless claimant, handback acknowledgement, lock order, watchdog
-lifetime snapshot, pause generations, Phase 1B/Phase 2 boundaries, and wrapper
-exclusion already match the implementation.  The architecture page now
-records the exact audit allowlist and prohibited-authority rules.
+Native Windows/BSD execution was unavailable on this Darwin arm64 host.  The
+review's historical active-helper leave failure did not reproduce in the
+fresh full Make or CMake runs after rebuilding the existing runtime tree; this
+scanner-only fix did not modify runtime production code.  A separate repeated
+characterization still observed unrelated existing sigaltstack-EINVAL test
+intermittency, which remains follow-up work rather than a scanner regression.
