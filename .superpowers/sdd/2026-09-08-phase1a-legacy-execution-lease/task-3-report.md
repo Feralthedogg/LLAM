@@ -1,50 +1,57 @@
-# Task 3 fix-round report — retain lease claimants through shutdown handback
+# Task 3 fix-round 3 report — abort shutdown-raced lease reservations
 
 Status: complete for the scoped Task 3 transition paths.
 
-The second re-review fixes the remaining shutdown claimant, publication-gate,
-and ownerless-episode assertion gaps:
+The residual shutdown races are fixed without changing public interfaces:
 
-* Destructive stop publishes `STOPPING` before waiting for the active run to
-  drain. A STOPPING handback publishes its acknowledgement and claimant owner
-  but retains `return_worker`/`return_incarnation` until the helper exit ACK and
-  join; `llam_legacy_lease_finalize_stop_locked()` remains the only cleanup
-  boundary. Cooperative stop without `shutdown_requested` still clears the
-  claimant during normal handback.
-* STOPPING handback validation and the narrowly scoped teardown-return fallback
-  require the matching retained claimant, incarnation, transfer sequence, and
-  acknowledgement.
-* Every enabled handback gate now checks both worker-local `active_g` values and
-  legacy `shard->current` under `opaque_lock -> shard->lock` before release.
-* `test_ownerless_return_ordering` snapshots the exact helper claimant token in
-  `REDIRECTED_NO_EXECUTOR`, the exact helper handback episode, the exact primary
-  handback episode, and the exact post-run sequence/epoch cleanup.
+* A destructive stop now aborts a primary-to-helper reservation before helper
+  grant. If the primary publication was already cleared, the rollback restores
+  the primary owner projection in `STOPPING`, restores `RUNNING` plus
+  worker-local `active_g` and `shard->current` under the established lock order,
+  clears the transient opaque-enter flags, and returns `ECANCELED`.
+* The STOPPING return path now treats an existing return claimant as exclusive:
+  only the exact worker/incarnation/sequence observation is idempotent. A live
+  helper may reserve the primary return boundary only when no claimant exists.
+  Mismatched rollback callers and return tokens are rejected.
+* Deterministic regressions cover destruction at
+  `AFTER_TRANSFER_REQUEST` and `AFTER_OWNER_CLEAR`, including task
+  state/depth, active-G/current restoration, no helper grant, claimant cleanup,
+  and bounded teardown. An ownerless-helper redirect test holds the handback
+  and helper-exit ACK gates while a primary return races the retained claimant.
 
-Verification:
+TDD RED/GREEN evidence:
 
-* TDD RED/GREEN: the retained-claimant shutdown assertion failed against the
-  previous implementation and passed after the coordinator/shutdown fix.
-* `make test_legacy_lease_internal`; direct focused binary: passed, plus 20
-  consecutive direct runs.
+* The owner-clear shutdown gate failed against `05722f7` with the stranded
+  blocked task boundary.
+* The ownerless STOPPING gate failed against `05722f7` because the primary
+  overwrote the helper claimant.
+* Both regressions pass after the minimal production changes.
+
+Verification on Darwin arm64:
+
+* `make test_legacy_lease_internal`; 20 consecutive direct runs passed.
 * `test_runtime_core`, `test_runtime_stress`, and
-  `test_runtime_shutdown_internal`: passed.
-* CMake Debug and Release focused configure/build/CTest:
-  `test_legacy_lease_internal` passed in each.
-* `make test-asan` (ASan/UBSan matrix): passed. ASan emitted only the known
-  Darwin stack-switch `__asan_handle_no_return` warning.
-* `make test-tsan` (TSan matrix): passed.
-* `python3 scripts/test_worker_identity_boundary.py`: 20 tests passed.
-* `make audit-production-test-hooks audit-shared-exports`: passed; 130 public
-  shared symbols and no production test-hook symbols.
-* `git diff --check`: passed; no public headers changed.
+  `test_runtime_shutdown_internal` passed.
+* CMake Debug and Release focused configure/build/CTest passed (4/4 tests in
+  each configuration).
+* `make test-asan` passed with ASan/UBSan; only the known Darwin
+  `__asan_handle_no_return` stack-switch warning was emitted.
+* `make test-tsan` passed without a TSan report.
+* `python3 scripts/test_worker_identity_boundary.py` passed (20 tests).
+* `make audit-production-test-hooks audit-shared-exports` passed; the shared
+  export audit reports 130 public symbols.
+* `make test_abi_contract test_abi_compat`, both ABI binaries,
+  `git diff --exit-code 2cde642 -- include/llam`, and `git diff --check`
+  passed.
 
 Expected boundary limitation:
 
-* `make test` reaches `python3 scripts/check_worker_identity_boundary.py` and
-  stops on the known 16 `active_g` references (six Task 2 references plus ten
-  Task 3 references). Updating this phase-aware scanner belongs to Phase 1A
-  Task 6; no unrelated scanner error was observed.
-* Native Windows/BSD execution was unavailable on this Darwin/arm64 host.
+* `make test` reaches the known Phase 0
+  `scripts/check_worker_identity_boundary.py` failure: 17 `active_g`
+  violations (the additional rollback publication reference is owned by the
+  Phase 1A migration). Updating the phase-aware scanner belongs to Task 6; no
+  unrelated scanner error was observed.
 
-No wrapper, P-field migration, ABI/stat change, or asynchronous preemption
-behavior was introduced.
+Native Windows/BSD execution was unavailable on this Darwin arm64 host.
+Wrappers, P-field migration, ABI/stat schema, public wrappers, and asynchronous
+preemption behavior remain unchanged.

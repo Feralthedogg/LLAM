@@ -156,6 +156,57 @@ typedef struct active_shutdown_state {
     pthread_t helper_thread_after;
 } active_shutdown_state_t;
 
+typedef struct shutdown_transfer_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    atomic_uint enter_returned;
+    atomic_uint release_task;
+    atomic_uint task_done;
+    atomic_uint destroy_started;
+    atomic_uint destroy_done;
+    atomic_uint run_done;
+    int enter_rc;
+    int enter_errno;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+    unsigned task_state;
+    unsigned task_depth;
+    uintptr_t task_identity;
+    uintptr_t primary_active_g;
+    uintptr_t current;
+    unsigned helper_active;
+    unsigned helper_started;
+    llam_lease_test_snapshot_t after_enter;
+} shutdown_transfer_state_t;
+
+typedef struct ownerless_shutdown_state {
+    test_failure_state_t failure;
+    llam_runtime_t *runtime;
+    atomic_uint helper_entered;
+    atomic_uint release_helper;
+    atomic_uint primary_leave_start;
+    atomic_uint root_done;
+    atomic_uint helper_done;
+    atomic_uint destroy_started;
+    atomic_uint destroy_done;
+    atomic_uint run_done;
+    int root_enter_rc;
+    int root_enter_errno;
+    int root_leave_rc;
+    int root_leave_errno;
+    int helper_enter_rc;
+    int helper_enter_errno;
+    int helper_leave_rc;
+    int helper_leave_errno;
+    uint64_t helper_incarnation;
+    llam_lease_test_snapshot_t handback_snapshot;
+    llam_lease_test_snapshot_t exit_snapshot;
+    int run_rc;
+    int run_errno;
+    int fatal_errno;
+} ownerless_shutdown_state_t;
+
 typedef struct invalid_handback_state {
     test_failure_state_t failure;
     llam_runtime_t *runtime;
@@ -354,6 +405,33 @@ static int snapshot_lease_locked_for_test(llam_shard_t *shard,
     rc = llam_legacy_lease_snapshot_locked(shard, snapshot) ? 0 : -1;
     pthread_mutex_unlock(&shard->opaque_lock);
     return rc;
+}
+
+static int wait_for_lease_state_direct(llam_shard_t *shard,
+                                       unsigned expected_state,
+                                       uintptr_t expected_owner,
+                                       uint64_t minimum_sequence,
+                                       llam_lease_test_snapshot_t *out) {
+    uint64_t deadline = legacy_deadline();
+
+    if (shard == NULL) {
+        return -1;
+    }
+    while (llam_now_ns() < deadline) {
+        llam_lease_test_snapshot_t snapshot;
+
+        if (snapshot_lease_locked_for_test(shard, &snapshot) == 0 &&
+            snapshot.state == expected_state &&
+            snapshot.owner_worker == expected_owner &&
+            snapshot.transfer_sequence >= minimum_sequence) {
+            if (out != NULL) {
+                *out = snapshot;
+            }
+            return 0;
+        }
+        llam_pause_cpu();
+    }
+    return -1;
 }
 
 typedef struct destroy_runtime_call {
@@ -1122,6 +1200,267 @@ static int test_failed_handback_does_not_republish(void) {
                           "failed handback republish regression failed");
 }
 
+static void shutdown_transfer_task(void *arg) {
+    shutdown_transfer_state_t *state = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_task_t *task = g_llam_tls_task;
+
+    errno = 0;
+    state->enter_rc = llam_enter_blocking();
+    state->enter_errno = errno;
+    if (shard == NULL || task == NULL) {
+        test_fail(&state->failure,
+                  "shutdown-raced transfer task lost its managed context");
+    } else {
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        (void)llam_legacy_lease_snapshot_locked(shard, &state->after_enter);
+        state->task_identity = (uintptr_t)task;
+        state->task_state = (unsigned)task->state;
+        state->task_depth = task->opaque_blocking_depth;
+        state->primary_active_g = (uintptr_t)atomic_load_explicit(
+            &shard->primary_worker.active_g,
+            memory_order_acquire);
+        state->current = (uintptr_t)atomic_load_explicit(&shard->current,
+                                                         memory_order_acquire);
+        state->helper_active = shard->opaque_helper_active ? 1U : 0U;
+        state->helper_started = shard->opaque_helper_thread_started ? 1U : 0U;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+    atomic_store_explicit(&state->enter_returned, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_task, memory_order_acquire) == 0U) {
+        llam_pause_cpu();
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *shutdown_transfer_run(void *arg) {
+    shutdown_transfer_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *shutdown_transfer_destroy(void *arg) {
+    shutdown_transfer_state_t *state = arg;
+
+    atomic_store_explicit(&state->destroy_started, 1U, memory_order_release);
+    llam_runtime_destroy(state->runtime);
+    atomic_store_explicit(&state->destroy_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int test_shutdown_raced_transfer_point(llam_lease_test_point_t gate) {
+    shutdown_transfer_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    llam_shard_t *shard = NULL;
+    pthread_t run_thread;
+    pthread_t destroy_thread;
+    cleanup_release_state_t release;
+    llam_lease_test_snapshot_t before_stop;
+    llam_lease_test_snapshot_t stopping;
+    llam_task_t *active_before = NULL;
+    llam_task_t *current_before = NULL;
+    bool helper_started_before = false;
+    bool run_created = false;
+    bool destroy_created = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.enter_returned, 0U);
+    atomic_init(&state.release_task, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.destroy_started, 0U);
+    atomic_init(&state.destroy_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    memset(&before_stop, 0, sizeof(before_stop));
+    memset(&stopping, 0, sizeof(stopping));
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    task = llam_runtime_spawn_ex(runtime, shutdown_transfer_task, &state, NULL, 0U);
+    if (task == NULL) {
+        test_fail(&state.failure, "shutdown-raced transfer task spawn failed");
+        goto cleanup;
+    }
+    llam_lease_test_set_gate(gate, true);
+    if (pthread_create(&run_thread, NULL, shutdown_transfer_run, &state) != 0) {
+        test_fail(&state.failure, "shutdown-raced transfer run setup failed");
+        goto cleanup;
+    }
+    run_created = true;
+    if (wait_for_lease_gate_reached(gate) != 0) {
+        test_fail(&state.failure, "shutdown-raced transfer gate was not reached");
+        goto cleanup;
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (!llam_legacy_lease_snapshot_locked(shard, &before_stop)) {
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        test_fail(&state.failure, "shutdown-raced transfer gate snapshot failed");
+    } else if (gate == LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST) {
+        active_before = atomic_load_explicit(&shard->primary_worker.active_g,
+                                             memory_order_acquire);
+        current_before = atomic_load_explicit(&shard->current,
+                                              memory_order_acquire);
+        helper_started_before = shard->opaque_helper_thread_started;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (before_stop.state != LLAM_LEASE_TRANSFER_TO_HELPER ||
+            before_stop.owner_worker != (uintptr_t)&shard->primary_worker ||
+            before_stop.transfer_sequence == 0U ||
+            helper_started_before || active_before == NULL || current_before == NULL ||
+            active_before != current_before) {
+            test_fail(&state.failure,
+                      "transfer-request gate did not retain the running primary publication");
+        }
+    } else if (before_stop.state != LLAM_LEASE_TRANSFER_TO_HELPER ||
+               before_stop.owner_worker != 0U ||
+               before_stop.transfer_sequence == 0U ||
+               atomic_load_explicit(&shard->primary_worker.active_g,
+                                    memory_order_acquire) != NULL ||
+               atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        test_fail(&state.failure,
+                  "owner-clear gate did not expose the expected cleared publication");
+    } else {
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+
+    if (pthread_create(&destroy_thread, NULL, shutdown_transfer_destroy, &state) != 0) {
+        test_fail(&state.failure, "shutdown-raced transfer destroy setup failed");
+        goto cleanup;
+    }
+    destroy_created = true;
+    if (wait_flag(&state.destroy_started, legacy_deadline()) != 0 ||
+        wait_for_lease_state_direct(shard,
+                                    LLAM_LEASE_STOPPING,
+                                    gate == LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST
+                                        ? (uintptr_t)&shard->primary_worker
+                                        : 0U,
+                                    before_stop.transfer_sequence,
+                                    &stopping) != 0) {
+        test_fail(&state.failure,
+                  "shutdown-raced transfer did not publish deterministic STOPPING");
+        goto cleanup;
+    }
+    if (stopping.return_worker != 0U || stopping.return_incarnation != 0U ||
+        stopping.owner_worker == (uintptr_t)&shard->opaque_helper_worker) {
+        test_fail(&state.failure,
+                  "shutdown-raced transfer retained a stale claimant or granted the helper");
+    }
+
+    llam_lease_test_set_gate(gate, false);
+    if (wait_flag(&state.enter_returned, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "shutdown-raced transfer did not return from the blocked enter");
+        goto cleanup;
+    }
+    if (state.enter_rc != -1 || state.enter_errno != ECANCELED ||
+        state.task_state != LLAM_TASK_STATE_RUNNING || state.task_depth != 0U ||
+        state.task_identity == 0U || state.primary_active_g != state.task_identity ||
+        state.current != state.task_identity ||
+        state.after_enter.state != LLAM_LEASE_STOPPING ||
+        state.after_enter.owner_worker != (uintptr_t)&shard->primary_worker ||
+        state.after_enter.return_worker != 0U ||
+        state.after_enter.return_incarnation != 0U || state.helper_active != 0U ||
+        (gate == LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST && state.helper_started != 0U) ||
+        (gate == LLAM_LEASE_TEST_AFTER_OWNER_CLEAR && state.helper_started == 0U) ||
+        state.after_enter.owner_worker == (uintptr_t)&shard->opaque_helper_worker) {
+        test_fail(&state.failure,
+                  "shutdown-raced transfer did not roll back to a running primary boundary");
+    }
+
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    if (wait_flag(&state.task_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.destroy_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "shutdown-raced transfer teardown was not bounded");
+        goto cleanup;
+    }
+    bounded_join_thread(destroy_thread,
+                        true,
+                        &state.destroy_done,
+                        NULL,
+                        NULL,
+                        "shutdown-raced transfer destroy exceeded its deadline");
+    destroy_created = false;
+    runtime = NULL;
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "shutdown-raced transfer run exceeded its deadline");
+    run_created = false;
+    if (state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "shutdown-raced transfer changed run or fatal semantics");
+    }
+    rc = failure_result(&state.failure,
+                        gate == LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST
+                            ? "shutdown-raced transfer-request regression failed"
+                            : "shutdown-raced owner-clear regression failed");
+
+cleanup:
+    reset_lease_test_gates();
+    atomic_store_explicit(&state.release_task, 1U, memory_order_release);
+    release.runtime = runtime;
+    release.release_flag = &state.release_task;
+    if (destroy_created) {
+        bounded_join_thread(destroy_thread,
+                            true,
+                            &state.destroy_done,
+                            release_flag_and_runtime,
+                            &release,
+                            "shutdown-raced transfer destroy cleanup exceeded its deadline");
+        destroy_created = false;
+        runtime = NULL;
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &release,
+                            "shutdown-raced transfer run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (runtime != NULL) {
+        destroy_runtime(&runtime);
+    }
+    return rc != 0
+               ? rc
+               : failure_result(&state.failure,
+                                gate == LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST
+                                    ? "shutdown-raced transfer-request regression failed"
+                                    : "shutdown-raced owner-clear regression failed");
+}
+
+static int test_shutdown_raced_transfer_request(void) {
+    return test_shutdown_raced_transfer_point(LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST);
+}
+
+static int test_shutdown_raced_owner_clear(void) {
+    return test_shutdown_raced_transfer_point(LLAM_LEASE_TEST_AFTER_OWNER_CLEAR);
+}
+
 static void redirect_helper_task(void *arg) {
     takeover_state_t *state = arg;
     llam_shard_t *shard = g_llam_tls_shard;
@@ -1458,6 +1797,314 @@ static int test_ownerless_return_ordering(void) {
     }
     destroy_runtime(&runtime);
     return failure_result(&state.failure, "ownerless return characterization failed");
+}
+
+static void ownerless_shutdown_helper_task(void *arg) {
+    ownerless_shutdown_state_t *state = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+
+    errno = 0;
+    state->helper_enter_rc = llam_enter_blocking();
+    state->helper_enter_errno = errno;
+    state->helper_incarnation = shard != NULL
+                                    ? atomic_load_explicit(
+                                          &shard->opaque_helper_worker.incarnation,
+                                          memory_order_acquire)
+                                    : 0U;
+    if (state->helper_enter_rc != 0 || shard == NULL ||
+        g_llam_tls_worker != &shard->opaque_helper_worker) {
+        test_fail(&state->failure,
+                  "ownerless shutdown helper did not enter through redirect");
+    }
+    atomic_store_explicit(&state->helper_entered, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_helper, memory_order_acquire) == 0U) {
+        llam_pause_cpu();
+    }
+    errno = 0;
+    state->helper_leave_rc = llam_leave_blocking();
+    state->helper_leave_errno = errno;
+    atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
+}
+
+static void ownerless_shutdown_root_task(void *arg) {
+    ownerless_shutdown_state_t *state = arg;
+    llam_task_t *helper_task;
+    uint64_t deadline = legacy_deadline();
+
+    helper_task = llam_runtime_spawn_ex(state->runtime,
+                                        ownerless_shutdown_helper_task,
+                                        state,
+                                        NULL,
+                                        0U);
+    if (helper_task == NULL) {
+        test_fail(&state->failure,
+                  "ownerless shutdown root could not spawn its helper task");
+        atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
+        atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+        return;
+    }
+    errno = 0;
+    state->root_enter_rc = llam_enter_blocking();
+    state->root_enter_errno = errno;
+    if (state->root_enter_rc != 0) {
+        test_fail(&state->failure,
+                  "ownerless shutdown root failed to acquire helper compensation");
+        atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
+        atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+        return;
+    }
+    if (wait_flag(&state->helper_entered, deadline) != 0) {
+        test_fail(&state->failure,
+                  "ownerless shutdown helper did not reach its redirect boundary");
+        atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+        return;
+    }
+    while (atomic_load_explicit(&state->primary_leave_start, memory_order_acquire) == 0U) {
+        llam_pause_cpu();
+    }
+    errno = 0;
+    state->root_leave_rc = llam_leave_blocking();
+    state->root_leave_errno = errno;
+    atomic_store_explicit(&state->root_done, 1U, memory_order_release);
+    bounded_join_task(helper_task,
+                      &state->helper_done,
+                      "ownerless shutdown helper join exceeded its deadline");
+}
+
+static void *ownerless_shutdown_run(void *arg) {
+    ownerless_shutdown_state_t *state = arg;
+
+    errno = 0;
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    state->run_errno = errno;
+    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
+                                              memory_order_acquire);
+    atomic_store_explicit(&state->run_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *ownerless_shutdown_destroy(void *arg) {
+    ownerless_shutdown_state_t *state = arg;
+
+    atomic_store_explicit(&state->destroy_started, 1U, memory_order_release);
+    llam_runtime_destroy(state->runtime);
+    atomic_store_explicit(&state->destroy_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int test_ownerless_redirect_active_destroy(void) {
+    ownerless_shutdown_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *root = NULL;
+    llam_shard_t *shard = NULL;
+    pthread_t run_thread;
+    pthread_t destroy_thread;
+    cleanup_release_state_t release;
+    llam_lease_test_snapshot_t stopping;
+    bool run_created = false;
+    bool destroy_created = false;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.helper_entered, 0U);
+    atomic_init(&state.release_helper, 0U);
+    atomic_init(&state.primary_leave_start, 0U);
+    atomic_init(&state.root_done, 0U);
+    atomic_init(&state.helper_done, 0U);
+    atomic_init(&state.destroy_started, 0U);
+    atomic_init(&state.destroy_done, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) {
+        return 1;
+    }
+    state.runtime = runtime;
+    shard = &runtime->shards[0];
+    root = llam_runtime_spawn_ex(runtime,
+                                 ownerless_shutdown_root_task,
+                                 &state,
+                                 NULL,
+                                 0U);
+    if (root == NULL) {
+        test_fail(&state.failure, "ownerless shutdown root spawn failed");
+        goto cleanup;
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, true);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK, true);
+    if (pthread_create(&run_thread, NULL, ownerless_shutdown_run, &state) != 0) {
+        test_fail(&state.failure, "ownerless shutdown run setup failed");
+        goto cleanup;
+    }
+    run_created = true;
+    if (wait_flag(&state.helper_entered, legacy_deadline()) != 0 ||
+        state.helper_enter_rc != 0) {
+        test_fail(&state.failure,
+                  "ownerless shutdown helper did not reach active redirect");
+        goto cleanup;
+    }
+    if (pthread_create(&destroy_thread, NULL, ownerless_shutdown_destroy, &state) != 0) {
+        test_fail(&state.failure, "ownerless shutdown destroy setup failed");
+        goto cleanup;
+    }
+    destroy_created = true;
+    if (wait_flag(&state.destroy_started, legacy_deadline()) != 0 ||
+        wait_for_lease_state_direct(shard,
+                                    LLAM_LEASE_STOPPING,
+                                    0U,
+                                    2U,
+                                    &stopping) != 0) {
+        test_fail(&state.failure,
+                  "ownerless shutdown did not publish STOPPING ownerless redirect");
+        goto cleanup;
+    }
+    if (stopping.return_worker != (uintptr_t)&shard->opaque_helper_worker ||
+        stopping.return_incarnation != state.helper_incarnation ||
+        stopping.handback_ack_sequence != 0U || stopping.owner_worker != 0U) {
+        test_fail(&state.failure,
+                  "ownerless shutdown lost the helper redirect claimant");
+    }
+
+    atomic_store_explicit(&state.release_helper, 1U, memory_order_release);
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK) != 0) {
+        test_fail(&state.failure,
+                  "ownerless shutdown helper did not reach the handback gate");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (!llam_legacy_lease_snapshot_locked(shard, &state.handback_snapshot) ||
+        state.handback_snapshot.state != LLAM_LEASE_STOPPING ||
+        state.handback_snapshot.owner_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state.handback_snapshot.return_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state.handback_snapshot.return_incarnation != state.helper_incarnation ||
+        state.handback_snapshot.handback_ack_sequence == 0U ||
+        state.handback_snapshot.handback_ack_sequence !=
+            state.handback_snapshot.transfer_sequence) {
+        test_fail(&state.failure,
+                  "ownerless shutdown handback did not retain helper claimant");
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    /* A primary reservation must not replace an existing STOPPING claimant. */
+    {
+        uint64_t racing_sequence = 0U;
+        uint64_t primary_incarnation = atomic_load_explicit(
+            &shard->primary_worker.incarnation,
+            memory_order_acquire);
+        bool racing_return;
+
+        pthread_mutex_lock(&shard->opaque_lock);
+        racing_return = llam_legacy_lease_request_return_locked(
+            shard,
+            &shard->primary_worker,
+            primary_incarnation,
+            &racing_sequence);
+        if (racing_return || racing_sequence != 0U ||
+            shard->legacy_lease.return_worker != &shard->opaque_helper_worker ||
+            shard->legacy_lease.return_incarnation != state.helper_incarnation) {
+            test_fail(&state.failure,
+                      "racing primary overwrote the STOPPING helper claimant");
+        }
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+
+    atomic_store_explicit(&state.primary_leave_start, 1U, memory_order_release);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, false);
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK) != 0) {
+        test_fail(&state.failure,
+                  "ownerless shutdown helper did not reach the exit gate");
+        goto cleanup;
+    }
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    if (!llam_legacy_lease_snapshot_locked(shard, &state.exit_snapshot) ||
+        state.exit_snapshot.state != LLAM_LEASE_STOPPING ||
+        state.exit_snapshot.owner_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state.exit_snapshot.return_worker !=
+            (uintptr_t)&shard->opaque_helper_worker ||
+        state.exit_snapshot.return_incarnation != state.helper_incarnation ||
+        state.exit_snapshot.handback_ack_sequence == 0U ||
+        !atomic_load_explicit(&shard->opaque_helper_exit_ack,
+                              memory_order_acquire) ||
+        atomic_load_explicit(&shard->primary_worker.active_g,
+                             memory_order_acquire) != NULL ||
+        atomic_load_explicit(&shard->opaque_helper_worker.active_g,
+                             memory_order_acquire) != NULL ||
+        atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
+        test_fail(&state.failure,
+                  "ownerless shutdown exit ACK did not retain helper claimant/cleanup");
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_EXIT_ACK, false);
+
+    if (wait_flag(&state.root_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.helper_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.run_done, legacy_deadline()) != 0 ||
+        wait_flag(&state.destroy_done, legacy_deadline()) != 0) {
+        test_fail(&state.failure,
+                  "ownerless shutdown teardown was not bounded");
+        goto cleanup;
+    }
+    bounded_join_thread(destroy_thread,
+                        true,
+                        &state.destroy_done,
+                        NULL,
+                        NULL,
+                        "ownerless shutdown destroy exceeded its deadline");
+    destroy_created = false;
+    runtime = NULL;
+    bounded_join_thread(run_thread,
+                        true,
+                        &state.run_done,
+                        NULL,
+                        NULL,
+                        "ownerless shutdown run exceeded its deadline");
+    run_created = false;
+    if (state.root_enter_rc != 0 || state.root_leave_rc != -1 ||
+        state.root_leave_errno != ECANCELED || state.helper_enter_rc != 0 ||
+        state.helper_leave_rc != 0 || state.run_rc != 0 || state.fatal_errno != 0) {
+        test_fail(&state.failure,
+                  "ownerless shutdown changed expected cancellation/run semantics");
+    }
+    rc = failure_result(&state.failure,
+                        "ownerless redirect active shutdown regression failed");
+
+cleanup:
+    reset_lease_test_gates();
+    atomic_store_explicit(&state.release_helper, 1U, memory_order_release);
+    atomic_store_explicit(&state.primary_leave_start, 1U, memory_order_release);
+    release.runtime = runtime;
+    release.release_flag = &state.release_helper;
+    if (destroy_created) {
+        bounded_join_thread(destroy_thread,
+                            true,
+                            &state.destroy_done,
+                            release_flag_and_runtime,
+                            &release,
+                            "ownerless shutdown destroy cleanup exceeded its deadline");
+        destroy_created = false;
+        runtime = NULL;
+    }
+    if (run_created) {
+        bounded_join_thread(run_thread,
+                            true,
+                            &state.run_done,
+                            release_flag_and_runtime,
+                            &release,
+                            "ownerless shutdown run cleanup exceeded its deadline");
+        run_created = false;
+    }
+    if (runtime != NULL) {
+        destroy_runtime(&runtime);
+    }
+    return rc != 0
+               ? rc
+               : failure_result(&state.failure,
+                                "ownerless redirect active shutdown regression failed");
 }
 
 static void repeat_observer_task(void *arg) {
@@ -2592,8 +3239,11 @@ int main(void) {
         test_lease_handoff_windows,
         test_clean_stop_completes_handback,
         test_failed_handback_does_not_republish,
+        test_shutdown_raced_transfer_request,
+        test_shutdown_raced_owner_clear,
         test_helper_reblocking_through_redirect,
         test_ownerless_return_ordering,
+        test_ownerless_redirect_active_destroy,
         test_repeated_shard_zero_runs_two_callers,
         test_helper_shutdown_while_idle,
         test_helper_shutdown_while_active,

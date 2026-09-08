@@ -230,14 +230,22 @@ bool llam_legacy_lease_request_return_locked(llam_shard_t *shard,
     if (lease->state == LLAM_LEASE_STOPPING) {
         /*
          * Shutdown may have marked the coordinator while a helper return was
-         * in flight. Re-observing the same token is idempotent; a live helper
-         * can also reserve the primary return boundary exactly once.
+         * in flight. Re-observing the same token is idempotent. Once a return
+         * claimant exists, no other worker may reserve or overwrite that
+         * boundary; a live helper can reserve the primary return only when the
+         * STOPPING coordinator has no claimant yet.
          */
-        if (lease->return_worker == claimant &&
-            lease->return_incarnation == claimant_incarnation &&
-            lease->transfer_sequence != 0U) {
-            *sequence_out = lease->transfer_sequence;
-            return true;
+        if (lease->return_worker != NULL) {
+            if (lease->return_worker == claimant &&
+                lease->return_incarnation == claimant_incarnation &&
+                lease->transfer_sequence != 0U) {
+                *sequence_out = lease->transfer_sequence;
+                return true;
+            }
+            return false;
+        }
+        if (lease->return_incarnation != 0U) {
+            return false;
         }
         if (lease->owner != &shard->opaque_helper_worker ||
             claimant != &shard->primary_worker ||
@@ -470,10 +478,30 @@ bool llam_legacy_lease_rollback_helper_locked(llam_shard_t *shard,
     if (shard == NULL || primary == NULL || incarnation == 0U || sequence == 0U) {
         return false;
     }
+    if (primary != &shard->primary_worker ||
+        primary->role != LLAM_WORKER_ROLE_PRIMARY ||
+        primary->compat_shard != shard) {
+        return false;
+    }
     lease = llam_shard_legacy_lease_locked(shard);
-    if (lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||
-        lease->transfer_sequence != sequence || lease->owner != NULL ||
+    /* Rollback is valid only for this transfer token with no return claimant. */
+    if (lease->transfer_sequence != sequence || lease->return_worker != NULL ||
+        lease->return_incarnation != 0U ||
         !llam_worker_binding_live(primary, incarnation)) {
+        return false;
+    }
+    if (lease->state == LLAM_LEASE_STOPPING) {
+        if (lease->owner != NULL &&
+            (lease->owner != primary || lease->owner_incarnation != incarnation)) {
+            return false;
+        }
+        /* Keep STOPPING, but restore a valid primary owner projection. */
+        lease->owner = primary;
+        lease->owner_incarnation = incarnation;
+        llam_legacy_lease_assert_consistent_locked(shard);
+        return true;
+    }
+    if (lease->state != LLAM_LEASE_TRANSFER_TO_HELPER || lease->owner != NULL) {
         return false;
     }
     lease->owner = primary;
