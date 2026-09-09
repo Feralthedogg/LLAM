@@ -55,10 +55,11 @@ validation must therefore require Python explicitly.  The production-hook
 audit uses `nm -a` (or `llvm-nm`), rejects uppercase externally defined
 `llam_*_test_*` symbols, and permits documented lowercase local fallback
 symbols.  If neither symbol tool exists, CTest marks that audit skipped (77),
-which is a platform limitation rather than a clean symbol result.  The Make
-`audit-production-test-hooks` recipe applies the same uppercase-vs-local rule
-to both its static and shared artifacts; when `nm` is unavailable, Make omits
-that symbol check and the platform validation must record the limitation.
+which is a platform limitation rather than a clean symbol result.  Make uses
+the configured `$(PYTHON)` interpreter to invoke the same checker for both
+artifacts, so its `llvm-nm` fallback and local-symbol exception are identical
+to CMake's; a missing symbol tool is reported as the same documented platform
+limitation.
 
 Install to a local prefix:
 

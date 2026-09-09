@@ -182,42 +182,38 @@ claimant.  It scans only the native C runtime sources; Rust, Python, JVM,
 .NET, and Go language wrappers remain explicitly excluded until a later phase.
 
 The checker is intentionally a conservative lexical audit rather than a full C
-parser or preprocessor/data-flow engine.  It accepts only the direct source
-shapes used by the Phase 1A implementation: validated snapshot outputs and
-lock-held revalidation, direct atomic ACK expressions/publication helpers,
-direct lease-coordinator origins and transition values, and direct scheduler
-lock calls with simple shard aliases.  Reassignments, compound or
-macro-hidden writes, unknown ACK/lock wrappers, unsupported pointer aliases,
-and proof markers in unreachable branches fail closed.  Trylock/timedlock
+parser or preprocessor/data-flow engine.  Its exact canonical allowlist is:
+the worker `active_g` declaration, two shard-slot initializers, and three
+direct worker helpers; merge/steal matchers with a positive request bit and
+generation plus the ACK bit and all three exact lease/worker tuple comparisons;
+direct tuple sampling arguments/publication stores with stable field provenance;
+direct lease-coordinator origins and the four named owner transitions (plus
+the audited init/finalize/redirect/unbind clears); the two watchdog snapshots,
+exact positive/failure guards, active-G check, and lock-held signal; and direct
+pthread scheduler locks with a visible first/second ID order.  Reassignments,
+compound/unary or macro-hidden writes, unknown ACK/owner/lock wrappers,
+unsupported pointer/address aliases, conditional tuple stores, duplicate tuple
+stores, noncanonical indices, and proof markers in unreachable or
+non-dominating branches are rejected rather than inferred.  Trylock/timedlock
 success is treated as held for ordering purposes.  Macro expansion and
 compiler-specific control-flow semantics are not inferred; any future source
 shape that needs those semantics must add an explicit audited helper or a
-dedicated checker update.  The watchdog proof is allowlisted to
-`llam_watchdog_check_shard`: its original and validated owner/incarnation/epoch
-and native-thread outputs, positive conjunction, active-G validation, and
-lock-held signal path must remain visible.  ACK matchers likewise require the
-actual request bit/generation and lease/worker tuple fields, while publication
-requires direct tuple stores on every unconditional path before a nonzero ACK;
-the sampling caller set and helper calls are also explicit.  Owner proofs
-require a returning failure guard and direct claimant provenance, and indexed
-lock receivers/wrappers outside the canonical forms are rejected rather than
-inferred.  These are lexical canonical-allowlist rules, not a replacement for
-a C parser, preprocessor, CFG, or whole-program data-flow analysis.  This
-limitation does not expand
-Phase 1A's scope:
-P-resource migration remains Phase 1B, foreign detach/reattach remains Phase 2,
-and language wrappers remain excluded.
+dedicated checker update.  These are lexical canonical-allowlist rules, not a
+replacement for a C parser, preprocessor, CFG, or whole-program data-flow
+analysis.  Phase 1A is complete; P-resource migration remains Phase 1B,
+foreign detach/reattach remains Phase 2, and Rust, Python, JVM, .NET, and Go
+wrappers remain excluded.
 
-The Make production-hook audit uses `nm -a` and its broad
-`llam_*_test_*` policy, including local symbols.  CMake's
-`audit_production_test_hooks` CTest uses `nm -a` as well, but has an explicit
-local-fallback policy: lowercase/local symbol types (the no-op test-hook
-fallbacks retained in unoptimized Debug static/shared artifacts) are allowed;
-only uppercase externally defined test-hook symbols are disallowed.  The
-existing `llam_broker_client_self_test_*` production self-test symbols remain
-the sole named exception.  CMake registers this audit only when Python 3 is
-found and skips with code 77 when no `nm`/`llvm-nm` is available; the native
-source and Phase 0 checks remain required for normal supported builds.
+Make and CMake use the same `scripts/audit_production_test_hooks.py` policy
+for both production static and shared artifacts.  The checker invokes
+`nm -a` (falling back to `llvm-nm`), rejects uppercase externally defined
+`llam_*_test_*` symbols, permits lowercase/local no-op fallback symbols in
+unoptimized Debug artifacts, and retains the existing
+`llam_broker_client_self_test_*` symbols as the sole named exception.  Make
+uses the configured `$(PYTHON)` interpreter; CMake registers the audit when
+Python 3 is found and marks it skipped with code 77 when neither symbol tool
+is available.  The native source and Phase 0 checks remain required for
+normal supported builds.
 
 ## Wake Handoff Fusion
 

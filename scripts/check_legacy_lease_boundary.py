@@ -231,6 +231,18 @@ LEASE_OWNER_ALLOWED_CALLS = frozenset(
         "atomic_store_explicit",
     }
 )
+LEASE_OWNER_NULL_ALLOWED_CALLS = frozenset(
+    {
+        *LEASE_OWNER_ALLOWED_CALLS,
+        "llam_worker_clear_active_g",
+        "memset",
+        "pthread_equal",
+        "pthread_mutex_lock",
+        "pthread_mutex_unlock",
+        "pthread_self",
+        "sizeof",
+    }
+)
 CONTROL_FLOW_NAMES = frozenset({"if", "for", "while", "switch", "catch"})
 ASSIGNMENT_OPERATORS = frozenset({"=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="})
 
@@ -488,6 +500,59 @@ def _simple_identifier(
     return None
 
 
+def _exact_atomic_field_argument(
+    tokens: Sequence[phase0._Token],
+    calls: Sequence[_CallSite],
+    argument: Sequence[int],
+    receiver: str,
+    field: str,
+) -> _CallSite | None:
+    """Return one unmodified atomic field load occupying ``argument``.
+
+    ACK sampling is intentionally an allowlist rather than a C expression
+    evaluator.  A field load hidden inside arithmetic, a cast, a conditional,
+    or another call is not a value-derived tuple argument.  Requiring the
+    call's token span to cover the complete argument keeps those forms
+    fail-closed while preserving the inline loads used by the runtime.
+    """
+
+    if not argument:
+        return None
+    first = argument[0]
+    last = argument[-1]
+    expected = ("&", receiver, "->", field)
+    for call in calls:
+        if call.name not in ATOMIC_LOAD_NAMES:
+            continue
+        if call.name_index != first or call.close_index != last:
+            continue
+        if call.open_index != first + 1 or not call.args:
+            continue
+        if _arg_values(tokens, call.args[0]) != expected:
+            continue
+        if call.name == "atomic_load" and len(call.args) != 1:
+            continue
+        if call.name == "atomic_load_explicit" and (
+            len(call.args) != 2
+            or _arg_values(tokens, call.args[1]) != ("memory_order_acquire",)
+        ):
+            continue
+        return call
+    return None
+
+
+def _canonical_atomic_load(
+    tokens: Sequence[phase0._Token], call: _CallSite
+) -> bool:
+    """Return whether one atomic load has the audited argument shape."""
+
+    if call.name == "atomic_load":
+        return len(call.args) == 1
+    return call.name == "atomic_load_explicit" and len(call.args) == 2 and _arg_values(
+        tokens, call.args[1]
+    ) == ("memory_order_acquire",)
+
+
 def _addressed_identifier(
     tokens: Sequence[phase0._Token], argument: Sequence[int]
 ) -> str | None:
@@ -497,6 +562,38 @@ def _addressed_identifier(
     ):
         return values[1]
     return None
+
+
+def _addressed_identifier_at(
+    tokens: Sequence[phase0._Token], index: int, end: int
+) -> tuple[str, int] | None:
+    """Recognize ``&identifier`` with balanced redundant parentheses.
+
+    This helper is used only for rejecting address aliases.  Canonical call
+    argument validators continue to require the unparenthesized two-token
+    spelling through ``_addressed_identifier``.
+    """
+
+    if not 0 <= index < end or tokens[index].value != "&":
+        return None
+    cursor = index + 1
+    opening = 0
+    while cursor < end and tokens[cursor].value == "(":
+        opening += 1
+        cursor += 1
+    if cursor >= end or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*", tokens[cursor].value
+    ):
+        return None
+    name = tokens[cursor].value
+    cursor += 1
+    closing = 0
+    while cursor < end and closing < opening and tokens[cursor].value == ")":
+        closing += 1
+        cursor += 1
+    if closing != opening:
+        return None
+    return name, cursor
 
 
 def _function_indices(
@@ -655,6 +752,43 @@ def _has_unconditional_return(
         if any(tokens[item].value in {"goto", "else"} for item in range(body_start + 1, body_end)):
             return False
         return True
+    return False
+
+
+def _has_unconditional_false_return(
+    tokens: Sequence[phase0._Token],
+    records: Sequence[tuple[int, int, int, int, int, bool]],
+    body_start: int,
+    body_end: int,
+) -> bool:
+    """Return whether a control body directly returns the failure value."""
+
+    if body_start >= body_end:
+        return False
+    candidates: list[int] = []
+    if tokens[body_start].value == "return":
+        candidates.append(body_start)
+    else:
+        for index in range(body_start + 1, body_end):
+            if tokens[index].value != "return":
+                continue
+            if any(
+                body_start < record[3] <= index < record[4] <= body_end
+                for record in records
+            ):
+                continue
+            candidates.append(index)
+    for index in candidates:
+        finish = index + 1
+        while finish < body_end and tokens[finish].value not in {";", "}"}:
+            finish += 1
+        values = tuple(tokens[item].value for item in range(index, finish))
+        if values in {
+            ("return", "false"),
+            ("return", "0"),
+            ("return", "0", "U"),
+        }:
+            return True
     return False
 
 
@@ -881,13 +1015,27 @@ def _active_g_surface_errors(relative_path: str, masked: str) -> list[tuple[int,
         # is an alias/rebinding escape even when the eventual atomic spelling
         # still says ``worker->active_g``.
         for index in range(body_open + 1, min(end, len(tokens) - 1)):
+            if tokens[index].value != "&":
+                continue
+            cursor = index + 1
+            opening_count = 0
+            while cursor < end and tokens[cursor].value == "(":
+                opening_count += 1
+                cursor += 1
+            if cursor >= end or tokens[cursor].value != worker:
+                continue
+            cursor += 1
+            closing_count = 0
+            while cursor < end and tokens[cursor].value == ")" and closing_count < opening_count:
+                closing_count += 1
+                cursor += 1
+            # Parenthesized worker addresses are aliases just like the direct
+            # ``&worker`` spelling.  Only a member-address expression is
+            # allowed in the helper's atomic operation.
             if (
-                tokens[index].value == "&"
-                and tokens[index + 1].value == worker
-                and not (
-                    index + 2 < end
-                    and tokens[index + 2].value in {"->", "."}
-                )
+                closing_count != opening_count
+                or cursor >= end
+                or tokens[cursor].value not in {"->", "."}
             ):
                 fail(tokens[index].line)
                 break
@@ -1243,6 +1391,7 @@ def _matcher_is_valid(
             for call in calls
             if begin <= call.name_index < end
             and call.name in ATOMIC_LOAD_NAMES
+            and _canonical_atomic_load(tokens, call)
             and len(call.args) >= 1
             and _arg_values(tokens, call.args[0]) == expected
             and statement_start < call.name_index < statement_end
@@ -1274,6 +1423,7 @@ def _matcher_is_valid(
             for call in calls
             if begin <= call.name_index < end
             and call.name == name
+            and (name not in ATOMIC_LOAD_NAMES or _canonical_atomic_load(tokens, call))
             and call.args
             and _arg_values(tokens, call.args[0]) == argument_values
             and statement_start < call.name_index < statement_end
@@ -1573,6 +1723,47 @@ def _publication_tuple_before(
     if request_origin is None or incarnation_origin is None:
         return False
 
+    # A tuple field has one canonical publication on the path that can reach
+    # the nonzero ACK.  Reset stores in the early failure branch are allowed,
+    # but a second unconditional store (or a conditional overwrite after the
+    # canonical store) would let the boolean ACK advertise a different tuple
+    # than the one this audit observed.
+    unconditional_stores: dict[str, list[_CallSite]] = {
+        field: [] for field in required
+    }
+    all_tuple_stores: list[tuple[str, _CallSite]] = []
+    for candidate in calls:
+        if (
+            candidate.name not in ATOMIC_STORE_NAMES
+            or candidate.name_index >= before
+            or not candidate.args
+            or len(candidate.args) < 2
+            or _inside_constant_false_block(tokens, candidate.name_index, begin, end)
+        ):
+            continue
+        target = _arg_values(tokens, candidate.args[0])
+        field = next(
+            (
+                item
+                for item in required
+                if target == ("&", "shard", "->", item)
+            ),
+            None,
+        )
+        if field is None:
+            continue
+        all_tuple_stores.append((field, candidate))
+        if not in_conditional_body(candidate.name_index):
+            unconditional_stores[field].append(candidate)
+    if any(len(stores) > 1 for stores in unconditional_stores.values()):
+        return False
+    for field, candidate in all_tuple_stores:
+        if in_conditional_body(candidate.name_index) and any(
+            prior.name_index < candidate.name_index
+            for prior in unconditional_stores[field]
+        ):
+            return False
+
     def variable_rebound(variable: str, start: int, finish: int) -> bool:
         for index in range(start, min(finish, end)):
             if tokens[index].value == "&" and index + 1 < finish:
@@ -1661,18 +1852,28 @@ def _ack_sampling_allowed(
         "steal_pause_incarnation",
     }
 
+    # The runtime-wide steal wait samples its request generation from ``rt``
+    # before it visits each ``shard``.  That is the one canonical request
+    # origin whose receiver is not the matcher receiver itself; keep it
+    # explicit instead of accepting arbitrary field-shaped aliases.
+    request_receivers = {receiver}
+    if base == "steal" and function.name == "llam_runtime_wait_steal_pause_ack":
+        request_receivers = {"rt"}
+
     def argument_has_direct_field(argument: Sequence[int], field: str) -> bool:
-        for candidate in calls:
-            if candidate.name not in ATOMIC_LOAD_NAMES or candidate.name_index not in argument:
-                continue
-            if not candidate.args:
-                continue
-            if _arg_values(tokens, candidate.args[0]) == ("&", receiver, "->", field):
-                return True
-        return False
+        return _exact_atomic_field_argument(
+            tokens,
+            calls,
+            argument,
+            receiver or "",
+            field,
+        ) is not None
 
     def variable_origin_matches(
-        argument: Sequence[int], field: str, before_index: int
+        argument: Sequence[int],
+        field: str,
+        before_index: int,
+        expected_receivers: set[str] | None = None,
     ) -> bool:
         """Require an identifier tuple argument to come from that field."""
 
@@ -1690,24 +1891,37 @@ def _ack_sampling_allowed(
         if latest_assignment is None:
             return False
         statement_end = _owner_statement_end(tokens, latest_assignment + 1, before_index)
+        origin_call: _CallSite | None = None
+        receivers = expected_receivers or {receiver}
         for candidate in calls:
             if not latest_assignment < candidate.name_index < before_index:
                 continue
             if candidate.name not in ATOMIC_LOAD_NAMES or not candidate.args:
                 continue
             values = _arg_values(tokens, candidate.args[0])
-            if len(values) < 2 or values[-2:] != ("->", field):
+            if len(values) != 4 or values[0] != "&" or values[2] != "->":
+                continue
+            if values[1] not in receivers or values[3] != field:
                 continue
             if candidate.name_index >= statement_end:
                 continue
-            if any(
-                tokens[index].value == variable
-                and index + 1 < candidate.name_index
-                and tokens[index + 1].value == "="
-                for index in range(latest_assignment, candidate.name_index)
+            if candidate.name_index != latest_assignment + 2:
+                continue
+            if candidate.close_index + 1 != statement_end:
+                continue
+            if candidate.name == "atomic_load" and len(candidate.args) != 1:
+                continue
+            if candidate.name == "atomic_load_explicit" and (
+                len(candidate.args) != 2
+                or _arg_values(tokens, candidate.args[1])
+                != ("memory_order_acquire",)
             ):
-                return True
-        return False
+                continue
+            origin_call = candidate
+            break
+        if origin_call is None:
+            return False
+        return True
 
     def matcher_arguments_are_canonical(candidate: _CallSite) -> bool:
         if len(candidate.args) != 4:
@@ -1721,6 +1935,7 @@ def _ack_sampling_allowed(
                 candidate.args[1],
                 request_field,
                 candidate.name_index,
+                request_receivers,
             )
         )
         epoch_ok = (
@@ -1767,51 +1982,102 @@ def _ack_sampling_allowed(
         """Require a matcher result to control a return/branch.
 
         A standalone call (especially one under ``if (flag)``) is not a
-        validation route.  The native code either embeds the matcher in an
-        ``if``/``return`` expression or assigns it to ``matched`` and tests
-        that value immediately afterwards.
+        validation route.  The native code either embeds the matcher as the
+        complete ``if``/``return`` condition or assigns it to ``matched`` and
+        tests that value immediately afterwards.  Do not treat a matcher
+        result that is ORed with an attacker-controlled value as a proof: the
+        decision expression must be exactly this call (optionally negated for
+        a failure branch).
         """
 
+        call_values = tuple(
+            tokens[index].value for index in range(call.name_index, call.close_index + 1)
+        )
         statement_start, statement_end = _statement_bounds(
             tokens, call.open_index, begin, end
         )
+        # A direct return may contain only this matcher call (or its direct
+        # negation).  Parenthesized/combined expressions are unsupported.
         if statement_start < statement_end and tokens[statement_start].value == "return":
-            return True
-        before = call.open_index - 1
-        if before >= statement_start and tokens[before].value == "(":
-            before -= 1
-        if before >= statement_start and tokens[before].value == "!":
-            before -= 1
-        if before >= statement_start and tokens[before].value in {"if", "return", "&&", "||"}:
-            return True
+            expression = tuple(
+                tokens[index].value
+                for index in range(statement_start + 1, statement_end - 1)
+            )
+            return expression in {call_values, ("!", *call_values)}
+
         # Calls used directly as the condition of ``if (...)`` are nested in
-        # the condition's parentheses, so locate the nearest preceding if.
-        for index in range(statement_start, call.name_index):
+        # the condition's parentheses.  The full condition must be exactly
+        # this call or ``!`` followed by it; no attacker-controlled operand or
+        # recombination is inferred.
+        for index in range(begin, call.name_index):
             if tokens[index].value != "if" or index + 1 >= end:
                 continue
             if tokens[index + 1].value != "(":
                 continue
             condition_end = _matching_token(tokens, index + 1, "(", ")")
-            if condition_end is not None and index < call.name_index < condition_end:
+            if condition_end is None or not index < call.name_index < condition_end:
+                continue
+            condition = tuple(
+                tokens[item].value for item in range(index + 2, condition_end)
+            )
+            if condition in {call_values, ("!", *call_values)}:
                 return True
-        # Assignment to a boolean is accepted only if that exact variable is
-        # consumed by a later branch/return in this same function.
-        equals = None
-        for index in range(statement_start, call.name_index):
-            if tokens[index].value == "=":
-                equals = index
+            return False
+
+        # Assignment to a boolean is accepted only when the assignment RHS is
+        # exactly this matcher call and the first later use is a direct
+        # ``if (matched)``/``if (!matched)`` or ``return matched`` decision.
+        equals = next(
+            (
+                index
+                for index in range(statement_start, call.name_index)
+                if tokens[index].value == "="
+            ),
+            None,
+        )
         if equals is None or equals == statement_start:
             return False
         lhs = tokens[equals - 1].value
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", lhs):
             return False
+        assignment = tuple(
+            tokens[index].value for index in range(equals + 1, statement_end - 1)
+        )
+        if assignment != call_values:
+            return False
+
         for index in range(call.close_index + 1, end):
             if tokens[index].value != lhs:
                 continue
-            if index > call.close_index + 1 and tokens[index - 1].value in {"!", "&&", "||", "("}:
+            # A rebind before the decision invalidates the routed result.
+            if index + 1 < end and tokens[index + 1].value in ASSIGNMENT_OPERATORS:
+                return False
+            for if_index in range(begin, index):
+                if tokens[if_index].value != "if" or if_index + 1 >= end:
+                    continue
+                if tokens[if_index + 1].value != "(":
+                    continue
+                condition_end = _matching_token(tokens, if_index + 1, "(", ")")
+                if condition_end is None or not if_index < index < condition_end:
+                    continue
+                condition = tuple(
+                    tokens[item].value for item in range(if_index + 2, condition_end)
+                )
+                return condition in {(lhs,), ("!", lhs)}
+            statement_start2, statement_end2 = _statement_bounds(
+                tokens, index, begin, end
+            )
+            if (
+                statement_start2 < statement_end2
+                and tokens[statement_start2].value == "return"
+                and tuple(
+                    tokens[item].value
+                    for item in range(statement_start2 + 1, statement_end2 - 1)
+                )
+                in {(lhs,), ("!", lhs)}
+            ):
                 return True
-            if index + 1 < end and tokens[index + 1].value in {"&&", "||", ")"}:
-                return True
+            return False
         return False
 
     def variable_has_alias_or_rebind(
@@ -1820,9 +2086,9 @@ def _ack_sampling_allowed(
         """Reject address escapes and writes to a routed tuple temporary."""
 
         for index in range(max(start, begin), min(finish, end)):
-            if tokens[index].value == "&" and index + 1 < finish:
-                if tokens[index + 1].value == variable:
-                    return True
+            addressed = _addressed_identifier_at(tokens, index, min(finish, end))
+            if addressed is not None and addressed[0] == variable:
+                return True
             if tokens[index].value != variable:
                 continue
             if index + 1 < finish and tokens[index + 1].value in ASSIGNMENT_OPERATORS:
@@ -1855,12 +2121,43 @@ def _ack_sampling_allowed(
                 # A function parameter or an uninitialized temporary cannot
                 # be treated as a tuple provenance proof.
                 return False
-            if variable_has_alias_or_rebind(
+            # An address alias formed before the field load can overwrite the
+            # freshly loaded temporary through a slot.  The prior stability
+            # walk started at the latest assignment and therefore missed that
+            # alias; inspect the whole function prefix for address escapes,
+            # then inspect the post-origin interval for ordinary rebinds.
+            if any(
+                (
+                    addressed := _addressed_identifier_at(
+                        tokens, index, latest_assignment
+                    )
+                )
+                is not None
+                and addressed[0] == variable
+                for index in range(begin, latest_assignment)
+            ) or variable_has_alias_or_rebind(
                 variable,
                 latest_assignment + 1,
                 candidate.name_index,
             ):
                 return False
+            # A redundant-parenthesis lvalue does not look like
+            # ``variable =`` to the simple token walk above.  Treat any
+            # assignment statement containing this temporary as a write,
+            # while leaving the original exact field-load statement intact.
+            for variable_index in range(
+                latest_assignment + 1, candidate.name_index
+            ):
+                if tokens[variable_index].value != variable:
+                    continue
+                statement_start, statement_end = _statement_bounds(
+                    tokens, variable_index, begin, candidate.name_index
+                )
+                if any(
+                    tokens[item].value in ASSIGNMENT_OPERATORS
+                    for item in range(statement_start, statement_end)
+                ):
+                    return False
         return True
 
     for matcher in matcher_calls:
@@ -1935,6 +2232,19 @@ def _ack_field_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
 
     def fail(line: int) -> None:
         errors.append((line, "Phase 1A unversioned pause acknowledgement decision"))
+
+    # The audited matcher/publication/sampling files use direct calls only.
+    # Rejecting every preprocessor definition in these files prevents an
+    # object-like macro from erasing an ACK field, tuple store, or routed
+    # decision from the lexical token stream.
+    if path in {
+        "src/core/sched/scheduler.c",
+        "src/engine/watchdog/watchdog_merge.c",
+        "src/engine/watchdog/watchdog_scale.c",
+    }:
+        for line, raw in enumerate(masked.splitlines(), start=1):
+            if re.match(r"^\s*#\s*define\b", raw):
+                fail(line)
 
     # Publication helpers are a closed source-level API.  A generic helper or
     # macro can otherwise hide a tuple write (or an ACK store) from the member
@@ -2168,13 +2478,17 @@ def _direct_lease_origin(
             continue
         if tokens[index - 1].value != variable:
             continue
-        if body_depth(index) != 1:
-            continue
         statement_end = _owner_statement_end(tokens, index + 1, min(before, end))
         rhs = [tokens[item].value for item in range(index + 1, statement_end)]
-        exact = rhs == ["llam_shard_legacy_lease_locked", "(", "shard", ")"]
+        exact = (
+            body_depth(index) == 1
+            and rhs == ["llam_shard_legacy_lease_locked", "(", "shard", ")"]
+        )
         if function.name == "llam_legacy_lease_init":
-            exact = exact or rhs == ["&", "shard", "->", "legacy_lease"]
+            exact = exact or (
+                body_depth(index) == 1
+                and rhs == ["&", "shard", "->", "legacy_lease"]
+            )
         events.append(
             (
                 index,
@@ -2184,7 +2498,10 @@ def _direct_lease_origin(
         )
     if not events:
         return False
-    return events[-1][1]
+    # Every visible rebind must be the one direct coordinator origin.  Merely
+    # ignoring assignments nested under ``if``/loops lets an attacker move the
+    # pointer after the canonical origin and retain a lease-looking receiver.
+    return all(exact for _index, exact in events)
 
 
 def _owner_proof_before(
@@ -2220,7 +2537,7 @@ def _owner_proof_before(
     def in_returning_guard(token_index: int) -> bool:
         return any(
             record[1] <= token_index < record[2]
-            and _has_unconditional_return(
+            and _has_unconditional_false_return(
                 tokens,
                 guard_records,
                 record[3],
@@ -2228,6 +2545,193 @@ def _owner_proof_before(
             )
             for record in guard_records
         )
+
+    def top_level_parts(start: int, finish: int) -> list[tuple[int, int]]:
+        """Split one failure condition at top-level ``||`` operators."""
+
+        parts: list[tuple[int, int]] = []
+        part_start = start
+        paren_depth = bracket_depth = brace_depth = 0
+        for index in range(start, finish):
+            value = tokens[index].value
+            if value == "(":
+                paren_depth += 1
+            elif value == ")" and paren_depth:
+                paren_depth -= 1
+            elif value == "[":
+                bracket_depth += 1
+            elif value == "]" and bracket_depth:
+                bracket_depth -= 1
+            elif value == "{":
+                brace_depth += 1
+            elif value == "}" and brace_depth:
+                brace_depth -= 1
+            elif (
+                value == "||"
+                and paren_depth == 0
+                and bracket_depth == 0
+                and brace_depth == 0
+            ):
+                parts.append((part_start, index))
+                part_start = index + 1
+        parts.append((part_start, finish))
+        return parts
+
+    def strip_outer_parentheses(values: tuple[str, ...]) -> tuple[str, ...]:
+        while len(values) >= 2 and values[0] == "(" and values[-1] == ")":
+            depth = 0
+            wraps_all = True
+            for offset, value in enumerate(values):
+                if value == "(":
+                    depth += 1
+                elif value == ")":
+                    depth -= 1
+                    if depth == 0 and offset != len(values) - 1:
+                        wraps_all = False
+                        break
+            if not wraps_all or depth != 0:
+                break
+            values = values[1:-1]
+        return values
+
+    def strict_failure_guard(
+        token_index: int, expected: tuple[str, ...]
+    ) -> bool:
+        """Require one expected predicate as a complete ``||`` arm.
+
+        The old proof accepted a predicate nested in ``flag && (...)``.  A
+        lexical audit cannot establish that the extra condition is always
+        true, so non-canonical conjunctions are rejected.  The completed
+        handback transition has one explicitly audited parenthesized
+        conjunction; retain that production form while keeping every other
+        transition arm exact.
+        """
+
+        for record in guard_records:
+            if not record[1] <= token_index < record[2]:
+                continue
+            if record[4] > member_index or not _has_unconditional_false_return(
+                tokens, guard_records, record[3], record[4]
+            ):
+                continue
+            condition_parts = top_level_parts(record[1], record[2])
+            condition_values = tuple(
+                tokens[index].value for index in range(record[1], record[2])
+            )
+            allowed_identifiers = {
+                "lease",
+                "owner",
+                "owner_incarnation",
+                "state",
+                "transfer_sequence",
+                "sequence",
+                "helper",
+                "worker",
+                "primary",
+                "claimant",
+                "claimant_incarnation",
+                "return_worker",
+                "return_incarnation",
+                "incarnation",
+                "shard",
+                "opaque_helper_worker",
+                "primary_worker",
+                "role",
+                "compat_shard",
+                "NULL",
+                "U",
+                "llam_worker_binding_live",
+                "llam_legacy_lease_matches_worker",
+                "llam_legacy_lease_merge_paused",
+                "llam_legacy_lease_runtime_stopping",
+            }
+            if any(
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
+                and value not in allowed_identifiers
+                and not value.startswith("LLAM_")
+                for value in condition_values
+            ):
+                continue
+            for part_start, part_end in condition_parts:
+                part = strip_outer_parentheses(
+                    tuple(tokens[index].value for index in range(part_start, part_end))
+                )
+                if part == expected:
+                    return True
+                if function.name == "llam_legacy_lease_complete_handback_locked":
+                    # Only the canonical state/owner pair conjunctions may
+                    # contain an expected predicate beneath parentheses.
+                    if "flag" in part or "attacker" in part:
+                        continue
+                    allowed = {
+                        "lease",
+                        "owner",
+                        "owner_incarnation",
+                        "state",
+                        "transfer_sequence",
+                        "sequence",
+                        "worker",
+                        "claimant",
+                        "claimant_incarnation",
+                        "NULL",
+                        "LLAM_LEASE_TRANSFER_TO_PRIMARY",
+                        "LLAM_LEASE_STOPPING",
+                        "llam_legacy_lease_matches_worker",
+                        "&&",
+                        "!=",
+                        "==",
+                        "(",
+                        ")",
+                        ",",
+                    }
+                    if expected == ("lease", "->", "owner", "!=", "NULL"):
+                        if part == (
+                            "lease",
+                            "->",
+                            "owner",
+                            "!=",
+                            "NULL",
+                            "&&",
+                            "lease",
+                            "->",
+                            "owner",
+                            "!=",
+                            "worker",
+                        ):
+                            return True
+                    if all(value in allowed for value in part) and expected in tuple(
+                        tuple(tokens[index].value for index in range(start, end))
+                        for start, end in top_level_parts(part_start, part_end)
+                    ):
+                        return True
+                if (
+                    function.name == "llam_legacy_lease_rollback_helper_locked"
+                    and expected == ("lease", "->", "owner", "!=", "NULL")
+                    and part
+                    == (
+                        "lease",
+                        "->",
+                        "owner",
+                        "!=",
+                        "NULL",
+                        "&&",
+                        "(",
+                        "lease",
+                        "->",
+                        "owner",
+                        "!=",
+                        "primary",
+                        "||",
+                        "lease",
+                        "->",
+                        "owner_incarnation",
+                        "!=",
+                        "incarnation",
+                        ")",
+                    )
+                ):
+                    return True
+        return False
 
     if not _direct_lease_origin(masked, tokens, function, "lease", member_index):
         return False
@@ -2338,7 +2842,12 @@ def _owner_proof_before(
                 if (
                     "=" not in pattern
                     and not positive_transition
-                    and not in_returning_guard(index)
+                    and not (
+                        strict_failure_guard(index, pattern)
+                        if function.name
+                        != "llam_legacy_lease_complete_handback_locked"
+                        else in_returning_guard(index)
+                    )
                 ):
                     continue
                 return True
@@ -2355,8 +2864,22 @@ def _owner_proof_before(
             if len(call.args) != len(arguments):
                 continue
             if all(_arg_values(tokens, actual) == expected for actual, expected in zip(call.args, arguments)):
-                if name == "llam_worker_binding_live" and not in_returning_guard(
-                    call.name_index
+                if name == "llam_worker_binding_live" and not (
+                    strict_failure_guard(
+                        call.name_index,
+                        (
+                            "!",
+                            "llam_worker_binding_live",
+                            "(",
+                            *arguments[0],
+                            ",",
+                            *arguments[1],
+                            ")",
+                        ),
+                    )
+                    if function.name
+                    != "llam_legacy_lease_complete_handback_locked"
+                    else in_returning_guard(call.name_index)
                 ):
                     continue
                 return True
@@ -2449,7 +2972,7 @@ def _owner_clear_proof_before(
     def in_returning_guard(token_index: int) -> bool:
         return any(
             record[1] <= token_index < record[2]
-            and _has_unconditional_return(
+            and _has_unconditional_false_return(
                 tokens,
                 guard_records,
                 record[3],
@@ -2457,6 +2980,129 @@ def _owner_clear_proof_before(
             )
             for record in guard_records
         )
+
+    def top_level_parts(start: int, finish: int) -> list[tuple[int, int]]:
+        parts: list[tuple[int, int]] = []
+        part_start = start
+        paren_depth = bracket_depth = brace_depth = 0
+        for index in range(start, finish):
+            value = tokens[index].value
+            if value == "(":
+                paren_depth += 1
+            elif value == ")" and paren_depth:
+                paren_depth -= 1
+            elif value == "[":
+                bracket_depth += 1
+            elif value == "]" and bracket_depth:
+                bracket_depth -= 1
+            elif value == "{":
+                brace_depth += 1
+            elif value == "}" and brace_depth:
+                brace_depth -= 1
+            elif (
+                value == "||"
+                and paren_depth == 0
+                and bracket_depth == 0
+                and brace_depth == 0
+            ):
+                parts.append((part_start, index))
+                part_start = index + 1
+        parts.append((part_start, finish))
+        return parts
+
+    def strict_failure_guard(
+        token_index: int, expected: tuple[str, ...]
+    ) -> bool:
+        for record in guard_records:
+            if not record[1] <= token_index < record[2]:
+                continue
+            if record[4] > member_index or not _has_unconditional_false_return(
+                tokens, guard_records, record[3], record[4]
+            ):
+                continue
+            condition_values = tuple(
+                tokens[index].value for index in range(record[1], record[2])
+            )
+            allowed_identifiers = {
+                "lease",
+                "owner",
+                "owner_incarnation",
+                "state",
+                "transfer_sequence",
+                "sequence",
+                "worker",
+                "return_worker",
+                "return_incarnation",
+                "incarnation",
+                "shard",
+                "NULL",
+                "U",
+                "llam_worker_binding_live",
+                "llam_legacy_lease_merge_paused",
+                "llam_legacy_lease_runtime_stopping",
+            }
+            if any(
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
+                and value not in allowed_identifiers
+                and not value.startswith("LLAM_")
+                for value in condition_values
+            ):
+                continue
+            for part_start, part_end in top_level_parts(record[1], record[2]):
+                part = tuple(tokens[index].value for index in range(part_start, part_end))
+                if part == expected:
+                    return True
+                if (
+                    function.name == "llam_legacy_lease_enter_redirect_locked"
+                    and part
+                    == (
+                        "(",
+                        "lease",
+                        "->",
+                        "state",
+                        "!=",
+                        "LLAM_LEASE_PRIMARY_OWNED",
+                        "&&",
+                        "lease",
+                        "->",
+                        "state",
+                        "!=",
+                        "LLAM_LEASE_HELPER_OWNED",
+                        "&&",
+                        "lease",
+                        "->",
+                        "state",
+                        "!=",
+                        "LLAM_LEASE_TRANSFER_TO_HELPER",
+                        ")",
+                    )
+                    and expected
+                    in (
+                        (
+                            "lease",
+                            "->",
+                            "state",
+                            "!=",
+                            "LLAM_LEASE_PRIMARY_OWNED",
+                        ),
+                        (
+                            "lease",
+                            "->",
+                            "state",
+                            "!=",
+                            "LLAM_LEASE_HELPER_OWNED",
+                        ),
+                        (
+                            "lease",
+                            "->",
+                            "state",
+                            "!=",
+                            "LLAM_LEASE_TRANSFER_TO_HELPER",
+                        ),
+                    )
+                ):
+                    return True
+        return False
 
     def has_pattern(pattern: tuple[str, ...]) -> bool:
         width = len(pattern)
@@ -2466,7 +3112,7 @@ def _owner_clear_proof_before(
             if body_depth(index) != 1:
                 continue
             if tuple(tokens[item].value for item in range(index, index + width)) == pattern:
-                if not in_returning_guard(index):
+                if not strict_failure_guard(index, pattern):
                     continue
                 return True
         return False
@@ -2483,8 +3129,17 @@ def _owner_clear_proof_before(
                 _arg_values(tokens, actual) == expected
                 for actual, expected in zip(call.args, arguments)
             ):
-                if name == "llam_worker_binding_live" and not in_returning_guard(
-                    call.name_index
+                if name == "llam_worker_binding_live" and not strict_failure_guard(
+                    call.name_index,
+                    (
+                        "!",
+                        "llam_worker_binding_live",
+                        "(",
+                        *arguments[0],
+                        ",",
+                        *arguments[1],
+                        ")",
+                    ),
                 ):
                     continue
                 return True
@@ -2584,7 +3239,9 @@ def _unbind_owner_clear_proof(
     return False
 
 
-def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
+def _owner_assignment_errors(
+    masked: str, relative_path: str | None = None
+) -> list[tuple[int, str]]:
     """Audit direct lease-owner writes and reject aliases/indirection."""
 
     errors: list[tuple[int, str]] = []
@@ -2597,6 +3254,16 @@ def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
         error = (line, "Phase 1A ownerless lease grant")
         if error not in errors:
             errors.append(error)
+
+    # No object-like macro is part of the canonical owner API.  A macro can
+    # hide a whole owner/null-store statement without leaving a member token,
+    # so audited scheduler source rejects preprocessor definitions outright.
+    if relative_path is not None and pathlib.PurePath(relative_path).as_posix() == (
+        "src/core/sched/scheduler.c"
+    ):
+        for line, raw in enumerate(masked.splitlines(), start=1):
+            if re.match(r"^\s*#\s*define\b", raw):
+                fail(line)
 
     # C designated initializers are not part of the audited coordinator API.
     # In particular, an unrelated local ``{ .owner = ... }`` must not be
@@ -2652,7 +3319,7 @@ def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
     # hide an owner-slot write or alter the proof state without leaving a
     # member token for the lexical audit to inspect.
     for function in function_spans:
-        if function.name not in LEASE_OWNER_WRITE_HELPERS:
+        if function.name not in LEASE_OWNER_WRITE_HELPERS | LEASE_OWNER_NULL_WRITE_HELPERS:
             continue
         begin, end = _token_range_for_span(masked, function)
         body_open = next(
@@ -2671,7 +3338,12 @@ def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
                 continue
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", call.name):
                 continue
-            if call.name in LEASE_OWNER_ALLOWED_CALLS or call.name in CONTROL_FLOW_NAMES:
+            allowed_calls = (
+                LEASE_OWNER_NULL_ALLOWED_CALLS
+                if function.name in LEASE_OWNER_NULL_WRITE_HELPERS
+                else LEASE_OWNER_ALLOWED_CALLS
+            )
+            if call.name in allowed_calls or call.name in CONTROL_FLOW_NAMES:
                 continue
             fail(tokens[call.name_index].line)
 
@@ -2793,8 +3465,10 @@ def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
             for index in range(statement_start, statement_end)
         )
 
-        if transition and direct_assignment and not conditional_write_is_audited(
-            function, begin, end, member_index
+        if (
+            direct_assignment
+            and (transition or (null_transition and receiver_is_local_lease))
+            and not conditional_write_is_audited(function, begin, end, member_index)
         ):
             fail(line)
             continue
@@ -2933,7 +3607,7 @@ def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
             )
             if tokens[index - 1].value in owner_slot_names or (
                 function is not None
-                and function.name in LEASE_OWNER_WRITE_HELPERS
+                and function.name in LEASE_OWNER_WRITE_HELPERS | LEASE_OWNER_NULL_WRITE_HELPERS
                 and not declaration
             ):
                 fail(token.line)
@@ -2987,7 +3661,7 @@ def _owner_assignment_errors(masked: str) -> list[tuple[int, str]]:
             function = _function_for_token(masked, tokens, function_spans, call.name_index)
             if alias in owner_slot_names or (
                 function is not None
-                and function.name in LEASE_OWNER_WRITE_HELPERS
+                and function.name in LEASE_OWNER_WRITE_HELPERS | LEASE_OWNER_NULL_WRITE_HELPERS
                 and alias is not None
                 and len(call.args) > 1
             ):
@@ -3155,6 +3829,16 @@ def _lock_order_errors(
             (call for call in calls if begin <= call.name_index < end),
             key=lambda call: call.name_index,
         )
+        function_has_opaque_lock = any(
+            direct_receiver_for_lock(call)[1] == "opaque_lock"
+            for call in function_calls
+        )
+        lock_receivers = {
+            direct_receiver_for_lock(call)[0]
+            for call in function_calls
+            if direct_receiver_for_lock(call)[0] is not None
+        }
+        mixed_receiver_protocol = function_has_opaque_lock and len(lock_receivers) > 1
         for call in function_calls:
             if noncanonical_indexed_shard_receiver(call):
                 fail(tokens[call.name_index].line)
@@ -3187,6 +3871,13 @@ def _lock_order_errors(
                     held_lock_roles.discard(role)
                 continue
             if which == "opaque_lock" and state["lock"]:
+                fail(tokens[call.name_index].line)
+            if which == "lock" and mixed_receiver_protocol and not state["opaque_lock"]:
+                # Once a function participates in the opaque/shard lock
+                # protocol, every direct shard lock must have its matching
+                # opaque lock held first.  Tracking only a global
+                # ``opaque-before-any-lock`` order lets ``a->opaque_lock`` be
+                # paired incorrectly with ``b->lock``.
                 fail(tokens[call.name_index].line)
             if which == "opaque_lock":
                 # More than one dynamic receiver is safe only when the
@@ -3263,6 +3954,24 @@ def _lock_order_errors(
                     fail(tokens[call.name_index].line)
                     continue
                 if (
+                    not call.name.startswith("llam_")
+                    and re.search(r"(?:lock|mutex|opaque)", lowered)
+                    and any(
+                        _simple_identifier(tokens, argument)
+                        in {"shard", "first", "second", "source", "target", "a", "b"}
+                        for argument in call.args
+                    )
+                    and call.name not in {
+                        "pthread_cond_wait",
+                        "pthread_cond_timedwait",
+                    }
+                ):
+                    # Generic mutex/opaque wrappers (including names such as
+                    # ``take_mutex``) are not source-auditable.  Reject them
+                    # even when the lock field is hidden behind a parameter.
+                    fail(tokens[call.name_index].line)
+                    continue
+                if (
                     lowered.startswith(("lock_shard", "unlock_shard", "trylock_shard"))
                     or (
                         lowered.startswith(("acquire_", "release_"))
@@ -3276,6 +3985,59 @@ def _lock_order_errors(
                     or lowered in {"lock", "lockit", "take_lock", "lock_fn"}
                 ):
                     fail(tokens[call.name_index].line)
+        # A mutex field may not be converted to a pointer and then handed to
+        # an opaque wrapper or function-pointer alias.  The direct pthread
+        # spelling is the sole exception; its complete argument is checked by
+        # ``direct_receiver_for_lock`` above.  This deliberately rejects
+        # pointer-hidden lock acquisition even when the wrapper name carries
+        # no lock-specific token.
+        scheduler_lock_path = pathlib.PurePath(relative_path).as_posix().startswith(
+            ("src/core/sched/", "src/engine/watchdog/")
+        )
+        for index in range(begin, end):
+            if not scheduler_lock_path or tokens[index].value != "&":
+                continue
+            member_index = None
+            for item in range(index + 1, min(end, index + 12)):
+                if tokens[item].value in {";", ",", ")", "}"}:
+                    break
+                if (
+                    tokens[item].value in {"lock", "opaque_lock"}
+                    and item > index + 1
+                    and tokens[item - 1].value in {"->", "."}
+                ):
+                    member_index = item
+                    break
+            if member_index is None:
+                continue
+            direct_call = _call_containing(
+                all_calls,
+                index,
+                lock_names | {"pthread_cond_wait", "pthread_cond_timedwait"},
+            )
+            if direct_call is None:
+                fail(tokens[index].line)
+                continue
+            if direct_call.name in {"pthread_cond_wait", "pthread_cond_timedwait"}:
+                if (
+                    len(direct_call.args) >= 2
+                    and direct_call.args[1][0] == index
+                    and _arg_values(tokens, direct_call.args[1])
+                    == ("&", "shard", "->", "opaque_lock")
+                ):
+                    continue
+                fail(tokens[index].line)
+                continue
+            receiver, field, mentioned = direct_receiver_for_lock(direct_call)
+            if (
+                not mentioned
+                or receiver is None
+                or field != tokens[member_index].value
+                or not direct_call.args
+                or direct_call.args[0][0] != index
+                or direct_call.args[0][-1] != member_index
+            ):
+                fail(tokens[index].line)
     return errors
 
 
@@ -3305,6 +4067,14 @@ def _watchdog_errors_legacy(relative_path: str, masked: str) -> list[tuple[int, 
         error = (line, "Phase 1A watchdog target outside lease lifetime")
         if error not in errors:
             errors.append(error)
+
+    # The canonical signal site has no preprocessor-defined wrapper.  An
+    # object-like macro could otherwise hide a snapshot-output write or a
+    # control-flow guard from this lexical proof.
+    if path == "src/engine/watchdog/watchdog_probe.c":
+        for line, raw in enumerate(masked.splitlines(), start=1):
+            if re.match(r"^\s*#\s*define\b", raw):
+                fail(line)
 
     def direct_identifier_argument(call: _CallSite, argument: int) -> str | None:
         if argument >= len(call.args):
@@ -3746,7 +4516,14 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             if not start < snapshot.name_index < finish:
                 continue
             part = (start, finish)
-            if values(part)[:1] != ("!",):
+            expected_condition = (
+                "!",
+                *tuple(
+                    tokens[index].value
+                    for index in range(snapshot.name_index, snapshot.close_index + 1)
+                ),
+            )
+            if values(part) != expected_condition:
                 continue
             nested = calls_in((start + 1, finish))
             if len(nested) != 1 or nested[0] != snapshot:
@@ -3940,7 +4717,10 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
         )
 
         # No original or validated snapshot output may be rebound before the
-        # signal, including pointer movement or compound updates.
+        # signal, including pointer movement or compound updates.  Address
+        # aliases are checked from function scope, not from the first
+        # snapshot: an alias created before that call can still overwrite the
+        # output after the snapshot has returned.
         rebound = False
         output_names = set(original_outputs) | set(validated_outputs)
         for index in range(original_snapshot.close_index + 1, call.name_index):
@@ -3958,23 +4738,96 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             ):
                 rebound = True
                 break
-        # An output address may not escape through an alias.  Exempt only the
-        # direct validated snapshot itself; every other ``&output`` is an
-        # unsupported write channel, including ``pthread_t *p = &output``.
+        # An output address may not escape through an alias.  The only
+        # pre-snapshot address uses in the native implementation are the
+        # direct snapshot arguments and zeroing ``memset`` calls.  Every other
+        # ``&output`` is an unsupported write channel, including
+        # ``pthread_t *p = &output``.
         if not rebound:
-            for index in range(original_snapshot.close_index + 1, call.name_index - 1):
+            for index in range(body_open + 1, call.name_index - 1):
+                addressed = _addressed_identifier_at(tokens, index, call.name_index)
+                if addressed is None:
+                    continue
+                output, addressed_end = addressed
+                if output not in output_names or (
+                    addressed_end < call.name_index
+                    and tokens[addressed_end].value in {"->", "."}
+                ):
+                    continue
+                containing_snapshot = _call_containing(
+                    calls,
+                    index,
+                    {"llam_legacy_lease_snapshot_watchdog_locked"},
+                )
+                if containing_snapshot is not None:
+                    continue
+                containing_memset = _call_containing(calls, index, {"memset"})
+                if containing_memset is not None and len(containing_memset.args) == 3:
+                    if (
+                        _addressed_identifier(tokens, containing_memset.args[0]) == output
+                        and _is_zero_value(tokens, containing_memset.args[1])
+                        and _arg_values(tokens, containing_memset.args[2])
+                        == ("sizeof", "(", output, ")")
+                    ):
+                        continue
+                rebound = True
+                break
+        # ``current`` is loaded from active-G after the original snapshot and
+        # must remain the same object through the validated snapshot/kill
+        # window.  It is intentionally checked only after the validated
+        # snapshot because the canonical path initializes it between the two
+        # snapshots.
+        if not rebound:
+            stability_names = output_names | {"current"}
+            for index in range(validated_snapshot.close_index + 1, call.name_index):
+                if tokens[index].value not in stability_names:
+                    continue
                 if (
-                    tokens[index].value != "&"
-                    or tokens[index + 1].value not in output_names
-                    or (
-                        index + 2 < call.name_index
-                        and tokens[index + 2].value in {"->", "."}
-                    )
-                    or validated_snapshot.open_index < index < validated_snapshot.close_index
+                    index + 1 < call.name_index
+                    and tokens[index + 1].value in ASSIGNMENT_OPERATORS
+                ) or (
+                    index > validated_snapshot.close_index
+                    and tokens[index - 1].value in {"++", "--"}
+                ) or (
+                    index + 1 < call.name_index
+                    and tokens[index + 1].value in {"++", "--"}
+                ):
+                    rebound = True
+                    break
+        if not rebound:
+            # ``current`` is also a protected scalar: a bare address escape
+            # before or after the validated snapshot could mutate the active-G
+            # comparison operand without an obvious assignment token.
+            for index in range(body_open + 1, call.name_index):
+                addressed = _addressed_identifier_at(tokens, index, call.name_index)
+                if addressed is None or addressed[0] != "current":
+                    continue
+                if (
+                    addressed[1] < call.name_index
+                    and tokens[addressed[1]].value in {"->", "."}
                 ):
                     continue
                 rebound = True
                 break
+        # Parenthesized lvalues such as ``((native_thread)) = attacker`` do
+        # not place an assignment operator immediately after the identifier.
+        # Any assignment statement mentioning a snapshot output after the
+        # original snapshot is therefore unsupported unless it is the direct
+        # validated snapshot call itself (which has no assignment operator).
+        if not rebound:
+            for index in range(original_snapshot.close_index + 1, call.name_index):
+                if tokens[index].value not in output_names:
+                    continue
+                statement_start, statement_end = _statement_bounds(
+                    tokens, index, begin, call.name_index
+                )
+                if any(
+                    tokens[item].value in ASSIGNMENT_OPERATORS
+                    and item > index
+                    for item in range(statement_start, statement_end)
+                ):
+                    rebound = True
+                    break
         if rebound:
             fail(tokens[call.name_index].line)
             continue
@@ -4098,7 +4951,7 @@ def scan_source(relative_path: str, text: str) -> list[str]:
     extra.extend(_processor_struct_errors(relative_path, masked))
     extra.extend(_shard_struct_errors(masked))
     extra.extend(_ack_field_errors(relative_path, masked))
-    extra.extend(_owner_assignment_errors(masked))
+    extra.extend(_owner_assignment_errors(masked, relative_path))
     extra.extend(_lock_order_errors(relative_path, masked))
     extra.extend(_watchdog_errors(relative_path, masked))
 

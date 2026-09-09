@@ -880,26 +880,7 @@ audit-shared-exports: shared
 	$(PYTHON) scripts/audit_shared_exports.py ./$(SHLIB_REAL)
 
 audit-production-test-hooks: static shared
-	@if command -v nm >/dev/null 2>&1; then \
-		test_hook_re='llam_[[:alnum:]_]*_test_[[:alnum:]_]*'; \
-		safe_self_test_re='llam_broker_client_self_test_'; \
-		for artifact in libllam_runtime.a ./$(SHLIB_REAL); do \
-			if test -f "$$artifact"; then \
-				symbols="$$($$(command -v nm) -a "$$artifact" 2>/dev/null || $$(command -v nm) "$$artifact" 2>/dev/null || true)"; \
-				test_hooks="$$(printf '%s\n' "$$symbols" | grep -E "$$test_hook_re" | grep -Ev "$$safe_self_test_re" || true)"; \
-				if test -n "$$test_hooks"; then \
-					echo "production artifact exports test fault-injection hooks: $$artifact" >&2; \
-					printf '%s\n' "$$test_hooks" >&2; \
-					exit 1; \
-				fi; \
-			fi; \
-		done; \
-		fixture_symbols='00000000 T llam_scheduler_test_rebind_primary'; \
-		if ! printf '%s\n' "$$fixture_symbols" | grep -E "$$test_hook_re" >/dev/null; then \
-			echo "production test-hook audit regression: scheduler hook prefix is not covered" >&2; \
-			exit 1; \
-		fi; \
-	fi
+	$(PYTHON) scripts/audit_production_test_hooks.py ./libllam_runtime.a ./$(SHLIB_REAL) || { status=$$?; test "$$status" -eq 77; }
 
 test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_legacy_lease_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_lcwe_model
