@@ -191,18 +191,22 @@ direct lease-coordinator origins and the four named owner transitions (plus
 the audited init/finalize/redirect/unbind clears); the two watchdog snapshots,
 exact positive/failure guards, active-G check, and lock-held signal; and direct
 pthread scheduler locks with a visible first/second ID order.  Reassignments,
-compound/unary or macro-hidden writes, unknown ACK/owner/lock wrappers,
-unsupported pointer/address aliases, conditional tuple stores, duplicate tuple
-stores, noncanonical indices, and proof markers in unreachable or
-non-dominating branches are rejected rather than inferred.  Trylock/timedlock
-success is treated as held for ordering purposes.  Macro expansion and
-compiler-specific control-flow semantics are not inferred; any future source
-shape that needs those semantics must add an explicit audited helper or a
-dedicated checker update.  These are lexical canonical-allowlist rules, not a
-replacement for a C parser, preprocessor, CFG, or whole-program data-flow
-analysis.  Phase 1A is complete; P-resource migration remains Phase 1B,
-foreign detach/reattach remains Phase 2, and Rust, Python, JVM, .NET, and Go
-wrappers remain excluded.
+compound/unary or macro-hidden writes, parenthesized/cast/comma lvalues,
+unknown ACK/owner/lock wrappers, unsupported pointer/address aliases,
+conditional nonzero tuple stores, duplicate tuple/ACK stores, any tuple/ACK
+store after the sole nonzero ACK, noncanonical indices, and proof markers in
+unreachable or non-dominating branches are rejected rather than inferred.  A
+publication's conditional zero-reset stores are allowed only before that
+publication edge; the tuple values themselves remain unconditional and
+field-derived.  Trylock/timedlock success is treated as held for ordering
+purposes, and watchdog failure exits must use the braced direct-return shape.
+Macro expansion and compiler-specific control-flow semantics are not inferred;
+any future source shape that needs those semantics must add an explicit
+audited helper or a dedicated checker update.  These are lexical
+canonical-allowlist rules, not a replacement for a C parser, preprocessor, CFG,
+or whole-program data-flow analysis.  Phase 1A is complete; P-resource
+migration remains Phase 1B, foreign detach/reattach remains Phase 2, and Rust,
+Python, JVM, .NET, and Go language wrappers remain excluded.
 
 Make and CMake use the same `scripts/audit_production_test_hooks.py` policy
 for both production static and shared artifacts.  The checker invokes

@@ -59,7 +59,11 @@ which is a platform limitation rather than a clean symbol result.  Make uses
 the configured `$(PYTHON)` interpreter to invoke the same checker for both
 artifacts, so its `llvm-nm` fallback and local-symbol exception are identical
 to CMake's; a missing symbol tool is reported as the same documented platform
-limitation.
+limitation.  The Phase 1A source checker is likewise a lexical
+canonical-allowlist gate: grouped/cast/comma lvalues, indirect aliases,
+noncanonical lock indices, and hidden wrappers are not inferred.  P-resource
+migration (Phase 1B), foreign detach/reattach (Phase 2), and Rust, Python,
+JVM, .NET, and Go wrappers are outside this audit.
 
 Install to a local prefix:
 

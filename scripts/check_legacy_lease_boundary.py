@@ -596,6 +596,134 @@ def _addressed_identifier_at(
     return name, cursor
 
 
+def _identifier_has_expression_write_or_move(
+    tokens: Sequence[phase0._Token],
+    name: str,
+    start: int,
+    end: int,
+    *,
+    pointer: bool = False,
+    include_assignment: bool = True,
+    include_address: bool = True,
+) -> bool:
+    """Reject an identifier used as a mutable expression in one interval.
+
+    The Phase 1A audits intentionally accept only direct identifier/member
+    spellings.  Looking at the token immediately adjacent to an identifier is
+    insufficient for ordinary C expressions such as ``(shard) = other`` or
+    ``((worker))++``: the assignment/unary operator is separated by one or
+    more closing parentheses (and a cast can add another pair).  This helper
+    keeps the audit lexical and conservative.  It treats an assignment
+    operator later in the same statement, an address escape, or a movement
+    operator after redundant parentheses as a mutation.  A direct member
+    receiver (``worker->field``) remains a read of the pointer itself and is
+    therefore excluded.
+
+    ``pointer`` additionally rejects parenthesized pointer arithmetic.  Scalar
+    tuple values are checked for assignment/unary movement but their normal
+    arithmetic in surrounding transition expressions is not rejected here.
+    """
+
+    if not name or start >= end:
+        return False
+    for index in range(max(0, start), min(end, len(tokens))):
+        if tokens[index].value != name:
+            continue
+        following = tokens[index + 1].value if index + 1 < end else None
+        previous = tokens[index - 1].value if index > start else None
+
+        # ``name->member``/``name.member`` is a direct projection, not a
+        # mutation of the receiver.  Addressed member projections are also
+        # canonical (``&name->field``), while bare ``&name`` is not.
+        if following in {"->", "."} or previous in {"->", "."}:
+            continue
+        # An identifier between an indexing pair is the selector of an
+        # object, not the object/index variable being assigned.  For example,
+        # ``rt->shards[i].metrics += 1`` must not be interpreted as a write to
+        # ``i`` merely because the assignment appears later in the statement.
+        # A grouped movement ``(i)++`` or grouped assignment ``(i) = j`` does
+        # not have this immediate ``[name]`` shape and remains rejected.
+        if previous == "[" and following == "]":
+            continue
+
+        if include_address:
+            addressed = _addressed_identifier_at(tokens, index - 1, end) if index > 0 else None
+            if addressed is not None and addressed[0] == name:
+                addressed_end = addressed[1]
+                if addressed_end >= end or tokens[addressed_end].value not in {"->", "."}:
+                    return True
+
+        statement_start, statement_end = _statement_bounds(tokens, index, start, end)
+        # An assignment later in this statement is an expression lvalue even
+        # when parentheses/casts/comma operators separate it from the name.
+        # Assignments before the name (for example ``out = name``) are not.
+        if include_assignment and any(
+            tokens[item].value in ASSIGNMENT_OPERATORS
+            for item in range(index + 1, statement_end)
+        ):
+            # A loop-local pointer declaration (``type *name = origin``)
+            # commonly appears after an earlier lock in the same function.
+            # It establishes a fresh lexical object, whereas a grouped or
+            # cast lvalue has a closing delimiter before its assignment.  The
+            # lock audit already treats this declaration as an allowed source
+            # origin; preserve that exception here so later receiver uses are
+            # still checked.
+            if (
+                following == "="
+                and previous == "*"
+                and any(
+                    value.endswith("_t")
+                    or value in {
+                        "const",
+                        "volatile",
+                        "restrict",
+                        "struct",
+                        "union",
+                        "unsigned",
+                        "signed",
+                        "void",
+                    }
+                    for value in (
+                        tokens[item].value for item in range(statement_start, index - 1)
+                    )
+                )
+            ):
+                continue
+            return True
+
+        # Prefix/postfix movement may be hidden behind redundant grouping or
+        # a cast.  Skip only delimiters that can close such a grouping; a
+        # member projection was handled above and is not skipped.
+        cursor = index + 1
+        while cursor < statement_end and tokens[cursor].value == ")":
+            cursor += 1
+        if cursor < statement_end and tokens[cursor].value in {"++", "--"}:
+            return True
+        cursor = index - 1
+        while cursor >= statement_start and tokens[cursor].value == "(":
+            cursor -= 1
+        if cursor >= statement_start and tokens[cursor].value in {"++", "--"}:
+            return True
+
+        if pointer:
+            # ``(name) + offset`` and the equivalent cast/grouped forms move
+            # a pointer receiver to an unproven object.  Keep this scoped to
+            # the same statement so scalar comparisons elsewhere cannot make
+            # a direct member use fail spuriously.
+            cursor = index + 1
+            while cursor < statement_end and tokens[cursor].value in {")", "]"
+            }:
+                cursor += 1
+            if cursor < statement_end and tokens[cursor].value in {"+", "-"}:
+                return True
+            cursor = index - 1
+            while cursor >= statement_start and tokens[cursor].value in {"(", "["}:
+                cursor -= 1
+            if cursor >= statement_start and tokens[cursor].value in {"+", "-"}:
+                return True
+    return False
+
+
 def _function_indices(
     masked: str, tokens: Sequence[phase0._Token], function: _FunctionSpan
 ) -> range:
@@ -1499,6 +1627,19 @@ def _parameter_has_escape_or_rebind(
     pointer_names = set(pointer_parameters or ()) or {
         name for name in names if name not in scalar_names
     }
+    # The older adjacent-token checks below are retained for simple source
+    # forms, but every parameter also needs an expression-aware walk.  In
+    # particular ``(worker)++`` and ``((task)) = other`` put the mutation
+    # operator past a closing parenthesis and otherwise look like reads.
+    for name in names:
+        if _identifier_has_expression_write_or_move(
+            tokens,
+            name,
+            body_open + 1,
+            finish,
+            pointer=name in pointer_names,
+        ):
+            return True
     for index in range(body_open + 1, finish):
         if tokens[index].value not in {"++", "--", "+", "-"}:
             continue
@@ -1573,6 +1714,14 @@ def _receiver_is_stable(
         return False
 
     # Freeze the local receiver after the one direct runtime-shards origin.
+    if _identifier_has_expression_write_or_move(
+        tokens,
+        receiver,
+        origin + 1,
+        min(before + 1, end),
+        pointer=True,
+    ):
+        return False
     for index in range(body_open + 1, min(before + 1, end)):
         addressed = _addressed_identifier_at(tokens, index, min(before + 1, end))
         if addressed is not None and addressed[0] == receiver:
@@ -2478,6 +2627,10 @@ def _ack_sampling_allowed(
     ) -> bool:
         """Reject address escapes and writes to a routed tuple temporary."""
 
+        if _identifier_has_expression_write_or_move(
+            tokens, variable, max(start, begin), min(finish, end)
+        ):
+            return True
         for index in range(max(start, begin), min(finish, end)):
             addressed = _addressed_identifier_at(tokens, index, min(finish, end))
             if addressed is not None and addressed[0] == variable:
@@ -2755,6 +2908,62 @@ def _ack_field_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             target = _arg_values(tokens, candidate.args[0])
             if len(target) != 4 or target[0] != "&" or target[1] != "shard" or target[2] != "->" or target[3] not in publication_fields:
                 fail(tokens[candidate.name_index].line)
+
+        # The release ACK bit is the single publication edge.  Once its sole
+        # nonzero store executes, no tuple field or ACK field may be written
+        # again—even with a relaxed order, a zero reset, or from a conditional
+        # branch.  Looking only at tuple stores before the candidate ACK lets
+        # a later overwrite advertise a different tuple to an acquire-side
+        # sampler, so validate the complete helper through its closing brace.
+        publication_control_records = _control_flow_records(tokens, begin, end)
+        publication_stores: list[tuple[str, _CallSite]] = []
+        for candidate in calls:
+            if (
+                not body_open < candidate.name_index < end
+                or candidate.name not in ATOMIC_STORE_NAMES
+                or len(candidate.args) < 2
+            ):
+                continue
+            target = _arg_values(tokens, candidate.args[0])
+            field = next(
+                (
+                    item
+                    for item in publication_fields
+                    if target == ("&", "shard", "->", item)
+                ),
+                None,
+            )
+            if field is None:
+                continue
+            publication_stores.append((field, candidate))
+
+            # A tuple publication is one unconditional sequence.  The early
+            # NULL/request guard is the only conditional control shape in
+            # this helper; treating any tuple store under another ``if`` as
+            # canonical would leave a path with a partially published tuple.
+            if _token_in_any_control_body(
+                publication_control_records, candidate.name_index
+            ) and not _inside_constant_false_block(
+                tokens, candidate.name_index, begin, end
+            ) and not _is_zero_value(tokens, candidate.args[1]):
+                fail(tokens[candidate.name_index].line)
+
+        nonzero_ack = [
+            candidate
+            for field, candidate in publication_stores
+            if field == f"{base}_pause_ack"
+            and _is_one_value(tokens, candidate.args[1])
+        ]
+        if len(nonzero_ack) != 1:
+            # The member walk reports malformed/missing ACK publications, but
+            # recording the helper line here also catches an ACK hidden behind
+            # a noncanonical value that otherwise leaves no positive edge.
+            fail(function.start_line)
+        else:
+            ack_index = nonzero_ack[0].name_index
+            for _field, candidate in publication_stores:
+                if candidate.name_index > ack_index:
+                    fail(tokens[candidate.name_index].line)
 
     # Sampling functions are an explicit, closed list of matcher callers.  A
     # helper or macro with no visible ACK field could otherwise hide the
@@ -3261,6 +3470,56 @@ def _owner_proof_before(
     value_variables = {value}
     if function.name == "llam_legacy_lease_complete_handback_locked":
         value_variables.update({"claimant", "claimant_incarnation"})
+
+    # Freeze every identity value that feeds the owner tuple after its proof.
+    # A local scalar such as ``incarnation`` is normally initialized by one
+    # direct load, while claimant is extracted from the lease.  Start the
+    # stability walk after that exact origin so the initializer remains a
+    # valid declaration/split-assignment form, then reject grouped/cast/comma
+    # lvalues and unary movement through the publication.
+    protected_values = set(value_variables)
+    protected_values.update(
+        {
+            "shard",
+            "sequence",
+            "incarnation",
+            "claimant",
+            "claimant_incarnation",
+            "worker",
+            "helper",
+            "primary",
+        }
+    )
+
+    def latest_direct_assignment_index(variable: str) -> int | None:
+        latest: int | None = None
+        for index in range(body_open + 1, member_index):
+            if (
+                tokens[index].value == variable
+                and index + 1 < member_index
+                and tokens[index + 1].value == "="
+            ):
+                latest = index
+        return latest
+
+    scalar_identity_values = {
+        "sequence",
+        "incarnation",
+        "claimant_incarnation",
+        "return_incarnation",
+    }
+    for variable in protected_values:
+        origin = latest_direct_assignment_index(variable)
+        start = origin + 1 if origin is not None else body_open + 1
+        if _identifier_has_expression_write_or_move(
+            tokens,
+            variable,
+            start,
+            member_index,
+            pointer=variable not in scalar_identity_values,
+        ):
+            return False
+
     for index in range(body_open + 1, member_index):
         if tokens[index].value not in value_variables:
             continue
@@ -4494,6 +4753,10 @@ def _lock_order_errors(
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", receiver):
             return False
         begin, end = _token_range_for_span(masked, function)
+        if _identifier_has_expression_write_or_move(
+            tokens, receiver, first_lock_index + 1, end, pointer=True
+        ):
+            return True
         for index in range(max(begin + 1, first_lock_index + 1), end):
             if tokens[index].value != receiver:
                 continue
@@ -4556,6 +4819,7 @@ def _lock_order_errors(
         held_opaque_roles: set[str] = set()
         held_lock_roles: set[str] = set()
         first_lock_by_receiver: dict[str, int] = {}
+        first_index_lock: dict[tuple[str, str], int] = {}
         function_calls = sorted(
             (call for call in calls if begin <= call.name_index < end),
             key=lambda call: call.name_index,
@@ -4587,6 +4851,28 @@ def _lock_order_errors(
             indexed = indexed_receiver_key(call)
             if indexed is not None:
                 runtime_name, index_name, _field = indexed
+                index_key = (runtime_name, index_name)
+                prior_index_lock = first_index_lock.setdefault(
+                    index_key, call.name_index
+                )
+                # Indexed lock receivers are stable only for the exact
+                # acquisition pair.  A grouped/cast/comma assignment or
+                # unary movement between the opaque and shard locks changes
+                # the object selected by the second call while its spelling
+                # remains ``rt->shards[index]``.
+                if _identifier_has_expression_write_or_move(
+                    tokens,
+                    index_name,
+                    prior_index_lock + 1,
+                    call.name_index,
+                ) or _identifier_has_expression_write_or_move(
+                    tokens,
+                    runtime_name,
+                    prior_index_lock + 1,
+                    call.name_index,
+                    pointer=True,
+                ):
+                    fail(tokens[call.name_index].line)
                 resolved_runtime = temporal_alias_for(
                     function, runtime_name, call.name_index
                 )
@@ -4601,6 +4887,12 @@ def _lock_order_errors(
                     # rather than silently treating a dynamic index as one
                     # lock object.
                     fail(tokens[call.name_index].line)
+                if call.name == "pthread_mutex_unlock" and _field == "opaque_lock":
+                    # A later lock in the same function may reuse the loop
+                    # index for a different object after this opaque lock is
+                    # released.  Do not carry the earlier acquisition's
+                    # temporal interval across that release.
+                    first_index_lock.pop(index_key, None)
             # Resolve aliases at this source position, not from their final
             # function-wide value.  A receiver reassigned between opaque and
             # shard locks must not inherit the first object's held state.
@@ -5296,6 +5588,23 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
         ]
 
     def has_unconditional_return(body_open: int, body_close: int) -> bool:
+        # A failure guard is part of the source-level proof only when its
+        # terminating return is the direct statement in a braced body.  An
+        # unbraced return (or a nested ``if (flag) return``) can fall through
+        # to the validated signal path, so do not treat it as unconditional.
+        if (
+            body_open >= body_close
+            or tokens[body_open].value != "{"
+        ):
+            return False
+        if any(
+            body_open < record[3] < record[4] <= body_close
+            for record in control_records
+        ):
+            # A nested conditional/jump inside the failure body is not the
+            # canonical direct-return edge, even if another return happens to
+            # appear later in the same block.
+            return False
         return _has_unconditional_return(
             tokens,
             control_records,
@@ -5611,6 +5920,24 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             ):
                 rebound = True
                 break
+        if not rebound:
+            # The declaration/zeroing forms above are allowed before the
+            # original snapshot, but parenthesized prefix/postfix movement is
+            # never a valid initialization of a snapshot output.  Check only
+            # movement here; the address walk below retains its explicit
+            # memset/snapshot exceptions for canonical output setup.
+            for variable in (*original_outputs, "current"):
+                if _identifier_has_expression_write_or_move(
+                    tokens,
+                    variable,
+                    body_open + 1,
+                    original_snapshot.name_index,
+                    pointer=variable in {"owner", "native_thread", "current"},
+                    include_assignment=False,
+                    include_address=False,
+                ):
+                    rebound = True
+                    break
         for index in range(original_snapshot.close_index + 1, call.name_index):
             if tokens[index].value not in output_names:
                 continue
@@ -5697,6 +6024,38 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
                     continue
                 rebound = True
                 break
+        if not rebound:
+            # Parenthesized/cast movement of the original snapshot outputs in
+            # the interval before the validated snapshot is not visible to
+            # the adjacent-token checks above.  The validated call itself
+            # does not use these names, so this interval is safe to inspect as
+            # one expression-closed provenance window.
+            for variable in original_outputs:
+                if _identifier_has_expression_write_or_move(
+                    tokens,
+                    variable,
+                    original_snapshot.close_index + 1,
+                    validated_snapshot.name_index,
+                    pointer=variable in {"owner", "native_thread"},
+                ):
+                    rebound = True
+                    break
+        if not rebound:
+            # After the second snapshot every validated output, plus the
+            # active-G current value, must remain immutable through the signal
+            # decision.  Direct member projections are not present in this
+            # set, so grouped/cast/comma lvalues can fail closed here without
+            # affecting the canonical snapshot call itself.
+            for variable in (*validated_outputs, "current"):
+                if _identifier_has_expression_write_or_move(
+                    tokens,
+                    variable,
+                    validated_snapshot.close_index + 1,
+                    call.name_index,
+                    pointer=variable in {"validated_owner", "validated_native_thread", "current"},
+                ):
+                    rebound = True
+                    break
         # Parenthesized lvalues such as ``((native_thread)) = attacker`` do
         # not place an assignment operator immediately after the identifier.
         # Any assignment statement mentioning a snapshot output after the
