@@ -724,6 +724,154 @@ def _identifier_has_expression_write_or_move(
     return False
 
 
+def _member_mutated_in_interval(
+    tokens: Sequence[phase0._Token],
+    calls: Sequence[_CallSite],
+    receivers: Iterable[str],
+    start: int,
+    end: int,
+    allowed_writes: Iterable[tuple[str, str, tuple[str, ...]]] = (),
+) -> bool:
+    """Reject member writes/address escapes in one provenance interval.
+
+    The boundary proofs use direct member reads, but a worker/coordinator
+    member can otherwise be changed after the proof and before its publication
+    (for example ``owner->role++`` or an atomic store through
+    ``&owner->binding_incarnation``).  Keep this lexical and conservative:
+    direct acquire loads remain reads, while any member lvalue movement,
+    assignment, mutating atomic, or non-load address escape is unsupported.
+    """
+
+    receiver_names = frozenset(receivers)
+    allowed_write_set = frozenset(allowed_writes)
+    if not receiver_names or start >= end:
+        return False
+
+    mutating_atomic_prefixes = (
+        "atomic_store",
+        "atomic_exchange",
+        "atomic_compare_exchange",
+        "atomic_fetch_",
+    )
+    load_calls = frozenset(ATOMIC_LOAD_NAMES)
+
+    for operator, member_index, _line, receiver, _kind, _member in _member_access_tokens(tokens):
+        if receiver not in receiver_names or not start <= operator < end:
+            continue
+
+        statement_start, statement_end = _statement_bounds(
+            tokens, member_index, start, end
+        )
+        following = (
+            tokens[member_index + 1].value
+            if member_index + 1 < end
+            else None
+        )
+
+        # Direct member assignment/compound assignment and postfix movement.
+        if following in ASSIGNMENT_OPERATORS | {"++", "--"}:
+            # The handback acknowledgement is the one coordinator metadata
+            # write intentionally made between its proof and owner tuple
+            # publication.  Keep the exact transition assignment valid while
+            # rejecting every other coordinator/worker mutation.
+            if (
+                receiver == "lease"
+                and _member == "handback_ack_sequence"
+                and following == "="
+                and tuple(
+                    tokens[index].value
+                    for index in range(member_index + 2, statement_end)
+                    if tokens[index].value != ";"
+                )
+                == ("sequence",)
+            ):
+                continue
+            rhs = tuple(
+                tokens[index].value
+                for index in range(member_index + 2, statement_end)
+                if tokens[index].value != ";"
+            )
+            if (receiver, _member, rhs) in allowed_write_set:
+                continue
+            return True
+
+        # Grouping/casts can separate the member from its lvalue operator.
+        # An assignment after this member in the same statement is a
+        # fail-closed indication that the projection participates in that
+        # lvalue expression; a prefix movement is handled similarly.
+        if any(
+            tokens[index].value in ASSIGNMENT_OPERATORS
+            for index in range(member_index + 1, statement_end)
+        ):
+            return True
+        if any(
+            tokens[index].value in {"++", "--"}
+            for index in range(statement_start, statement_end)
+        ):
+            return True
+        # Parenthesized member addresses (``&(owner->field)``) do not leave
+        # ``&`` immediately before the member's ``->`` token.  Treat any
+        # address in this statement as an escape unless the containing call
+        # is the exact direct atomic acquire load used by the native path.
+        if any(
+            tokens[index].value == "&"
+            for index in range(statement_start, operator)
+        ):
+            containing = _call_containing(calls, member_index)
+            if containing is None or containing.name not in load_calls:
+                return True
+            if not containing.args or _arg_values(
+                tokens, containing.args[0]
+            ) != (
+                "&",
+                receiver,
+                "->" if tokens[operator].value == "->" else ".",
+                tokens[member_index].value,
+            ):
+                return True
+        cursor = member_index + 1
+        while cursor < statement_end and tokens[cursor].value in {")", "]"
+        }:
+            cursor += 1
+        if cursor < statement_end and tokens[cursor].value in {"++", "--"}:
+            return True
+        cursor = operator - 1
+        while cursor >= statement_start and tokens[cursor].value in {
+            "(",
+        }:
+            cursor -= 1
+        if cursor >= statement_start and tokens[cursor].value in {"++", "--"}:
+            return True
+
+        # Atomic stores/exchanges/fetches mutate the addressed member.  A
+        # direct acquire load is explicitly a read and remains valid in the
+        # watchdog's post-snapshot policy recomputation.
+        containing = _call_containing(calls, member_index)
+        if containing is not None and containing.name.startswith(
+            mutating_atomic_prefixes
+        ):
+            return True
+
+        # Any bare member address can escape to an alias.  Permit only the
+        # direct atomic acquire-load argument; ``&(receiver->field)`` is not a
+        # canonical spelling and therefore remains rejected.
+        address_start = operator - 1
+        if address_start >= statement_start and tokens[address_start].value == "&":
+            if containing is None or containing.name not in load_calls:
+                return True
+            if not containing.args or _arg_values(
+                tokens, containing.args[0]
+            ) != (
+                "&",
+                receiver,
+                "->" if tokens[operator].value == "->" else ".",
+                tokens[member_index].value,
+            ):
+                return True
+
+    return False
+
+
 def _function_indices(
     masked: str, tokens: Sequence[phase0._Token], function: _FunctionSpan
 ) -> range:
@@ -2538,33 +2686,99 @@ def _ack_sampling_allowed(
         statement_start, statement_end = _statement_bounds(
             tokens, call.open_index, begin, end
         )
-        # A direct return may contain only this matcher call (or its direct
-        # negation).  Parenthesized/combined expressions are unsupported.
+        def return_value(index: int, limit: int) -> str | None:
+            """Return the direct boolean value of one return statement."""
+
+            finish = index + 1
+            while finish < limit and tokens[finish].value not in {";", "}"}:
+                finish += 1
+            values = tuple(tokens[item].value for item in range(index, finish))
+            if values in {
+                ("return", "true"),
+                ("return", "1"),
+                ("return", "1", "U"),
+            }:
+                return "true"
+            if values in {
+                ("return", "false"),
+                ("return", "0"),
+                ("return", "0", "U"),
+            }:
+                return "false"
+            return None
+
+        def body_returns(body_open: int, body_close: int, expected: str) -> bool:
+            """Require one direct return with the condition's polarity."""
+
+            if body_open >= body_close:
+                return False
+            if tokens[body_open].value != "{":
+                return return_value(body_open, body_close) == expected
+            records = _control_flow_records(tokens, begin, end)
+            returns = [
+                index
+                for index in range(body_open + 1, body_close)
+                if tokens[index].value == "return"
+                and not any(
+                    body_open < record[3] <= index < record[4] <= body_close
+                    for record in records
+                )
+            ]
+            return len(returns) == 1 and return_value(returns[0], body_close) == expected
+
+        def condition_route(
+            condition: tuple[str, ...], body_open: int, body_close: int
+        ) -> bool:
+            """Map matcher truth to success and direct negation to failure."""
+
+            if condition == call_values:
+                return body_returns(body_open, body_close, "true")
+            if condition == ("!", *call_values):
+                # The scale path takes a canonical failure ``goto`` to its
+                # release label instead of returning immediately.  It has no
+                # successful return in that branch, so preserve this one
+                # operation-closed cleanup shape.
+                return body_returns(body_open, body_close, "false") or (
+                    tokens[body_open].value == "{"
+                    and any(
+                        tokens[index].value == "break"
+                        or (
+                            tokens[index].value == "goto"
+                            and index + 1 < body_close
+                            and tokens[index + 1].value == "release_pause"
+                        )
+                        for index in range(body_open + 1, body_close)
+                    )
+                    and not any(
+                        return_value(index, body_close) == "true"
+                        for index in range(body_open + 1, body_close)
+                        if tokens[index].value == "return"
+                    )
+                )
+            return False
+
+        # A direct return is the successful matcher path.  Returning its
+        # negation would turn a failed ACK into success and is not canonical.
         if statement_start < statement_end and tokens[statement_start].value == "return":
             expression = tuple(
                 tokens[index].value
                 for index in range(statement_start + 1, statement_end - 1)
             )
-            return expression in {call_values, ("!", *call_values)}
+            return expression == call_values
 
         # Calls used directly as the condition of ``if (...)`` are nested in
         # the condition's parentheses.  The full condition must be exactly
-        # this call or ``!`` followed by it; no attacker-controlled operand or
-        # recombination is inferred.
-        for index in range(begin, call.name_index):
-            if tokens[index].value != "if" or index + 1 >= end:
-                continue
-            if tokens[index + 1].value != "(":
-                continue
-            condition_end = _matching_token(tokens, index + 1, "(", ")")
-            if condition_end is None or not index < call.name_index < condition_end:
-                continue
-            condition = tuple(
-                tokens[item].value for item in range(index + 2, condition_end)
-            )
-            if condition in {call_values, ("!", *call_values)}:
-                return True
-            return False
+        # this call or its direct negation, and the branch must preserve the
+        # corresponding boolean polarity.
+        condition_records = [
+            record
+            for record in _control_flow_records(tokens, begin, end)
+            if record[1] <= call.name_index < record[2]
+        ]
+        if condition_records:
+            record = min(condition_records, key=lambda item: item[2] - item[1])
+            condition = tuple(tokens[item].value for item in range(record[1], record[2]))
+            return condition_route(condition, record[3], record[4])
 
         # Assignment to a boolean is accepted only when the assignment RHS is
         # exactly this matcher call and the first later use is a direct
@@ -2588,24 +2802,52 @@ def _ack_sampling_allowed(
         if assignment != call_values:
             return False
 
+        # The boolean result is itself a short-lived proof value.  It may not
+        # escape through an address alias, even when the alias is formed
+        # before the matcher assignment and written only afterwards.
+        for index in range(begin, end):
+            addressed = _addressed_identifier_at(tokens, index, end)
+            if addressed is not None and addressed[0] == lhs:
+                return False
+        if _identifier_has_expression_write_or_move(
+            tokens, lhs, call.close_index + 1, end
+        ):
+            return False
+
         for index in range(call.close_index + 1, end):
             if tokens[index].value != lhs:
                 continue
-            # A rebind before the decision invalidates the routed result.
-            if index + 1 < end and tokens[index + 1].value in ASSIGNMENT_OPERATORS:
-                return False
-            for if_index in range(begin, index):
-                if tokens[if_index].value != "if" or if_index + 1 >= end:
-                    continue
-                if tokens[if_index + 1].value != "(":
-                    continue
-                condition_end = _matching_token(tokens, if_index + 1, "(", ")")
-                if condition_end is None or not if_index < index < condition_end:
-                    continue
+            condition_records = [
+                record
+                for record in _control_flow_records(tokens, begin, end)
+                if record[1] <= index < record[2]
+            ]
+            if condition_records:
+                record = min(condition_records, key=lambda item: item[2] - item[1])
                 condition = tuple(
-                    tokens[item].value for item in range(if_index + 2, condition_end)
+                    tokens[item].value for item in range(record[1], record[2])
                 )
-                return condition in {(lhs,), ("!", lhs)}
+                if condition == (lhs,):
+                    return body_returns(record[3], record[4], "true")
+                if condition == ("!", lhs):
+                    return body_returns(record[3], record[4], "false") or (
+                        tokens[record[3]].value == "{"
+                        and any(
+                            tokens[item].value == "break"
+                            or (
+                                tokens[item].value == "goto"
+                                and item + 1 < record[4]
+                                and tokens[item + 1].value == "release_pause"
+                            )
+                            for item in range(record[3] + 1, record[4])
+                        )
+                        and not any(
+                            return_value(item, record[4]) == "true"
+                            for item in range(record[3] + 1, record[4])
+                            if tokens[item].value == "return"
+                        )
+                    )
+                return False
             statement_start2, statement_end2 = _statement_bounds(
                 tokens, index, begin, end
             )
@@ -2616,7 +2858,7 @@ def _ack_sampling_allowed(
                     tokens[item].value
                     for item in range(statement_start2 + 1, statement_end2 - 1)
                 )
-                in {(lhs,), ("!", lhs)}
+                == (lhs,)
             ):
                 return True
             return False
@@ -3135,6 +3377,127 @@ def _owner_statement_end(
     return index
 
 
+def _owner_provenance_stable_before(
+    masked: str,
+    tokens: Sequence[phase0._Token],
+    function: _FunctionSpan,
+    member_index: int,
+) -> bool:
+    """Freeze coordinator/worker proof state before owner publication.
+
+    The transition proof is a snapshot of the lease and worker identity.  A
+    later member write before ``owner``/``owner_incarnation`` publication can
+    invalidate that snapshot while leaving all original guard predicates in
+    place.  This helper audits only that narrow post-guard/pre-publication
+    interval, so the actual transition writes after publication remain valid.
+    """
+
+    begin, end = _token_range_for_span(masked, function)
+    body_open = next(
+        (index for index in range(begin, end) if tokens[index].value == "{"),
+        None,
+    )
+    if body_open is None:
+        return False
+
+    # Stop at the publication operator.  When validating owner_incarnation,
+    # the preceding canonical owner write remains inside this interval so a
+    # mutation between the two tuple fields cannot slip through.
+    publication_index = (
+        member_index - 1
+        if member_index > 0 and tokens[member_index - 1].value in {"->", "."}
+        else member_index
+    )
+    allowed_writes: set[tuple[str, str, tuple[str, ...]]] = set()
+    if (
+        member_index >= 2
+        and tokens[member_index - 1].value == "->"
+        and tokens[member_index - 2].value == "lease"
+        and tokens[member_index].value == "owner_incarnation"
+    ):
+        owner_value = LEASE_OWNER_VALUE_NAMES.get(function.name)
+        if owner_value is not None:
+            allowed_writes.add(("lease", "owner", (owner_value,)))
+        elif function.name in LEASE_OWNER_NULL_WRITE_HELPERS:
+            allowed_writes.add(("lease", "owner", ("NULL",)))
+
+    records = _control_flow_records(tokens, begin, end)
+    proof_ends = [
+        record[4]
+        for record in records
+        if record[4] <= publication_index
+        and _has_unconditional_false_return(
+            tokens, records, record[3], record[4]
+        )
+    ]
+    if not proof_ends:
+        # The caller's canonical proof recognizer supplies the final decision;
+        # leave its existing diagnostics responsible for missing guards.
+        return True
+    start = max(proof_ends)
+    if start >= publication_index:
+        return True
+
+    calls = _call_sites(tokens)
+    if _member_mutated_in_interval(
+        tokens,
+        calls,
+        {
+            "lease",
+            "shard",
+            "helper",
+            "claimant",
+            "worker",
+            "primary",
+            "owner",
+        },
+        start,
+        publication_index,
+        allowed_writes,
+    ):
+        return False
+
+    # Scalar identity values do not have a member projection for the member
+    # walk above.  Freeze direct/parenthesized assignments and bare address
+    # escapes in the same interval; declaration initializers all occur before
+    # the canonical guard and remain valid.
+    for variable in {
+        "shard",
+        "helper",
+        "claimant",
+        "worker",
+        "primary",
+        "sequence",
+        "incarnation",
+        "claimant_incarnation",
+        "return_incarnation",
+        "return_worker",
+    }:
+        if _identifier_has_expression_write_or_move(
+            tokens,
+            variable,
+            start,
+            publication_index,
+            pointer=variable
+            in {
+                "shard",
+                "helper",
+                "claimant",
+                "worker",
+                "primary",
+                "return_worker",
+            },
+        ):
+            return False
+        for index in range(start, publication_index):
+            addressed = _addressed_identifier_at(
+                tokens, index, publication_index
+            )
+            if addressed is not None and addressed[0] == variable:
+                return False
+    return True
+
+
 def _direct_lease_origin(
     masked: str,
     tokens: Sequence[phase0._Token],
@@ -3429,6 +3792,10 @@ def _owner_proof_before(
         return False
 
     if not _direct_lease_origin(masked, tokens, function, "lease", member_index):
+        return False
+    if not _owner_provenance_stable_before(
+        masked, tokens, function, member_index
+    ):
         return False
 
     def latest_assignment(
@@ -3891,6 +4258,10 @@ def _owner_clear_proof_before(
         return False
 
     if not _direct_lease_origin(masked, tokens, function, "lease", member_index):
+        return False
+    if not _owner_provenance_stable_before(
+        masked, tokens, function, member_index
+    ):
         return False
     if function.name == "llam_legacy_lease_enter_redirect_locked":
         return (
@@ -5526,6 +5897,37 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             return None
         return values[0], values[2]
 
+    def receiver_stable_before_first_lock(
+        begin: int,
+        before: int,
+        body_open: int,
+    ) -> bool:
+        """Keep the watchdog shard receiver fixed before its first lock."""
+
+        shard_locks = [
+            candidate
+            for candidate in calls
+            if begin <= candidate.name_index < before
+            and candidate.name
+            in {
+                "pthread_mutex_lock",
+                "pthread_mutex_trylock",
+                "pthread_mutex_timedlock",
+            }
+            and mutex_receiver(candidate) is not None
+            and mutex_receiver(candidate)[0] == "shard"
+        ]
+        if not shard_locks:
+            return True
+        first = min(shard_locks, key=lambda item: item.name_index)
+        return not _identifier_has_expression_write_or_move(
+            tokens,
+            "shard",
+            body_open + 1,
+            first.name_index,
+            pointer=True,
+        )
+
     def if_records(begin: int, end: int) -> list[tuple[int, int, int, int, int]]:
         result: list[tuple[int, int, int, int, int]] = []
         for index in range(begin, end):
@@ -5756,6 +6158,11 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
         if body_open is None:
             fail(tokens[call.name_index].line)
             continue
+        if not receiver_stable_before_first_lock(
+            begin, call.name_index, body_open
+        ):
+            fail(tokens[call.name_index].line)
+            continue
         control_records = _control_flow_records(tokens, begin, end)
         if any(tokens[index].value == "goto" for index in range(body_open + 1, end)):
             # The canonical signal path has no jumps.  In particular, a jump
@@ -5791,6 +6198,19 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
         if not snapshot_shape(original_snapshot, original_outputs) or not snapshot_shape(
             validated_snapshot, validated_outputs
         ):
+            fail(tokens[call.name_index].line)
+            continue
+        if _member_mutated_in_interval(
+            tokens,
+            calls,
+            {"owner", "validated_owner"},
+            original_snapshot.close_index + 1,
+            call.name_index,
+        ):
+            # The owner tuple is valid only while the snapshotted worker
+            # identity remains unchanged.  Role, compatibility-shard, and
+            # binding-field writes (including atomic stores or aliases) after
+            # either snapshot invalidate the signal target proof.
             fail(tokens[call.name_index].line)
             continue
         records = if_records(begin, end)

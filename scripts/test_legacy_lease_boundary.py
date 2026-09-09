@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,48 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def assert_clean(self, relative_path: str, source: str) -> None:
         self.assertEqual([], scan_source(relative_path, source))
+
+    def assert_typed_error(
+        self,
+        relative_path: str,
+        source: str,
+        prelude: str,
+        message: str,
+    ) -> None:
+        """Require a warning-clean C fixture that the lexical audit rejects."""
+
+        self.assert_error(relative_path, source, message)
+        compiler = shutil.which("cc")
+        if compiler is None:
+            self.skipTest("typed boundary fixtures require cc")
+        result = subprocess.run(
+            [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Wpedantic",
+                "-Werror",
+                "-fsyntax-only",
+                "-I",
+                str(ROOT / "src"),
+                "-I",
+                str(ROOT / "src" / "internal"),
+                "-I",
+                str(ROOT / "src" / "engine"),
+                "-I",
+                str(ROOT / "include"),
+                "-x",
+                "c",
+                "-",
+            ],
+            input=prelude + source,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_allows_the_exact_worker_local_active_g_surface(self) -> None:
         self.assert_clean(
@@ -2555,6 +2598,178 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "src/core/sched/scheduler.c", source,
             "unversioned pause acknowledgement",
         )
+
+    def test_rejects_ack_sampler_result_polarity_and_alias_escape(self) -> None:
+        prelude = (
+            "#include <stdatomic.h>\n"
+            "#include <stdbool.h>\n"
+            "#include <stdint.h>\n"
+            "typedef struct llam_shard llam_shard_t;\n"
+            "struct llam_shard {\n"
+            "    _Atomic uint64_t merge_pause_request_sequence;\n"
+            "    _Atomic uint64_t merge_pause_ack_lease_epoch;\n"
+            "    _Atomic uint64_t merge_pause_ack_worker_incarnation;\n"
+            "};\n"
+            "extern bool llam_shard_merge_pause_ack_matches_locked(\n"
+            "    const llam_shard_t *, uint64_t, uint64_t, uint64_t);\n"
+        )
+        prefix = (
+            "bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, bool attacker) {\n"
+            "    (void)attacker;\n"
+            "    uint64_t request_sequence;\n"
+            "    uint64_t epoch_value;\n"
+            "    uint64_t worker_incarnation;\n"
+            "    request_sequence = atomic_load_explicit(&shard->merge_pause_request_sequence, memory_order_acquire);\n"
+            "    epoch_value = atomic_load_explicit(&shard->merge_pause_ack_lease_epoch, memory_order_acquire);\n"
+            "    worker_incarnation = atomic_load_explicit(&shard->merge_pause_ack_worker_incarnation, memory_order_acquire);\n"
+            "%s"
+            "}\n"
+        )
+        fixtures = (
+            (
+                "    bool matched = llam_shard_merge_pause_ack_matches_locked(shard, request_sequence, epoch_value, worker_incarnation);\n"
+                "    if (!matched) return true;\n"
+                "    return false;\n",
+                "failure branch returns success",
+            ),
+            (
+                "    if (llam_shard_merge_pause_ack_matches_locked(shard, request_sequence, epoch_value, worker_incarnation)) return false;\n"
+                "    return true;\n",
+                "matched branch returns failure",
+            ),
+            (
+                "    bool matched;\n"
+                "    bool *slot = &matched;\n"
+                "    (void)slot;\n"
+                "    matched = llam_shard_merge_pause_ack_matches_locked(shard, request_sequence, epoch_value, worker_incarnation);\n"
+                "    *slot = attacker;\n"
+                "    if (matched) return true;\n"
+                "    return false;\n",
+                "matcher result overwritten through alias",
+            ),
+            (
+                "    bool matched;\n"
+                "    bool *slot = &matched;\n"
+                "    (void)slot;\n"
+                "    matched = llam_shard_merge_pause_ack_matches_locked(shard, request_sequence, epoch_value, worker_incarnation);\n"
+                "    if (matched) return true;\n"
+                "    return false;\n",
+                "matcher result address escapes",
+            ),
+        )
+        for body, description in fixtures:
+            with self.subTest(description=description):
+                self.assert_typed_error(
+                    "src/engine/watchdog/watchdog_merge.c",
+                    prefix % body,
+                    prelude,
+                    "unversioned pause acknowledgement",
+                )
+
+    def test_rejects_owner_proof_member_and_identity_mutation_after_guard(self) -> None:
+        prelude = (
+            "#include <stdatomic.h>\n"
+            "#include <stdbool.h>\n"
+            "#include <stdint.h>\n"
+            "enum { LLAM_LEASE_TRANSFER_TO_HELPER = 2, LLAM_LEASE_STOPPING = 5,\n"
+            "       LLAM_WORKER_ROLE_OPAQUE_HELPER = 2 };\n"
+            "typedef struct llam_worker llam_worker_t;\n"
+            "typedef struct llam_shard llam_shard_t;\n"
+            "typedef struct llam_legacy_lease llam_legacy_lease_t;\n"
+            "struct llam_worker {\n"
+            "    int role;\n"
+            "    llam_shard_t *compat_shard;\n"
+            "    _Atomic uint64_t incarnation;\n"
+            "    _Atomic uint64_t binding_incarnation;\n"
+            "};\n"
+            "struct llam_legacy_lease {\n"
+            "    int state;\n"
+            "    uint64_t transfer_sequence;\n"
+            "    llam_worker_t *owner;\n"
+            "    uint64_t owner_incarnation;\n"
+            "};\n"
+            "struct llam_shard { llam_legacy_lease_t legacy_lease; llam_worker_t opaque_helper_worker; };\n"
+            "extern llam_legacy_lease_t *llam_shard_legacy_lease_locked(llam_shard_t *);\n"
+            "extern bool llam_worker_binding_live(const llam_worker_t *, uint64_t);\n"
+        )
+        prefix = (
+            "bool llam_legacy_lease_grant_helper_locked(llam_shard_t *shard, llam_worker_t *helper, uint64_t sequence) {\n"
+            "    llam_legacy_lease_t *lease;\n"
+            "    uint64_t incarnation;\n"
+            "    lease = llam_shard_legacy_lease_locked(shard);\n"
+            "    incarnation = atomic_load_explicit(&helper->incarnation, memory_order_acquire);\n"
+            "    if (lease->state != LLAM_LEASE_TRANSFER_TO_HELPER ||\n"
+            "        lease->transfer_sequence != sequence ||\n"
+            "        lease->owner != NULL ||\n"
+            "        helper != &shard->opaque_helper_worker ||\n"
+            "        helper->role != LLAM_WORKER_ROLE_OPAQUE_HELPER ||\n"
+            "        helper->compat_shard != shard ||\n"
+            "        !llam_worker_binding_live(helper, incarnation) ||\n"
+            "        lease->state == LLAM_LEASE_STOPPING) {\n"
+            "        return false;\n"
+            "    }\n"
+            "%s"
+            "    lease->owner = helper;\n"
+            "    lease->owner_incarnation = incarnation;\n"
+            "    return true;\n"
+            "}\n"
+        )
+        fixtures = (
+            ("    lease->state++;\n", "coordinator state movement"),
+            ("    helper->role++;\n", "worker role movement"),
+            ("    helper->compat_shard = shard;\n", "worker shard rebinding"),
+            ("    helper->binding_incarnation++;\n", "worker binding movement"),
+            ("    incarnation = sequence;\n", "owner incarnation rebinding"),
+        )
+        for mutation, description in fixtures:
+            with self.subTest(description=description):
+                self.assert_typed_error(
+                    "src/core/sched/scheduler.c",
+                    prefix % mutation,
+                    prelude,
+                    "ownerless lease grant",
+                )
+        self.assert_typed_error(
+            "src/core/sched/scheduler.c",
+            prefix % "    lease->owner = helper;\n    helper->role++;\n",
+            prelude,
+            "ownerless lease grant",
+        )
+
+    def test_rejects_watchdog_receiver_and_owner_provenance_mutation(self) -> None:
+        source = (ROOT / "src/engine/watchdog/watchdog_probe.c").read_text(
+            encoding="utf-8"
+        )
+        before_first_lock = "    pthread_mutex_lock(&shard->opaque_lock);\n"
+        self.assertIn(before_first_lock, source)
+        self.assert_typed_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            source.replace(
+                before_first_lock,
+                "    shard = NULL;\n" + before_first_lock,
+                1,
+            ),
+            "",
+            "watchdog target outside lease lifetime",
+        )
+        after_snapshots = (
+            "    /* Recompute policy after the tuple validation; a late safepoint wins. */\n"
+        )
+        self.assertIn(after_snapshots, source)
+        for mutation, description in (
+            ("    owner->role++;\n", "original owner role movement"),
+            ("    owner->binding_incarnation++;\n", "original owner binding movement"),
+            ("    validated_owner->role++;\n", "validated owner role movement"),
+            ("    validated_owner->binding_incarnation++;\n", "validated owner binding movement"),
+            ("    validated_owner->compat_shard = shard;\n", "validated owner shard rebinding"),
+        ):
+            with self.subTest(description=description):
+                self.assert_typed_error(
+                    "src/engine/watchdog/watchdog_probe.c",
+                    source.replace(after_snapshots, mutation + after_snapshots, 1),
+                    "",
+                    "watchdog target outside lease lifetime",
+                )
 
 
 if __name__ == "__main__":
