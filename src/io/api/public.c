@@ -29,7 +29,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -157,8 +157,27 @@ static int llam_writev_validate_fallback_iov(const llam_iovec_t *iov, int iovcnt
  */
 static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
     void *ignored = NULL;
-
-    return llam_call_blocking_result(fn, req, &ignored);
+    bool has_deadline = req->deadline_ns != 0U;
+    uint64_t deadline = req->deadline_ns;
+    llam_task_merge_wait_deadline(g_llam_tls_task, &has_deadline, &deadline);
+    req->deadline_ns = has_deadline ? deadline : 0U;
+#if LLAM_PLATFORM_WINDOWS
+    if (g_llam_tls_task != NULL && g_llam_tls_task->io_scope_active &&
+        (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE)) {
+        errno = ENOTSUP; /* Synchronous HANDLE fallbacks cannot guarantee bounded cancellation. */
+        return -1;
+    }
+#endif
+    int result = llam_call_blocking_result(fn, req, &ignored);
+    int error = llam_thread_errno_load_current();
+    if (result != 0 && error == ECANCELED && req->result > 0 &&
+        g_llam_tls_task != NULL && g_llam_tls_task->io_scope_active) {
+        /* The callback has returned before a RUNNING job wakes G. Keep bytes
+         * actually transferred; the next chunk observes cancellation. */
+        return 0;
+    }
+    llam_thread_errno_store(error);
+    return result;
 }
 
 /**
@@ -297,6 +316,7 @@ static ssize_t llam_submit_managed_read(llam_fd_t fd,
     llam_io_req_t *req;
     ssize_t result;
 
+    llam_task_merge_wait_deadline(g_llam_tls_task, &has_deadline, &deadline_ns);
     if (llam_validate_async_rw_count(count) != 0) {
         return -1;
     }
@@ -334,6 +354,8 @@ static ssize_t llam_submit_managed_read(llam_fd_t fd,
         req->buf = buf;
         req->count = count;
         req->task = g_llam_tls_task;
+        /* Wait cleanup clears the backend deadline; carry it into the fallback. */
+        req->deadline_ns = has_deadline ? deadline_ns : 0U;
         if (llam_call_blocking_io(llam_blocking_read_impl, req) != 0) {
             int saved_errno = errno;
 
@@ -365,6 +387,8 @@ static ssize_t llam_submit_managed_read(llam_fd_t fd,
  * @return Number of bytes read, or -1 with @c errno set.
  */
 ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return llam_platform_read_fd(fd, buf, count);
     }
@@ -391,7 +415,7 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
             return llam_submit_managed_read(fd, buf, count, false, 0U);
         }
         if (llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
-            llam_yield();
+            llam_yield_internal();
             direct_socket = false;
             direct_rc = llam_try_direct_rw(fd,
                                            buf,
@@ -426,6 +450,8 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
  * @brief Read bytes from a generic platform handle.
  */
 ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count) {
+    LLAM_NATIVE_API_GUARD(-1);
+
 #if LLAM_PLATFORM_POSIX
     /*
      * Public POSIX handles are file descriptors. Route through llam_read so
@@ -491,6 +517,8 @@ ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count) {
  * extra public-API safepoint and one redundant readiness probe after poll wake.
  */
 ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_ms) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uint64_t deadline_ns = 0U;
     int caller_errno = errno;
 
@@ -540,7 +568,7 @@ ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_
         llam_io_coop_yield_enabled() &&
         llam_io_poll_coop_yield_enabled()) {
         if (!llam_yield_to_local_runnable() && llam_io_shard_has_local_work()) {
-            llam_yield();
+            llam_yield_internal();
         }
     }
 
@@ -633,6 +661,8 @@ ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_
  * @return Number of bytes written, or -1 with @c errno set.
  */
 ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_io_req_t *req;
     ssize_t result;
 
@@ -708,6 +738,8 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
  * @brief Scatter/gather write wrapper.
  */
 ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     ssize_t total = 0;
 
     if (iovcnt < 0) {
@@ -866,6 +898,8 @@ static int llam_forget_closed_fd_state(llam_fd_t fd) {
 }
 
 int llam_close(llam_fd_t fd) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     int rc;
 
     if (LLAM_FD_IS_INVALID(fd)) {
@@ -892,6 +926,8 @@ int llam_close(llam_fd_t fd) {
 }
 
 int llam_close_handle(llam_handle_t handle) {
+    LLAM_NATIVE_API_GUARD(-1);
+
 #if LLAM_PLATFORM_POSIX
     return llam_close((llam_fd_t)handle);
 #else
@@ -938,6 +974,8 @@ int llam_close_handle(llam_handle_t handle) {
  * @return Accepted descriptor, or -1 with @c errno set.
  */
 llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_io_req_t *req;
     llam_fd_t result;
     bool allow_multishot = addr == NULL && addrlen == NULL;
@@ -1047,6 +1085,8 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
  * @return 0 on connection, or -1 with @c errno set.
  */
 int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_io_req_t *req;
     int result;
 
@@ -1113,6 +1153,8 @@ int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
  * @return Positive ready count, 0 on timeout, or -1 with @c errno set.
  */
 int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_io_req_t *req;
     int result;
     unsigned ready_yields = 0U;
@@ -1127,7 +1169,7 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
         llam_io_poll_coop_yield_enabled() &&
         llam_io_shard_has_local_work()) {
         if (!llam_yield_to_local_runnable()) {
-            llam_yield();
+            llam_yield_internal();
         }
     }
     result = llam_try_socket_pollin_now(fd, events, revents);
@@ -1159,7 +1201,7 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
             if (!llam_io_shard_has_local_work()) {
                 break;
             }
-            llam_yield();
+            llam_yield_internal();
         }
         result = llam_try_socket_pollin_now(fd, events, revents);
         if (result == INT_MIN) {
@@ -1242,6 +1284,8 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
  * @brief Poll a generic platform handle without pinning a scheduler worker.
  */
 int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents) {
+    LLAM_NATIVE_API_GUARD(-1);
+
 #if LLAM_PLATFORM_POSIX
     /*
      * POSIX handles are file descriptors in the public ABI.  Delegate to the

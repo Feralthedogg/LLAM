@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "llam/runtime.h"
@@ -2122,7 +2122,7 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
     }
     task = NULL;
 
-    allocator = &runtime_b->shards[0].allocator;
+    allocator = &runtime_b->shards[0].processor.allocator;
     errno = 0;
     {
         bool task_returned_to_external_cache;

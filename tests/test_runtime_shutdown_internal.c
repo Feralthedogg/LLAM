@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -60,6 +60,112 @@ static int fail_errno(const char *message) {
 static int fail_msg(const char *message) {
     fprintf(stderr, "test_runtime_shutdown_internal: %s\n", message);
     return 1;
+}
+
+static int exercise_splitmix64_reference_vectors(void) {
+    if (llam_mix64(UINT64_C(0)) != UINT64_C(0) ||
+        llam_mix64(UINT64_C(1)) != UINT64_C(0x5692161d100b05e5) ||
+        llam_mix64(UINT64_C(0x9e3779b97f4a7c15)) !=
+            UINT64_C(0xe220a8397b1dcdaf) ||
+        llam_public_slot_mix64(UINT64_C(1)) !=
+            UINT64_C(0x5692161d100b05e5)) {
+        return fail_msg("SplitMix64 reference vector mismatch");
+    }
+    return 0;
+}
+
+static int exercise_watch_identity_hash_is_ordered(void) {
+    const uint64_t base = llam_hash_watch_identity(1U, 2U, 3U);
+
+    if (base == llam_hash_watch_identity(2U, 1U, 3U) ||
+        base == llam_hash_watch_identity(4U, 2U, 3U) ||
+        base == llam_hash_watch_identity(1U, 4U, 3U) ||
+        base == llam_hash_watch_identity(1U, 2U, 4U) ||
+        base != llam_hash_watch_identity(1U, 2U, 3U)) {
+        return fail_msg("watch identity hash did not preserve field domains");
+    }
+    return 0;
+}
+
+static int exercise_cldeque_wraparound_and_slot_reuse(void) {
+    llam_cldeque_t *deque;
+    llam_task_t *tasks;
+    llam_task_t extra;
+    size_t i;
+    int rc = 1;
+
+    deque = calloc(1U, sizeof(*deque));
+    tasks = calloc(LLAM_NORM_QUEUE_CAP, sizeof(*tasks));
+    memset(&extra, 0, sizeof(extra));
+    if (deque == NULL || tasks == NULL) {
+        free(tasks);
+        free(deque);
+        return fail_errno("deque wraparound fixture allocation failed");
+    }
+
+    llam_cldeque_init(deque);
+    atomic_store_explicit(&deque->top, SIZE_MAX, memory_order_relaxed);
+    atomic_store_explicit(&deque->bottom, SIZE_MAX, memory_order_relaxed);
+    if (!llam_cldeque_push_bottom(deque, &tasks[0]) ||
+        atomic_load_explicit(&deque->bottom, memory_order_relaxed) != 0U ||
+        llam_cldeque_test_pop_bottom(deque) != &tasks[0] ||
+        atomic_load_explicit(&deque->top, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&deque->bottom, memory_order_relaxed) != 0U) {
+        (void)fail_msg("owner pop lost the item spanning SIZE_MAX wraparound");
+        goto done;
+    }
+
+    llam_cldeque_init(deque);
+    atomic_store_explicit(&deque->top, SIZE_MAX, memory_order_relaxed);
+    atomic_store_explicit(&deque->bottom, SIZE_MAX, memory_order_relaxed);
+    if (!llam_cldeque_push_bottom(deque, &tasks[1]) ||
+        llam_cldeque_test_steal_top(deque) != &tasks[1] ||
+        atomic_load_explicit(&deque->top, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&deque->bottom, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&deque->buffer[LLAM_NORM_QUEUE_CAP - 1U],
+                             memory_order_relaxed) != &tasks[1]) {
+        (void)fail_msg("thief lost the item spanning SIZE_MAX wraparound");
+        goto done;
+    }
+
+    llam_cldeque_init(deque);
+    if (!llam_cldeque_push_bottom(deque, &tasks[0]) ||
+        llam_cldeque_test_pop_bottom(deque) != &tasks[0] ||
+        atomic_load_explicit(&deque->buffer[0], memory_order_relaxed) != &tasks[0]) {
+        (void)fail_msg("deque consumer cleared a reusable producer slot");
+        goto done;
+    }
+
+    llam_cldeque_init(deque);
+    for (i = 0U; i < LLAM_NORM_QUEUE_CAP; ++i) {
+        if (!llam_cldeque_push_bottom(deque, &tasks[i])) {
+            (void)fail_msg("deque rejected an item before reaching capacity");
+            goto done;
+        }
+    }
+    if (llam_cldeque_push_bottom(deque, &extra)) {
+        (void)fail_msg("deque accepted an item past its bounded capacity");
+        goto done;
+    }
+    for (i = LLAM_NORM_QUEUE_CAP; i > 0U; --i) {
+        if (llam_cldeque_test_pop_bottom(deque) != &tasks[i - 1U]) {
+            (void)fail_msg("deque did not drain each bounded item exactly once");
+            goto done;
+        }
+    }
+    if (llam_cldeque_test_pop_bottom(deque) != NULL ||
+        !llam_cldeque_push_bottom(deque, &extra) ||
+        llam_cldeque_test_steal_top(deque) != &extra ||
+        llam_cldeque_test_steal_top(deque) != NULL) {
+        (void)fail_msg("deque could not safely reuse storage after a full cycle");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    free(tasks);
+    free(deque);
+    return rc;
 }
 
 static void *count_block_callback(void *arg) {
@@ -2097,7 +2203,15 @@ static int exercise_linux_accept_rejects_stale_deactivate_overlap(void) {
     node.supports_multishot_accept = true;
     shard.runtime = &runtime;
     shard.id = 0U;
-    shard.io_node_index = 0U;
+    shard.processor.runtime = &runtime;
+    shard.processor.compat_shard = &shard;
+    shard.processor.id = 0U;
+    shard.processor.cpu_id = 0U;
+    shard.processor.node_index = 0U;
+    shard.processor.io_node_index = 0U;
+    shard.processor.event_fd = LLAM_INVALID_FD;
+    atomic_init(&shard.processor.online, 1U);
+    atomic_init(&shard.processor.event_pending, 0U);
     task.owner_runtime = &runtime;
     llam_io_req_reset(&req, &runtime, UINT_MAX, UINT_MAX);
 
@@ -3711,28 +3825,28 @@ static int exercise_norm_depth_counter_wrap_is_rejected(void) {
     runtime.shards = &shard;
     atomic_init(&runtime.fatal_errno, 0);
     shard.runtime = &runtime;
-    atomic_init(&shard.norm_depth, UINT_MAX);
+    atomic_init(&shard.processor.norm_depth, UINT_MAX);
 
     /*
      * Normal-queue depth feeds stealing, scaling, and drain heuristics.  If a
      * corrupted/saturated value wraps to zero, those paths can misclassify a
      * loaded shard as empty.
      */
-    if (llam_norm_queue_push_owner_locked(&shard, &task) ||
-        atomic_load_explicit(&shard.norm_depth, memory_order_acquire) != UINT_MAX ||
+    if (llam_norm_queue_note_enqueue(&shard) ||
+        atomic_load_explicit(&shard.processor.norm_depth, memory_order_acquire) != UINT_MAX ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
         return fail_msg("norm depth enqueue overflow was not rejected");
     }
 
-    memset(&shard.norm_q, 0, sizeof(shard.norm_q));
+    memset(&shard.processor.norm_q, 0, sizeof(shard.processor.norm_q));
     task.queue_next = NULL;
     task.queue_prev = NULL;
     atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
-    atomic_store_explicit(&shard.norm_depth, 0U, memory_order_release);
-    llam_queue_push_tail(&shard.norm_q, &task);
-    popped = llam_norm_queue_pop_owner_locked(&shard);
-    if (popped != &task ||
-        atomic_load_explicit(&shard.norm_depth, memory_order_acquire) != 0U ||
+    atomic_store_explicit(&shard.processor.norm_depth, 0U, memory_order_release);
+    llam_queue_push_tail(&shard.processor.norm_q, &task);
+    popped = llam_queue_pop_head(&shard.processor.norm_q);
+    if (popped != &task || llam_norm_queue_note_dequeue(&shard) ||
+        atomic_load_explicit(&shard.processor.norm_depth, memory_order_acquire) != 0U ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
         return fail_msg("norm depth dequeue underflow was not rejected");
     }
@@ -4147,13 +4261,22 @@ static int exercise_dynamic_scaler_live_saturation_fails_closed(void) {
     for (unsigned i = 0U; i < 2U; ++i) {
         shards[i].runtime = &runtime;
         shards[i].id = i;
-        atomic_init(&shards[i].online, 1U);
-        atomic_init(&shards[i].norm_depth, 0U);
-        atomic_init(&shards[i].timer_callbacks_active, 0U);
+        shards[i].processor.runtime = &runtime;
+        shards[i].processor.compat_shard = &shards[i];
+        shards[i].processor.id = i;
+        shards[i].processor.cpu_id = i;
+        shards[i].processor.node_index = 0U;
+        shards[i].processor.io_node_index = 0U;
+        shards[i].processor.event_fd = -1;
+        atomic_init(&shards[i].processor.online, 1U);
+        atomic_init(&shards[i].processor.event_pending, 0U);
+        atomic_init(&shards[i].processor.norm_depth, 0U);
+        atomic_init(&shards[i].processor.timer_callbacks_active, 0U);
         atomic_init(&shards[i].live_tasks, i == 0U ? UINT_MAX : 0U);
         if (pthread_mutex_init(&shards[i].lock, NULL) != 0) {
             goto done;
         }
+        shards[i].lock_initialized = true;
         locks_initialized[i] = true;
         if (pthread_mutex_init(&shards[i].opaque_lock, NULL) != 0) {
             goto done;
@@ -4171,7 +4294,7 @@ static int exercise_dynamic_scaler_live_saturation_fails_closed(void) {
         rc = fail_msg("dynamic scaler treated saturated live tasks as idle");
         goto done;
     }
-    atomic_store_explicit(&shards[0].timer_callbacks_active, 1U, memory_order_release);
+    atomic_store_explicit(&shards[0].processor.timer_callbacks_active, 1U, memory_order_release);
     llam_runtime_adjust_online_shards(&runtime);
     if (runtime.dynamic_scale_down_streak != 0U) {
         rc = fail_msg("dynamic scaler scaled down saturated live tasks with timers pending");
@@ -4405,6 +4528,10 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
     rt = &fixture->runtime;
     task = &fixture->task;
     req = &fixture->req;
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        task->cancel_links[i].task = task;
+        atomic_init(&task->cancel_links[i].delivering, false);
+    }
     rt->shards = fixture->shards;
     rt->nodes = fixture->nodes;
     rt->active_shards = 2U;
@@ -4420,16 +4547,23 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
 
         shard->runtime = rt;
         shard->id = i;
-        shard->io_node_index = i;
-        shard->event_fd = LLAM_INVALID_FD;
-        atomic_init(&shard->online, 1U);
+        shard->processor.runtime = rt;
+        shard->processor.compat_shard = shard;
+        shard->processor.id = i;
+        shard->processor.cpu_id = i;
+        shard->processor.node_index = i;
+        shard->processor.io_node_index = i;
+        shard->processor.event_fd = LLAM_INVALID_FD;
+        atomic_init(&shard->processor.online, 1U);
+        atomic_init(&shard->processor.event_pending, 0U);
         atomic_init(&shard->merge_pause_requested, 0U);
-        atomic_init(&shard->inject_depth, 0U);
-        atomic_init(&shard->timer_count, 0U);
-        atomic_init(&shard->timer_callbacks_active, 0U);
+        atomic_init(&shard->processor.inject_depth, 0U);
+        atomic_init(&shard->processor.timer_count, 0U);
+        atomic_init(&shard->processor.timer_callbacks_active, 0U);
         if (pthread_mutex_init(&shard->lock, NULL) != 0) {
             return -1;
         }
+        shard->lock_initialized = true;
 
         node->runtime = rt;
         node->index = i;
@@ -4443,12 +4577,13 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
     }
 
     task->owner_runtime = rt;
-    task->home_shard = 0U;
+    atomic_init(&task->home_shard, 0U);
     task->alloc_owner_shard = UINT_MAX;
     atomic_init(&task->state, LLAM_TASK_STATE_PARKED);
     atomic_init(&task->wait_reason, LLAM_WAIT_IO);
     atomic_init(&task->last_shard, 0U);
     atomic_init(&task->parked_shard, 0U);
+    atomic_init(&task->active_timer_heap_shard, UINT_MAX);
     atomic_init(&task->task_class, LLAM_TASK_CLASS_DEFAULT);
     atomic_init(&task->wake_error_code, 0);
     atomic_init(&task->wait_resolver_state, 0U);
@@ -4614,7 +4749,7 @@ static int run_public_cancel_submit_case(bool migrate) {
         (void)public_cancel_thread_main(&call);
     }
 
-    if (call.rc != 0 || fixture.task.cancel_registered ||
+    if (call.rc != 0 || fixture.task.cancel_links[0].registered ||
         (migrate && (rehomed != 1U || evacuated != 1U)) ||
         fixture.nodes[0].submit_head != NULL ||
         fixture.nodes[1].submit_head != NULL ||
@@ -4628,9 +4763,9 @@ static int run_public_cancel_submit_case(bool migrate) {
         atomic_load_explicit(&fixture.task.state,
                              memory_order_acquire) != LLAM_TASK_STATE_RUNNABLE ||
         llam_task_active_io_req_load(&fixture.task) != NULL ||
-        (fixture.shards[target_index].inject_q.head != &fixture.task &&
-         fixture.shards[target_index].hot_q.head != &fixture.task &&
-         fixture.shards[target_index].norm_q.head != &fixture.task) ||
+        (fixture.shards[target_index].processor.inject_q.head != &fixture.task &&
+         fixture.shards[target_index].processor.hot_q.head != &fixture.task &&
+         fixture.shards[target_index].processor.norm_q.head != &fixture.task) ||
         atomic_load_explicit(&fixture.req.lifetime_refs,
                              memory_order_acquire) != 1U ||
         atomic_load_explicit(&fixture.runtime.fatal_errno,
@@ -4641,7 +4776,7 @@ static int run_public_cancel_submit_case(bool migrate) {
                 "inject=%p hot=%p norm=%p refs=%u fatal=%d\n",
                 migrate,
                 call.rc,
-                fixture.task.cancel_registered,
+                fixture.task.cancel_links[0].registered,
                 rehomed,
                 evacuated,
                 (void *)fixture.nodes[0].submit_head,
@@ -4653,23 +4788,23 @@ static int run_public_cancel_submit_case(bool migrate) {
                 fixture.req.error_code,
                 atomic_load_explicit(&fixture.task.state, memory_order_acquire),
                 (void *)llam_task_active_io_req_load(&fixture.task),
-                (void *)fixture.shards[target_index].inject_q.head,
-                (void *)fixture.shards[target_index].hot_q.head,
-                (void *)fixture.shards[target_index].norm_q.head,
+                (void *)fixture.shards[target_index].processor.inject_q.head,
+                (void *)fixture.shards[target_index].processor.hot_q.head,
+                (void *)fixture.shards[target_index].processor.norm_q.head,
                 atomic_load_explicit(&fixture.req.lifetime_refs, memory_order_acquire),
                 atomic_load_explicit(&fixture.runtime.fatal_errno, memory_order_acquire));
         goto cleanup_token;
     }
-    fixture.shards[target_index].inject_q.head = NULL;
-    fixture.shards[target_index].inject_q.tail = NULL;
-    fixture.shards[target_index].inject_q.depth = 0U;
-    fixture.shards[target_index].hot_q.head = NULL;
-    fixture.shards[target_index].hot_q.tail = NULL;
-    fixture.shards[target_index].hot_q.depth = 0U;
-    fixture.shards[target_index].norm_q.head = NULL;
-    fixture.shards[target_index].norm_q.tail = NULL;
-    fixture.shards[target_index].norm_q.depth = 0U;
-    atomic_store_explicit(&fixture.shards[target_index].inject_depth,
+    fixture.shards[target_index].processor.inject_q.head = NULL;
+    fixture.shards[target_index].processor.inject_q.tail = NULL;
+    fixture.shards[target_index].processor.inject_q.depth = 0U;
+    fixture.shards[target_index].processor.hot_q.head = NULL;
+    fixture.shards[target_index].processor.hot_q.tail = NULL;
+    fixture.shards[target_index].processor.hot_q.depth = 0U;
+    fixture.shards[target_index].processor.norm_q.head = NULL;
+    fixture.shards[target_index].processor.norm_q.tail = NULL;
+    fixture.shards[target_index].processor.norm_q.depth = 0U;
+    atomic_store_explicit(&fixture.shards[target_index].processor.inject_depth,
                           0U,
                           memory_order_release);
     rc = 0;
@@ -4861,6 +4996,15 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 #endif
 
 int main(void) {
+    if (exercise_splitmix64_reference_vectors() != 0) {
+        return 1;
+    }
+    if (exercise_watch_identity_hash_is_ordered() != 0) {
+        return 1;
+    }
+    if (exercise_cldeque_wraparound_and_slot_reuse() != 0) {
+        return 1;
+    }
     if (exercise_io_lifetime_invariants_are_lock_safe() != 0) {
         return 1;
     }

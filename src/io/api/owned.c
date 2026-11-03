@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -65,6 +65,7 @@ static void llam_io_buffer_external_free(llam_io_buffer_t *buffer) {
 llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alignment, uint32_t flags) {
     llam_io_buffer_t *buffer;
     size_t normalized_alignment;
+    size_t inline_capacity = 0U;
     bool needs_external;
 
     if (!llam_io_buffer_alignment_valid(alignment) ||
@@ -73,16 +74,24 @@ llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alig
         return NULL;
     }
     normalized_alignment = llam_io_buffer_normalize_alignment(alignment);
-    buffer = calloc(1, sizeof(*buffer));
+    needs_external = min_capacity > LLAM_IO_BUFFER_INLINE_BYTES || normalized_alignment > sizeof(void *);
+    if (!needs_external) {
+        /* Keep a usable pointer for zero-capacity buffers and round only to
+         * inline alignment. Small reads no longer reserve a full 4 KiB page. */
+        inline_capacity = (min_capacity != 0U ? min_capacity : 1U);
+        inline_capacity = (inline_capacity + 15U) & ~(size_t)15U;
+    }
+    buffer = calloc(1, sizeof(*buffer) + inline_capacity);
     if (buffer == NULL) {
         return NULL;
     }
 
     buffer->detached_wrapper = true;
+    buffer->inline_capacity = inline_capacity;
+    buffer->inline_data = (unsigned char *)(buffer + 1);
     buffer->data = buffer->inline_data;
-    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    buffer->capacity = inline_capacity;
     buffer->alignment = sizeof(void *);
-    needs_external = min_capacity > LLAM_IO_BUFFER_INLINE_BYTES || normalized_alignment > sizeof(void *);
     if (needs_external) {
         void *data = NULL;
         size_t alloc_size = min_capacity != 0U ? min_capacity : normalized_alignment;
@@ -109,8 +118,6 @@ llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alig
         buffer->alignment = normalized_alignment;
         buffer->external_storage = true;
         buffer->aligned_storage = true;
-    } else if ((flags & LLAM_IO_BUFFER_F_ZERO_FILL) != 0U) {
-        memset(buffer->inline_data, 0, sizeof(buffer->inline_data));
     }
     if (llam_io_buffer_public_register(buffer) != 0) {
         if (buffer->external_storage) {
@@ -123,10 +130,22 @@ llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alig
 }
 
 ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     return llam_read_owned_impl(fd, max_count, 0, false, out);
 }
 
 ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     return llam_read_owned_impl(fd, max_count, flags, true, out);
 }
 
@@ -163,6 +182,8 @@ static void llam_io_buffer_release_unregistered(llam_io_buffer_t *buffer) {
 }
 
 void llam_io_buffer_release(llam_io_buffer_t *buffer) {
+    LLAM_NATIVE_API_GUARD();
+
     llam_io_buffer_t *raw_buffer;
 
     if (buffer == NULL) {
@@ -196,10 +217,14 @@ void llam_io_buffer_release_raw(llam_io_buffer_t *buffer) {
 }
 
 void *llam_io_buffer_data(llam_io_buffer_t *buffer) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     return llam_io_buffer_public_data(buffer);
 }
 
 size_t llam_io_buffer_size(const llam_io_buffer_t *buffer) {
+    LLAM_NATIVE_API_GUARD(0);
+
     llam_io_buffer_t *live = llam_io_buffer_public_begin_op(buffer);
     size_t size;
 
@@ -212,6 +237,8 @@ size_t llam_io_buffer_size(const llam_io_buffer_t *buffer) {
 }
 
 size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer) {
+    LLAM_NATIVE_API_GUARD(0);
+
     llam_io_buffer_t *live = llam_io_buffer_public_begin_op(buffer);
     size_t capacity;
 
@@ -241,6 +268,12 @@ int llam_io_buffer_opts_init(llam_io_buffer_opts_t *opts, size_t opts_size) {
 }
 
 int llam_io_buffer_alloc_ex(const llam_io_buffer_opts_t *opts, size_t opts_size, llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     llam_io_buffer_opts_t normalized;
     llam_io_buffer_t *buffer;
     llam_io_buffer_t *handle;
@@ -275,6 +308,12 @@ int llam_io_buffer_alloc_ex(const llam_io_buffer_opts_t *opts, size_t opts_size,
 }
 
 int llam_io_buffer_alloc(size_t capacity, llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     llam_io_buffer_opts_t opts;
 
     opts.capacity = capacity;
@@ -285,6 +324,12 @@ int llam_io_buffer_alloc(size_t capacity, llam_io_buffer_t **out) {
 }
 
 int llam_io_buffer_alloc_aligned(size_t capacity, size_t alignment, llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     llam_io_buffer_opts_t opts;
 
     opts.capacity = capacity;
@@ -295,6 +340,8 @@ int llam_io_buffer_alloc_aligned(size_t capacity, size_t alignment, llam_io_buff
 }
 
 size_t llam_io_buffer_alignment(const llam_io_buffer_t *buffer) {
+    LLAM_NATIVE_API_GUARD(0);
+
     llam_io_buffer_t *live = llam_io_buffer_public_begin_op(buffer);
     size_t alignment;
 
@@ -451,6 +498,12 @@ ssize_t llam_pread_owned_aligned(llam_fd_t fd,
                                  uint64_t offset,
                                  size_t alignment,
                                  llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     return llam_pread_owned_aligned_impl(false, LLAM_INVALID_HANDLE, fd, max_count, offset, alignment, out);
 }
 
@@ -459,5 +512,11 @@ ssize_t llam_pread_handle_owned_aligned(llam_handle_t handle,
                                         uint64_t offset,
                                         size_t alignment,
                                         llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     return llam_pread_owned_aligned_impl(true, handle, LLAM_INVALID_FD, max_count, offset, alignment, out);
 }

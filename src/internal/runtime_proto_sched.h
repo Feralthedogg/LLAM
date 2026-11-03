@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_PROTO_SCHED_H
@@ -45,7 +45,10 @@
 #define LLAM_LEASE_TEST_POINT_AFTER_IO_PARK 11U
 #define LLAM_LEASE_TEST_POINT_AFTER_SLEEP_PARK 12U
 #define LLAM_LEASE_TEST_POINT_AFTER_TASK_EXIT_CLEAR 13U
-#define LLAM_LEASE_TEST_POINT_COUNT 14U
+#define LLAM_LEASE_TEST_POINT_BEFORE_HELPER_FOREIGN_PUBLISH 14U
+#define LLAM_LEASE_TEST_POINT_AFTER_REDIRECT_FOREIGN_PUBLISH 15U
+#define LLAM_LEASE_TEST_POINT_AFTER_REGISTERED_YIELD 16U
+#define LLAM_LEASE_TEST_POINT_COUNT 17U
 
 /*
  * Legacy execution-lease and worker binding lifecycle. Every `_locked`
@@ -53,6 +56,21 @@
  * needed, callers acquire `shard->lock` only after that handoff lock.
  */
 void llam_legacy_lease_init(llam_shard_t *shard);
+int llam_worker_registry_init(llam_runtime_t *runtime, size_t managed_count);
+void llam_worker_registry_destroy(llam_runtime_t *runtime);
+int llam_worker_bind_registered(llam_worker_t *worker, llam_ctx_t *scheduler_ctx);
+int llam_worker_unbind_registered(llam_worker_t *worker);
+/* Caller owns the P's opaque_lock. Only the owning native M claims/returns P. */
+bool llam_execution_lease_claim_locked(llam_shard_t *shard,
+                                      llam_worker_t *worker,
+                                      uint64_t incarnation);
+/* Shutdown-only ownerless P claim; never produces an ordinary execute ticket. */
+bool llam_execution_lease_claim_drain_locked(llam_shard_t *shard,
+                                            llam_worker_t *worker,
+                                            uint64_t incarnation);
+bool llam_execution_lease_return_locked(llam_shard_t *shard,
+                                       llam_worker_t *worker,
+                                       const llam_processor_owner_ticket_t *ticket);
 void llam_legacy_lease_begin_stop_locked(llam_shard_t *shard);
 void llam_legacy_lease_finalize_stop_locked(llam_shard_t *shard);
 bool llam_legacy_lease_request_helper_locked(llam_shard_t *shard,
@@ -123,6 +141,7 @@ bool llam_shard_steal_pause_ack_matches_locked(const llam_shard_t *shard,
  * authority; callers publish only after task state, shard association, and
  * timestamps are complete.
  */
+void llam_worker_begin_g_run(llam_worker_t *worker, llam_task_t *task);
 void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task);
 llam_task_t *llam_worker_load_active_g(const llam_worker_t *worker);
 void llam_worker_clear_active_g(llam_worker_t *worker);
@@ -160,7 +179,10 @@ bool llam_scheduler_test_rebind_primary(llam_shard_t *shard,
 /*
  * Opaque-block redirect and helper compensation.
  */
-void llam_activate_opaque_redirect_locked(llam_shard_t *shard, llam_task_t *current_task);
+void llam_activate_opaque_redirect_locked(
+    llam_shard_t *shard,
+    const llam_processor_queue_access_t *access,
+    llam_task_t *current_task);
 void llam_deactivate_opaque_redirect_locked(llam_shard_t *shard);
 bool llam_enqueue_opaque_redirect_task_locked(llam_shard_t *blocked, llam_task_t *task, bool hot);
 int llam_ensure_opaque_helper_locked(llam_shard_t *shard);
@@ -182,7 +204,10 @@ typedef enum llam_lease_test_point {
     LLAM_LEASE_TEST_AFTER_DIRECT_REINJECT = 10,
     LLAM_LEASE_TEST_AFTER_IO_PARK = 11,
     LLAM_LEASE_TEST_AFTER_SLEEP_PARK = 12,
-    LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR = 13
+    LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR = 13,
+    LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH = 14,
+    LLAM_LEASE_TEST_AFTER_REDIRECT_FOREIGN_PUBLISH = 15,
+    LLAM_LEASE_TEST_AFTER_REGISTERED_YIELD = 16
 } llam_lease_test_point_t;
 
 /**
@@ -249,19 +274,31 @@ void *llam_shard_worker_main(void *arg);
  * Normal queue and deque primitives.
  */
 void llam_cldeque_init(llam_cldeque_t *deque);
+bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+LLAM_INTERNAL_API llam_task_t *llam_cldeque_test_pop_bottom(llam_cldeque_t *deque);
+LLAM_INTERNAL_API llam_task_t *llam_cldeque_test_steal_top(llam_cldeque_t *deque);
+#endif
 bool llam_lockfree_normq_enabled(const llam_runtime_t *rt);
 unsigned llam_norm_queue_depth(const llam_shard_t *shard);
 bool llam_norm_queue_note_enqueue(llam_shard_t *shard);
 bool llam_norm_queue_note_dequeue(llam_shard_t *shard);
-llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard);
+llam_task_t *llam_norm_queue_pop_owner_locked(
+    llam_shard_t *shard,
+    const llam_processor_queue_access_t *access);
+llam_task_t *llam_norm_queue_pop_merge_locked(llam_shard_t *shard);
 llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard);
 bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
                                            llam_task_t *current,
                                            llam_task_t **out_next,
                                            bool *out_push_failed);
-bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task);
+bool llam_norm_queue_push_owner_locked(llam_shard_t *shard,
+                                       const llam_processor_queue_access_t *access,
+                                       llam_task_t *task);
 bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task);
-bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task);
+bool llam_norm_queue_push_yield_locked(llam_shard_t *shard,
+                                       const llam_processor_queue_access_t *access,
+                                       llam_task_t *task);
 bool llam_norm_queue_push_yield_unlocked(llam_shard_t *shard, llam_task_t *task);
 llam_task_t *llam_norm_queue_steal(llam_shard_t *victim);
 llam_task_t *llam_queue_pop_head(llam_queue_t *queue);
@@ -269,7 +306,8 @@ llam_task_t *llam_queue_pop_tail(llam_queue_t *queue);
 bool llam_queue_push_bounded_locked(llam_shard_t *shard,
                                   llam_queue_t *queue,
                                   unsigned capacity,
-                                  llam_task_t *task);
+                                  llam_task_t *task,
+                                  const llam_processor_queue_access_t *access);
 void llam_queue_push_tail(llam_queue_t *queue, llam_task_t *task);
 
 /*
@@ -283,7 +321,8 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
                              bool hot,
                              llam_trace_kind_t kind,
                              llam_wait_reason_t reason,
-                             bool direct_local);
+                             bool direct_local,
+                             const llam_processor_queue_access_t *access);
 unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task);
 unsigned llam_pick_spawn_shard(llam_runtime_t *rt);
 bool llam_should_enqueue_hot_locked(llam_shard_t *shard,
@@ -361,6 +400,7 @@ static inline llam_cancel_token_t *llam_cancel_token_public_handle(llam_cancel_t
 
 int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t deadline_ns);
 void llam_cancel_task_wait(llam_task_t *task);
+void llam_cancel_task_wait_generation(llam_task_t *task, uint64_t generation);
 void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt);
 int llam_cancel_token_register_task(llam_task_t *task);
 void llam_cancel_token_unregister_task(llam_task_t *task);
@@ -378,6 +418,26 @@ bool llam_join_waiter_remove_locked(llam_task_t *target, llam_task_t *waiter);
 void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind);
 bool llam_task_clear_wait_tracking(llam_task_t *task);
 void llam_task_clear_wait_tracking_or_abort(llam_task_t *task);
+typedef struct llam_wait_dependency {
+    llam_task_t *task;
+    llam_mutex_t *mutex;
+    llam_task_t *join_target;
+    llam_wait_node_t *node;
+    uint64_t generation;
+    uintptr_t owner;
+    bool pinned;
+} llam_wait_dependency_t;
+
+/* Caller retains G storage, freezes its dispatch, and proves it is not executing.
+ * Its scheduler payload lock stays held. On success the
+ * snapshot owns one resolver reference, released with wait_resolver_end.
+ * No allocation/blocking locks; the idle acquisition is one strong CAS. */
+bool llam_task_wait_dependency_read_locked(llam_runtime_t *runtime, llam_task_t *task,
+                                            size_t limit, llam_wait_dependency_t *out);
+/* Advisory recheck needs no P lock while the caller retains G storage and the
+ * snapshot's resolver reference. It grants no execution or queue authority. */
+bool llam_task_wait_dependency_matches(const llam_wait_dependency_t *snapshot);
+
 bool llam_task_wait_resolver_try_begin(llam_task_t *task);
 void llam_task_wait_resolver_end(llam_task_t *task);
 bool llam_task_close_wait_resolvers(llam_task_t *task);

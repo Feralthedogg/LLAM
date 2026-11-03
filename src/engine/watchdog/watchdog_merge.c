@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "engine/runtime_watchdog_internal.h"
@@ -86,14 +86,16 @@ llam_shard_t *llam_runtime_pick_merge_target(llam_runtime_t *rt, llam_shard_t *s
         }
 
         load = llam_watchdog_snapshot_shard_load(candidate);
-        if (candidate->io_node_index == source->io_node_index) {
+        if (llam_processor_io_node_index(&candidate->processor) ==
+            llam_processor_io_node_index(&source->processor)) {
             if (load < best_same_io_load) {
                 best_same_io = candidate;
                 best_same_io_load = load;
             }
             continue;
         }
-        if (candidate->node_index == source->node_index) {
+        if (llam_processor_node_index(&candidate->processor) ==
+            llam_processor_node_index(&source->processor)) {
             if (load < best_same_node_load) {
                 best_same_node = candidate;
                 best_same_node_load = load;
@@ -253,13 +255,19 @@ bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns)
  *
  * @param shard Shard to pause.
  */
-void llam_shard_request_merge_pause(llam_shard_t *shard) {
+uint64_t llam_shard_request_merge_pause(llam_shard_t *shard) {
     uint64_t request_sequence;
 
     if (shard == NULL || !shard->opaque_lock_initialized) {
-        return;
+        return 0U;
     }
     pthread_mutex_lock(&shard->opaque_lock);
+    if (shard->runtime != NULL &&
+        atomic_load_explicit(&shard->runtime->async_preempt_enabled, memory_order_acquire) != 0U &&
+        atomic_load_explicit(&shard->merge_pause_request_sequence, memory_order_acquire) == UINT64_MAX) {
+        pthread_mutex_unlock(&shard->opaque_lock);
+        return 0U; /* Never recycle an async idle-operation cleanup identity. */
+    }
     request_sequence = llam_watchdog_next_pause_sequence(
         atomic_load_explicit(&shard->merge_pause_request_sequence,
                              memory_order_acquire));
@@ -279,6 +287,7 @@ void llam_shard_request_merge_pause(llam_shard_t *shard) {
     atomic_store_explicit(&shard->merge_pause_requested, 1U, memory_order_release);
     pthread_mutex_unlock(&shard->opaque_lock);
     llam_kick_shard(shard);
+    return request_sequence;
 }
 
 /**
@@ -304,6 +313,24 @@ void llam_shard_release_merge_pause(llam_shard_t *shard) {
                           memory_order_release);
     pthread_mutex_unlock(&shard->opaque_lock);
     llam_kick_shard(shard);
+}
+
+/* Cleanup identity is the pause operation, not a still-valid normal P ticket. */
+bool llam_shard_release_merge_pause_if_sequence(llam_shard_t *shard, uint64_t sequence) {
+    bool released = false;
+    if (shard == NULL || !shard->opaque_lock_initialized || sequence == 0U) return false;
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (atomic_load_explicit(&shard->merge_pause_request_sequence, memory_order_acquire) == sequence) {
+        atomic_store_explicit(&shard->merge_pause_requested, 0U, memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack_sequence, 0U, memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack_lease_epoch, 0U, memory_order_release);
+        atomic_store_explicit(&shard->merge_pause_ack_worker_incarnation, 0U, memory_order_release);
+        released = true;
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+    if (released) llam_kick_shard(shard);
+    return released;
 }
 
 /**
@@ -392,9 +419,14 @@ bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
                                 memory_order_acquire) != 0U &&
            llam_shard_merge_pause_ack_current_locked(shard) &&
            llam_shard_load_lease_current((llam_shard_t *)shard) == NULL &&
-           atomic_load_explicit(&((llam_shard_t *)shard)->timer_callbacks_active, memory_order_acquire) == 0U &&
-           shard->inject_q.depth == 0U &&
-           shard->hot_q.depth == 0U &&
+           atomic_load_explicit(&((llam_shard_t *)shard)->processor.timer_callbacks_active,
+                                memory_order_acquire) == 0U &&
+           shard->processor.timer_heap_len == 0U &&
+           shard->processor.timers == NULL &&
+           atomic_load_explicit(&((llam_shard_t *)shard)->processor.timer_count,
+                                memory_order_acquire) == 0U &&
+           shard->processor.inject_q.depth == 0U &&
+           shard->processor.hot_q.depth == 0U &&
            llam_norm_queue_depth(shard) == 0U &&
            !shard->opaque_redirect_active;
 }
@@ -474,8 +506,8 @@ void llam_merge_rehome_task(llam_shard_t *source, llam_shard_t *target, llam_tas
     if (source == NULL || target == NULL || task == NULL) {
         return;
     }
-    if (task->home_shard == source->id) {
-        task->home_shard = target->id;
+    if (atomic_load_explicit(&task->home_shard, memory_order_acquire) == source->id) {
+        atomic_store_explicit(&task->home_shard, target->id, memory_order_release);
     }
 }
 
@@ -494,7 +526,11 @@ static bool llam_merge_task_to_target_locked(llam_shard_t *source, llam_shard_t 
     }
 
     llam_merge_rehome_task(source, target, task);
-    if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
+    if (llam_queue_push_bounded_locked(target,
+                                       &target->processor.inject_q,
+                                       LLAM_INJECT_QUEUE_CAP,
+                                       task,
+                                       NULL)) {
         target->metrics.inject_enqueues += 1U;
     }
     source->metrics.migrations += 1U;
@@ -551,7 +587,7 @@ static bool llam_merge_lockfree_normq_locked(llam_shard_t *source, llam_shard_t 
     }
 
     while (staged_count < LLAM_NORM_QUEUE_CAP) {
-        llam_task_t *task = llam_norm_queue_pop_owner_locked(source);
+        llam_task_t *task = llam_norm_queue_pop_merge_locked(source);
 
         if (task == NULL) {
             break;
@@ -559,8 +595,14 @@ static bool llam_merge_lockfree_normq_locked(llam_shard_t *source, llam_shard_t 
         staged[staged_count++] = task;
         if (!llam_task_can_merge_runnable(source, target, task)) {
             for (i = staged_count; i-- > 0U;) {
-                if (llam_norm_queue_push_owner_locked(source, staged[i])) {
-                    source->metrics.norm_enqueues -= 1U;
+                staged[i]->enqueue_hot = 0U;
+                if (llam_queue_push_bounded_locked(
+                        source,
+                        &source->processor.inject_q,
+                        LLAM_INJECT_QUEUE_CAP,
+                        staged[i],
+                        NULL)) {
+                    source->metrics.inject_enqueues += 1U;
                 }
             }
             return false;
@@ -612,16 +654,16 @@ bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *targe
                                  memory_order_acquire))) {
         return false;
     }
-    if (!llam_queue_can_merge_runnable(source, target, &source->inject_q) ||
-        !llam_queue_can_merge_runnable(source, target, &source->hot_q)) {
+    if (!llam_queue_can_merge_runnable(source, target, &source->processor.inject_q) ||
+        !llam_queue_can_merge_runnable(source, target, &source->processor.hot_q)) {
         return false;
     }
-    if (!llam_lockfree_normq_enabled(source->runtime) && !llam_queue_can_merge_runnable(source, target, &source->norm_q)) {
+    if (!llam_lockfree_normq_enabled(source->runtime) && !llam_queue_can_merge_runnable(source, target, &source->processor.norm_q)) {
         return false;
     }
 
     for (;;) {
-        llam_task_t *task = llam_queue_pop_head(&source->inject_q);
+        llam_task_t *task = llam_queue_pop_head(&source->processor.inject_q);
 
         if (task == NULL) {
             break;
@@ -629,9 +671,9 @@ bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *targe
         (void)llam_merge_task_to_target_locked(source, target, task);
         migrated += 1U;
     }
-    atomic_store_explicit(&source->inject_depth, source->inject_q.depth, memory_order_release);
+    atomic_store_explicit(&source->processor.inject_depth, source->processor.inject_q.depth, memory_order_release);
     for (;;) {
-        llam_task_t *task = llam_queue_pop_head(&source->hot_q);
+        llam_task_t *task = llam_queue_pop_head(&source->processor.hot_q);
 
         if (task == NULL) {
             break;
@@ -641,7 +683,7 @@ bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *targe
     }
     if (!llam_lockfree_normq_enabled(source->runtime)) {
         for (;;) {
-            llam_task_t *task = llam_queue_pop_head(&source->norm_q);
+            llam_task_t *task = llam_queue_pop_head(&source->processor.norm_q);
 
             if (task == NULL) {
                 break;

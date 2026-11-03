@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -63,6 +63,8 @@ static void llam_mutex_donate_priority(uintptr_t owner_value, const llam_task_t 
  *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_mutex_trylock(llam_mutex_t *mutex) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t expected = 0U;
 
     llam_task_safepoint();
@@ -130,6 +132,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
     }
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
+    if (register_cancel) llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
     current = (uintptr_t)task;
     if (atomic_load(&mutex->owner) == current) {
         errno = EDEADLK;
@@ -208,7 +211,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
         llam_sync_wait_node_release(shard, node);
         return -1;
     }
-    if (register_cancel && task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+    if (register_cancel && llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -280,6 +283,8 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_mutex_lock(llam_mutex_t *mutex) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_mutex_lock_impl(mutex, false, 0U, true);
 }
 
@@ -293,6 +298,8 @@ int llam_mutex_lock(llam_mutex_t *mutex) {
  *         propagated wait error.
  */
 int llam_mutex_lock_until(llam_mutex_t *mutex, uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_mutex_lock_impl(mutex, true, deadline_ns, true);
 }
 
@@ -308,6 +315,8 @@ int llam_mutex_lock_until(llam_mutex_t *mutex, uint64_t deadline_ns) {
  *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_mutex_unlock(llam_mutex_t *mutex) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_wait_node_t *node;
     uintptr_t owner;
 

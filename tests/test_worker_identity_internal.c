@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -1084,13 +1084,59 @@ static void role_root_task(void *arg) {
     }
 }
 
-static int test_primary_helper_takeover(void) {
+static void *hold_helper_publication_tail(void *arg) {
+    role_state_t *state = arg;
+    uint64_t deadline = legacy_deadline();
+    bool reached = false;
+
+    while (llam_now_ns() < deadline) {
+        if (llam_lease_test_gate_reached(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH) &&
+            llam_lease_test_gate_reached(LLAM_LEASE_TEST_AFTER_REDIRECT_FOREIGN_PUBLISH)) {
+            reached = true;
+            break;
+        }
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000L};
+        (void)nanosleep(&delay, NULL);
+    }
+    if (!reached) {
+        test_fail(&state->failure, "helper foreign-publication tail was not reached");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH, false);
+
+    /* Keep the helper inside enter_blocking until the primary has observed its
+     * published token, including the still-owned runtime/preemption guards. */
+    deadline = legacy_deadline();
+    reached = false;
+    while (llam_now_ns() < deadline) {
+        llam_shard_t *shard = &state->runtime->shards[0];
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        reached = shard->primary_worker.foreign_token.state == LLAM_FOREIGN_TOKEN_ACTIVE ||
+                  atomic_load_explicit(&state->runtime->fatal_errno, memory_order_acquire) != 0;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (reached) {
+            break;
+        }
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000L};
+        (void)nanosleep(&delay, NULL);
+    }
+    if (!reached) {
+        test_fail(&state->failure, "primary did not finish its helper-backed detach");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_REDIRECT_FOREIGN_PUBLISH, false);
+    return NULL;
+}
+
+static int test_primary_helper_takeover(bool hold_publication_tail) {
     role_state_t state;
     llam_runtime_t *runtime = NULL;
     llam_task_t *root = NULL;
     llam_shard_t *shard;
     uint64_t redirect_before;
     bool helper_same_driver;
+    pthread_t gate_thread;
+    int run_rc;
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failure.failures, 0U);
@@ -1115,8 +1161,22 @@ static int test_primary_helper_takeover(void) {
     shard = &runtime->shards[0];
     redirect_before = atomic_load_explicit(&shard->metrics.opaque_redirect_activations,
                                            memory_order_acquire);
+    if (hold_publication_tail) {
+        llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH, true);
+        llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_REDIRECT_FOREIGN_PUBLISH, true);
+        if (pthread_create(&gate_thread, NULL, hold_helper_publication_tail, &state) != 0) {
+            llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH, false);
+            llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_REDIRECT_FOREIGN_PUBLISH, false);
+            destroy_runtime_bounded(&runtime, "publication-tail runtime destroy exceeded the bounded deadline");
+            return 1;
+        }
+    }
     root = llam_runtime_spawn_ex(runtime, role_root_task, &state, NULL, 0U);
-    if (root == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(root) != 0) {
+    run_rc = root == NULL ? -1 : llam_runtime_run_handle(runtime);
+    if (hold_publication_tail) {
+        pthread_join(gate_thread, NULL);
+    }
+    if (root == NULL || run_rc != 0 || llam_join(root) != 0) {
         destroy_runtime_bounded(&runtime, "role-takeover runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: role takeover run/join failed: errno=%d (%s)\n",
@@ -1795,12 +1855,75 @@ cleanup:
                : 0;
 }
 
+#if LLAM_PLATFORM_WINDOWS && defined(_WIN64)
+typedef struct win_identity_fixture {
+    pthread_t self;
+    atomic_uint ready;
+    atomic_uint release;
+} win_identity_fixture_t;
+
+static void *win_identity_fixture_main(void *opaque) {
+    win_identity_fixture_t *fixture = opaque;
+    fixture->self = pthread_self();
+    atomic_store_explicit(&fixture->ready, 1U, memory_order_release);
+    while (atomic_load_explicit(&fixture->release, memory_order_acquire) == 0U) { Sleep(1U); }
+    return NULL;
+}
+
+static int test_win64_private_identity_truth_table(void) {
+    win_identity_fixture_t fixtures[2] = {0};
+    pthread_t handles[2] = {0};
+    HANDLE duplicate = NULL;
+    uint64_t deadline = GetTickCount64() + 2000U;
+    bool correct;
+    for (unsigned i = 0U; i < 2U; ++i) {
+        atomic_init(&fixtures[i].ready, 0U);
+        atomic_init(&fixtures[i].release, 0U);
+        if (pthread_create(&handles[i], NULL, win_identity_fixture_main, &fixtures[i]) != 0) {
+            abort();
+        }
+    }
+    while (atomic_load_explicit(&fixtures[0].ready, memory_order_acquire) == 0U ||
+           atomic_load_explicit(&fixtures[1].ready, memory_order_acquire) == 0U) {
+        if (GetTickCount64() >= deadline) { abort(); }
+        Sleep(1U);
+    }
+    if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)handles[0], GetCurrentProcess(),
+                          &duplicate, 0U, FALSE, DUPLICATE_SAME_ACCESS)) { abort(); }
+    errno = EDOM;
+    SetLastError(0x5A18U);
+    correct = pthread_equal(handles[0], fixtures[0].self) &&
+        pthread_equal(fixtures[0].self, handles[0]) &&
+        pthread_equal((pthread_t)duplicate, handles[0]) &&
+        pthread_equal(fixtures[0].self, (pthread_t)duplicate) &&
+        !pthread_equal(handles[0], handles[1]) &&
+        !pthread_equal(fixtures[0].self, fixtures[1].self) &&
+        !pthread_equal(handles[0], fixtures[1].self) &&
+        GetLastError() == 0x5A18U && errno == EDOM;
+    if (!CloseHandle(duplicate)) { abort(); }
+    for (unsigned i = 0U; i < 2U; ++i) { atomic_store_explicit(&fixtures[i].release, 1U, memory_order_release); }
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if (WaitForSingleObject((HANDLE)handles[i], 2000U) != WAIT_OBJECT_0 ||
+            pthread_join(handles[i], NULL) != 0) { abort(); }
+    }
+    if (!correct) {
+        fputs("test_worker_identity_internal: Win64 handle/self/duplicate identity or error sentinel mismatch\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+#endif
+
 int main(void) {
+#if LLAM_PLATFORM_WINDOWS && defined(_WIN64)
+    if (test_win64_private_identity_truth_table() != 0) { return 1; }
+#endif
     if (test_helper_create_failure_redirect() != 0 ||
 #if LLAM_PLATFORM_POSIX
         test_wrong_owner_uninstall_aborts() != 0 ||
 #endif
-        test_primary_helper_takeover() != 0 ||
+        test_primary_helper_takeover(false) != 0 ||
+        test_primary_helper_takeover(true) != 0 ||
 #if !LLAM_PLATFORM_WINDOWS
         test_helper_signal_stack_eagain() != 0 ||
         test_helper_signal_stack_einval() != 0 ||

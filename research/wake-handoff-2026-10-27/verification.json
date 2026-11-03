@@ -1,0 +1,315 @@
+{
+  "platform": "Darwin arm64",
+  "checks": [
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_runtime_core"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 1.158,
+      "stdout": "[test_runtime_core] ok\n",
+      "stderr": "[test_runtime_core] begin test_preinit_contracts\n[test_runtime_core] ok test_preinit_contracts\n[test_runtime_core] begin test_runtime_registered_init_failure_rolls_back\n[test_runtime_core] ok test_runtime_registered_init_failure_rolls_back\n[test_runtime_core] begin test_runtime_create_preserves_managed_tls\n[test_runtime_core] ok test_runtime_create_preserves_managed_tls\n[test_runtime_core] begin test_direct_yield_auto_policy_is_profile_scoped\n[test_runtime_core] ok test_direct_yield_auto_policy_is_profile_scoped\n[test_runtime_core] begin test_direct_yield_timer_policy_is_bounded\n[test_runtime_core] ok test_direct_yield_timer_policy_is_bounded\n[test_runtime_core] begin test_autotune_handoff_budget_actuates\n[test_runtime_core] ok test_autotune_handoff_budget_actuates\n[test_runtime_core] begin test_autotune_handoff_freezes_no_work_low_hit\n[test_runtime_core] ok test_autotune_handoff_freezes_no_work_low_hit\n[test_runtime_core] begin test_autotune_handoff_probe_defers_low_sample\n[test_runtime_core] ok test_autotune_handoff_probe_defers_low_sample\n[test_runtime_core] begin test_autotune_handoff_wake_guardrail_rolls_back\n[test_runtime_core] ok test_autotune_handoff_wake_guardrail_rolls_back\n[test_runtime_core] begin test_unsigned_runtime_env_rejects_malformed_input\n[test_runtime_core] ok test_unsigned_runtime_env_rejects_malformed_input\n[test_runtime_core] begin test_runtime_env_flags_accept_false_tokens\n[test_runtime_core] ok test_runtime_env_flags_accept_false_tokens\n[test_runtime_core] begin test_runtime_handle_api\n[test_runtime_core] ok test_runtime_handle_api\n[test_runtime_core] begin test_runtime_lifecycle_and_task_contracts\n[test_runtime_core] ok test_runtime_lifecycle_and_task_contracts\n[test_runtime_core] begin test_request_stop_returns_success\n[test_runtime_core] ok test_request_stop_returns_success\n[test_runtime_core] begin test_shutdown_from_task_requests_stop\n[test_runtime_core] ok test_shutdown_from_task_requests_stop\n[test_runtime_core] begin test_runtime_owner_mismatch_diagnostics\n[test_runtime_core] ok test_runtime_owner_mismatch_diagnostics\n[test_runtime_core] begin test_timer_wait_ownership_contract\n[test_runtime_core] ok test_timer_wait_ownership_contract\n[test_runtime_core] begin test_select_completion_ownership_contract\n[test_runtime_core] ok test_select_completion_ownership_contract\n[test_runtime_core] begin test_wait_resolver_gate_contract\n[test_runtime_core] ok test_wait_resolver_gate_contract\n[test_runtime_core] begin test_wait_tracking_setters_fail_closed_on_saturation\n[test_runtime_core] ok test_wait_tracking_setters_fail_closed_on_saturation\n[test_runtime_core] begin test_wait_tracking_lock_safe_overflow\n[test_runtime_core] ok test_wait_tracking_lock_safe_overflow\n[test_runtime_core] begin test_wait_tracking_caller_rolls_back_saturation\n[test_runtime_core] ok test_wait_tracking_caller_rolls_back_saturation\n[test_runtime_core] begin test_active_io_tracking_counter_saturation_rolls_back\n[test_runtime_core] ok test_active_io_tracking_counter_saturation_rolls_back\n[test_runtime_core] begin test_deferred_fatal_stops_and_drains_parked_wait\n[test_runtime_core] ok test_deferred_fatal_stops_and_drains_parked_wait\n[test_runtime_core] begin test_deferred_fatal_rewakes_prestopped_runtime\n[test_runtime_core] ok test_deferred_fatal_rewakes_prestopped_runtime\n[test_runtime_core] begin test_wait_resolver_scalar_cancel_drain\n[test_runtime_core] ok test_wait_resolver_scalar_cancel_drain\n[test_runtime_core] begin test_wait_resolver_select_cancel_drain\n[test_runtime_core] ok test_wait_resolver_select_cancel_drain\n[test_runtime_core] begin test_wait_resolver_block_job_recycle_drain\n[test_runtime_core] ok test_wait_resolver_block_job_recycle_drain\n[test_runtime_core] begin test_public_active_op_release_sequence\n[test_runtime_core] ok test_public_active_op_release_sequence\n[test_runtime_core] begin test_task_group_unique_spawn_reservations\n[test_runtime_core] ok test_task_group_unique_spawn_reservations\n[test_runtime_core] begin test_runtime_dump_while_blocking_job_active\n[test_runtime_core] ok test_runtime_dump_while_blocking_job_active\n[test_runtime_core] begin test_concurrent_runtime_init_contract\n[test_runtime_core] ok test_concurrent_runtime_init_contract\n[test_runtime_core] begin test_concurrent_init_shutdown_contract\n[test_runtime_core] ok test_concurrent_init_shutdown_contract\n[test_runtime_core] begin test_concurrent_init_stats_contract\n[test_runtime_core] ok test_concurrent_init_stats_contract\n[test_runtime_core] begin test_concurrent_init_dump_contract\n[test_runtime_core] ok test_concurrent_init_dump_contract\n[test_runtime_core] begin test_concurrent_init_sleep_contract\n[test_runtime_core] ok test_concurrent_init_sleep_contract\n[test_runtime_core] begin test_concurrent_trace_ring_contract\n[test_runtime_core] ok test_concurrent_trace_ring_contract\n[test_runtime_core] begin test_concurrent_run_contract\n[test_runtime_core] ok test_concurrent_run_contract\n[test_runtime_core] begin test_concurrent_spawn_contract\n[test_runtime_core] ok test_concurrent_spawn_contract\n[test_runtime_core] begin test_detach_contract\n[test_runtime_core] ok test_detach_contract\n[test_runtime_core] begin test_ex_option_prefixes\n[test_runtime_core] ok test_ex_option_prefixes\n[test_runtime_core] begin test_waitable_timer_api\n[test_runtime_core] ok test_waitable_timer_api\n[test_runtime_core] begin test_stat_path_metadata_contract\n[test_runtime_core] ok test_stat_path_metadata_contract\n[test_runtime_core] begin test_blocking_wrappers_api\n[test_runtime_core] ok test_blocking_wrappers_api\n[test_runtime_core] begin test_signal_wait_api\n[test_runtime_core] ok test_signal_wait_api\n[test_runtime_core] begin test_errno_is_task_local_across_switches\n[test_runtime_core] ok test_errno_is_task_local_across_switches\n[test_runtime_core] begin test_direct_yield_failure_keeps_task_running\n[test_runtime_core] ok test_direct_yield_failure_keeps_task_running\n[test_runtime_core] begin test_aarch64_simd_is_preserved_across_switches\n[test_runtime_core] ok test_aarch64_simd_is_preserved_across_switches\n[test_runtime_core] begin test_concurrent_join_contract\n[test_runtime_core] ok test_concurrent_join_contract\n"
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_multi_runtime_core"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 4.137,
+      "stdout": "[test_multi_runtime_core] begin sync_handle_family_confusion\n[test_multi_runtime_core] ok sync_handle_family_confusion\n[test_multi_runtime_core] begin runtime_run_handle_rejects_null\n[test_multi_runtime_core] ok runtime_run_handle_rejects_null\n[test_multi_runtime_core] begin idle_block_workers_destroy_repeat\n[test_multi_runtime_core] ok idle_block_workers_destroy_repeat\n[test_multi_runtime_core] begin concurrent_spawn_join\n[test_multi_runtime_core] ok concurrent_spawn_join\n[test_multi_runtime_core] begin sequential_runtime_host_join_owner_cleanup\n[test_multi_runtime_core] ok sequential_runtime_host_join_owner_cleanup\n[test_multi_runtime_core] begin cross_runtime_task_owner\n[test_multi_runtime_core] ok cross_runtime_task_owner\n[test_multi_runtime_core] begin cross_runtime_object_owner\n[test_multi_runtime_core] ok cross_runtime_object_owner\n[test_multi_runtime_core] begin cross_runtime_spawn_cancel_token_owner\n[test_multi_runtime_core] ok cross_runtime_spawn_cancel_token_owner\n[test_multi_runtime_core] begin task_group_spawn_rejects_foreign_cancel_token\n[test_multi_runtime_core] ok task_group_spawn_rejects_foreign_cancel_token\n[test_multi_runtime_core] begin cross_runtime_allocator_returns_are_remote\n[test_multi_runtime_core] ok cross_runtime_allocator_returns_are_remote\n[test_multi_runtime_core] begin task_group_host_spawn_uses_group_runtime\n[test_multi_runtime_core] ok task_group_host_spawn_uses_group_runtime\n[test_multi_runtime_core] begin concurrent_runtime_io\n[test_multi_runtime_core] ok concurrent_runtime_io\n[test_multi_runtime_core] begin explicit_owned_buffers_survive_runtime_destroy\n[test_multi_runtime_core] ok explicit_owned_buffers_survive_runtime_destroy\n[test_multi_runtime_core] begin destroyed_runtime_io_cancel_does_not_stop_peer_runtime\n[test_multi_runtime_core] ok destroyed_runtime_io_cancel_does_not_stop_peer_runtime\n[test_multi_runtime_core] begin process_signal_handler_survives_peer_runtime_destroy\n[test_multi_runtime_core] ok process_signal_handler_survives_peer_runtime_destroy\n[test_multi_runtime_core] begin process_fp_globals_survive_peer_runtime_destroy\n[test_multi_runtime_core] ok process_fp_globals_survive_peer_runtime_destroy\n[test_multi_runtime_core] begin host_try_ops_ignore_default_runtime_race\n[test_multi_runtime_core] ok host_try_ops_ignore_default_runtime_race\n[test_multi_runtime_core] begin explicit_channel_host_try_races_runtime_destroy\n[test_multi_runtime_core] ok explicit_channel_host_try_races_runtime_destroy\n[test_multi_runtime_core] begin default_channel_host_try_ops_ignore_default_runtime_reinit\n[test_multi_runtime_core] ok default_channel_host_try_ops_ignore_default_runtime_reinit\n[test_multi_runtime_core] begin concurrent_runtime_destroy_is_single_owner\n[test_multi_runtime_core] ok concurrent_runtime_destroy_is_single_owner\n[test_multi_runtime_core] begin runtime_destroy_active_op_sentinel_does_not_hang\n[test_multi_runtime_core] ok runtime_destroy_active_op_sentinel_does_not_hang\n[test_multi_runtime_core] begin runtime_destroy_detects_sentinel_after_claim\n[test_multi_runtime_core] ok runtime_destroy_detects_sentinel_after_claim\n[test_multi_runtime_core] begin runtime_begin_active_op_near_sentinel_fails_busy\n[test_multi_runtime_core] ok runtime_begin_active_op_near_sentinel_fails_busy\n[test_multi_runtime_core] begin default_spawn_respects_runtime_public_op_gate\n[test_multi_runtime_core] ok default_spawn_respects_runtime_public_op_gate\n[test_multi_runtime_core] begin runtime_destroy_waits_for_active_run\n[test_multi_runtime_core] ok runtime_destroy_waits_for_active_run\n[test_multi_runtime_core] begin unmanaged_join_races_runtime_destroy\n[test_multi_runtime_core] ok unmanaged_join_races_runtime_destroy\n[test_multi_runtime_core] begin runtime_run_start_destroy_race\n[test_multi_runtime_core] ok runtime_run_start_destroy_race\n[test_multi_runtime_core] begin runtime_stats_destroy_race\n[test_multi_runtime_core] ok runtime_stats_destroy_race\n[test_multi_runtime_core] begin destroyed_runtime_handle_address_not_reused\n[test_multi_runtime_core] ok destroyed_runtime_handle_address_not_reused\n[test_multi_runtime_core] begin public_cleanup_after_owner_runtime_destroy\n[test_multi_runtime_core] ok public_cleanup_after_owner_runtime_destroy\n[test_multi_runtime_core] begin explicit_channel_drain_after_owner_runtime_destroy\n[test_multi_runtime_core] ok explicit_channel_drain_after_owner_runtime_destroy\n[test_multi_runtime_core] begin legacy_stop_wrappers_target_current_runtime\n[test_multi_runtime_core] ok legacy_stop_wrappers_target_current_runtime\n[test_multi_runtime_core] begin managed_destroy_foreign_runtime_does_not_stop_peer\n[test_multi_runtime_core] ok managed_destroy_foreign_runtime_does_not_stop_peer\n[test_multi_runtime_core] begin explicit_embedding_shutdown_path\n[test_multi_runtime_core] ok explicit_embedding_shutdown_path\n[test_multi_runtime_core] begin explicit_embedding_cancellation_path\n[test_multi_runtime_core] ok explicit_embedding_cancellation_path\n[test_multi_runtime_core] begin explicit_embedding_channel_lost_wakeup\n[test_multi_runtime_core] ok explicit_embedding_channel_lost_wakeup\n[test_multi_runtime_core] begin explicit_embedding_select_fanout\n[test_multi_runtime_core] ok explicit_embedding_select_fanout\n[test_multi_runtime_core] begin explicit_embedding_blocking_helper\n[test_multi_runtime_core] ok explicit_embedding_blocking_helper\n[test_multi_runtime_core] begin explicit_embedding_io_ownership\n[test_multi_runtime_core] ok explicit_embedding_io_ownership\n[test_multi_runtime_core] begin concurrent_blocking_pool_isolation\n[test_multi_runtime_core] ok concurrent_blocking_pool_isolation\n[test_multi_runtime_core] ok\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_runtime_select_edges"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.017,
+      "stdout": "test_runtime_select_edges ok: rounds=16\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_runtime_shutdown_internal"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.106,
+      "stdout": "test_runtime_shutdown_internal ok\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_runtime_invariants"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.032,
+      "stdout": "[test_runtime_invariants] ok seed=5497841045310690900 scenarios=32\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_legacy_lease_internal"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.419,
+      "stdout": "test_legacy_lease_internal: all legacy lease characterization checks passed\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_sync_primitives"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.012,
+      "stdout": "[test_sync_primitives] ok\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_runtime_fuzz"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.412,
+      "stdout": "[test_runtime_fuzz] ok seed=5497841045260819034 scenarios=48 multi_seed=2393994400551611964 multi_scenarios=16\n",
+      "stderr": ""
+    },
+    {
+      "policy": "baseline",
+      "command": [
+        "./test_processor_queue_timer_internal"
+      ],
+      "environment": {},
+      "returncode": 0,
+      "seconds": 0.014,
+      "stdout": "test_processor_queue_timer_internal: ownership routing checks passed\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_runtime_core"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 1.431,
+      "stdout": "[test_runtime_core] ok\n",
+      "stderr": "[test_runtime_core] begin test_preinit_contracts\n[test_runtime_core] ok test_preinit_contracts\n[test_runtime_core] begin test_runtime_registered_init_failure_rolls_back\n[test_runtime_core] ok test_runtime_registered_init_failure_rolls_back\n[test_runtime_core] begin test_runtime_create_preserves_managed_tls\n[test_runtime_core] ok test_runtime_create_preserves_managed_tls\n[test_runtime_core] begin test_direct_yield_auto_policy_is_profile_scoped\n[test_runtime_core] ok test_direct_yield_auto_policy_is_profile_scoped\n[test_runtime_core] begin test_direct_yield_timer_policy_is_bounded\n[test_runtime_core] ok test_direct_yield_timer_policy_is_bounded\n[test_runtime_core] begin test_autotune_handoff_budget_actuates\n[test_runtime_core] ok test_autotune_handoff_budget_actuates\n[test_runtime_core] begin test_autotune_handoff_freezes_no_work_low_hit\n[test_runtime_core] ok test_autotune_handoff_freezes_no_work_low_hit\n[test_runtime_core] begin test_autotune_handoff_probe_defers_low_sample\n[test_runtime_core] ok test_autotune_handoff_probe_defers_low_sample\n[test_runtime_core] begin test_autotune_handoff_wake_guardrail_rolls_back\n[test_runtime_core] ok test_autotune_handoff_wake_guardrail_rolls_back\n[test_runtime_core] begin test_unsigned_runtime_env_rejects_malformed_input\n[test_runtime_core] ok test_unsigned_runtime_env_rejects_malformed_input\n[test_runtime_core] begin test_runtime_env_flags_accept_false_tokens\n[test_runtime_core] ok test_runtime_env_flags_accept_false_tokens\n[test_runtime_core] begin test_runtime_handle_api\n[test_runtime_core] ok test_runtime_handle_api\n[test_runtime_core] begin test_runtime_lifecycle_and_task_contracts\n[test_runtime_core] ok test_runtime_lifecycle_and_task_contracts\n[test_runtime_core] begin test_request_stop_returns_success\n[test_runtime_core] ok test_request_stop_returns_success\n[test_runtime_core] begin test_shutdown_from_task_requests_stop\n[test_runtime_core] ok test_shutdown_from_task_requests_stop\n[test_runtime_core] begin test_runtime_owner_mismatch_diagnostics\n[test_runtime_core] ok test_runtime_owner_mismatch_diagnostics\n[test_runtime_core] begin test_timer_wait_ownership_contract\n[test_runtime_core] ok test_timer_wait_ownership_contract\n[test_runtime_core] begin test_select_completion_ownership_contract\n[test_runtime_core] ok test_select_completion_ownership_contract\n[test_runtime_core] begin test_wait_resolver_gate_contract\n[test_runtime_core] ok test_wait_resolver_gate_contract\n[test_runtime_core] begin test_wait_tracking_setters_fail_closed_on_saturation\n[test_runtime_core] ok test_wait_tracking_setters_fail_closed_on_saturation\n[test_runtime_core] begin test_wait_tracking_lock_safe_overflow\n[test_runtime_core] ok test_wait_tracking_lock_safe_overflow\n[test_runtime_core] begin test_wait_tracking_caller_rolls_back_saturation\n[test_runtime_core] ok test_wait_tracking_caller_rolls_back_saturation\n[test_runtime_core] begin test_active_io_tracking_counter_saturation_rolls_back\n[test_runtime_core] ok test_active_io_tracking_counter_saturation_rolls_back\n[test_runtime_core] begin test_deferred_fatal_stops_and_drains_parked_wait\n[test_runtime_core] ok test_deferred_fatal_stops_and_drains_parked_wait\n[test_runtime_core] begin test_deferred_fatal_rewakes_prestopped_runtime\n[test_runtime_core] ok test_deferred_fatal_rewakes_prestopped_runtime\n[test_runtime_core] begin test_wait_resolver_scalar_cancel_drain\n[test_runtime_core] ok test_wait_resolver_scalar_cancel_drain\n[test_runtime_core] begin test_wait_resolver_select_cancel_drain\n[test_runtime_core] ok test_wait_resolver_select_cancel_drain\n[test_runtime_core] begin test_wait_resolver_block_job_recycle_drain\n[test_runtime_core] ok test_wait_resolver_block_job_recycle_drain\n[test_runtime_core] begin test_public_active_op_release_sequence\n[test_runtime_core] ok test_public_active_op_release_sequence\n[test_runtime_core] begin test_task_group_unique_spawn_reservations\n[test_runtime_core] ok test_task_group_unique_spawn_reservations\n[test_runtime_core] begin test_runtime_dump_while_blocking_job_active\n[test_runtime_core] ok test_runtime_dump_while_blocking_job_active\n[test_runtime_core] begin test_concurrent_runtime_init_contract\n[test_runtime_core] ok test_concurrent_runtime_init_contract\n[test_runtime_core] begin test_concurrent_init_shutdown_contract\n[test_runtime_core] ok test_concurrent_init_shutdown_contract\n[test_runtime_core] begin test_concurrent_init_stats_contract\n[test_runtime_core] ok test_concurrent_init_stats_contract\n[test_runtime_core] begin test_concurrent_init_dump_contract\n[test_runtime_core] ok test_concurrent_init_dump_contract\n[test_runtime_core] begin test_concurrent_init_sleep_contract\n[test_runtime_core] ok test_concurrent_init_sleep_contract\n[test_runtime_core] begin test_concurrent_trace_ring_contract\n[test_runtime_core] ok test_concurrent_trace_ring_contract\n[test_runtime_core] begin test_concurrent_run_contract\n[test_runtime_core] ok test_concurrent_run_contract\n[test_runtime_core] begin test_concurrent_spawn_contract\n[test_runtime_core] ok test_concurrent_spawn_contract\n[test_runtime_core] begin test_detach_contract\n[test_runtime_core] ok test_detach_contract\n[test_runtime_core] begin test_ex_option_prefixes\n[test_runtime_core] ok test_ex_option_prefixes\n[test_runtime_core] begin test_waitable_timer_api\n[test_runtime_core] ok test_waitable_timer_api\n[test_runtime_core] begin test_stat_path_metadata_contract\n[test_runtime_core] ok test_stat_path_metadata_contract\n[test_runtime_core] begin test_blocking_wrappers_api\n[test_runtime_core] ok test_blocking_wrappers_api\n[test_runtime_core] begin test_signal_wait_api\n[test_runtime_core] ok test_signal_wait_api\n[test_runtime_core] begin test_errno_is_task_local_across_switches\n[test_runtime_core] ok test_errno_is_task_local_across_switches\n[test_runtime_core] begin test_direct_yield_failure_keeps_task_running\n[test_runtime_core] ok test_direct_yield_failure_keeps_task_running\n[test_runtime_core] begin test_aarch64_simd_is_preserved_across_switches\n[test_runtime_core] ok test_aarch64_simd_is_preserved_across_switches\n[test_runtime_core] begin test_concurrent_join_contract\n[test_runtime_core] ok test_concurrent_join_contract\n"
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_multi_runtime_core"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 4.466,
+      "stdout": "[test_multi_runtime_core] begin sync_handle_family_confusion\n[test_multi_runtime_core] ok sync_handle_family_confusion\n[test_multi_runtime_core] begin runtime_run_handle_rejects_null\n[test_multi_runtime_core] ok runtime_run_handle_rejects_null\n[test_multi_runtime_core] begin idle_block_workers_destroy_repeat\n[test_multi_runtime_core] ok idle_block_workers_destroy_repeat\n[test_multi_runtime_core] begin concurrent_spawn_join\n[test_multi_runtime_core] ok concurrent_spawn_join\n[test_multi_runtime_core] begin sequential_runtime_host_join_owner_cleanup\n[test_multi_runtime_core] ok sequential_runtime_host_join_owner_cleanup\n[test_multi_runtime_core] begin cross_runtime_task_owner\n[test_multi_runtime_core] ok cross_runtime_task_owner\n[test_multi_runtime_core] begin cross_runtime_object_owner\n[test_multi_runtime_core] ok cross_runtime_object_owner\n[test_multi_runtime_core] begin cross_runtime_spawn_cancel_token_owner\n[test_multi_runtime_core] ok cross_runtime_spawn_cancel_token_owner\n[test_multi_runtime_core] begin task_group_spawn_rejects_foreign_cancel_token\n[test_multi_runtime_core] ok task_group_spawn_rejects_foreign_cancel_token\n[test_multi_runtime_core] begin cross_runtime_allocator_returns_are_remote\n[test_multi_runtime_core] ok cross_runtime_allocator_returns_are_remote\n[test_multi_runtime_core] begin task_group_host_spawn_uses_group_runtime\n[test_multi_runtime_core] ok task_group_host_spawn_uses_group_runtime\n[test_multi_runtime_core] begin concurrent_runtime_io\n[test_multi_runtime_core] ok concurrent_runtime_io\n[test_multi_runtime_core] begin explicit_owned_buffers_survive_runtime_destroy\n[test_multi_runtime_core] ok explicit_owned_buffers_survive_runtime_destroy\n[test_multi_runtime_core] begin destroyed_runtime_io_cancel_does_not_stop_peer_runtime\n[test_multi_runtime_core] ok destroyed_runtime_io_cancel_does_not_stop_peer_runtime\n[test_multi_runtime_core] begin process_signal_handler_survives_peer_runtime_destroy\n[test_multi_runtime_core] ok process_signal_handler_survives_peer_runtime_destroy\n[test_multi_runtime_core] begin process_fp_globals_survive_peer_runtime_destroy\n[test_multi_runtime_core] ok process_fp_globals_survive_peer_runtime_destroy\n[test_multi_runtime_core] begin host_try_ops_ignore_default_runtime_race\n[test_multi_runtime_core] ok host_try_ops_ignore_default_runtime_race\n[test_multi_runtime_core] begin explicit_channel_host_try_races_runtime_destroy\n[test_multi_runtime_core] ok explicit_channel_host_try_races_runtime_destroy\n[test_multi_runtime_core] begin default_channel_host_try_ops_ignore_default_runtime_reinit\n[test_multi_runtime_core] ok default_channel_host_try_ops_ignore_default_runtime_reinit\n[test_multi_runtime_core] begin concurrent_runtime_destroy_is_single_owner\n[test_multi_runtime_core] ok concurrent_runtime_destroy_is_single_owner\n[test_multi_runtime_core] begin runtime_destroy_active_op_sentinel_does_not_hang\n[test_multi_runtime_core] ok runtime_destroy_active_op_sentinel_does_not_hang\n[test_multi_runtime_core] begin runtime_destroy_detects_sentinel_after_claim\n[test_multi_runtime_core] ok runtime_destroy_detects_sentinel_after_claim\n[test_multi_runtime_core] begin runtime_begin_active_op_near_sentinel_fails_busy\n[test_multi_runtime_core] ok runtime_begin_active_op_near_sentinel_fails_busy\n[test_multi_runtime_core] begin default_spawn_respects_runtime_public_op_gate\n[test_multi_runtime_core] ok default_spawn_respects_runtime_public_op_gate\n[test_multi_runtime_core] begin runtime_destroy_waits_for_active_run\n[test_multi_runtime_core] ok runtime_destroy_waits_for_active_run\n[test_multi_runtime_core] begin unmanaged_join_races_runtime_destroy\n[test_multi_runtime_core] ok unmanaged_join_races_runtime_destroy\n[test_multi_runtime_core] begin runtime_run_start_destroy_race\n[test_multi_runtime_core] ok runtime_run_start_destroy_race\n[test_multi_runtime_core] begin runtime_stats_destroy_race\n[test_multi_runtime_core] ok runtime_stats_destroy_race\n[test_multi_runtime_core] begin destroyed_runtime_handle_address_not_reused\n[test_multi_runtime_core] ok destroyed_runtime_handle_address_not_reused\n[test_multi_runtime_core] begin public_cleanup_after_owner_runtime_destroy\n[test_multi_runtime_core] ok public_cleanup_after_owner_runtime_destroy\n[test_multi_runtime_core] begin explicit_channel_drain_after_owner_runtime_destroy\n[test_multi_runtime_core] ok explicit_channel_drain_after_owner_runtime_destroy\n[test_multi_runtime_core] begin legacy_stop_wrappers_target_current_runtime\n[test_multi_runtime_core] ok legacy_stop_wrappers_target_current_runtime\n[test_multi_runtime_core] begin managed_destroy_foreign_runtime_does_not_stop_peer\n[test_multi_runtime_core] ok managed_destroy_foreign_runtime_does_not_stop_peer\n[test_multi_runtime_core] begin explicit_embedding_shutdown_path\n[test_multi_runtime_core] ok explicit_embedding_shutdown_path\n[test_multi_runtime_core] begin explicit_embedding_cancellation_path\n[test_multi_runtime_core] ok explicit_embedding_cancellation_path\n[test_multi_runtime_core] begin explicit_embedding_channel_lost_wakeup\n[test_multi_runtime_core] ok explicit_embedding_channel_lost_wakeup\n[test_multi_runtime_core] begin explicit_embedding_select_fanout\n[test_multi_runtime_core] ok explicit_embedding_select_fanout\n[test_multi_runtime_core] begin explicit_embedding_blocking_helper\n[test_multi_runtime_core] ok explicit_embedding_blocking_helper\n[test_multi_runtime_core] begin explicit_embedding_io_ownership\n[test_multi_runtime_core] ok explicit_embedding_io_ownership\n[test_multi_runtime_core] begin concurrent_blocking_pool_isolation\n[test_multi_runtime_core] ok concurrent_blocking_pool_isolation\n[test_multi_runtime_core] ok\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_runtime_select_edges"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.018,
+      "stdout": "test_runtime_select_edges ok: rounds=16\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_runtime_shutdown_internal"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.112,
+      "stdout": "test_runtime_shutdown_internal ok\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_runtime_invariants"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.039,
+      "stdout": "[test_runtime_invariants] ok seed=5497841045310690900 scenarios=32\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_legacy_lease_internal"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.389,
+      "stdout": "test_legacy_lease_internal: all legacy lease characterization checks passed\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_sync_primitives"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.007,
+      "stdout": "[test_sync_primitives] ok\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_runtime_fuzz"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.401,
+      "stdout": "[test_runtime_fuzz] ok seed=5497841045260819034 scenarios=48 multi_seed=2393994400551611964 multi_scenarios=16\n",
+      "stderr": ""
+    },
+    {
+      "policy": "burst8",
+      "command": [
+        "./test_processor_queue_timer_internal"
+      ],
+      "environment": {
+        "LLAM_YIELD_DIRECT_HANDOFF_BURST": "8"
+      },
+      "returncode": 0,
+      "seconds": 0.008,
+      "stdout": "test_processor_queue_timer_internal: ownership routing checks passed\n",
+      "stderr": ""
+    }
+  ],
+  "limitations": [
+    "No Linux, BSD or Windows execution",
+    "Finite SC protocol model is not a full C11 proof"
+  ],
+  "additional_checks": [
+    {
+      "command": "make -j4 CC=clang test-handoff",
+      "result": "pass",
+      "detail": "11 Python/model/native-smoke tests; 6 native call orders and 3000 three-thread trials"
+    },
+    {
+      "command": "cmake -S . -B object/handoff-work-20261027/cmake -DLLAM_PREEMPT_TOOLING=off -DCMAKE_BUILD_TYPE=Release",
+      "result": "pass",
+      "detail": "CMake configuration/generation; no duplicate native CMake build"
+    },
+    {
+      "command": "ctest --test-dir object/handoff-work-20261027/cmake --output-on-failure -R '^test_handoff_model$'",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --check -- Makefile CMakeLists.txt",
+      "result": "pass"
+    },
+    {
+      "command": "scoped check_license_policy.has_notice plus ast.parse",
+      "result": "pass",
+      "detail": "All five new C/Python files; source notices checked without opening cloud placeholders"
+    },
+    {
+      "command": "audit_production_test_hooks.py (full-gate prerequisite)",
+      "result": "pass",
+      "detail": "2 production artifacts; no test hooks exported"
+    }
+  ],
+  "global_gates": [
+    {
+      "command": "make -j4 CC=clang all test",
+      "result": "blocked",
+      "detail": "After repairing the missing watchdog_worker test-hook object, the gate reached test_preempt_package.py and blocked copying docs/requirements.txt. lsof identified this file; ls -lO reported compressed,dataless. Interrupted our process after observing no progress."
+    },
+    {
+      "command": "make check-license-policy",
+      "result": "blocked",
+      "detail": "License unit tests passed, then the include-untracked scan blocked in path.read_bytes(). Interrupted our process; no full-policy pass claimed."
+    }
+  ],
+  "build_fix": {
+    "path": "Makefile",
+    "detail": "Added watchdog_worker.o to test-hook overrides and excluded its ordinary object there, resolving undefined llam_watchdog_test_scheduler_point for lease/scheduler tests. CMake already builds all test-hook sources with LLAM_ENABLE_TEST_HOOKS."
+  },
+  "final_sources": {
+    "Makefile": "6f9e9e5a64ba7c962c4d7a084f45807bac4bcbbbe901d8582d6fdf49916e4ca2",
+    "CMakeLists.txt": "253698117db127a4f3108e5547b990a9cd3891164411d605b9f9016b64bf1f8a",
+    "experiments/handoff/README.md": "727a0269e1412702f0b451f3ae9dcb2c6dd88743c69fe6835857fd87662965cc",
+    "experiments/handoff/bench_handoff.c": "858f799d3a2213978ed060d51d0bb9ff01aa84151d1a2c5b041847836f72ba76",
+    "experiments/handoff/handoff_model.py": "45d1715097aa57defeb02741b5f5398b36c05d225ce83cf8e47c2e9df4a2940a",
+    "experiments/handoff/verify_handoff.c": "ea7b7a4f0cc72c8d14e006b1a8361860d7e78e075309944c28a1a59b19f3327c",
+    "scripts/bench_handoff.py": "5259bec2c0e3949d8d363e7598a3ffb7c2044e27e4e4a9d27205e0e2a4eac4b3",
+    "scripts/test_handoff_model.py": "d31e721bb1955a252e22568e2e90717594b2d2164502311619c23c468abe746e"
+  },
+  "acceptance": {
+    "original_request": "user: implement wake/handoff counterexample-guided optimization, concurrency validation, throughput and p99 comparison",
+    "experiment": "implemented",
+    "focused_concurrency": "passed",
+    "matched_comparison": "completed; no general improvement established",
+    "global_gates": "incomplete as documented",
+    "production_default": "unchanged"
+  },
+  "cleanup": {
+    "removed": [
+      {
+        "path": "object/handoff-work-20261027",
+        "files": 562,
+        "logical_bytes": 2980304
+      },
+      {
+        "path": "object/experiments/handoff",
+        "files": 2,
+        "logical_bytes": 113112
+      },
+      {
+        "path": "bench_handoff",
+        "files": 1,
+        "logical_bytes": 757744
+      },
+      {
+        "path": "test_handoff_protocol",
+        "files": 1,
+        "logical_bytes": 740648
+      }
+    ],
+    "failures": [],
+    "preserved": "Existing build caches, dependencies, user measurement artifacts, dataless docs/requirements.txt, and final experiment sources/results. Byte totals are logical file lengths, not physical disk-space recovery."
+  }
+}

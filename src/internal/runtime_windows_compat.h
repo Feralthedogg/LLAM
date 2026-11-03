@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_WINDOWS_COMPAT_H
@@ -34,6 +34,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <limits.h>
 #include <malloc.h>
 #include <signal.h>
@@ -77,28 +78,65 @@
 #define CLOCK_MONOTONIC 1
 #endif
 
+static inline void llam_windows_counter_to_timespec(uint64_t ticks, uint64_t frequency,
+                                                     struct timespec *ts) {
+    uint64_t remainder = ticks % frequency;
+    uint64_t fraction;
+
+    ts->tv_sec = (time_t)(ticks / frequency);
+    if (remainder <= UINT64_MAX / 1000000000ULL) {
+        fraction = (remainder * 1000000000ULL) / frequency;
+    } else {
+        /* Exact multiply/divide for unusually large frequencies, without a wide integer. */
+        uint64_t residual = 0U;
+
+        fraction = 0U;
+        for (int bit = 29; bit >= 0; --bit) {
+            fraction *= 2U;
+            if (residual >= frequency - residual) {
+                residual -= frequency - residual;
+                ++fraction;
+            } else {
+                residual *= 2U;
+            }
+            if ((1000000000ULL & (UINT64_C(1) << bit)) != 0U) {
+                if (residual >= frequency - remainder) {
+                    residual -= frequency - remainder;
+                    ++fraction;
+                } else {
+                    residual += remainder;
+                }
+            }
+        }
+    }
+    ts->tv_nsec = (long)fraction;
+}
+
 static inline int llam_windows_clock_gettime(int clock_id, struct timespec *ts) {
-    static LARGE_INTEGER frequency;
+    static atomic_uint_fast64_t cached_frequency;
+    LARGE_INTEGER native_frequency;
     LARGE_INTEGER counter;
-    uint64_t ns;
+    uint64_t frequency;
 
     if (clock_id != CLOCK_MONOTONIC || ts == NULL) {
         errno = EINVAL;
         return -1;
     }
-    if (frequency.QuadPart == 0) {
-        if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart == 0) {
+    /* The cache is one immutable scalar; relaxed atomics need publish no other state. */
+    frequency = atomic_load_explicit(&cached_frequency, memory_order_relaxed);
+    if (frequency == 0U) {
+        if (!QueryPerformanceFrequency(&native_frequency) || native_frequency.QuadPart <= 0) {
             errno = EINVAL;
             return -1;
         }
+        frequency = (uint64_t)native_frequency.QuadPart;
+        atomic_store_explicit(&cached_frequency, frequency, memory_order_relaxed);
     }
-    if (!QueryPerformanceCounter(&counter)) {
+    if (!QueryPerformanceCounter(&counter) || counter.QuadPart < 0) {
         errno = EINVAL;
         return -1;
     }
-    ns = ((uint64_t)counter.QuadPart * 1000000000ULL) / (uint64_t)frequency.QuadPart;
-    ts->tv_sec = (time_t)(ns / 1000000000ULL);
-    ts->tv_nsec = (long)(ns % 1000000000ULL);
+    llam_windows_counter_to_timespec((uint64_t)counter.QuadPart, frequency, ts);
     return 0;
 }
 
@@ -490,19 +528,45 @@ static inline int pthread_join(pthread_t thread, void **retval) {
         *retval = NULL;
     }
     if (handle == NULL) {
-        return 0;
+        return EINVAL;
     }
-    (void)WaitForSingleObject(handle, INFINITE);
-    CloseHandle(handle);
-    return 0;
+    /* A successful join is the native TLS-destructor lifetime barrier. Keep
+     * the owned handle on wait failure; callers must not retire thread-owned
+     * storage merely because the wait API returned. */
+    if (WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0) {
+        return EIO;
+    }
+    return CloseHandle(handle) ? 0 : EIO;
 }
 
 static inline pthread_t pthread_self(void) {
+#if defined(_WIN64)
+    /* Owned pthreads are real _beginthreadex handles (low tag bits clear).
+     * Borrowed self identities are tagged native DWORD ids, NOT handles.
+     * Keep their namespaces disjoint: a raw TID may numerically equal a handle.
+     * Win64 has space for the complete 32-bit id plus this private tag. */
+    return ((pthread_t)GetCurrentThreadId() << 1U) | (pthread_t)1U;
+#else
     return (pthread_t)GetCurrentThreadId();
+#endif
 }
 
 static inline int pthread_equal(pthread_t a, pthread_t b) {
+#if defined(_WIN64)
+    DWORD saved_last_error;
+    DWORD a_id;
+    DWORD b_id;
+    if (a == b) {
+        return 1;
+    }
+    saved_last_error = GetLastError();
+    a_id = (a & (pthread_t)1U) != 0U ? (DWORD)(a >> 1U) : GetThreadId((HANDLE)a);
+    b_id = (b & (pthread_t)1U) != 0U ? (DWORD)(b >> 1U) : GetThreadId((HANDLE)b);
+    SetLastError(saved_last_error);
+    return a_id != 0U && a_id == b_id;
+#else
     return a == b;
+#endif
 }
 
 static inline int pthread_kill(pthread_t thread, int signo) {

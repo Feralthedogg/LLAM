@@ -17,10 +17,21 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/windows/runtime_io_watch_windows_internal.h"
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static void llam_windows_test_complete_sink(atomic_uint *flag) {
+    if (flag == NULL) {
+        return;
+    }
+    /* Result fields and the freed OVERLAPPED op precede this test-only ACK. */
+    atomic_store_explicit(flag, 1U, memory_order_release);
+    WakeByAddressSingle(flag);
+}
+#endif
 
 void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool decrement_pending) {
     llam_io_abort_reason_t abort_reason;
@@ -118,10 +129,17 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
 }
 
 void llam_windows_complete_submit_error(llam_node_t *node, llam_io_req_t *req, int err) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    atomic_uint *test_flag = req != NULL ? req->windows_test_completion_flag : NULL;
+#endif
+
     if (err <= 0) {
         err = EIO;
     }
     llam_windows_complete_req(node, req, -err, true);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_windows_test_complete_sink(test_flag);
+#endif
 }
 
 static void llam_windows_copy_accept_addr(llam_windows_io_op_t *op) {
@@ -190,6 +208,9 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     DWORD flags = 0;
     int result;
     int err = 0;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    atomic_uint *test_flag;
+#endif
 
     if (completion->overlapped == 0U) {
         return;
@@ -199,6 +220,10 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     }
 
     req = op->req;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    /* Cache before READY publication; the resumed G may recycle req at once. */
+    test_flag = req->windows_test_completion_flag;
+#endif
     node = op->node;
     transferred = completion->bytes;
     llam_fd_watch_lifecycle_lock();
@@ -215,7 +240,14 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
                req->kind == LLAM_IO_KIND_HANDLE_PREAD ||
                req->kind == LLAM_IO_KIND_HANDLE_PWRITE) {
         if (!GetOverlappedResult((HANDLE)req->handle, &op->overlapped, &transferred, FALSE)) {
-            err = llam_windows_system_error_to_errno(GetLastError());
+            DWORD error_code = GetLastError();
+
+            if (error_code == ERROR_HANDLE_EOF &&
+                (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_PREAD)) {
+                transferred = 0U;
+            } else {
+                err = llam_windows_system_error_to_errno(error_code);
+            }
         }
     } else if (!WSAGetOverlappedResult(req->fd, &op->overlapped, &transferred, FALSE, &flags)) {
         err = llam_windows_wsa_error_to_errno(WSAGetLastError());
@@ -248,6 +280,9 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
         llam_windows_complete_req(node, req, result, true);
     }
     llam_windows_io_op_free(op);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_windows_test_complete_sink(test_flag);
+#endif
 }
 
 void llam_windows_complete_immediate_op(llam_windows_io_op_t *op, DWORD bytes) {

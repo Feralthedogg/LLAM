@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_IO_H
@@ -110,6 +110,53 @@ typedef struct llam_file_stat {
  * primitive directly and may block the calling OS thread.
  */
 LLAM_API ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
+
+/**
+ * @brief Read/write/connect/poll with one absolute deadline and extra token.
+ *
+ * Managed operations use the earliest task/call deadline and observe task OR
+ * group OR call cancellation. Cancellation never releases a buffer while a
+ * backend/helper can still access it; a completed transfer can win the race.
+ * Bounded read/write/connect need a managed task. POSIX bounded byte I/O accepts
+ * sockets and nonblocking pipes/devices, rejecting regular/block files with
+ * ENOTSUP rather than promising to interrupt a blocking filesystem call.
+ * Windows HANDLE variants require native overlapped support when bounded.
+ * Poll supports host threads as well. Its timeout result is 0, like poll_fd.
+ * Existing read_when_ready and its relative millisecond timeout are unchanged.
+ */
+LLAM_API ssize_t llam_read_ex(llam_fd_t fd, void *buf, size_t count,
+                              const llam_wait_opts_t *opts, size_t opts_size);
+LLAM_API ssize_t llam_write_ex(llam_fd_t fd, const void *buf, size_t count,
+                               const llam_wait_opts_t *opts, size_t opts_size);
+LLAM_API int llam_connect_ex(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen,
+                              const llam_wait_opts_t *opts, size_t opts_size);
+LLAM_API int llam_poll_fd_ex(llam_fd_t fd, int events, short *revents,
+                              const llam_wait_opts_t *opts, size_t opts_size);
+LLAM_API ssize_t llam_read_handle_ex(llam_handle_t handle, void *buf, size_t count,
+                                     const llam_wait_opts_t *opts, size_t opts_size);
+LLAM_API ssize_t llam_write_handle_ex(llam_handle_t handle, const void *buf, size_t count,
+                                      const llam_wait_opts_t *opts, size_t opts_size);
+
+/** @brief Absolute-deadline forms; deadline 0 is already expired. */
+LLAM_API ssize_t llam_read_until(llam_fd_t fd, void *buf, size_t count, uint64_t deadline_ns);
+LLAM_API ssize_t llam_write_until(llam_fd_t fd, const void *buf, size_t count, uint64_t deadline_ns);
+LLAM_API int llam_connect_until(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen, uint64_t deadline_ns);
+LLAM_API int llam_poll_fd_until(llam_fd_t fd, int events, uint64_t deadline_ns, short *revents);
+
+/**
+ * @brief Transfer exactly count bytes, returning confirmed progress on failure.
+ *
+ * Return 0 after count bytes, -1 with errno otherwise. progress is required and
+ * starts at 0; EOF before a complete read is EPIPE, a zero-byte write is EIO.
+ * Completed chunks remain counted after timeout/cancel/error. These helpers
+ * cannot roll back bytes already transferred; do not resend the confirmed prefix.
+ */
+LLAM_API int llam_read_exact_ex(llam_fd_t fd, void *buf, size_t count,
+                                const llam_wait_opts_t *opts, size_t opts_size, size_t *progress);
+LLAM_API int llam_write_all_ex(llam_fd_t fd, const void *buf, size_t count,
+                               const llam_wait_opts_t *opts, size_t opts_size, size_t *progress);
+LLAM_API int llam_read_exact(llam_fd_t fd, void *buf, size_t count, size_t *progress);
+LLAM_API int llam_write_all(llam_fd_t fd, const void *buf, size_t count, size_t *progress);
 
 /**
  * @brief Read from a generic platform handle.
@@ -213,7 +260,10 @@ LLAM_API ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t
 /**
  * @brief Positional read from a generic platform handle.
  *
- * @details Windows submits overlapped @c ReadFile with the supplied offset. On
+ * @details Windows submits overlapped @c ReadFile with the supplied offset.
+ * Synchronous file handles use an independent reopened handle and must allow
+ * read sharing; managed tasks park while a blocking helper performs that I/O.
+ * The original file position is preserved, and end-of-file returns zero. On
  * POSIX, ::llam_handle_t aliases ::llam_fd_t and this delegates to
  * ::llam_pread.
  */
@@ -221,6 +271,9 @@ LLAM_API ssize_t llam_pread_handle(llam_handle_t handle, void *buf, size_t count
 
 /**
  * @brief Positional write to a generic platform handle.
+ *
+ * The original file position is preserved. Synchronous Windows file handles
+ * must allow write sharing so an independent handle can perform the operation.
  */
 LLAM_API ssize_t llam_pwrite_handle(llam_handle_t handle, const void *buf, size_t count, uint64_t offset);
 

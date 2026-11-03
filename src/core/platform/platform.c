@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -247,9 +247,21 @@ void llam_tune_block_worker_thread(void) {
 /**
  * @brief Apply platform scheduling hints for the controller/watchdog thread.
  */
-void llam_tune_ctrl_thread(void) {
+void llam_tune_ctrl_thread(bool native_progress) {
 #if defined(__APPLE__)
-    llam_darwin_tune_current_thread(QOS_CLASS_UTILITY, -1, -3, THREAD_AFFINITY_TAG_NULL);
+    /* Capturing and retiring G contexts is scheduler progress. A utility QoS
+     * controller can starve behind CPU-bound user-initiated Ms, even though it
+     * is the only thread able to give another G a turn. Keep ordinary idle
+     * watchdog work at its existing utility priority. */
+    if (native_progress) {
+        llam_darwin_tune_current_thread(QOS_CLASS_USER_INITIATED, 0, 2,
+                                       THREAD_AFFINITY_TAG_NULL);
+    } else {
+        llam_darwin_tune_current_thread(QOS_CLASS_UTILITY, -1, -3,
+                                       THREAD_AFFINITY_TAG_NULL);
+    }
+#else
+    (void)native_progress;
 #endif
 }
 
@@ -424,6 +436,29 @@ void llam_restore_process_signal_handlers(llam_runtime_t *rt) {
     pthread_mutex_unlock(&g_llam_process_signal_lock);
 }
 
+/* Signal stacks belong to native M, including the scheduler's no-P interval.
+ * A borrowed P must agree with current_p/TLS; it never changes the native home. */
+static bool llam_registered_signal_stack_owner(const llam_worker_t *worker) {
+    llam_processor_t *processor;
+    uint64_t incarnation;
+
+    if (worker == NULL || g_llam_tls_worker != worker ||
+        !llam_worker_registered_for(worker, worker->registry_runtime) ||
+        worker->registry_runtime->execution_lease_mode != LLAM_EXECUTION_LEASE_REGISTERED) {
+        return false;
+    }
+    incarnation = atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire);
+    if (!llam_worker_binding_live(worker, incarnation) ||
+        pthread_equal(worker->native_thread, pthread_self()) == 0) {
+        return false;
+    }
+    processor = atomic_load_explicit(&worker->current_p, memory_order_acquire);
+    return g_llam_tls_processor == processor &&
+           (processor == NULL ? g_llam_tls_shard == worker->compat_shard
+                              : llam_worker_can_own_processor(worker, processor) &&
+                                    g_llam_tls_shard == processor->compat_shard);
+}
+
 /**
  * @brief Install a per-thread alternate signal stack for guard-page diagnostics.
  *
@@ -436,7 +471,10 @@ int llam_install_thread_signal_stack(llam_worker_t *worker) {
     uint64_t incarnation;
 
     if (worker == NULL || g_llam_tls_worker != worker ||
-        g_llam_tls_processor != worker->associated_processor ||
+        (worker->registry_runtime != NULL &&
+                 worker->registry_runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED
+             ? !llam_registered_signal_stack_owner(worker)
+             : g_llam_tls_processor != worker->associated_processor) ||
         worker->signal_stack == NULL ||
         worker->signal_stack_size < (size_t)SIGSTKSZ ||
         worker->sigaltstack_installed) {
@@ -481,12 +519,19 @@ void llam_uninstall_thread_signal_stack(llam_worker_t *worker) {
     stack_t disabled;
     uint64_t incarnation;
 
-    if (worker == NULL || g_llam_tls_shard == NULL ||
-        g_llam_tls_worker != worker || g_llam_tls_processor == NULL ||
-        g_llam_tls_processor != &g_llam_tls_shard->processor ||
-        worker->compat_shard != g_llam_tls_shard ||
-        worker->associated_processor != g_llam_tls_processor ||
-        g_llam_tls_processor->compat_shard != g_llam_tls_shard) {
+    if (worker == NULL || g_llam_tls_shard == NULL || g_llam_tls_worker != worker) {
+        abort();
+    }
+    if (worker->registry_runtime != NULL &&
+        worker->registry_runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        if (!llam_registered_signal_stack_owner(worker)) {
+            abort();
+        }
+    } else if (g_llam_tls_processor == NULL ||
+               g_llam_tls_processor != &g_llam_tls_shard->processor ||
+               worker->compat_shard != g_llam_tls_shard ||
+               worker->associated_processor != g_llam_tls_processor ||
+               g_llam_tls_processor->compat_shard != g_llam_tls_shard) {
         abort();
     }
     if (!worker->sigaltstack_installed) {
@@ -498,10 +543,14 @@ void llam_uninstall_thread_signal_stack(llam_worker_t *worker) {
     }
 
     memset(&disabled, 0, sizeof(disabled));
+    /* Darwin validates a nonzero stack size even for SS_DISABLE. Keep the
+     * installed tuple valid and never unmap storage after a failed teardown. */
+    disabled.ss_sp = worker->signal_stack;
+    disabled.ss_size = worker->signal_stack_size;
     disabled.ss_flags = SS_DISABLE;
-    (void)sigaltstack(&disabled, NULL);
+    if (sigaltstack(&disabled, NULL) != 0) abort();
     if ((worker->previous_sigaltstack.ss_flags & SS_DISABLE) == 0) {
-        (void)sigaltstack(&worker->previous_sigaltstack, NULL);
+        if (sigaltstack(&worker->previous_sigaltstack, NULL) != 0) abort();
     }
     worker->sigaltstack_installed = false;
     worker->signal_stack_incarnation = 0U;
@@ -549,12 +598,42 @@ unsigned llam_count_allowed_cpus(unsigned **out_cpus) {
     return count;
 #elif LLAM_PLATFORM_WINDOWS
     SYSTEM_INFO system_info;
+    DWORD_PTR process_mask = 0U;
+    DWORD_PTR system_mask = 0U;
     unsigned count;
     unsigned *cpus;
     unsigned i;
 
     if (out_cpus == NULL) {
         return 0;
+    }
+    /* Preserve concrete CPU ids when the host confines this process. Windows
+     * reports one primary processor group here; zero/multi-group masks retain
+     * the pre-existing native-system fallback below. */
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask,
+                                &system_mask) && process_mask != 0U) {
+        process_mask &= system_mask;
+        count = 0U;
+        for (i = 0U; i < sizeof(process_mask) * CHAR_BIT; ++i) {
+            if ((process_mask & ((DWORD_PTR)1U << i)) != 0U) {
+                ++count;
+            }
+        }
+        if (count == 0U) {
+            return 0U;
+        }
+        cpus = calloc(count, sizeof(*cpus));
+        if (cpus == NULL) {
+            return 0U;
+        }
+        count = 0U;
+        for (i = 0U; i < sizeof(process_mask) * CHAR_BIT; ++i) {
+            if ((process_mask & ((DWORD_PTR)1U << i)) != 0U) {
+                cpus[count++] = i;
+            }
+        }
+        *out_cpus = cpus;
+        return count;
     }
     memset(&system_info, 0, sizeof(system_info));
     GetNativeSystemInfo(&system_info);

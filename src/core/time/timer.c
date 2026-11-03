@@ -26,7 +26,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -35,10 +35,29 @@
 static atomic_int g_llam_test_helper_create_error;
 static atomic_bool g_llam_lease_test_gate[LLAM_LEASE_TEST_POINT_COUNT];
 static atomic_bool g_llam_lease_test_gate_reached[LLAM_LEASE_TEST_POINT_COUNT];
+static _Atomic(llam_timer_cancel_owner_sample_hook_fn)
+    g_llam_timer_cancel_owner_sample_hook;
+
+void llam_timer_test_set_cancel_owner_sample_hook(
+    llam_timer_cancel_owner_sample_hook_fn hook) {
+    atomic_store_explicit(&g_llam_timer_cancel_owner_sample_hook,
+                          hook,
+                          memory_order_release);
+}
+
+static void llam_timer_test_cancel_owner_sample(void) {
+    llam_timer_cancel_owner_sample_hook_fn hook = atomic_load_explicit(
+        &g_llam_timer_cancel_owner_sample_hook,
+        memory_order_acquire);
+
+    if (hook != NULL) {
+        hook();
+    }
+}
 
 static bool llam_lease_test_point_valid(llam_lease_test_point_t point) {
     return point >= LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST &&
-           point <= LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR;
+           (unsigned)point < LLAM_LEASE_TEST_POINT_COUNT;
 }
 
 void llam_worker_test_force_helper_create_error(int error_code) {
@@ -262,7 +281,14 @@ void llam_timer_insert_locked(llam_shard_t *shard, llam_task_t *task) {
     node->wait_lifetime_ops = lifetime_ops;
     node->deadline_ns = task->deadline_ns;
     node->wait_generation = wait_generation;
+    /* Publish the lock owner before the timer can become externally visible. */
+    atomic_store_explicit(&task->active_timer_heap_shard,
+                          shard->id,
+                          memory_order_release);
     if (!llam_timer_heap_push_locked(shard, node)) {
+        atomic_store_explicit(&task->active_timer_heap_shard,
+                              UINT_MAX,
+                              memory_order_release);
         llam_timer_release_ownership(shard, node);
         return;
     }
@@ -285,25 +311,33 @@ bool llam_timer_remove_locked(llam_shard_t *shard, llam_task_t *task) {
     llam_timer_node_t *node;
     size_t i;
 
-    if (task == NULL || task->active_timer == NULL) {
+    if (shard == NULL || task == NULL || task->active_timer == NULL ||
+        atomic_load_explicit(&task->active_timer_heap_shard,
+                             memory_order_acquire) != shard->id) {
         return false;
     }
 
     node = task->active_timer;
-    if (node->heap_index < shard->timer_heap_len && shard->timer_heap[node->heap_index] == node) {
+    if (node->heap_index < shard->processor.timer_heap_len && shard->processor.timer_heap[node->heap_index] == node) {
         (void)llam_timer_heap_remove_at_locked(shard, node->heap_index);
         task->active_timer = NULL;
         task->deadline_ns = 0U;
+        atomic_store_explicit(&task->active_timer_heap_shard,
+                              UINT_MAX,
+                              memory_order_release);
         node->next = NULL;
         llam_timer_release_ownership(shard, node);
         return true;
     }
 
-    for (i = 0U; i < shard->timer_heap_len; ++i) {
-        if (shard->timer_heap[i] == node) {
+    for (i = 0U; i < shard->processor.timer_heap_len; ++i) {
+        if (shard->processor.timer_heap[i] == node) {
             (void)llam_timer_heap_remove_at_locked(shard, i);
             task->active_timer = NULL;
             task->deadline_ns = 0U;
+            atomic_store_explicit(&task->active_timer_heap_shard,
+                                  UINT_MAX,
+                                  memory_order_release);
             node->next = NULL;
             llam_timer_release_ownership(shard, node);
             return true;
@@ -336,39 +370,66 @@ static void llam_cancel_wait_metric(llam_runtime_t *rt, unsigned parked_shard) {
 }
 
 /* Sleep expiry clears tracking while holding the shard lock, so use lock->gate. */
-static void llam_cancel_sleep_wait(llam_task_t *task, llam_runtime_t *rt) {
-    unsigned parked_shard;
+static void llam_cancel_sleep_wait(llam_task_t *task, llam_runtime_t *rt, uint64_t expected_generation) {
+    unsigned timer_owner_shard;
+    unsigned wake_shard = UINT_MAX;
     llam_shard_t *shard;
     llam_wait_node_t *node = NULL;
     uint64_t generation;
     bool removed = false;
+    bool test_hook_called = false;
 
-    parked_shard = atomic_load_explicit(&task->parked_shard, memory_order_acquire);
-    if (parked_shard >= rt->active_shards) {
-        return;
-    }
-    shard = &rt->shards[parked_shard];
-    pthread_mutex_lock(&shard->lock);
-    if (!llam_task_wait_resolver_try_begin(task)) {
-        pthread_mutex_unlock(&shard->lock);
-        return;
-    }
-    generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
-                                                memory_order_acquire);
-    if (generation != 0U && generation != UINT64_MAX &&
-        atomic_load_explicit(&task->state, memory_order_acquire) ==
-            LLAM_TASK_STATE_PARKED &&
-        atomic_load_explicit(&task->wait_reason, memory_order_acquire) ==
-            LLAM_WAIT_SLEEP &&
-        atomic_load_explicit(&task->parked_shard, memory_order_acquire) ==
-            parked_shard) {
-        node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
-        removed = llam_timer_remove_locked(shard, task);
-        if (removed) {
-            shard->metrics.cancel_wakes += 1U;
+    for (;;) {
+        timer_owner_shard = atomic_load_explicit(
+            &task->active_timer_heap_shard,
+            memory_order_acquire);
+        if (timer_owner_shard >= rt->active_shards) {
+            return;
         }
+        shard = &rt->shards[timer_owner_shard];
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        if (!test_hook_called) {
+            test_hook_called = true;
+            llam_timer_test_cancel_owner_sample();
+        }
+#else
+        (void)test_hook_called;
+#endif
+        pthread_mutex_lock(&shard->lock);
+        if (atomic_load_explicit(&task->active_timer_heap_shard,
+                                 memory_order_acquire) != timer_owner_shard) {
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+        if (!llam_task_wait_resolver_try_begin(task)) {
+            pthread_mutex_unlock(&shard->lock);
+            return;
+        }
+        generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
+                                                    memory_order_acquire);
+        if ((expected_generation == 0U || generation == expected_generation) &&
+            generation != 0U && generation != UINT64_MAX &&
+            atomic_load_explicit(&task->state, memory_order_acquire) ==
+                LLAM_TASK_STATE_PARKED &&
+            atomic_load_explicit(&task->wait_reason, memory_order_acquire) ==
+                LLAM_WAIT_SLEEP &&
+            atomic_load_explicit(&task->active_timer_heap_shard,
+                                 memory_order_acquire) == timer_owner_shard) {
+            node = atomic_load_explicit(&task->active_wait_node,
+                                        memory_order_acquire);
+            removed = llam_timer_remove_locked(shard, task);
+            if (removed) {
+                shard->metrics.cancel_wakes += 1U;
+                wake_shard = atomic_load_explicit(&task->parked_shard,
+                                                  memory_order_acquire);
+                if (wake_shard >= rt->active_shards) {
+                    wake_shard = timer_owner_shard;
+                }
+            }
+        }
+        pthread_mutex_unlock(&shard->lock);
+        break;
     }
-    pthread_mutex_unlock(&shard->lock);
     if (removed) {
         atomic_store_explicit(&task->wake_error_code, ECANCELED, memory_order_release);
         if (node != NULL) {
@@ -379,14 +440,14 @@ static void llam_cancel_sleep_wait(llam_task_t *task, llam_runtime_t *rt) {
     if (removed && (node == NULL || llam_wait_node_prepare_wake(node))) {
         llam_reinject_task_on_shard(rt,
                                   task,
-                                  parked_shard,
+                                  wake_shard,
                                   true,
                                   LLAM_TRACE_WAKE,
                                   LLAM_WAIT_CANCEL);
     }
 }
 
-void llam_cancel_task_wait(llam_task_t *task) {
+static void llam_cancel_task_wait_impl(llam_task_t *task, uint64_t expected_generation) {
     llam_runtime_t *rt = llam_timer_task_runtime(task);
     llam_wait_reason_t wait_reason;
     uint64_t wait_generation;
@@ -401,7 +462,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason,
                                                            memory_order_acquire);
     if (wait_reason == LLAM_WAIT_SLEEP) {
-        llam_cancel_sleep_wait(task, rt);
+        llam_cancel_sleep_wait(task, rt, expected_generation);
         return;
     }
     if (!llam_task_wait_resolver_try_begin(task)) {
@@ -410,6 +471,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     resolver_held = true;
     wait_generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
                                                      memory_order_acquire);
+    if (expected_generation != 0U && wait_generation != expected_generation) goto done;
     wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason,
                                                            memory_order_acquire);
     parked_shard = atomic_load_explicit(&task->parked_shard, memory_order_acquire);
@@ -420,7 +482,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     }
     if (wait_reason == LLAM_WAIT_SLEEP) {
         llam_task_wait_resolver_end(task);
-        llam_cancel_sleep_wait(task, rt);
+        llam_cancel_sleep_wait(task, rt, expected_generation);
         return;
     }
 
@@ -606,6 +668,15 @@ done:
     if (resolver_held) {
         llam_task_wait_resolver_end(task);
     }
+}
+
+void llam_cancel_task_wait(llam_task_t *task) {
+    llam_cancel_task_wait_impl(task, 0U);
+}
+
+void llam_cancel_task_wait_generation(llam_task_t *task, uint64_t generation) {
+    if (generation != 0U && generation != UINT64_MAX)
+        llam_cancel_task_wait_impl(task, generation);
 }
 
 /**
@@ -834,6 +905,15 @@ static void llam_timeout_task_wait(llam_timer_node_t *timer) {
 int llam_ensure_opaque_helper_locked(llam_shard_t *shard) {
     int rc;
 
+#if (defined(__linux__) && defined(__x86_64__)) || LLAM_ASYNC_CONTEXT_SHARED
+    if (shard != NULL && shard->runtime != NULL &&
+        atomic_load_explicit(&shard->runtime->async_preempt_enabled,
+                             memory_order_acquire) != 0U) {
+        /* Started Gs require primary-M service; helper handback cannot preserve it. */
+        errno = ENOTSUP;
+        return -1;
+    }
+#endif
     if (shard == NULL || shard->legacy_lease.state == LLAM_LEASE_STOPPING ||
         (shard->runtime != NULL &&
          (atomic_load_explicit(&shard->runtime->stop_requested, memory_order_acquire) ||
@@ -902,19 +982,19 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
     uint64_t now;
     unsigned expired_count = 0U;
 
-    if (atomic_load_explicit(&shard->timer_count, memory_order_acquire) == 0U) {
+    if (atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) == 0U) {
         return;
     }
 
     pthread_mutex_lock(&shard->lock);
-    if (shard->timers == NULL) {
+    if (shard->processor.timers == NULL) {
         pthread_mutex_unlock(&shard->lock);
         return;
     }
 
     now = llam_now_ns();
-    while (shard->timers != NULL && shard->timers->deadline_ns <= now) {
-        llam_timer_node_t *timer = shard->timers;
+    while (shard->processor.timers != NULL && shard->processor.timers->deadline_ns <= now) {
+        llam_timer_node_t *timer = shard->processor.timers;
 
         /*
          * The heap lock still proves the task and timer are live here. Acquire
@@ -935,6 +1015,9 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
         if (timer->task != NULL && timer->task->active_timer == timer) {
             timer->task->active_timer = NULL;
             timer->task->deadline_ns = 0U;
+            atomic_store_explicit(&timer->task->active_timer_heap_shard,
+                                  UINT_MAX,
+                                  memory_order_release);
         }
         expired_count += 1U;
         if (expired_tail != NULL) {
@@ -951,7 +1034,7 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
          * Dynamic shard offlining must see that in-between ownership and avoid
          * treating an empty heap as quiescent.
          */
-        atomic_fetch_add_explicit(&shard->timer_callbacks_active, expired_count, memory_order_release);
+        atomic_fetch_add_explicit(&shard->processor.timer_callbacks_active, expired_count, memory_order_release);
     }
     pthread_mutex_unlock(&shard->lock);
 
@@ -980,9 +1063,23 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
     if (sleep_head != NULL) {
         llam_runtime_t *rt = shard->runtime;
         bool pressure = llam_runtime_pressure_signal(rt);
+        bool owner_access_valid = false;
+        llam_processor_queue_access_t owner_access;
         llam_timer_node_t *timer;
 
+        if (g_llam_tls_shard == shard &&
+            llam_processor_queue_access_snapshot(&shard->processor, &owner_access) &&
+            (owner_access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
+             owner_access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
+            owner_access_valid = true;
+        }
+
         pthread_mutex_lock(&shard->lock);
+        if (owner_access_valid &&
+            !llam_processor_queue_access_validate_owner_mutation_locked(shard,
+                                                                        &owner_access)) {
+            owner_access_valid = false;
+        }
         timer = sleep_head;
         while (timer != NULL) {
             llam_task_t *task = timer->task;
@@ -1008,10 +1105,19 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
             }
             llam_task_clear_wait_tracking_or_abort(task);
             hot = llam_should_enqueue_hot_locked(shard, task, true, pressure);
-            llam_mark_runnable_locked(shard, task, hot, LLAM_TRACE_WAKE, LLAM_WAIT_TIMEOUT, true);
+            llam_mark_runnable_locked(shard,
+                                      task,
+                                      hot,
+                                      LLAM_TRACE_WAKE,
+                                      LLAM_WAIT_TIMEOUT,
+                                      owner_access_valid,
+                                      owner_access_valid ? &owner_access : NULL);
             timer = timer->next;
         }
         pthread_mutex_unlock(&shard->lock);
+        if (!owner_access_valid) {
+            llam_kick_shard(shard);
+        }
 
         timer = sleep_head;
         while (timer != NULL) {
@@ -1022,6 +1128,6 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
         }
     }
     if (expired_count > 0U) {
-        atomic_fetch_sub_explicit(&shard->timer_callbacks_active, expired_count, memory_order_acq_rel);
+        atomic_fetch_sub_explicit(&shard->processor.timer_callbacks_active, expired_count, memory_order_acq_rel);
     }
 }

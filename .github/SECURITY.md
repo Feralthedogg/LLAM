@@ -1,8 +1,18 @@
 <!--
 Copyright 2026 Feralthedogg
-SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-Licensed under the LLAM Commercial Reciprocity License 1.0.
-See the LICENSE file distributed with this Software.
+SPDX-License-Identifier: Apache-2.0
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+See LICENSES/Apache-2.0.txt.
 -->
 
 # Security Policy
@@ -52,15 +62,12 @@ Sanitize anything you cannot lawfully or safely disclose. An initial report may
 say that the issue is suspected, the root cause is uncertain, or investigation
 is ongoing.
 
-## License reporting windows
+## Voluntary reporting
 
-If Section 8 of the LLAM Commercial Reciprocity License 1.0 applies to your
-Commercial Deployment, an initial Security Defect report is due without
-unreasonable delay and no later than **7 calendar days** after Actual Knowledge.
-Any other Reportable Defect must be reported no later than **45 calendar days**
-after Actual Knowledge. See the repository [LICENSE](../LICENSE) for the
-controlling definitions, exceptions, unavailable-channel procedure, and
-complete terms.
+Please report suspected vulnerabilities promptly through the private route
+above. Reporting is voluntary: Apache License 2.0 imposes no LLAM-specific
+defect-reporting obligation or reporting deadline, including for commercial
+use. This policy adds no conditions to the [LICENSE](../LICENSE).
 
 This reporting channel does not promise confirmation, remediation, disclosure,
 support, or a response schedule.

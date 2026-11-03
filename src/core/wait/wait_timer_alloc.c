@@ -4,7 +4,7 @@
  *
  * @details
  * Wait nodes and timer nodes are short-lived scheduler objects. They use the
- * same shard-local cache model as tasks and I/O objects: owner-shard reuse is
+ * same processor-local cache model as tasks and I/O objects: owner-P reuse is
  * direct, foreign returns are batched through atomic remote-free lists.
  *
  * @copyright Copyright 2026 Feralthedogg
@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -42,28 +42,28 @@ llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
     }
 
     for (;;) {
-        if (g_llam_tls_shard == shard) {
+        if (llam_processor_tls_owns_resources(&shard->processor)) {
             // Most wait nodes are created by the scheduler shard that will own
             // them, so this path avoids allocator locking.
-            node = shard->allocator.wait_free;
+            node = shard->processor.allocator.wait_free;
             if (node != NULL) {
-                shard->allocator.wait_free = node->alloc_next;
-                shard->allocator.wait_reuses += 1U;
+                shard->processor.allocator.wait_free = node->alloc_next;
+                shard->processor.allocator.wait_reuses += 1U;
                 llam_wait_node_reset(node, shard->runtime, shard->id);
                 return node;
             }
         } else {
             // Cold external path for API/bootstrap callers not bound to shard TLS.
-            llam_allocator_lock(&shard->allocator);
-            node = shard->allocator.wait_free;
+            llam_allocator_lock(&shard->processor.allocator);
+            node = shard->processor.allocator.wait_free;
             if (node != NULL) {
-                shard->allocator.wait_free = node->alloc_next;
-                shard->allocator.wait_reuses += 1U;
-                llam_allocator_unlock(&shard->allocator);
+                shard->processor.allocator.wait_free = node->alloc_next;
+                shard->processor.allocator.wait_reuses += 1U;
+                llam_allocator_unlock(&shard->processor.allocator);
                 llam_wait_node_reset(node, shard->runtime, shard->id);
                 return node;
             }
-            llam_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->processor.allocator);
         }
         // Empty free list: grow one slab and retry the normal pop path.
         if (llam_allocator_grow_wait_slab(shard) != 0) {
@@ -91,21 +91,21 @@ void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node) {
     owner = &rt->shards[node->owner_shard];
     node->next = NULL;
     node->alloc_next = NULL;
-    if (g_llam_tls_shard == owner) {
+    if (llam_processor_tls_owns_resources(&owner->processor)) {
         // Owner-local free goes straight back to the shard cache.  Pointer
         // identity is required because independent runtimes reuse shard ids.
-        node->alloc_next = owner->allocator.wait_free;
-        owner->allocator.wait_free = node;
-        owner->allocator.wait_frees += 1U;
+        node->alloc_next = owner->processor.allocator.wait_free;
+        owner->processor.allocator.wait_free = node;
+        owner->processor.allocator.wait_frees += 1U;
         return;
     }
 
     // Foreign free: publish to the owner's remote list for quiescent drain.
     do {
-        head = atomic_load(&owner->allocator.wait_remote_free);
+        head = atomic_load(&owner->processor.allocator.wait_remote_free);
         node->alloc_next = head;
-    } while (!atomic_compare_exchange_weak(&owner->allocator.wait_remote_free, &head, node));
-    atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+    } while (!atomic_compare_exchange_weak(&owner->processor.allocator.wait_remote_free, &head, node));
+    atomic_store_explicit(&owner->processor.allocator.remote_free_pending, 1U, memory_order_release);
 }
 
 /**
@@ -123,13 +123,13 @@ llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard) {
     }
 
     for (;;) {
-        if (g_llam_tls_shard == shard) {
-            // Timer allocation is on scheduler hot paths; keep same-shard reuse
+        if (llam_processor_tls_owns_resources(&shard->processor)) {
+            // Timer allocation is on scheduler hot paths; keep same-P reuse
             // lock-free.
-            node = shard->allocator.timer_free;
+            node = shard->processor.allocator.timer_free;
             if (node != NULL) {
-                shard->allocator.timer_free = node->alloc_next;
-                shard->allocator.timer_reuses += 1U;
+                shard->processor.allocator.timer_free = node->alloc_next;
+                shard->processor.allocator.timer_reuses += 1U;
                 memset(node, 0, sizeof(*node));
                 node->owner_runtime = shard->runtime;
                 node->owner_shard = shard->id;
@@ -137,18 +137,18 @@ llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard) {
             }
         } else {
             // Cold path when a foreign caller needs a timer node from this shard.
-            llam_allocator_lock(&shard->allocator);
-            node = shard->allocator.timer_free;
+            llam_allocator_lock(&shard->processor.allocator);
+            node = shard->processor.allocator.timer_free;
             if (node != NULL) {
-                shard->allocator.timer_free = node->alloc_next;
-                shard->allocator.timer_reuses += 1U;
-                llam_allocator_unlock(&shard->allocator);
+                shard->processor.allocator.timer_free = node->alloc_next;
+                shard->processor.allocator.timer_reuses += 1U;
+                llam_allocator_unlock(&shard->processor.allocator);
                 memset(node, 0, sizeof(*node));
                 node->owner_runtime = shard->runtime;
                 node->owner_shard = shard->id;
                 return node;
             }
-            llam_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->processor.allocator);
         }
         // Grow lazily when the timer cache is exhausted.
         if (llam_allocator_grow_timer_slab(shard) != 0) {
@@ -176,19 +176,19 @@ void llam_timer_node_free(llam_shard_t *shard, llam_timer_node_t *node) {
     owner = &rt->shards[node->owner_shard];
     node->next = NULL;
     node->alloc_next = NULL;
-    if (g_llam_tls_shard == owner) {
+    if (llam_processor_tls_owns_resources(&owner->processor)) {
         // Common path: timer fires/cancels on its owner shard.  Pointer
         // identity avoids cross-runtime local-cache corruption.
-        node->alloc_next = owner->allocator.timer_free;
-        owner->allocator.timer_free = node;
-        owner->allocator.timer_frees += 1U;
+        node->alloc_next = owner->processor.allocator.timer_free;
+        owner->processor.allocator.timer_free = node;
+        owner->processor.allocator.timer_frees += 1U;
         return;
     }
 
     // Cross-shard cancellation returns through the remote-free queue.
     do {
-        head = atomic_load(&owner->allocator.timer_remote_free);
+        head = atomic_load(&owner->processor.allocator.timer_remote_free);
         node->alloc_next = head;
-    } while (!atomic_compare_exchange_weak(&owner->allocator.timer_remote_free, &head, node));
-    atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+    } while (!atomic_compare_exchange_weak(&owner->processor.allocator.timer_remote_free, &head, node));
+    atomic_store_explicit(&owner->processor.allocator.remote_free_pending, 1U, memory_order_release);
 }

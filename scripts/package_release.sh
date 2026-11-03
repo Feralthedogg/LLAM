@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 set -eu
 
@@ -25,6 +25,35 @@ script_dir="$(dirname "$0")"
 root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
 out_dir="$root_dir/target/dist"
 host_os="$(uname -s)"
+case "$host_os" in
+    FreeBSD|OpenBSD|NetBSD|DragonFly)
+        echo "BSD support ended in LLAM 3.0.0" >&2; exit 1 ;;
+esac
+case "$target" in
+    freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*)
+        echo "BSD support ended in LLAM 3.0.0" >&2; exit 1 ;;
+esac
+preempt_tooling="${LLAM_PREEMPT_TOOLING:-off}"
+preempt_tools_available=0
+preempt_driver_available=0
+preempt_plugin_available=0
+preempt_plugin_explicit=0
+preempt_plugin_source="${LLAM_PREEMPT_PLUGIN_PATH:-${PREEMPT_TOOLING_BUILD_DIR:-build-preempt-tools}/llam_preempt_pass.so}"
+
+case "$preempt_tooling" in
+    off|auto|required) ;;
+    *)
+        echo "LLAM_PREEMPT_TOOLING must be off, auto, or required" >&2
+        exit 2
+        ;;
+esac
+if [ -n "${LLAM_PREEMPT_PLUGIN_PATH:-}" ]; then
+    preempt_plugin_explicit=1
+fi
+case "$preempt_plugin_source" in
+    /*) ;;
+    *) preempt_plugin_source="$root_dir/$preempt_plugin_source" ;;
+esac
 
 if [ -z "$target" ]; then
     os="$host_os"
@@ -32,10 +61,6 @@ if [ -z "$target" ]; then
     case "$os" in
         Darwin) os_name="macos" ;;
         Linux) os_name="linux" ;;
-        FreeBSD) os_name="freebsd" ;;
-        OpenBSD) os_name="openbsd" ;;
-        NetBSD) os_name="netbsd" ;;
-        DragonFly) os_name="dragonflybsd" ;;
         *) os_name="$(printf '%s' "$os" | LC_ALL=C tr '[:upper:]' '[:lower:]')" ;;
     esac
     case "$arch" in
@@ -49,10 +74,6 @@ fi
 case "$host_os" in
     Darwin) host_target_os="macos" ;;
     Linux) host_target_os="linux" ;;
-    FreeBSD) host_target_os="freebsd" ;;
-    OpenBSD) host_target_os="openbsd" ;;
-    NetBSD) host_target_os="netbsd" ;;
-    DragonFly) host_target_os="dragonflybsd" ;;
     *)
         echo "unsupported release packaging host: $host_os" >&2
         exit 1
@@ -206,7 +227,7 @@ validate_packaged_archive_links() (
                 "$tmp_dir/$package_root/lib/libllam_runtime.dylib" \
                 "libllam_runtime.$abi_major.dylib"
             ;;
-        Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+        Linux)
             validate_expected_symlink_target \
                 "$tmp_dir/$package_root/lib/libllam_runtime.so.$abi_major" \
                 "libllam_runtime.so.$library_version"
@@ -311,15 +332,19 @@ validate_release_component "library version" "$library_version"
 validate_safe_output_path "$out_dir" 0
 
 require_input "$root_dir/LICENSE"
-require_input "$root_dir/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-require_input "$root_dir/LICENSES/OLD-LICENSE/Apache-2.0.txt"
-require_input "$root_dir/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
+require_input "$root_dir/NOTICE"
+require_input "$root_dir/THIRD_PARTY_NOTICES.md"
+require_input "$root_dir/LICENSES/Apache-2.0.txt"
+require_input "$root_dir/third_party/magic2/LICENSE"
 require_input "$root_dir/README.md"
 require_input "$root_dir/CHANGELOG.md"
 require_input "$root_dir/scripts/install.sh"
 require_input "$root_dir/scripts/install.ps1"
 require_input "$root_dir/scripts/stress_server.py"
 require_input "$root_dir/scripts/stress_server_composite.py"
+require_input "$root_dir/scripts/cli_numbers.py"
+require_input "$root_dir/scripts/process_utils.py"
+require_input "$root_dir/scripts/safe_output.py"
 require_input "$root_dir/docs"
 require_input "$root_dir/include/llam"
 require_input "$root_dir/examples"
@@ -331,12 +356,77 @@ require_input "$root_dir/server_lossless"
 require_input "$root_dir/server_flood"
 require_input "$root_dir/libllam_runtime.a"
 
+preempt_inspector_source="$root_dir/llam_preempt_metadata_inspect"
+preempt_driver_source="$root_dir/tools/llam-clang"
+preempt_header_source="$root_dir/tools/preempt/metadata.h"
+if [ -e "$preempt_inspector_source" ] || [ -L "$preempt_inspector_source" ] ||
+   [ -e "$preempt_header_source" ] || [ -L "$preempt_header_source" ]; then
+    require_input "$preempt_inspector_source"
+    require_input "$preempt_header_source"
+    preempt_tools_available=1
+elif [ "$preempt_tooling" != "off" ]; then
+    require_input "$preempt_inspector_source"
+    require_input "$preempt_header_source"
+    preempt_tools_available=1
+fi
+
+if [ "$preempt_tools_available" -eq 1 ] && [ "$target" = "linux-x86_64" ] && command -v bash >/dev/null 2>&1 &&
+   { [ -e "$preempt_driver_source" ] || [ -L "$preempt_driver_source" ]; }; then
+    require_input "$preempt_driver_source"
+    preempt_driver_available=1
+elif [ "$preempt_tooling" = "required" ]; then
+    if ! command -v bash >/dev/null 2>&1; then
+        echo "LLAM_PREEMPT_TOOLING=required package needs bash" >&2
+        exit 1
+    fi
+    require_input "$preempt_driver_source"
+    preempt_driver_available=1
+fi
+if [ "$preempt_tooling" = "required" ] && [ "$preempt_driver_available" -ne 1 ]; then
+    echo "LLAM_PREEMPT_TOOLING=required compiler driver is missing" >&2
+    exit 1
+fi
+
+if [ "$preempt_tooling" = "required" ]; then
+    if [ "$target" != "linux-x86_64" ]; then
+        echo "LLAM_PREEMPT_TOOLING=required currently supports linux-x86_64 only" >&2
+        exit 1
+    fi
+    if [ -L "$preempt_plugin_source" ]; then
+        echo "refusing symlink required preemption plugin: $preempt_plugin_source" >&2
+        exit 1
+    fi
+    if [ ! -f "$preempt_plugin_source" ]; then
+        echo "LLAM_PREEMPT_TOOLING=required plugin is missing: $preempt_plugin_source" >&2
+        exit 1
+    fi
+    preempt_plugin_available=1
+elif [ "$preempt_tooling" = "auto" ] && [ "$target" = "linux-x86_64" ]; then
+    if [ -L "$preempt_plugin_source" ]; then
+        echo "refusing symlink optional preemption plugin: $preempt_plugin_source" >&2
+        exit 1
+    fi
+    if [ -e "$preempt_plugin_source" ]; then
+        if [ ! -f "$preempt_plugin_source" ]; then
+            echo "refusing non-file optional preemption plugin: $preempt_plugin_source" >&2
+            exit 1
+        fi
+        preempt_plugin_available=1
+    elif [ "$preempt_plugin_explicit" -eq 1 ]; then
+        echo "explicit LLAM_PREEMPT_PLUGIN_PATH does not exist: $preempt_plugin_source" >&2
+        exit 1
+    fi
+elif [ "$preempt_tooling" = "auto" ] && [ "$preempt_plugin_explicit" -eq 1 ]; then
+    echo "explicit preemption plugin is unsupported for target $target" >&2
+    exit 1
+fi
+
 case "$host_os" in
     Darwin)
         require_input "$root_dir/libllam_runtime.$abi_major.dylib"
         require_input "$root_dir/libllam_runtime.dylib"
         ;;
-    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+    Linux)
         require_input "$root_dir/libllam_runtime.so.$library_version"
         require_input "$root_dir/libllam_runtime.so.$abi_major"
         require_input "$root_dir/libllam_runtime.so"
@@ -349,18 +439,32 @@ if [ "$missing_inputs" -ne 0 ]; then
 fi
 
 validate_release_input_file "$root_dir/LICENSE"
-validate_release_input_file "$root_dir/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-validate_release_input_file "$root_dir/LICENSES/OLD-LICENSE/Apache-2.0.txt"
-validate_release_input_file "$root_dir/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
+validate_release_input_file "$root_dir/NOTICE"
+validate_release_input_file "$root_dir/THIRD_PARTY_NOTICES.md"
+validate_release_input_file "$root_dir/LICENSES/Apache-2.0.txt"
+validate_release_input_file "$root_dir/third_party/magic2/LICENSE"
 validate_release_input_file "$root_dir/README.md"
 validate_release_input_file "$root_dir/CHANGELOG.md"
 validate_release_input_file "$root_dir/scripts/install.sh"
 validate_release_input_file "$root_dir/scripts/install.ps1"
 validate_release_input_file "$root_dir/scripts/stress_server.py"
 validate_release_input_file "$root_dir/scripts/stress_server_composite.py"
+validate_release_input_file "$root_dir/scripts/cli_numbers.py"
+validate_release_input_file "$root_dir/scripts/process_utils.py"
+validate_release_input_file "$root_dir/scripts/safe_output.py"
 validate_release_input_tree "$root_dir/docs"
 validate_release_input_tree "$root_dir/include/llam"
 validate_release_input_tree "$root_dir/examples"
+if [ "$preempt_tools_available" -eq 1 ]; then
+    validate_release_input_file "$preempt_inspector_source"
+    validate_release_input_file "$preempt_header_source"
+fi
+if [ "$preempt_driver_available" -eq 1 ]; then
+    validate_release_input_file "$preempt_driver_source"
+fi
+if [ "$preempt_plugin_available" -eq 1 ]; then
+    validate_release_input_file "$preempt_plugin_source"
+fi
 validate_release_input_file "$root_dir/demo"
 validate_release_input_file "$root_dir/stress"
 validate_release_input_file "$root_dir/bench"
@@ -375,7 +479,7 @@ case "$host_os" in
         validate_release_input_link_or_file "$root_dir/libllam_runtime.dylib"
         validate_expected_symlink_target "$root_dir/libllam_runtime.dylib" "libllam_runtime.$abi_major.dylib"
         ;;
-    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+    Linux)
         validate_release_input_file "$root_dir/libllam_runtime.so.$library_version"
         validate_release_input_link_or_file "$root_dir/libllam_runtime.so.$abi_major"
         validate_release_input_link_or_file "$root_dir/libllam_runtime.so"
@@ -397,18 +501,31 @@ validate_safe_output_path "$archive.sha256"
 validate_safe_output_path "$out_dir/$package_name.tar.gz"
 validate_safe_output_path "$out_dir/$package_name.tar.gz.sha256"
 rm -rf "$stage" "$archive" "$archive.sha256" "$out_dir/$package_name.tar.gz" "$out_dir/$package_name.tar.gz.sha256"
-mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts" "$stage/LICENSES/OLD-LICENSE"
+mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts" "$stage/LICENSES" "$stage/LICENSES/THIRD_PARTY/magic2" "$stage/share/llam/preempt"
 validate_safe_output_path "$stage" 0
 validate_safe_stage_tree "$stage"
 
 printf '%s\n' "$version" > "$stage/VERSION"
 printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
 printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
-cp "$root_dir/LICENSE" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
-cp "$root_dir/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt" "$stage/LICENSES/"
-cp "$root_dir/LICENSES/OLD-LICENSE/Apache-2.0.txt" "$root_dir/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt" "$stage/LICENSES/OLD-LICENSE/"
+cp "$root_dir/LICENSE" "$root_dir/NOTICE" "$root_dir/THIRD_PARTY_NOTICES.md" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
+cp "$root_dir/LICENSES/Apache-2.0.txt" "$stage/LICENSES/"
+cp "$root_dir/third_party/magic2/LICENSE" "$stage/LICENSES/THIRD_PARTY/magic2/"
 cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
-cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" "$stage/scripts/"
+cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" \
+    "$root_dir/scripts/cli_numbers.py" "$root_dir/scripts/process_utils.py" \
+    "$root_dir/scripts/safe_output.py" "$stage/scripts/"
+if [ "$preempt_tools_available" -eq 1 ]; then
+    cp "$preempt_inspector_source" "$stage/bin/"
+    cp "$preempt_header_source" "$stage/share/llam/preempt/"
+fi
+if [ "$preempt_driver_available" -eq 1 ]; then
+    cp "$preempt_driver_source" "$stage/bin/llam-clang"
+fi
+if [ "$preempt_plugin_available" -eq 1 ]; then
+    mkdir -p "$stage/lib/llam"
+    cp "$preempt_plugin_source" "$stage/lib/llam/llam_preempt_pass.so"
+fi
 cp -R "$root_dir/docs/." "$stage/docs/"
 cp -R "$root_dir/include/llam" "$stage/include/"
 cp "$root_dir"/examples/*.c "$root_dir"/examples/*.h "$stage/examples/"
@@ -421,7 +538,7 @@ case "$host_os" in
         ln -s "libllam_runtime.$abi_major.dylib" "$stage/lib/libllam_runtime.dylib"
         validate_expected_symlink_target "$stage/lib/libllam_runtime.dylib" "libllam_runtime.$abi_major.dylib"
         ;;
-    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+    Linux)
         cp "$root_dir/libllam_runtime.so.$library_version" "$stage/lib/"
         ln -s "libllam_runtime.so.$library_version" "$stage/lib/libllam_runtime.so.$abi_major"
         ln -s "libllam_runtime.so.$abi_major" "$stage/lib/libllam_runtime.so"
@@ -435,6 +552,7 @@ case "$host_os" in
 esac
 
 LLAM_VERSION="$library_version" LLAM_ABI_MAJOR="$abi_major" \
+LLAM_PREEMPT_TOOLING="$preempt_tooling" \
     "$root_dir/scripts/generate_sdk_metadata.sh" "$stage" "$target"
 
 validate_safe_stage_tree "$stage"

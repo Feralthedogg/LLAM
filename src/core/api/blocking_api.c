@@ -39,7 +39,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -221,12 +221,15 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
  *         returns @c NULL. @c errno carries the disambiguating status.
  */
 int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_runtime_t *rt;
     llam_task_t *task = g_llam_tls_task;
     llam_worker_t *worker = g_llam_tls_worker;
-    llam_cancel_token_t *token;
+    llam_cancel_lock_set_t cancel_locks;
     llam_block_job_t *job;
     llam_wait_node_t *node;
+    bool async_reserved = false;
     int wake_error;
 
     llam_task_safepoint();
@@ -267,10 +270,18 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
         return -1;
     }
 
-    job = llam_block_job_alloc(rt);
-    if (job == NULL) {
+    if (llam_async_preempt_block_reserve(rt, &async_reserved) != 0) {
         return -1;
     }
+    job = llam_block_job_alloc(rt);
+    if (job == NULL) {
+        if (async_reserved) {
+            llam_async_preempt_block_release(rt);
+        }
+        return -1;
+    }
+    /* Caller owns this prepared job until publication; every rollback uses its finalizer. */
+    job->async_slot_reserved = async_reserved;
     node = llam_sync_wait_node_acquire(g_llam_tls_shard);
     if (node == NULL) {
         llam_block_job_release(rt, job);
@@ -316,53 +327,32 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
         errno = saved_errno;
         return -1;
     }
-    token = task->cancel_token;
-
-    if (token != NULL) {
-        pthread_mutex_lock(&token->lock);
-        if (token->cancelled) {
-            pthread_mutex_unlock(&token->lock);
-            task->state = LLAM_TASK_STATE_RUNNING;
-            task->wait_reason = LLAM_WAIT_NONE;
-            llam_task_clear_wait_tracking_or_abort(task);
-            llam_sync_wait_node_release(g_llam_tls_shard, node);
-            llam_block_job_release(rt, job);
-            errno = ECANCELED;
-            return -1;
-        }
-
-        if (!task->cancel_registered) {
-            task->cancel_prev = NULL;
-            task->cancel_next = token->waiters;
-            if (token->waiters != NULL) {
-                token->waiters->cancel_prev = task;
-            }
-            token->waiters = task;
-            task->cancel_registered = true;
-        }
+    if (llam_cancel_token_lock_task(task, &cancel_locks) != 0) {
+        int saved_errno = errno;
+        task->state = LLAM_TASK_STATE_RUNNING;
+        task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking_or_abort(task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        llam_block_job_release(rt, job);
+        errno = saved_errno;
+        return -1;
     }
+    /* Keep every source locked through queue commit: cancellation must never
+     * observe a registered blocking waiter before its job is actually queued. */
+    llam_cancel_token_register_task_locked(task);
 
     pthread_mutex_lock(&rt->block_lock);
-    if (!llam_runtime_note_block_pending(rt, 1U)) {
-        int saved_errno = errno;
+    bool admission_closed = atomic_load_explicit(&rt->stop_requested, memory_order_acquire) ||
+                            atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire);
+    bool at_capacity = rt->max_blocking_jobs != 0U &&
+                       atomic_load_explicit(&rt->block_pending, memory_order_relaxed) >= rt->max_blocking_jobs;
+    if (admission_closed || at_capacity || !llam_runtime_note_block_pending(rt, 1U)) {
+        /* Queue commit and the last block worker's exit decision share this lock. */
+        int saved_errno = admission_closed ? ECANCELED : (at_capacity ? EAGAIN : errno);
 
         pthread_mutex_unlock(&rt->block_lock);
-        if (token != NULL) {
-            if (task->cancel_registered) {
-                if (task->cancel_prev != NULL) {
-                    task->cancel_prev->cancel_next = task->cancel_next;
-                } else {
-                    token->waiters = task->cancel_next;
-                }
-                if (task->cancel_next != NULL) {
-                    task->cancel_next->cancel_prev = task->cancel_prev;
-                }
-                task->cancel_prev = NULL;
-                task->cancel_next = NULL;
-                task->cancel_registered = false;
-            }
-            pthread_mutex_unlock(&token->lock);
-        }
+        llam_cancel_token_unregister_task_locked(task);
+        llam_cancel_token_unlock_task(&cancel_locks);
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking_or_abort(task);
@@ -391,9 +381,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
 #elif LLAM_PLATFORM_WINDOWS
     WakeByAddressSingle((PVOID)&rt->block_wake_seq);
 #endif
-    if (token != NULL) {
-        pthread_mutex_unlock(&token->lock);
-    }
+    llam_cancel_token_unlock_task(&cancel_locks);
 
     g_llam_tls_shard->metrics.blocking_calls += 1U;
     g_llam_tls_shard->metrics.parks += 1U;
@@ -405,7 +393,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
                    LLAM_WAIT_BLOCKING);
     if (llam_wait_node_should_park(node)) {
         /* Retire execution publication before handing the task to a wait. */
-        if (worker != NULL && worker->compat_shard == g_llam_tls_shard) {
+        if (llam_worker_matches_shard(worker, g_llam_tls_shard)) {
             pthread_mutex_lock(&g_llam_tls_shard->lock);
             llam_worker_clear_active_g(worker);
             pthread_mutex_unlock(&g_llam_tls_shard->lock);
@@ -419,16 +407,18 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_sync_wait_node_release(g_llam_tls_shard, node);
     wake_error = llam_consume_task_wake_error(task);
     if (wake_error != 0) {
-        errno = wake_error;
+        llam_thread_errno_store(wake_error);
         return -1;
     }
-    errno = task->blocking_errno;
+    llam_thread_errno_store(task->blocking_errno);
     *out = task->blocking_result;
     g_llam_tls_shard->metrics.blocking_completions += 1U;
     return 0;
 }
 
 void *llam_call_blocking(llam_blocking_fn fn, void *arg) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     void *result = NULL;
 
     if (llam_call_blocking_result(fn, arg, &result) != 0) {
@@ -459,6 +449,7 @@ static void llam_restore_running_after_lease_abort_locked(llam_shard_t *shard,
                               llam_now_ns(),
                               memory_order_release);
         /* Publish only after the restored task boundary is complete. */
+        llam_worker_begin_g_run(worker, task);
         llam_worker_publish_active_g(worker, task);
     }
     llam_trace_shard(shard,
@@ -468,6 +459,508 @@ static void llam_restore_running_after_lease_abort_locked(llam_shard_t *shard,
                      LLAM_TASK_STATE_RUNNING,
                      LLAM_WAIT_BLOCKING);
     pthread_mutex_unlock(&shard->lock);
+}
+
+/**
+ * @brief Recognize a helper M that is already relinquishing P through redirect.
+ *
+ * @details
+ * The primary can resume from its initial helper activation after the helper
+ * has started another managed task and that task has entered foreign blocking.
+ * In that window the lease is redirected with no executor, even though the
+ * primary's outer helper-backed detach has not yet published its token. Accept
+ * only the helper's exact live redirect claimant, with P absent and either a
+ * matching published token or an in-progress runtime-critical detach/return.
+ */
+static bool llam_foreign_helper_redirect_inflight_locked(
+    llam_shard_t *shard,
+    uint64_t primary_transfer_sequence) {
+    llam_worker_t *helper;
+    const llam_foreign_token_t *token;
+    llam_task_t *active_task;
+    uint64_t incarnation;
+    unsigned execution_state;
+    unsigned critical_depth;
+    unsigned preempt_depth;
+
+    if (shard == NULL || primary_transfer_sequence == 0U) {
+        return false;
+    }
+    helper = &shard->opaque_helper_worker;
+    token = &helper->foreign_token;
+    active_task = llam_worker_load_active_g(helper);
+    incarnation = atomic_load_explicit(&helper->incarnation, memory_order_acquire);
+    execution_state = atomic_load_explicit(&helper->execution_state,
+                                           memory_order_acquire);
+    /* Publication precedes dropping the guards. Read critical depth first so
+     * observing its final zero also orders the earlier preemption release. */
+    critical_depth = atomic_load_explicit(&helper->runtime_critical_depth,
+                                          memory_order_acquire);
+    preempt_depth = atomic_load_explicit(&helper->preempt_disable_depth,
+                                         memory_order_acquire);
+    if (shard->legacy_lease.state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+        shard->legacy_lease.owner != NULL ||
+        shard->legacy_lease.return_worker != helper ||
+        shard->legacy_lease.return_incarnation != incarnation ||
+        shard->legacy_lease.transfer_sequence == 0U ||
+        shard->legacy_lease.transfer_sequence == primary_transfer_sequence ||
+        atomic_load_explicit(&helper->current_p, memory_order_acquire) != NULL ||
+        incarnation == 0U ||
+        atomic_load_explicit(&helper->binding_incarnation, memory_order_acquire) !=
+            incarnation ||
+        !atomic_load_explicit(&helper->native_thread_live, memory_order_acquire)) {
+        return false;
+    }
+
+    if (execution_state == LLAM_WORKER_EXEC_RUNTIME_UNSAFE &&
+        critical_depth != 0U && preempt_depth != 0U) {
+        bool in_progress_task_valid =
+            active_task == NULL ||
+            (active_task->owner_runtime == shard->runtime &&
+             (atomic_load_explicit(&active_task->state, memory_order_acquire) ==
+                  LLAM_TASK_STATE_RUNNING ||
+              atomic_load_explicit(&active_task->state, memory_order_acquire) ==
+                  LLAM_TASK_STATE_BLOCKED_OPAQUE));
+
+        return (token->state == LLAM_FOREIGN_TOKEN_INACTIVE &&
+                in_progress_task_valid) ||
+               (token->state == LLAM_FOREIGN_TOKEN_RETURNING &&
+                token->worker == helper && token->processor == &shard->processor &&
+                token->mode == LLAM_FOREIGN_TOKEN_MODE_REDIRECT &&
+                token->generation != 0U &&
+                token->generation == helper->foreign_token_generation &&
+                token->worker_incarnation == incarnation &&
+                token->worker_run_generation != 0U &&
+                token->worker_run_generation != UINT64_MAX &&
+                token->worker_run_generation ==
+                    atomic_load_explicit(&helper->run_generation, memory_order_acquire) &&
+                token->task != NULL &&
+                token->task_run_generation != 0U &&
+                token->task_run_generation != UINT64_MAX &&
+                token->task_run_generation ==
+                    atomic_load_explicit(&token->task->run_generation, memory_order_acquire) &&
+                token->task->owner_runtime == shard->runtime &&
+                token->lease_projection_epoch != UINT64_MAX &&
+                token->p_generation != 0U &&
+                token->p_generation != UINT64_MAX &&
+                token->transfer_sequence == shard->legacy_lease.transfer_sequence &&
+                (active_task == NULL || active_task == token->task) &&
+                atomic_load_explicit(&token->task->state, memory_order_acquire) ==
+                    LLAM_TASK_STATE_BLOCKED_OPAQUE &&
+                atomic_load_explicit(&token->task->opaque_blocking_depth,
+                                     memory_order_acquire) == 0U &&
+                token->task->opaque_uses_redirect &&
+                !token->task->opaque_uses_helper);
+    }
+
+    if (execution_state == LLAM_WORKER_EXEC_FOREIGN &&
+        active_task == NULL &&
+        token->state == LLAM_FOREIGN_TOKEN_ACTIVE && token->worker == helper &&
+        token->processor == &shard->processor &&
+        token->mode == LLAM_FOREIGN_TOKEN_MODE_REDIRECT && token->generation != 0U &&
+        token->generation == helper->foreign_token_generation &&
+        token->worker_incarnation == incarnation &&
+        token->worker_run_generation != 0U &&
+        token->worker_run_generation != UINT64_MAX &&
+        token->worker_run_generation ==
+            atomic_load_explicit(&helper->run_generation, memory_order_acquire) &&
+        token->task != NULL &&
+        token->task_run_generation != 0U &&
+        token->task_run_generation != UINT64_MAX &&
+        token->task_run_generation ==
+            atomic_load_explicit(&token->task->run_generation, memory_order_acquire) &&
+        token->task->owner_runtime == shard->runtime &&
+        token->lease_projection_epoch != UINT64_MAX && token->p_generation != 0U &&
+        token->p_generation != UINT64_MAX &&
+        token->transfer_sequence == shard->legacy_lease.transfer_sequence &&
+        atomic_load_explicit(&token->task->state, memory_order_acquire) ==
+            LLAM_TASK_STATE_BLOCKED_OPAQUE &&
+        atomic_load_explicit(&token->task->opaque_blocking_depth, memory_order_acquire) ==
+            1U &&
+        token->task->opaque_uses_redirect && !token->task->opaque_uses_helper &&
+        /* A fully published token is valid through the ordered guard-release
+         * tail: (critical, preempt) is (1,1), (1,0), then (0,0). This grants
+         * no execution authority; P remains absent and the exact token above
+         * still identifies the helper's live redirect. */
+        critical_depth <= 1U && preempt_depth <= critical_depth) {
+        return true;
+    }
+    return false;
+}
+
+static bool llam_foreign_token_publish(llam_shard_t *shard,
+                                       llam_worker_t *worker,
+                                       llam_task_t *task,
+                                       const llam_processor_owner_ticket_t *entry_ticket,
+                                       uint64_t worker_run_generation,
+                                       uint64_t task_run_generation,
+                                       uint64_t transfer_sequence,
+                                       llam_foreign_token_mode_t mode) {
+    llam_legacy_lease_t *lease;
+    llam_foreign_token_t *token;
+    uint64_t worker_incarnation;
+    bool lease_handoff_ready;
+    bool published = false;
+
+    if (shard == NULL || worker == NULL || task == NULL || entry_ticket == NULL ||
+        transfer_sequence == 0U || mode == LLAM_FOREIGN_TOKEN_MODE_NONE ||
+        !shard->opaque_lock_initialized || !shard->lock_initialized ||
+        pthread_mutex_lock(&shard->opaque_lock) != 0) {
+        return false;
+    }
+    if (pthread_mutex_lock(&shard->lock) != 0) {
+        pthread_mutex_unlock(&shard->opaque_lock);
+        return false;
+    }
+
+    lease = &shard->legacy_lease;
+    token = &worker->foreign_token;
+    worker_incarnation = atomic_load_explicit(&worker->incarnation,
+                                               memory_order_acquire);
+    if (mode == LLAM_FOREIGN_TOKEN_MODE_HELPER) {
+        llam_worker_t *helper = &shard->opaque_helper_worker;
+        uint64_t helper_incarnation =
+            atomic_load_explicit(&helper->incarnation, memory_order_acquire);
+
+        lease_handoff_ready =
+            (lease->state == LLAM_LEASE_HELPER_OWNED &&
+             lease->owner == helper &&
+             lease->owner_incarnation == helper_incarnation &&
+             atomic_load_explicit(&helper->current_p, memory_order_acquire) ==
+                 &shard->processor) ||
+            (atomic_load_explicit(&shard->primary_worker.current_p,
+                                  memory_order_acquire) == NULL &&
+             llam_foreign_helper_redirect_inflight_locked(shard,
+                                                            transfer_sequence));
+    } else {
+        lease_handoff_ready = lease->state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR &&
+                              lease->owner == NULL && lease->return_worker == worker &&
+                              lease->return_incarnation == worker_incarnation &&
+                              lease->transfer_sequence == transfer_sequence &&
+                              atomic_load_explicit(&shard->primary_worker.current_p,
+                                                   memory_order_acquire) == NULL &&
+                              atomic_load_explicit(&shard->opaque_helper_worker.current_p,
+                                                   memory_order_acquire) == NULL;
+    }
+    if (entry_ticket->processor == &shard->processor &&
+        entry_ticket->owner_m == worker &&
+        entry_ticket->worker_incarnation == worker_incarnation &&
+        entry_ticket->p_generation != 0U && entry_ticket->p_generation != UINT64_MAX &&
+        entry_ticket->lease_state != LLAM_LEASE_REDIRECTED_NO_EXECUTOR &&
+        task->owner_runtime == shard->runtime &&
+        atomic_load_explicit(&worker->run_generation, memory_order_acquire) ==
+            worker_run_generation &&
+        atomic_load_explicit(&task->run_generation, memory_order_acquire) ==
+            task_run_generation &&
+        atomic_load_explicit(&task->state, memory_order_acquire) ==
+            LLAM_TASK_STATE_BLOCKED_OPAQUE &&
+        atomic_load_explicit(&task->opaque_blocking_depth, memory_order_acquire) == 0U &&
+        llam_worker_load_active_g(worker) == NULL &&
+        atomic_load_explicit(&worker->current_p, memory_order_acquire) == NULL &&
+        atomic_load_explicit(&worker->execution_state, memory_order_acquire) ==
+            LLAM_WORKER_EXEC_RUNTIME_UNSAFE &&
+        atomic_load_explicit(&worker->runtime_critical_depth, memory_order_acquire) != 0U &&
+        atomic_load_explicit(&worker->preempt_disable_depth, memory_order_acquire) != 0U &&
+        atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire) ==
+            worker_incarnation &&
+        atomic_load_explicit(&worker->native_thread_live, memory_order_acquire) &&
+        pthread_equal(worker->native_thread, pthread_self()) != 0 &&
+        token->state == LLAM_FOREIGN_TOKEN_INACTIVE && lease_handoff_ready &&
+        ((mode == LLAM_FOREIGN_TOKEN_MODE_HELPER && task->opaque_uses_helper &&
+          !task->opaque_uses_redirect) ||
+         (mode == LLAM_FOREIGN_TOKEN_MODE_REDIRECT && task->opaque_uses_redirect &&
+          !task->opaque_uses_helper)) &&
+        worker->foreign_token_generation != UINT64_MAX) {
+        uint64_t token_generation = worker->foreign_token_generation + 1U;
+
+        memset(token, 0, sizeof(*token));
+        token->worker = worker;
+        token->processor = &shard->processor;
+        token->task = task;
+        token->generation = token_generation;
+        token->worker_incarnation = worker_incarnation;
+        token->worker_run_generation = worker_run_generation;
+        token->task_run_generation = task_run_generation;
+        token->lease_projection_epoch = entry_ticket->lease_projection_epoch;
+        token->p_generation = entry_ticket->p_generation;
+        token->transfer_sequence = transfer_sequence;
+        token->state = LLAM_FOREIGN_TOKEN_ACTIVE;
+        token->mode = mode;
+        worker->foreign_token_generation = token_generation;
+        atomic_store_explicit(&task->opaque_blocking_depth, 1U, memory_order_release);
+        atomic_store_explicit(&worker->execution_state,
+                              LLAM_WORKER_EXEC_FOREIGN,
+                              memory_order_release);
+        atomic_fetch_add_explicit(&shard->metrics.foreign_p_detaches,
+                                  1U,
+                                  memory_order_relaxed);
+        if (mode == LLAM_FOREIGN_TOKEN_MODE_HELPER) {
+            atomic_fetch_add_explicit(&shard->metrics.relief_worker_activations,
+                                      1U,
+                                      memory_order_relaxed);
+        }
+        published = true;
+    }
+
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    return published;
+}
+
+static bool llam_foreign_token_validate_locked(llam_shard_t *shard,
+                                              llam_worker_t *worker,
+                                              llam_task_t *task,
+                                              llam_foreign_token_state_t expected_state) {
+    const llam_foreign_token_t *token;
+    const llam_legacy_lease_t *lease;
+    uint64_t worker_incarnation;
+    bool lease_matches;
+
+    if (shard == NULL || worker == NULL || task == NULL) {
+        return false;
+    }
+    token = &worker->foreign_token;
+    lease = &shard->legacy_lease;
+    worker_incarnation = atomic_load_explicit(&worker->incarnation,
+                                              memory_order_acquire);
+    if (token->state != expected_state || token->worker != worker || token->task != task ||
+        token->processor != &shard->processor || token->generation == 0U ||
+        token->generation != worker->foreign_token_generation ||
+        token->worker_incarnation != worker_incarnation || worker_incarnation == 0U ||
+        token->worker_run_generation == 0U ||
+        token->worker_run_generation == UINT64_MAX ||
+        token->worker_run_generation !=
+            atomic_load_explicit(&worker->run_generation, memory_order_acquire) ||
+        token->task_run_generation == 0U || token->task_run_generation == UINT64_MAX ||
+        token->lease_projection_epoch == UINT64_MAX || token->p_generation == 0U ||
+        token->p_generation == UINT64_MAX || token->transfer_sequence == 0U ||
+        token->mode == LLAM_FOREIGN_TOKEN_MODE_NONE ||
+        task->owner_runtime != shard->runtime ||
+        atomic_load_explicit(&task->run_generation, memory_order_acquire) !=
+            token->task_run_generation ||
+        atomic_load_explicit(&task->state, memory_order_acquire) !=
+            LLAM_TASK_STATE_BLOCKED_OPAQUE ||
+        llam_worker_load_active_g(worker) != NULL ||
+        !atomic_load_explicit(&worker->native_thread_live, memory_order_acquire) ||
+        atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire) !=
+            worker_incarnation || worker->compat_shard != shard ||
+        worker->associated_processor != &shard->processor ||
+        g_llam_tls_shard != shard || g_llam_tls_processor != &shard->processor ||
+        g_llam_tls_worker != worker || g_llam_tls_task != task ||
+        pthread_equal(worker->native_thread, pthread_self()) == 0) {
+        return false;
+    }
+    if (expected_state == LLAM_FOREIGN_TOKEN_ACTIVE &&
+        (atomic_load_explicit(&worker->current_p, memory_order_acquire) != NULL ||
+         atomic_load_explicit(&worker->execution_state, memory_order_acquire) !=
+             LLAM_WORKER_EXEC_FOREIGN ||
+         atomic_load_explicit(&task->opaque_blocking_depth,
+                              memory_order_acquire) == 0U)) {
+        return false;
+    }
+    if (expected_state == LLAM_FOREIGN_TOKEN_RETURNING &&
+        (atomic_load_explicit(&worker->execution_state, memory_order_acquire) !=
+             LLAM_WORKER_EXEC_RUNTIME_UNSAFE ||
+         atomic_load_explicit(&worker->runtime_critical_depth,
+                              memory_order_acquire) == 0U ||
+         atomic_load_explicit(&worker->preempt_disable_depth,
+                              memory_order_acquire) == 0U)) {
+        return false;
+    }
+
+    if (token->mode == LLAM_FOREIGN_TOKEN_MODE_HELPER) {
+        lease_matches =
+            lease->state == LLAM_LEASE_HELPER_OWNED &&
+            lease->owner == &shard->opaque_helper_worker &&
+            lease->owner_incarnation ==
+                atomic_load_explicit(&shard->opaque_helper_worker.binding_incarnation,
+                                     memory_order_acquire) &&
+            atomic_load_explicit(&shard->opaque_helper_worker.current_p,
+                                 memory_order_acquire) == &shard->processor;
+        if (!lease_matches && lease->state == LLAM_LEASE_TRANSFER_TO_PRIMARY) {
+            lease_matches = lease->return_worker == worker &&
+                            lease->return_incarnation == worker_incarnation;
+        }
+        if (!lease_matches && lease->state == LLAM_LEASE_STOPPING) {
+            lease_matches = lease->return_worker == worker &&
+                            lease->return_incarnation == worker_incarnation;
+            if (!lease_matches) {
+                llam_worker_t *helper = &shard->opaque_helper_worker;
+                uint64_t helper_incarnation = atomic_load_explicit(
+                    &helper->incarnation,
+                    memory_order_acquire);
+                bool unclaimed_helper_stop =
+                    lease->owner == helper &&
+                    lease->owner_incarnation == helper_incarnation &&
+                    lease->return_worker == NULL &&
+                    lease->return_incarnation == 0U &&
+                    atomic_load_explicit(&helper->current_p,
+                                         memory_order_acquire) == &shard->processor;
+
+                lease_matches = unclaimed_helper_stop;
+            }
+        }
+    } else {
+        lease_matches = lease->transfer_sequence == token->transfer_sequence &&
+                        (lease->state == LLAM_LEASE_REDIRECTED_NO_EXECUTOR ||
+                         lease->state == LLAM_LEASE_TRANSFER_TO_PRIMARY ||
+                         lease->state == LLAM_LEASE_STOPPING) &&
+                        lease->return_worker == worker &&
+                        lease->return_incarnation == worker_incarnation;
+    }
+    return lease_matches;
+}
+
+static bool llam_foreign_token_begin_return(llam_shard_t *shard,
+                                            llam_worker_t *worker,
+                                            llam_task_t *task) {
+    bool valid = false;
+    bool critical_entered = false;
+    bool preempt_disabled = false;
+
+    if (shard == NULL || worker == NULL || task == NULL ||
+        !shard->opaque_lock_initialized || !shard->lock_initialized ||
+        pthread_mutex_lock(&shard->opaque_lock) != 0) {
+        return false;
+    }
+    if (pthread_mutex_lock(&shard->lock) != 0) {
+        pthread_mutex_unlock(&shard->opaque_lock);
+        return false;
+    }
+    if (llam_foreign_token_validate_locked(shard,
+                                           worker,
+                                           task,
+                                           LLAM_FOREIGN_TOKEN_ACTIVE)) {
+        critical_entered = llam_worker_runtime_critical_enter(worker);
+        preempt_disabled = critical_entered && llam_worker_preempt_disable(worker);
+        if (preempt_disabled) {
+            worker->foreign_token.state = LLAM_FOREIGN_TOKEN_RETURNING;
+            atomic_store_explicit(&task->opaque_blocking_depth,
+                                  0U,
+                                  memory_order_release);
+            valid = true;
+        } else if (critical_entered) {
+            (void)llam_worker_runtime_critical_leave(worker);
+            atomic_store_explicit(&worker->execution_state,
+                                  LLAM_WORKER_EXEC_FOREIGN,
+                                  memory_order_release);
+        }
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    return valid;
+}
+
+/**
+ * @brief Validate the exact acknowledged STOPPING return used only for unwind.
+ *
+ * @details
+ * Shutdown deliberately suppresses ordinary execution tickets. A worker that
+ * has already acknowledged its matching return may nevertheless resume the
+ * blocked G long enough to unwind the foreign call and observe cancellation.
+ * This is narrower than an execution ticket: it requires the same M, token,
+ * processor projection, and transfer ACK, and is only valid after shutdown.
+ */
+static bool llam_foreign_token_stopping_return_valid_pair_locked(
+    llam_shard_t *shard,
+    const llam_worker_t *worker,
+    const llam_task_t *task,
+    const llam_foreign_token_t *token,
+    uint64_t worker_incarnation) {
+    const llam_legacy_lease_t *lease;
+    llam_processor_queue_access_t stopping_access = {0};
+    bool projection_valid;
+    bool return_claim_valid;
+
+    if (shard == NULL || worker == NULL || task == NULL || token == NULL ||
+        shard->runtime == NULL ||
+        !atomic_load_explicit(&shard->runtime->shutdown_requested,
+                              memory_order_acquire)) {
+        return false;
+    }
+    lease = &shard->legacy_lease;
+    projection_valid =
+        llam_processor_queue_access_snapshot_pair_locked(shard, &stopping_access) &&
+        stopping_access.processor == &shard->processor &&
+        stopping_access.actor_m == worker &&
+        stopping_access.actor_incarnation == worker_incarnation &&
+        stopping_access.projected_owner_m == worker &&
+        stopping_access.projected_worker_incarnation == worker_incarnation &&
+        stopping_access.lease_state == LLAM_LEASE_STOPPING &&
+        stopping_access.owner_state == LLAM_PROCESSOR_OWNER_STOPPING &&
+        stopping_access.lease_projection_epoch == lease->epoch &&
+        stopping_access.p_generation != 0U &&
+        stopping_access.p_generation != UINT64_MAX;
+    return_claim_valid =
+        (lease->return_worker == worker &&
+         lease->return_incarnation == worker_incarnation) ||
+        (lease->return_worker == NULL && lease->return_incarnation == 0U);
+    return lease->state == LLAM_LEASE_STOPPING && lease->owner == worker &&
+           lease->owner_incarnation == worker_incarnation &&
+           return_claim_valid &&
+           lease->transfer_sequence != 0U &&
+           token->transfer_sequence != 0U &&
+           (token->mode == LLAM_FOREIGN_TOKEN_MODE_HELPER ||
+            (token->mode == LLAM_FOREIGN_TOKEN_MODE_REDIRECT &&
+             lease->transfer_sequence == token->transfer_sequence)) &&
+           lease->handback_ack_sequence == lease->transfer_sequence &&
+           projection_valid &&
+           atomic_load_explicit(&worker->current_p, memory_order_acquire) ==
+               &shard->processor &&
+           llam_worker_load_active_g(worker) == NULL &&
+           atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire) ==
+               worker_incarnation &&
+           atomic_load_explicit(&worker->native_thread_live, memory_order_acquire) &&
+           token->state == LLAM_FOREIGN_TOKEN_RETURNING && token->worker == worker &&
+           token->processor == &shard->processor && token->task == task &&
+           token->generation != 0U &&
+           token->generation == worker->foreign_token_generation &&
+           token->worker_incarnation == worker_incarnation &&
+           token->worker_run_generation ==
+               atomic_load_explicit(&worker->run_generation, memory_order_acquire) &&
+           token->task_run_generation ==
+               atomic_load_explicit(&task->run_generation, memory_order_acquire) &&
+           task->owner_runtime == shard->runtime &&
+           atomic_load_explicit(&task->state, memory_order_acquire) ==
+               LLAM_TASK_STATE_BLOCKED_OPAQUE &&
+           atomic_load_explicit(&task->opaque_blocking_depth, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&worker->execution_state, memory_order_acquire) ==
+               LLAM_WORKER_EXEC_RUNTIME_UNSAFE &&
+           atomic_load_explicit(&worker->runtime_critical_depth, memory_order_acquire) !=
+               0U &&
+           atomic_load_explicit(&worker->preempt_disable_depth, memory_order_acquire) != 0U;
+}
+
+static void llam_foreign_token_resume_after_failed_return(llam_shard_t *shard,
+                                                          llam_worker_t *worker,
+                                                          llam_task_t *task) {
+    if (shard == NULL || worker == NULL || task == NULL ||
+        pthread_mutex_lock(&shard->opaque_lock) != 0) {
+        return;
+    }
+    pthread_mutex_lock(&shard->lock);
+    if (worker->foreign_token.state == LLAM_FOREIGN_TOKEN_RETURNING &&
+        worker->foreign_token.worker == worker &&
+        worker->foreign_token.worker_run_generation ==
+            atomic_load_explicit(&worker->run_generation, memory_order_acquire) &&
+        worker->foreign_token.task_run_generation ==
+            atomic_load_explicit(&task->run_generation, memory_order_acquire)) {
+        worker->foreign_token.state = LLAM_FOREIGN_TOKEN_ACTIVE;
+        atomic_store_explicit(&task->opaque_blocking_depth, 1U, memory_order_release);
+        if (atomic_load_explicit(&worker->preempt_disable_depth,
+                                 memory_order_acquire) != 0U) {
+            (void)llam_worker_preempt_enable(worker);
+        }
+        if (atomic_load_explicit(&worker->runtime_critical_depth,
+                                 memory_order_acquire) != 0U) {
+            (void)llam_worker_runtime_critical_leave(worker);
+        }
+        atomic_store_explicit(&worker->execution_state,
+                              LLAM_WORKER_EXEC_FOREIGN,
+                              memory_order_release);
+    }
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
 }
 
 /**
@@ -483,6 +976,8 @@ static void llam_restore_running_after_lease_abort_locked(llam_shard_t *shard,
  *         as no-ops and also return 0.
  */
 int llam_enter_blocking(void) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_worker_t *worker = g_llam_tls_worker;
@@ -495,6 +990,14 @@ int llam_enter_blocking(void) {
     bool task_publication_cleared = false;
     bool task_publication_restored = false;
     bool timing = false;
+    bool outermost = false;
+    bool runtime_critical_entered = false;
+    bool preempt_disabled = false;
+    llam_processor_owner_ticket_t entry_ticket = {0};
+    llam_relief_defer_reason_t relief_reason = LLAM_RELIEF_DEFER_NONE;
+    uint64_t worker_run_generation = 0U;
+    uint64_t task_run_generation = 0U;
+    llam_processor_queue_access_t redirect_release_access;
     uint64_t worker_incarnation = 0U;
     uint64_t transfer_sequence = 0U;
     uint64_t enter_wait_ns = 0U;
@@ -504,6 +1007,25 @@ int llam_enter_blocking(void) {
     if (task == NULL || shard == NULL) {
         return 0;
     }
+    if (shard->runtime != NULL &&
+        shard->runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        /* Registered native-affine detach has no adapter yet. Callback offload
+         * parks G through the scheduler without mutating the legacy lease. */
+        errno = ENOTSUP;
+        return -1;
+    }
+#if (defined(__linux__) && defined(__x86_64__)) || \
+    (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)) || LLAM_ASYNC_CONTEXT_SHARED
+    if (shard->runtime != NULL &&
+        atomic_load_explicit(&shard->runtime->async_preempt_enabled,
+                             memory_order_acquire) != 0U) {
+        /* Inline native work could strand this M's affine Gs; use callback offload.
+         * Windows must reject redirect as well as helper takeover, before
+         * changing P ownership or admitting an unqualified native M. */
+        errno = ENOTSUP;
+        return -1;
+    }
+#endif
     if (worker != NULL && worker->compat_shard == shard) {
         atomic_store_explicit(&worker->last_safepoint_ns,
                               llam_now_ns(),
@@ -511,6 +1033,48 @@ int llam_enter_blocking(void) {
     }
 
     if (task->opaque_blocking_depth == 0U) {
+        outermost = true;
+        if (!llam_processor_relief_snapshot(shard,
+                                            worker,
+                                            task,
+                                            &entry_ticket,
+                                            &relief_reason)) {
+            if (relief_reason == LLAM_RELIEF_DEFER_UNKNOWN_STATE) {
+                atomic_fetch_add_explicit(&shard->metrics.relief_deferred_unknown,
+                                          1U,
+                                          memory_order_relaxed);
+            } else if (relief_reason == LLAM_RELIEF_DEFER_STALE_P_TICKET) {
+                atomic_fetch_add_explicit(&shard->metrics.relief_deferred_stale_ticket,
+                                          1U,
+                                          memory_order_relaxed);
+            } else {
+                atomic_fetch_add_explicit(&shard->metrics.relief_deferred_unsafe,
+                                          1U,
+                                          memory_order_relaxed);
+            }
+            errno = atomic_load_explicit(&shard->runtime->shutdown_requested,
+                                         memory_order_acquire) != 0U
+                        ? ECANCELED
+                        : EBUSY;
+            return -1;
+        }
+        worker_run_generation = atomic_load_explicit(&worker->run_generation,
+                                                      memory_order_acquire);
+        task_run_generation = atomic_load_explicit(&task->run_generation,
+                                                   memory_order_acquire);
+        runtime_critical_entered = llam_worker_runtime_critical_enter(worker);
+        preempt_disabled = runtime_critical_entered &&
+                           llam_worker_preempt_disable(worker);
+        if (!preempt_disabled) {
+            if (runtime_critical_entered) {
+                (void)llam_worker_runtime_critical_leave(worker);
+            }
+            atomic_store_explicit(&worker->execution_state,
+                                  LLAM_WORKER_EXEC_MANAGED_SAFE,
+                                  memory_order_release);
+            errno = EOVERFLOW;
+            return -1;
+        }
         timing = llam_opaque_timing_enabled();
         task->opaque_block_started_ns = timing ? llam_now_ns() : 0U;
         task->opaque_uses_helper = false;
@@ -668,6 +1232,16 @@ int llam_enter_blocking(void) {
                 llam_restore_running_after_lease_abort_locked(shard, task, worker);
                 pthread_mutex_unlock(&shard->opaque_lock);
             }
+            (void)llam_worker_preempt_enable(worker);
+            (void)llam_worker_runtime_critical_leave(worker);
+            atomic_store_explicit(&worker->execution_state,
+                                  atomic_load_explicit(&worker->current_p,
+                                                       memory_order_acquire) ==
+                                              &shard->processor &&
+                                          llam_worker_load_active_g(worker) == task
+                                      ? LLAM_WORKER_EXEC_MANAGED_SAFE
+                                      : LLAM_WORKER_EXEC_STOPPING,
+                                  memory_order_release);
             task->opaque_block_started_ns = 0U;
             task->opaque_uses_helper = false;
             task->opaque_uses_redirect = false;
@@ -682,9 +1256,15 @@ int llam_enter_blocking(void) {
                                                          worker,
                                                          worker_incarnation)) {
                 pthread_mutex_unlock(&shard->opaque_lock);
+                (void)llam_worker_preempt_enable(worker);
+                (void)llam_worker_runtime_critical_leave(worker);
+                atomic_store_explicit(&worker->execution_state,
+                                      LLAM_WORKER_EXEC_STOPPING,
+                                      memory_order_release);
                 errno = ECANCELED;
                 return -1;
             }
+            transfer_sequence = shard->legacy_lease.transfer_sequence;
             shard->opaque_redirect_depth += 1U;
             if (shard->opaque_redirect_depth > shard->opaque_redirect_depth_peak) {
                 shard->opaque_redirect_depth_peak = shard->opaque_redirect_depth;
@@ -693,7 +1273,20 @@ int llam_enter_blocking(void) {
             pthread_mutex_unlock(&shard->opaque_lock);
             llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_OWNER_CLEAR);
 
+            pthread_mutex_lock(&shard->opaque_lock);
             pthread_mutex_lock(&shard->lock);
+            if (!llam_processor_queue_access_snapshot_pair_locked(
+                    shard, &redirect_release_access)) {
+                pthread_mutex_unlock(&shard->lock);
+                pthread_mutex_unlock(&shard->opaque_lock);
+                (void)llam_worker_preempt_enable(worker);
+                (void)llam_worker_runtime_critical_leave(worker);
+                atomic_store_explicit(&worker->execution_state,
+                                      LLAM_WORKER_EXEC_STOPPING,
+                                      memory_order_release);
+                errno = ECANCELED;
+                return -1;
+            }
             task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
             task->wait_reason = LLAM_WAIT_BLOCKING;
             if (worker != NULL && worker->compat_shard == shard) {
@@ -703,8 +1296,11 @@ int llam_enter_blocking(void) {
             if (shard->opaque_redirect_depth == 1U) {
                 shard->metrics.opaque_redirect_activations += 1U;
             }
-            llam_activate_opaque_redirect_locked(shard, task);
+            llam_activate_opaque_redirect_locked(shard,
+                                                  &redirect_release_access,
+                                                  task);
             pthread_mutex_unlock(&shard->lock);
+            pthread_mutex_unlock(&shard->opaque_lock);
             if (wake_redirect_workers) {
                 llam_wake_opaque_redirect_worker(shard->runtime, shard);
             }
@@ -724,6 +1320,38 @@ int llam_enter_blocking(void) {
             }
         }
     }
+    if (outermost) {
+        llam_foreign_token_mode_t mode = task->opaque_uses_helper
+                                             ? LLAM_FOREIGN_TOKEN_MODE_HELPER
+                                             : LLAM_FOREIGN_TOKEN_MODE_REDIRECT;
+
+        if (mode == LLAM_FOREIGN_TOKEN_MODE_HELPER) {
+            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_BEFORE_HELPER_FOREIGN_PUBLISH);
+        }
+        if (!llam_foreign_token_publish(shard,
+                                        worker,
+                                        task,
+                                        &entry_ticket,
+                                        worker_run_generation,
+                                        task_run_generation,
+                                        transfer_sequence,
+                                        mode)) {
+            atomic_fetch_add_explicit(&shard->metrics.relief_deferred_stale_ticket,
+                                      1U,
+                                      memory_order_relaxed);
+            (void)llam_worker_preempt_enable(worker);
+            (void)llam_worker_runtime_critical_leave(worker);
+            llam_record_fatal(shard->runtime, EPROTO);
+            errno = ECANCELED;
+            return -1;
+        }
+        if (mode == LLAM_FOREIGN_TOKEN_MODE_REDIRECT) {
+            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_REDIRECT_FOREIGN_PUBLISH);
+        }
+        (void)llam_worker_preempt_enable(worker);
+        (void)llam_worker_runtime_critical_leave(worker);
+        return 0;
+    }
     task->opaque_blocking_depth += 1U;
     return 0;
 }
@@ -742,20 +1370,58 @@ int llam_enter_blocking(void) {
  *         matching enter.
  */
 int llam_leave_blocking(void) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_worker_t *worker = g_llam_tls_worker;
+    unsigned depth;
 
     if (task == NULL || shard == NULL) {
         return 0;
     }
-    if (task->opaque_blocking_depth == 0U) {
+    if (shard->runtime != NULL &&
+        shard->runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    depth = atomic_load_explicit(&task->opaque_blocking_depth, memory_order_acquire);
+    if (depth == 0U) {
         errno = EINVAL;
         return -1;
     }
+    if (depth > 1U) {
+        bool nested_valid = false;
 
-    task->opaque_blocking_depth -= 1U;
-    if (task->opaque_blocking_depth == 0U) {
+        if (worker != NULL && shard->opaque_lock_initialized &&
+            shard->lock_initialized &&
+            pthread_mutex_lock(&shard->opaque_lock) == 0) {
+            if (pthread_mutex_lock(&shard->lock) == 0) {
+                nested_valid = llam_foreign_token_validate_locked(
+                    shard,
+                    worker,
+                    task,
+                    LLAM_FOREIGN_TOKEN_ACTIVE);
+                if (nested_valid) {
+                    atomic_store_explicit(&task->opaque_blocking_depth,
+                                          depth - 1U,
+                                          memory_order_release);
+                }
+                pthread_mutex_unlock(&shard->lock);
+            }
+            pthread_mutex_unlock(&shard->opaque_lock);
+        }
+        if (!nested_valid) {
+            errno = ECANCELED;
+            return -1;
+        }
+        return 0;
+    }
+    if (!llam_foreign_token_begin_return(shard, worker, task)) {
+        errno = ECANCELED;
+        return -1;
+    }
+    {
         bool used_helper = task->opaque_uses_helper;
         bool used_redirect = task->opaque_uses_redirect;
         bool from_opaque_helper = llam_tls_is_opaque_helper_for(shard);
@@ -912,47 +1578,126 @@ int llam_leave_blocking(void) {
                 shard->opaque_redirect_depth += 1U;
                 pthread_mutex_unlock(&shard->opaque_lock);
             }
-            task->opaque_blocking_depth = 1U;
             task->opaque_uses_helper = used_helper;
             task->opaque_uses_redirect = used_redirect;
+            llam_foreign_token_resume_after_failed_return(shard, worker, task);
             errno = ECANCELED;
             return -1;
         }
 
-        pthread_mutex_lock(&shard->lock);
-        if (timing) {
-            shard->metrics.opaque_block_ns += block_ns;
-            shard->metrics.opaque_block_samples += 1U;
-        }
-        if (timing && block_ns > shard->metrics.opaque_block_max_ns) {
-            shard->metrics.opaque_block_max_ns = block_ns;
-        }
-        if (timing && used_helper && !from_opaque_helper) {
-            shard->metrics.opaque_leave_wait_ns += leave_wait_ns;
-            shard->metrics.opaque_leave_wait_samples += 1U;
-            if (leave_wait_ns > shard->metrics.opaque_leave_wait_max_ns) {
-                shard->metrics.opaque_leave_wait_max_ns = leave_wait_ns;
+        if (pthread_mutex_lock(&shard->opaque_lock) != 0) {
+            leave_validation_failed = true;
+        } else if (pthread_mutex_lock(&shard->lock) != 0) {
+            pthread_mutex_unlock(&shard->opaque_lock);
+            leave_validation_failed = true;
+        } else {
+            llam_processor_owner_ticket_t current_ticket = {0};
+            llam_foreign_token_t *token = worker != NULL
+                                                ? &worker->foreign_token
+                                                : NULL;
+            bool token_return_tuple_valid =
+                token != NULL && token->state == LLAM_FOREIGN_TOKEN_RETURNING &&
+                token->worker == worker && token->processor == &shard->processor &&
+                token->generation == worker->foreign_token_generation &&
+                token->worker_incarnation == worker_incarnation &&
+                token->worker_run_generation ==
+                    atomic_load_explicit(&worker->run_generation,
+                                         memory_order_acquire) &&
+                token->task_run_generation ==
+                    atomic_load_explicit(&task->run_generation,
+                                         memory_order_acquire) &&
+                atomic_load_explicit(&worker->execution_state,
+                                     memory_order_acquire) ==
+                    LLAM_WORKER_EXEC_RUNTIME_UNSAFE &&
+                atomic_load_explicit(&worker->runtime_critical_depth,
+                                     memory_order_acquire) != 0U &&
+                atomic_load_explicit(&worker->preempt_disable_depth,
+                                     memory_order_acquire) != 0U;
+            bool ordinary_return_ticket_valid =
+                llam_processor_owner_ticket_snapshot_pair_locked(shard,
+                                                                  &current_ticket) &&
+                current_ticket.owner_m == worker &&
+                current_ticket.worker_incarnation == worker_incarnation;
+            bool stopping_return_valid =
+                llam_foreign_token_stopping_return_valid_pair_locked(shard,
+                                                                      worker,
+                                                                      task,
+                                                                      token,
+                                                                      worker_incarnation);
+            bool return_tuple_valid = token_return_tuple_valid &&
+                                      (ordinary_return_ticket_valid ||
+                                       stopping_return_valid);
+
+            if (!return_tuple_valid) {
+                pthread_mutex_unlock(&shard->lock);
+                pthread_mutex_unlock(&shard->opaque_lock);
+                leave_validation_failed = true;
+            } else {
+                if (timing) {
+                    shard->metrics.opaque_block_ns += block_ns;
+                    shard->metrics.opaque_block_samples += 1U;
+                }
+                if (timing && block_ns > shard->metrics.opaque_block_max_ns) {
+                    shard->metrics.opaque_block_max_ns = block_ns;
+                }
+                if (timing && used_helper && !from_opaque_helper) {
+                    shard->metrics.opaque_leave_wait_ns += leave_wait_ns;
+                    shard->metrics.opaque_leave_wait_samples += 1U;
+                    if (leave_wait_ns > shard->metrics.opaque_leave_wait_max_ns) {
+                        shard->metrics.opaque_leave_wait_max_ns = leave_wait_ns;
+                    }
+                }
+                if (deactivate_redirect) {
+                    llam_deactivate_opaque_redirect_locked(shard);
+                }
+                if (!llam_worker_preempt_enable(worker) ||
+                    !llam_worker_runtime_critical_leave(worker)) {
+                    llam_record_fatal(shard->runtime, EINVAL);
+                    pthread_mutex_unlock(&shard->lock);
+                    pthread_mutex_unlock(&shard->opaque_lock);
+                    leave_validation_failed = true;
+                } else {
+                    memset(&worker->foreign_token, 0,
+                           sizeof(worker->foreign_token));
+                    task->state = LLAM_TASK_STATE_RUNNING;
+                    task->wait_reason = LLAM_WAIT_NONE;
+                    if (worker != NULL && worker->compat_shard == shard) {
+                        atomic_store_explicit(&worker->last_safepoint_ns,
+                                              timing && now_ns != 0U
+                                                  ? now_ns
+                                                  : llam_now_ns(),
+                                              memory_order_release);
+                        /* Publish only after a fresh P ticket or exact stop-return is validated. */
+                        llam_worker_begin_g_run(worker, task);
+                        llam_worker_publish_active_g(worker, task);
+                    }
+                    atomic_fetch_add_explicit(&shard->metrics.foreign_p_reacquires,
+                                              1U,
+                                              memory_order_relaxed);
+                    llam_trace_shard(shard,
+                                     task,
+                                     LLAM_TRACE_STATE,
+                                     LLAM_TASK_STATE_BLOCKED_OPAQUE,
+                                     LLAM_TASK_STATE_RUNNING,
+                                     LLAM_WAIT_BLOCKING);
+                    pthread_mutex_unlock(&shard->lock);
+                    pthread_mutex_unlock(&shard->opaque_lock);
+                    leave_validation_failed = false;
+                }
             }
         }
-        if (deactivate_redirect) {
-            llam_deactivate_opaque_redirect_locked(shard);
+        if (leave_validation_failed) {
+            if (used_redirect && deactivate_redirect) {
+                pthread_mutex_lock(&shard->opaque_lock);
+                shard->opaque_redirect_depth += 1U;
+                pthread_mutex_unlock(&shard->opaque_lock);
+            }
+            task->opaque_uses_helper = used_helper;
+            task->opaque_uses_redirect = used_redirect;
+            llam_foreign_token_resume_after_failed_return(shard, worker, task);
+            errno = ECANCELED;
+            return -1;
         }
-        task->state = LLAM_TASK_STATE_RUNNING;
-        task->wait_reason = LLAM_WAIT_NONE;
-        if (worker != NULL && worker->compat_shard == shard) {
-            atomic_store_explicit(&worker->last_safepoint_ns,
-                                  timing && now_ns != 0U ? now_ns : llam_now_ns(),
-                                  memory_order_release);
-            /* Publish only after the restored task boundary is complete. */
-            llam_worker_publish_active_g(worker, task);
-        }
-        llam_trace_shard(shard,
-                       task,
-                       LLAM_TRACE_STATE,
-                       LLAM_TASK_STATE_BLOCKED_OPAQUE,
-                       LLAM_TASK_STATE_RUNNING,
-                       LLAM_WAIT_BLOCKING);
-        pthread_mutex_unlock(&shard->lock);
         (void)handback_acknowledged;
     }
     return 0;

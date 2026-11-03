@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -96,14 +96,20 @@ static ssize_t llam_positional_fd_rw(llam_fd_t fd, void *buf, size_t count, uint
 }
 
 ssize_t llam_pread(llam_fd_t fd, void *buf, size_t count, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_positional_fd_rw(fd, buf, count, offset, false);
 }
 
 ssize_t llam_pwrite(llam_fd_t fd, const void *buf, size_t count, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_positional_fd_rw(fd, (void *)buf, count, offset, true);
 }
 
 ssize_t llam_preadv(llam_fd_t fd, const llam_mut_iovec_t *iov, int iovcnt, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     ssize_t total = 0;
 
     if (iovcnt < 0 || iovcnt > llam_positional_iovcnt_max() || (iovcnt > 0 && iov == NULL)) {
@@ -177,6 +183,8 @@ ssize_t llam_preadv(llam_fd_t fd, const llam_mut_iovec_t *iov, int iovcnt, uint6
 }
 
 ssize_t llam_pwritev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     ssize_t total = 0;
 
     if (iovcnt < 0 || iovcnt > llam_positional_iovcnt_max() || (iovcnt > 0 && iov == NULL)) {

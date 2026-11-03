@@ -27,7 +27,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -71,7 +71,7 @@ static bool llam_channel_should_handoff_to_waiter(const llam_wait_node_t *node, 
  */
 static void llam_channel_handoff_yield(void) {
     g_llam_tls_io_handoff_yield += 1U;
-    llam_yield();
+    llam_yield_internal();
     g_llam_tls_io_handoff_yield -= 1U;
 }
 
@@ -128,11 +128,11 @@ static bool llam_channel_has_local_runnable_hint(void) {
     if (shard == NULL) {
         return false;
     }
-    if (shard->norm_q.depth != 0U) {
+    if (shard->processor.norm_q.depth != 0U) {
         return true;
     }
-    top = atomic_load_explicit(&shard->norm_cldeque.top, memory_order_acquire);
-    bottom = atomic_load_explicit(&shard->norm_cldeque.bottom, memory_order_acquire);
+    top = atomic_load_explicit(&shard->processor.norm_cldeque.top, memory_order_acquire);
+    bottom = atomic_load_explicit(&shard->processor.norm_cldeque.bottom, memory_order_acquire);
     return bottom > top;
 }
 
@@ -367,6 +367,7 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
     }
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
+    llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
 
     pthread_mutex_lock(&channel->lock);
     if (channel->closed) {
@@ -491,7 +492,7 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
         llam_channel_end_public_op(channel);
         return -1;
     }
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+    if (llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -549,6 +550,8 @@ wait_ready:
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_send(llam_channel_t *channel, void *value) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_channel_send_impl(channel, value, false, 0U);
 }
 
@@ -561,6 +564,8 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_try_send(llam_channel_t *channel, void *value) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_wait_node_t *receiver;
     llam_runtime_t *pinned_runtime = NULL;
     bool receiver_wake_required = false;
@@ -635,6 +640,8 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_send_until(llam_channel_t *channel, void *value, uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_channel_send_impl(channel, value, true, deadline_ns);
 }
 
@@ -684,6 +691,7 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
     }
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
+    llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
 
     pthread_mutex_lock(&channel->lock);
     if (channel->count > 0U) {
@@ -820,7 +828,7 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         llam_channel_end_public_op(channel);
         return -1;
     }
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+    if (llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -881,6 +889,8 @@ wait_ready:
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_recv_result(llam_channel_t *channel, void **out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_channel_recv_result_impl(channel, false, 0U, out);
 }
 
@@ -894,6 +904,8 @@ int llam_channel_recv_result(llam_channel_t *channel, void **out) {
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_recv_until_result(llam_channel_t *channel, uint64_t deadline_ns, void **out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_channel_recv_result_impl(channel, true, deadline_ns, out);
 }
 
@@ -906,6 +918,8 @@ int llam_channel_recv_until_result(llam_channel_t *channel, uint64_t deadline_ns
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_wait_node_t *sender;
     void *value;
     void *refill_value;
@@ -1049,6 +1063,8 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
  * @return Received pointer on success, or @c NULL with @c errno set.
  */
 void *llam_channel_recv(llam_channel_t *channel) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     void *value = NULL;
 
     if (llam_channel_recv_result(channel, &value) != 0) {
@@ -1069,6 +1085,8 @@ void *llam_channel_recv(llam_channel_t *channel) {
  * @return Received pointer on success, or @c NULL with @c errno set.
  */
 void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     void *value = NULL;
 
     if (llam_channel_recv_until_result(channel, deadline_ns, &value) != 0) {
@@ -1093,6 +1111,8 @@ void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
  *         longer live fails with @c ENOTSUP.
  */
 int llam_channel_close(llam_channel_t *channel) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_runtime_t *pinned_runtime = NULL;
     llam_wait_node_t *send_wake_head = NULL;
     llam_wait_node_t *send_wake_tail = NULL;

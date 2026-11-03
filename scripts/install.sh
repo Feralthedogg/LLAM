@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 set -eu
 
@@ -91,6 +91,14 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# Versioned 2.x installers remain the legacy BSD entry point. Reject before
+# inspecting/installing a local archive as well as before any download.
+case "$(uname -s):$target" in
+    FreeBSD:*|OpenBSD:*|NetBSD:*|DragonFly:*|*:freebsd-*|*:openbsd-*|*:netbsd-*|*:dragonflybsd-*)
+        echo "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling" >&2
+        exit 1 ;;
+esac
 
 if [ -z "$prefix" ]; then
     echo "invalid prefix: empty" >&2
@@ -727,10 +735,6 @@ detect_target() {
     case "$os" in
         Linux) os_name="linux" ;;
         Darwin) os_name="macos" ;;
-        FreeBSD) os_name="freebsd" ;;
-        OpenBSD) os_name="openbsd" ;;
-        NetBSD) os_name="netbsd" ;;
-        DragonFly) os_name="dragonflybsd" ;;
         *)
             echo "unsupported OS for LLAM release installer: $os" >&2
             exit 1
@@ -765,6 +769,8 @@ run_archive_install_from() {
 
     copy_file "$install_src_dir/README.md" "$prefix/share/llam/README.md"
     copy_file "$install_src_dir/LICENSE" "$prefix/share/llam/LICENSE"
+    copy_file "$install_src_dir/NOTICE" "$prefix/share/llam/NOTICE"
+    copy_file "$install_src_dir/THIRD_PARTY_NOTICES.md" "$prefix/share/llam/THIRD_PARTY_NOTICES.md"
     copy_file "$install_src_dir/CHANGELOG.md" "$prefix/share/llam/CHANGELOG.md"
     copy_file "$install_src_dir/VERSION" "$prefix/share/llam/VERSION"
     copy_file "$install_src_dir/ABI_MAJOR" "$prefix/share/llam/ABI_MAJOR"

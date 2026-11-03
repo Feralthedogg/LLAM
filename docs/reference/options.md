@@ -68,7 +68,7 @@ Examples:
 
 ```sh
 make -j4 CC=gcc
-make OBJDIR=object-asan CC=clang CFLAGS='-O1 -g -fsanitize=address,undefined' test
+make test-asan CC=clang
 ```
 
 ## Runtime Options
@@ -95,6 +95,10 @@ opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
 | `preempt_mode` | One of `LLAM_PREEMPT_*`. |
 | `preempt_poll_period` | Safepoint flag-poll period; `0` selects a profile default. |
 | `preempt_quantum_ns` | Global preemption slice override; `0` uses task-class budgets. |
+| `worker_count` | Portable/legacy processor count; `0` chooses available CPUs/profile. Must fit CPUs after SQPOLL reservation; deterministic permits only one. |
+| `blocking_worker_count` | Blocking pool threads, 1..1024; `0` retains platform defaults. |
+| `max_tasks` | Maximum retained task objects, including completed unjoined tasks; `0` unlimited. Admission failure is `EAGAIN`. |
+| `max_blocking_jobs` | Maximum queued plus running callbacks; `0` unlimited. Rejection invokes no callback. |
 
 Runtime profiles:
 
@@ -110,9 +114,30 @@ Preemption modes:
 | Value | Use |
 | --- | --- |
 | `LLAM_PREEMPT_OFF` | Disable automatic preemption requests. |
-| `LLAM_PREEMPT_COOPERATIVE` | Honor explicit safepoints only. |
-| `LLAM_PREEMPT_AUTO` | Request preemption when runtime pressure exists. |
-| `LLAM_PREEMPT_STRICT` | Diagnostic mode for finding loops without enough safepoints. |
+| `LLAM_PREEMPT_COOPERATIVE` | Honor explicit safepoints only; this mode never activates async capture. |
+| `LLAM_PREEMPT_AUTO` | Request preemption when runtime pressure exists. Compatibility constructors remain cooperative unless their expert async API is explicitly enabled. The managed constructor uses its separate admission policy. |
+| `LLAM_PREEMPT_STRICT` | Diagnostic mode for finding loops without enough safepoints; unsupported code still falls back or defers safely. |
+
+The experimental Linux x86-64 context backend is not enabled by selecting
+`AUTO` or `STRICT`. It requires the separate build option and explicit safe
+range registration; unregistered code stays on the cooperative path. Effective
+policy and the fallback reason are shown in the internal runtime dump without
+changing the public stats schema.
+
+The experimental fixed-primary Win64/MinGW backend additionally requires the explicit
+host-thread call `llam_runtime_enable_experimental_windows_async_preempt_ex()`
+before its first worker run and before any task is live.
+`llam_windows_async_preempt_opts_t` contains a
+nonempty copied array of `llam_windows_async_preempt_range_t` half-open PC
+intervals, a count, and the mandatory
+`LLAM_WINDOWS_ASYNC_PREEMPT_ACK_PROCESS_FAILFAST` flag. Unknown flags and
+overlapping ranges fail. The caller—not LLAM—certifies that every possible
+interrupted PC in those PE-image intervals is safe for async capture/restore;
+the caller must keep code bytes unchanged until runtime shutdown/destroy. The
+backend is one-way and available only with the experimental build option.
+Uncertain committed remote context changes terminate the whole process.
+`AUTO`/`STRICT` still determine the request policy; code outside certified
+ranges remains cooperative.
 
 Experimental flags:
 
@@ -226,3 +251,29 @@ File types:
 ## Environment Variables
 
 Environment variables are listed separately in [Environment Variables](environment.md).
+
+## Managed constructor policy and resources
+
+`<llam/managed.h>` adds caller-sized `llam_preempt_opts_t` without extending
+`llam_runtime_opts_t`. The defaults are `ASYNC_AUTO`, a 64 MiB capsule storage
+budget and four native-affine slots. The budget is a quota, not an eager 64 MiB
+allocation or RSS limit. Prepared storage grows from the native-M-scaled initial
+pool up to the quota; temporary depletion returns `EAGAIN`, quota exhaustion
+returns `ENOMEM`, and rejected spawns never publish a task.
+
+`ASYNC_REQUIRED` rejects legacy code, incompatible whole-task `NO_PREEMPT` and
+unavailable native profiles before user entry. `COOPERATIVE` explicitly disables
+native capture. `llam_runtime_preempt_info_ex` reports requested/effective
+policies, reasons, active quantum and prepared/in-use storage. See
+[managed runtimes](managed-runtime.md) for module pinning, affine refill and
+callback lifetime.
+
+## Operation Wait Options
+
+`llam_wait_opts_init` sets an inheriting deadline, no extra cancellation token and
+zero flags. `deadline_ns` uses the monotonic `llam_now_ns` clock; zero adds no
+operation limit. A task's persistent spawn budget still applies. `cancel_token`
+is an additional OR source; it never replaces task/group cancellation. Reserved
+flags/fields must remain zero. Omitted input tails use defaults. See the
+[embedding guide](../guides/embedding.md#compose-cancellation-and-request-budgets)
+for endpoint capabilities, partial-transfer and buffer-lifetime rules.

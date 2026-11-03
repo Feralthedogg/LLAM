@@ -1,5 +1,60 @@
 # LLAM ChangeLog
 
+## Unreleased
+
+### Added
+
+* complete explicit-runtime object creation, stop, JSON/dump diagnostics, resource
+  snapshots and per-runtime worker/blocking/task/job limits; add bounded host drain
+  that retains handles and in-flight memory on timeout.
+* add opt-in linked group cancellation, common per-operation I/O deadlines/tokens,
+  read-exact/write-all with confirmed progress, application task results and
+  nonblocking task-local exit cleanup, including cancellation (same-M for
+  compiler-qualified native-affine tasks).
+* add checked explicit-runtime/group examples and regression coverage for nullable
+  values, budget inheritance, partial transfers, admission, drain and cleanup.
+
+* add one atomic, expert-only public Win64 experimental async-preemption
+  opt-in for caller-certified PE-image ranges, with explicit process-wide
+  fail-fast acknowledgement; unavailable builds export an `ENOTSUP` stub.
+
+* add opt-in preemption metadata tooling and a conservative LLVM pass/driver;
+  Rust, Python, JVM, .NET, and Go language-binding wrappers remain excluded.
+
+* add private platform capability/fallback reporting for cooperative and
+  experimental Linux x86-64 hybrid preemption, with async context and
+  foreign-detach/relief observability in internal dumps.
+
+* integrate the supplied Magic2 implementation behind private LLAM plumbing,
+  including managed caller-scheduled CPU plans and a selective heavy-work
+  policy that falls back before admission under low cost or runtime pressure;
+  add exact-result tests and an isolated manual/Magic2/automatic benchmark.
+
+* vendor the upstream `magic2` repository under `third_party/magic2/` at
+  commit `b890268b2be97a73977c73a2110b5b5f0af65500`, retaining its MIT license.
+
+### Changed
+
+* end FreeBSD, OpenBSD, NetBSD and DragonFly BSD support from 3.0.0; remove BSD CI
+  and release artifacts and reject retired targets in builds/install/package/SDK
+  tooling. macOS kqueue remains supported; earlier BSD sources/reports are history.
+* advance the additive ABI to 2.3; retain the 56-byte runtime-options prefix and
+  append fixed-width resource limits. Existing constructors and legacy group token
+  override semantics remain compatible; managed defaults are documented separately.
+* preserve spawn request budgets across waits, prevent late cancellation delivery
+  from affecting a subsequent wait, and allow group cleanup after runtime teardown
+  has invalidated all of its child handles.
+
+* license all current first-party LLAM files under Apache License 2.0; remove
+  the custom-license selection manifest and mandatory defect-reporting terms,
+  and update notices, contribution terms, policy checks, and release/install
+  metadata. Existing third-party terms and previously distributed versions
+  are unchanged.
+
+* retain the expert Windows opt-in symbol and JSON statistics; caller-certified
+  metadata does not automatically register ranges or change the compatibility
+  constructors' boundary/safepoint behavior.
+
 ## 3.0.0 - 2026-08-01
 
 ### Changed

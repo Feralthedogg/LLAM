@@ -88,11 +88,14 @@ nav:
       - Performance Tuning: guides/performance-tuning.md
   - Reference:
       - Public API: reference/api.md
+      - Managed C and Async Preemption: reference/managed-runtime.md
       - Options: reference/options.md
       - CLI And Tools: reference/cli-tools.md
       - ABI Contract: abi.md
       - Environment Variables: reference/environment.md
       - Security Model: security.md
+  - Tooling:
+      - Compiler Preemption Metadata: tooling/preempt-metadata.md
   - Operations:
       - Verification: operations/verification.md
       - Benchmarks: operations/benchmarks.md
@@ -100,7 +103,9 @@ nav:
       - Production Checklist: operations.md
   - Internals:
       - Architecture: internals/architecture.md
+      - Internal magic2 Integration: internals/magic2.md
       - Testing Strategy: internals/testing-strategy.md
+      - Capability and Fallback Policy: superpowers/specs/2026-09-15-phase7-capability-policy.md
   - Project:
       - Licensing: licensing.md
       - Documentation Guide: project/documentation-guide.md

@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_PUBLIC_SLOT_H
@@ -50,6 +50,7 @@
 #define LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER 7U
 #define LLAM_PUBLIC_HANDLE_FAMILY_TIMER 8U
 #define LLAM_PUBLIC_HANDLE_FAMILY_SIGNAL_SET 9U
+#define LLAM_PUBLIC_HANDLE_FAMILY_MODULE 10U
 #define LLAM_PUBLIC_HANDLE_EPOCH_MASK LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH
 #define LLAM_PUBLIC_SLOT_WORD_BITS ((unsigned)(sizeof(uintptr_t) * CHAR_BIT))
 

@@ -29,7 +29,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_PLATFORM_H
@@ -94,8 +94,12 @@
 #define LLAM_PLATFORM_BSD 0
 #endif
 
+#if LLAM_PLATFORM_BSD
+#error "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling."
+#endif
+
 /** @brief Non-zero when the platform exposes kqueue as the native readiness backend. */
-#if LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD
+#if LLAM_PLATFORM_DARWIN
 #define LLAM_PLATFORM_KQUEUE 1
 #else
 #define LLAM_PLATFORM_KQUEUE 0

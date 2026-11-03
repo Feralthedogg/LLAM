@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -128,19 +128,24 @@ bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
          */
         return true;
     }
-    return req != NULL &&
-           req->task != NULL &&
-           req->task->cancel_token != NULL &&
-           llam_cancel_token_is_cancelled(req->task->cancel_token) > 0;
+    if (req != NULL && llam_task_cancel_token_is_cancelled(req->task)) return true;
+    return req != NULL && req->kind != LLAM_IO_KIND_POLL && req->deadline_ns != 0U &&
+           llam_now_ns() >= req->deadline_ns;
 }
 
 /**
  * @brief Mark a blocking fallback request as cooperatively cancelled.
  */
 void llam_blocking_req_set_cancelled(llam_io_req_t *req) {
-    errno = ECANCELED;
+    int error = ECANCELED;
+    if (req != NULL && req->deadline_ns != 0U && llam_now_ns() >= req->deadline_ns &&
+        !llam_task_cancel_token_is_cancelled(req->task) &&
+        (req->owner_runtime == NULL ||
+         !atomic_load_explicit(&req->owner_runtime->stop_requested, memory_order_acquire))) error = ETIMEDOUT;
+    errno = error;
     if (req != NULL) {
         req->result = -1;
+        req->error_code = error;
         req->fd_result = LLAM_INVALID_FD;
     }
 }
@@ -189,9 +194,26 @@ void *llam_blocking_read_impl(void *arg) {
     }
 
     for (;;) {
+        int poll_ms = 10;
+
         if (llam_blocking_req_cancelled(req)) {
             llam_blocking_req_set_cancelled(req);
             break;
+        }
+        if (req->deadline_ns != 0U) {
+            uint64_t now_ns = llam_now_ns();
+            uint64_t remaining_ns;
+
+            if (now_ns >= req->deadline_ns) {
+                req->result = -1;
+                req->error_code = ETIMEDOUT;
+                errno = ETIMEDOUT;
+                break;
+            }
+            remaining_ns = req->deadline_ns - now_ns;
+            if (remaining_ns < 10000000ULL) {
+                poll_ms = (int)((remaining_ns + 999999ULL) / 1000000ULL);
+            }
         }
         req->result = req->use_recv_op ? llam_platform_recv_fd(req->fd, req->buf, req->count, req->recv_flags) :
                                          llam_platform_read_fd(req->fd, req->buf, req->count);
@@ -204,7 +226,7 @@ void *llam_blocking_read_impl(void *arg) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             break;
         }
-        if (llam_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
+        if (llam_platform_poll_fd(req->fd, POLLIN, poll_ms, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
@@ -383,7 +405,8 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
 
     if (socket_recv && recv_flags == 0 && max_count <= LLAM_IO_BUFFER_INLINE_BYTES &&
         (socket_type == SOCK_DGRAM || socket_type == SOCK_SEQPACKET)) {
-        llam_node_t *node = &g_llam_tls_shard->runtime->nodes[g_llam_tls_shard->io_node_index];
+        llam_node_t *node = &g_llam_tls_shard->runtime->nodes[
+            llam_processor_io_node_index(&g_llam_tls_shard->processor)];
 
         prefer_multishot = !node->supports_provided_buffers && node->supports_multishot_recv;
     }
@@ -419,7 +442,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
             req->owned_buffer->provided_bid = 0U;
             req->owned_buffer->data = req->owned_buffer->inline_data;
             req->owned_buffer->size = 0U;
-            req->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+            req->owned_buffer->capacity = req->owned_buffer->inline_capacity;
             req->owned_buffer->alignment = sizeof(void *);
             req->owned_buffer->aligned_storage = false;
         } else {
@@ -686,7 +709,9 @@ static bool llam_blocking_prepare_poll_slice(llam_io_req_t *req, uint64_t deadli
         return false;
     }
     *slice_ms = 10;
-    if (req->timeout_ms >= 0) {
+    if (req->deadline_ns != 0U && (deadline_ns == 0U || req->deadline_ns < deadline_ns))
+        deadline_ns = req->deadline_ns;
+    if (deadline_ns != 0U) {
         uint64_t now_ns = llam_now_ns();
         uint64_t remain_ns;
 

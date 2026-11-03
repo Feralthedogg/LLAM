@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 """Check that Phase 0 worker identity code stays descriptive and shard-owned."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 import pathlib
 import re
@@ -28,6 +29,34 @@ from typing import Iterable, Sequence
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEBUG_EQUIVALENCE_PATH = "src/internal/runtime_state.h"
+PROVIDED_MAGIC2_PATH = "src/internal/magic2.h"
+PROVIDED_MAGIC2_BRIDGE_PATH = "src/core/api/magic2_api.c"
+PROVIDED_MAGIC2_SHA256 = "b3f8388c6c45fe148ad31390e12e9930b5b448c320471be63bc1edc3a5ea3de5"
+
+
+def _provided_source_errors(relative_path: str, text: str) -> list[str] | None:
+    """Verify the exact supplied library snapshot without applying LLAM names.
+
+    Magic2's independent CPU executor is not LLAM execution authority. This
+    exception is content-pinned: updating the supplied implementation requires
+    an explicit review and digest update; another path never inherits it.
+    read_text normalizes checkout line endings before this content check.
+    """
+    if relative_path != PROVIDED_MAGIC2_PATH:
+        return None
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != PROVIDED_MAGIC2_SHA256:
+        return [f"{relative_path}:1: supplied magic2 snapshot hash mismatch; review required"]
+    return []
+
+
+def _missing_provided_source_errors(root: pathlib.Path) -> list[str]:
+    # Small scanner-fixture roots need no dependency unless they use the bridge.
+    if (root / PROVIDED_MAGIC2_BRIDGE_PATH).is_file() and not (
+        root / PROVIDED_MAGIC2_PATH
+    ).is_file():
+        return [f"{PROVIDED_MAGIC2_PATH}:1: supplied magic2 snapshot is missing"]
+    return []
 
 FUTURE_EXECUTION_AUTHORITY_NAMES = frozenset(
     {
@@ -159,8 +188,14 @@ _TOKEN_RE = re.compile(
 
 def _tokens(masked: str) -> list[_Token]:
     tokens: list[_Token] = []
+    line = 1
+    previous_end = 0
     for match in _TOKEN_RE.finditer(masked):
-        tokens.append(_Token(match.group(0), masked.count("\n", 0, match.start()) + 1))
+        # Tokens contain no newlines. Count only the gap since the previous
+        # match so large implementation headers do not require quadratic work.
+        line += masked.count("\n", previous_end, match.start())
+        tokens.append(_Token(match.group(0), line))
+        previous_end = match.end()
     return tokens
 
 
@@ -370,6 +405,9 @@ def _receiver_is_shard(tokens: Sequence[_Token], member_operator: int) -> bool:
 def scan_source(relative_path: str, text: str) -> list[str]:
     """Return Phase 0 boundary violations found in one C source/header."""
 
+    provided_errors = _provided_source_errors(relative_path, text)
+    if provided_errors is not None:
+        return provided_errors
     masked = _mask_comments_and_literals(text)
     tokens = _tokens(masked)
     errors: list[str] = []
@@ -421,7 +459,7 @@ def iter_source_files(root: pathlib.Path) -> Iterable[pathlib.Path]:
 
 
 def scan_repository(root: pathlib.Path) -> list[str]:
-    errors: list[str] = []
+    errors: list[str] = _missing_provided_source_errors(root)
     for path in iter_source_files(root):
         relative = path.relative_to(root).as_posix()
         errors.extend(scan_source(relative, path.read_text(encoding="utf-8", errors="replace")))
@@ -447,8 +485,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    count = sum(1 for _ in iter_source_files(root))
-    print(f"check_worker_identity_boundary ok: {count} source/header file(s)")
+    count = sum(
+        path.relative_to(root).as_posix() != PROVIDED_MAGIC2_PATH
+        for path in iter_source_files(root)
+    )
+    provided = int((root / PROVIDED_MAGIC2_PATH).is_file())
+    print(
+        f"check_worker_identity_boundary ok: {count} source/header file(s), "
+        f"{provided} verified supplied header(s)"
+    )
     return 0
 
 

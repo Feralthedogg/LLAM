@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -37,6 +37,10 @@
  * task cursor has been installed before every helper has sampled the shard.
  */
 llam_runtime_t *llam_runtime_current_owner(void) {
+    if (llam_native_domain_blocked()) {
+        errno = ENOTSUP;
+        return NULL;
+    }
     if (LLAM_LIKELY(g_llam_tls_shard != NULL && g_llam_tls_shard->runtime != NULL)) {
         return g_llam_tls_shard->runtime;
     }
@@ -53,6 +57,41 @@ llam_runtime_t *llam_runtime_owner_for_new_object(void) {
     return llam_runtime_current_owner();
 }
 
+int llam_runtime_check_creation_owner(llam_runtime_t *owner) {
+    if (owner == NULL) { errno = EINVAL; return -1; }
+    if (atomic_load_explicit(&owner->draining, memory_order_acquire)) {
+        errno = ECANCELED;
+        return -1;
+    }
+    return 0;
+}
+
+/* Explicit constructors retain this pin through handle publication. Host
+ * callers have no run-driver pin, and a secret/owner read must not race free. */
+int llam_runtime_begin_object_creation(llam_runtime_t *runtime, llam_runtime_t **out) {
+    llam_runtime_t *pinned = NULL;
+    if (out == NULL || runtime == NULL) {
+        if (out != NULL) *out = NULL;
+        errno = EINVAL;
+        return -1;
+    }
+    *out = NULL;
+    if (llam_runtime_begin_public_op(runtime, &pinned) != 0) return -1;
+    int error = 0;
+    if (!atomic_load_explicit(&pinned->initialized, memory_order_acquire) ||
+        atomic_load_explicit(&pinned->shutdown_requested, memory_order_acquire)) error = EINVAL;
+    else if ((g_llam_tls_task != NULL || g_llam_tls_shard != NULL) &&
+             llam_runtime_current_owner() != pinned) error = EXDEV;
+    else if (atomic_load_explicit(&pinned->draining, memory_order_acquire)) error = ECANCELED;
+    if (error != 0) {
+        llam_runtime_end_public_op(pinned);
+        errno = error;
+        return -1;
+    }
+    *out = pinned;
+    return 0;
+}
+
 /**
  * @brief Validate that an object belongs to the current runtime context.
  *
@@ -62,6 +101,10 @@ llam_runtime_t *llam_runtime_owner_for_new_object(void) {
  * stale-owner misuse and fail with @c EXDEV without dereferencing the pointer.
  */
 int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime) {
+    if (llam_native_domain_blocked()) {
+        errno = ENOTSUP;
+        return -1;
+    }
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     llam_runtime_t *current;
 
@@ -111,6 +154,10 @@ int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime) {
  * object storage, and cleanup only needs to free that object.
  */
 int llam_runtime_check_object_owner_for_cleanup(const llam_runtime_t *owner_runtime) {
+    if (llam_native_domain_blocked()) {
+        errno = ENOTSUP;
+        return -1;
+    }
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     llam_runtime_t *current;
     int saved_errno = errno;

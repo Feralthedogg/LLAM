@@ -1,0 +1,9 @@
+{
+  "command": [
+    "/Users/feral/Desktop/Programming/LLAM/scripts/bench_tokio_compare/target/release/bench_tokio_compare"
+  ],
+  "case": "spawn_join",
+  "returncode": 0,
+  "stdout": "[tokio-bench] config rounds=127 warmup=8 worker_threads=1 spawn_tasks=512 channel_messages=4096 select_ops=4096 io_messages=512 poll_events=512 sleep_tasks=1024 sleep_yields=4 sleep_us=30000 opaque_scopes=64\n[tokio-bench] name=spawn_join rounds=127 warmup=8 ops=512 ops_per_sec=1311557.02 p50_us=386.21 p99_us=539.96\n",
+  "stderr": ""
+}

@@ -1,0 +1,444 @@
+diff --git a/llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp b/llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp
+index 0b3da65..ec39f72 100644
+--- a/llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp
++++ b/llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp
+@@ -205,6 +205,15 @@ public:
+ };
+ } // end anonymous namespace
+ 
++namespace llvm {
++bool llamX86MCEmitsUnqualifiedPadding() {
++  return X86AlignBranchBoundary != 0U ||
++         X86AlignBranchWithin32BBoundaries ||
++         static_cast<uint8_t>(X86AlignBranchKindLoc) != 0U ||
++         X86PadMaxPrefixSize != 0U || X86PadForAlign;
++}
++} // namespace llvm
++
+ static bool isRelaxableBranch(unsigned Opcode) {
+   return Opcode == X86::JCC_1 || Opcode == X86::JMP_1;
+ }
+diff --git a/llvm/lib/Target/X86/X86AsmPrinter.cpp b/llvm/lib/Target/X86/X86AsmPrinter.cpp
+index f22b89b..b9b310a 100644
+--- a/llvm/lib/Target/X86/X86AsmPrinter.cpp
++++ b/llvm/lib/Target/X86/X86AsmPrinter.cpp
+@@ -25,6 +25,7 @@
+ #include "llvm/Analysis/StaticDataProfileInfo.h"
+ #include "llvm/BinaryFormat/COFF.h"
+ #include "llvm/BinaryFormat/ELF.h"
++#include "llvm/CodeGen/AsmPrinterHandler.h"
+ #include "llvm/CodeGen/MachineConstantPool.h"
+ #include "llvm/CodeGen/MachineModuleInfoImpls.h"
+ #include "llvm/CodeGen/MachinePassManager.h"
+@@ -49,14 +50,411 @@
+ #include "llvm/MC/MCSymbol.h"
+ #include "llvm/MC/TargetRegistry.h"
+ #include "llvm/Support/Debug.h"
++#include "llvm/Support/CommandLine.h"
+ #include "llvm/Support/ErrorHandling.h"
++#include "llvm/Support/raw_ostream.h"
+ #include "llvm/Target/TargetMachine.h"
+ 
++#include <string>
++
++namespace llvm {
++bool llamX86MCEmitsUnqualifiedPadding();
++}
++
+ using namespace llvm;
+ 
++static cl::opt<bool> LLAMPreemptProbeEnd(
++    "llam-preempt-probe-end", cl::Hidden,
++    cl::desc("Emit marker-only LLAM endpoint probes for annotated Win64 functions"),
++    cl::init(false));
++static cl::opt<bool> LLAMPreemptProbeLLPM(
++    "llam-preempt-probe-llpm", cl::Hidden,
++    cl::desc("Emit manually certified LLPM transport fixtures on Win64"),
++    cl::init(false));
++static cl::opt<bool> LLAMPreemptLateAudit(
++    "llam-preempt-late-audit", cl::Hidden,
++    cl::desc("Diagnose the narrow Win64 scalar-leaf machine profile"),
++    cl::init(false));
++static cl::opt<bool> LLAMPreemptLateRequire(
++    "llam-preempt-late-require", cl::Hidden,
++    cl::desc("Fail codegen when a narrow Win64 scalar-leaf probe is refused"),
++    cl::init(false));
++static cl::opt<bool> LLAMPreemptCertify(
++    "llam-preempt-certify-v1", cl::Hidden,
++    cl::desc("Emit gated Win64 scalar-leaf-v1 LLPM certificates"),
++    cl::init(false));
++
++static bool llamVolatileIntegerReg(Register Reg) {
++  switch (Reg.id()) {
++  case X86::RAX: case X86::EAX:
++  case X86::RCX: case X86::ECX:
++  case X86::RDX: case X86::EDX:
++  case X86::R8: case X86::R8D:
++  case X86::R9: case X86::R9D:
++  case X86::R10: case X86::R10D:
++  case X86::R11: case X86::R11D:
++    return true;
++  default:
++    return false;
++  }
++}
++
++static bool llamExplicitShape(const MachineInstr &MI) {
++  unsigned Count = MI.getNumExplicitOperands();
++  auto IsReg = [&](unsigned Index) {
++    return Index < Count && MI.getOperand(Index).isReg();
++  };
++  auto IsImm = [&](unsigned Index) {
++    return Index < Count && MI.getOperand(Index).isImm();
++  };
++  auto IsBlock = [&](unsigned Index) {
++    return Index < Count && MI.getOperand(Index).isMBB();
++  };
++  switch (MI.getOpcode()) {
++  case X86::MOV32ri:
++    return Count == 2 && IsReg(0) && IsImm(1);
++  case X86::MOV64rr: case X86::INC64r: case X86::DEC64r:
++  case X86::TEST64rr:
++    return Count == 2 && IsReg(0) && IsReg(1);
++  case X86::SUB64rr:
++  case X86::XOR32rr: case X86::XOR64rr:
++    return Count == 3 && IsReg(0) && IsReg(1) && IsReg(2);
++  case X86::ADD64ri32: case X86::SHL64ri: case X86::SHR64ri:
++    return Count == 3 && IsReg(0) && IsReg(1) && IsImm(2);
++  case X86::CMP64ri32:
++    return Count == 2 && IsReg(0) && IsImm(1);
++  case X86::JCC_1:
++    return Count == 2 && IsBlock(0) && IsImm(1);
++  case X86::RET64:
++    return Count == 1 && IsReg(0) &&
++           (MI.getOperand(0).getReg().id() == X86::RAX ||
++            MI.getOperand(0).getReg().id() == X86::EAX);
++  default:
++    return false;
++  }
++}
++
++static bool llamLateRefuse(const MachineFunction &MF, std::string &Why) {
++  const Function &Fn = MF.getFunction();
++  const MachineFrameInfo &Frame = MF.getFrameInfo();
++  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
++  if (llamX86MCEmitsUnqualifiedPadding()) {
++    Why = "EMISSION_PROFILE MC branch/prefix padding";
++    return true;
++  }
++  if (Subtarget.hardenSlsRet() || Subtarget.hardenSlsIJmp()) {
++    Why = "EMISSION_PROFILE SLS hardening";
++    return true;
++  }
++  if (Fn.isVarArg() ||
++      !(Fn.getReturnType()->isIntegerTy(32) ||
++        Fn.getReturnType()->isIntegerTy(64))) {
++    Why = "SIGNATURE return/varargs";
++    return true;
++  }
++  for (const Argument &Arg : Fn.args()) {
++    if (!(Arg.getType()->isIntegerTy(32) ||
++          Arg.getType()->isIntegerTy(64))) {
++      Why = "SIGNATURE argument";
++      return true;
++    }
++  }
++  if (MF.hasBBSections() || MF.getJumpTableInfo() || MF.hasEHFunclets() ||
++      MF.hasEHScopes() || MF.isOutlined() || Fn.hasPrefixData() ||
++      Fn.hasPrologueData() || Fn.hasPersonalityFn() ||
++      Fn.hasFnAttribute("patchable-function-entry") ||
++      Fn.hasFnAttribute("patchable-function-prefix")) {
++    Why = "LAYOUT split/jump-table/funclet/prefix";
++    return true;
++  }
++  for (const MachineBasicBlock &Block : MF) {
++    for (const MachineInstr &MI : Block) {
++      if (MI.isCall() || MI.getOpcode() == X86::TAILJMPd64 ||
++          MI.getOpcode() == X86::TAILJMPr64) {
++        Why = (Twine("CALL_OR_TAIL ") +
++               MF.getSubtarget().getInstrInfo()->getName(MI.getOpcode())).str();
++        return true;
++      }
++      if (MI.isIndirectBranch() ||
++          (MI.isReturn() && MI.getOpcode() != X86::RET64)) {
++        Why = (Twine("CONTROL_FLOW ") +
++               MF.getSubtarget().getInstrInfo()->getName(MI.getOpcode())).str();
++        return true;
++      }
++    }
++  }
++  for (const MachineBasicBlock &Block : MF) {
++    for (const MachineInstr &MI : Block) {
++      if (MI.getOpcode() != X86::RET64 &&
++          (MI.mayLoadOrStore() || MI.isInlineAsm() ||
++           MI.hasUnmodeledSideEffects())) {
++        Why = (Twine("MEMORY_OR_EFFECT ") +
++               MF.getSubtarget().getInstrInfo()->getName(MI.getOpcode())).str();
++        return true;
++      }
++    }
++  }
++  for (const MachineBasicBlock &Block : MF) {
++    if (&Block != &MF.front() && Block.getAlignment().value() > 1U) {
++      Why = "LAYOUT in-range aligned block";
++      return true;
++    }
++    for (const MachineInstr &MI : Block) {
++      unsigned Opcode = MI.getOpcode();
++      StringRef OpcodeName = MF.getSubtarget().getInstrInfo()->getName(Opcode);
++      if (MI.isDebugInstr() || MI.isCFIInstruction() ||
++          Opcode == TargetOpcode::KILL || Opcode == TargetOpcode::IMPLICIT_DEF)
++        continue;
++      if (Opcode != X86::RET64 &&
++          (MI.mayLoadOrStore() || MI.isCall() || MI.isInlineAsm() ||
++           MI.hasUnmodeledSideEffects())) {
++        Why = (Twine("MEMORY_OR_EFFECT ") + OpcodeName).str();
++        return true;
++      }
++      if (MI.isPseudo()) {
++        Why = (Twine("UNKNOWN_LOWERING ") + OpcodeName).str();
++        return true;
++      }
++      bool IsBranch = Opcode == X86::JCC_1;
++      if (Opcode == X86::LEA64r) {
++        for (const MachineOperand &Operand : MI.operands()) {
++          if (Operand.getTargetFlags() != 0U) {
++            Why = "CONTROL_OR_SYMBOL LEA64r";
++            return true;
++          }
++        }
++        if (MI.getNumOperands() != 6U ||
++          MI.getNumExplicitOperands() != 6U || !MI.getOperand(0).isReg() ||
++            !llamVolatileIntegerReg(MI.getOperand(0).getReg()) ||
++            !MI.getOperand(1).isReg() || !MI.getOperand(2).isImm() ||
++            !MI.getOperand(3).isReg() || !MI.getOperand(4).isImm() ||
++            !MI.getOperand(5).isReg() ||
++            MI.getOperand(5).getReg().id() != 0U ||
++            (MI.getOperand(1).getReg().id() == 0U &&
++             MI.getOperand(3).getReg().id() == 0U) ||
++            (MI.getOperand(1).getReg().id() != 0U &&
++             !llamVolatileIntegerReg(MI.getOperand(1).getReg())) ||
++            (MI.getOperand(3).getReg().id() != 0U &&
++             !llamVolatileIntegerReg(MI.getOperand(3).getReg())) ||
++            (MI.getOperand(2).getImm() != 1 &&
++             MI.getOperand(2).getImm() != 2 &&
++             MI.getOperand(2).getImm() != 4 &&
++             MI.getOperand(2).getImm() != 8)) {
++          Why = "SPECIAL_REGISTER_OR_LEA_ADDRESS";
++          return true;
++        }
++        continue;
++      }
++      switch (Opcode) {
++      case X86::MOV32ri: case X86::MOV64rr:
++      case X86::ADD64ri32:
++      case X86::INC64r: case X86::DEC64r: case X86::SUB64rr:
++      case X86::XOR32rr: case X86::XOR64rr:
++      case X86::SHL64ri: case X86::SHR64ri:
++      case X86::TEST64rr: case X86::CMP64ri32:
++      case X86::JCC_1: case X86::RET64:
++        break;
++      default:
++        Why = (Twine("UNKNOWN_LOWERING ") + OpcodeName).str();
++        return true;
++      }
++      if (!llamExplicitShape(MI)) {
++        Why = (Twine("OPERAND_SHAPE ") + OpcodeName).str();
++        return true;
++      }
++      if (Opcode == X86::JCC_1 &&
++          (MI.getNumOperands() < 2U || !MI.getOperand(0).isMBB() ||
++           !MI.getOperand(1).isImm() || MI.getOperand(1).getImm() < 0 ||
++           MI.getOperand(1).getImm() > 15)) {
++        Why = "CONTROL_FLOW conditional branch";
++        return true;
++      }
++      for (const MachineOperand &Operand : MI.operands()) {
++        if (Operand.getTargetFlags() != 0U) {
++          Why = (Twine("CONTROL_OR_SYMBOL ") + OpcodeName).str();
++          return true;
++        }
++        if (Operand.isReg()) {
++          Register Reg = Operand.getReg();
++          if (Reg.id() == X86::EFLAGS && Operand.isImplicit())
++            continue;
++          if (!llamVolatileIntegerReg(Reg)) {
++            Why = (Twine("SPECIAL_REGISTER ") + OpcodeName).str();
++            return true;
++          }
++        } else if (Operand.isImm()) {
++          continue;
++        } else if (Operand.isMBB() && IsBranch &&
++                   Operand.getMBB()->getParent() == &MF) {
++          continue;
++        } else {
++          Why = (Twine("CONTROL_OR_SYMBOL ") + OpcodeName).str();
++          return true;
++        }
++      }
++    }
++  }
++  if (Frame.getNumObjects() || Frame.getStackSize() ||
++      Frame.hasVarSizedObjects() || Frame.adjustsStack() ||
++      Frame.hasOpaqueSPAdjustment() || Frame.hasCalls() ||
++      Frame.hasTailCall() || Frame.hasStackMap() || Frame.hasPatchPoint() ||
++      Frame.isFrameAddressTaken() || Frame.isReturnAddressTaken()) {
++    Why = "FRAME stack/adjustment/call";
++    return true;
++  }
++  return false;
++}
++
++class LLAMPreemptEndProbe final : public AsmPrinterHandler {
++  X86AsmPrinter &Printer;
++  const MachineFunction *Selected = nullptr;
++  MCSymbol *Begin = nullptr;
++  MCSymbol *End = nullptr;
++  MCSectionCOFF *CodeSection = nullptr;
++  MCSymbol *CodeLeader = nullptr;
++  bool Transport = false;
++  bool Certified = false;
++  unsigned EmittedCertificates = 0;
++
++public:
++  explicit LLAMPreemptEndProbe(X86AsmPrinter &Printer) : Printer(Printer) {}
++
++  void beginFunction(const MachineFunction *MF) override {
++    Selected = nullptr;
++    Begin = nullptr;
++    End = nullptr;
++    CodeSection = nullptr;
++    CodeLeader = nullptr;
++    Transport = false;
++    Certified = false;
++    const Function &Fn = MF->getFunction();
++    bool EarlyAccepted = Fn.hasFnAttribute("llam.preempt.win64_ir_accepted");
++    bool EarlyRequested = Fn.hasFnAttribute("llam.preempt.async_requested");
++    if (LLAMPreemptCertify && EarlyRequested != EarlyAccepted)
++      report_fatal_error(Twine("LLAM Win64 IR provenance mismatch ") +
++                         MF->getName());
++    Certified = LLAMPreemptCertify && EarlyRequested && EarlyAccepted;
++    if (Certified) {
++      std::string Why;
++      if (llamLateRefuse(*MF, Why))
++        report_fatal_error(Twine("LLAM Win64 certification rejected ") +
++                           MF->getName() + ": " + Why);
++    }
++    if ((LLAMPreemptLateAudit || LLAMPreemptLateRequire) &&
++        (Fn.hasFnAttribute("llam.preempt.late_probe") || EarlyAccepted)) {
++      std::string Why;
++      if (llamLateRefuse(*MF, Why)) {
++        if (LLAMPreemptLateRequire)
++          report_fatal_error(Twine("LLAM late profile rejected ") +
++                             MF->getName() + ": " + Why);
++        errs() << "llam-late-audit: REFUSE " << MF->getName() << " " << Why
++               << "\n";
++      } else if (LLAMPreemptLateAudit) {
++        errs() << "llam-late-audit: PASS_BODY " << MF->getName() << "\n";
++      }
++    }
++    Transport = LLAMPreemptProbeLLPM &&
++                Fn.hasFnAttribute("llam.preempt.transport_fixture");
++    Selected = Certified || Transport || Fn.hasFnAttribute("llam.preempt.probe")
++                   ? MF
++                   : nullptr;
++    if (!Selected)
++      return;
++    Begin = Printer.CurrentFnSym;
++    CodeSection = static_cast<MCSectionCOFF *>(
++        Printer.OutStreamer->getCurrentSectionOnly());
++    CodeLeader = CodeSection->getCOMDATSymbol();
++    if ((Certified || Transport) &&
++        (Begin == nullptr || CodeLeader == nullptr ||
++         CodeSection->getSelection() !=
++             COFF::IMAGE_COMDAT_SELECT_NODUPLICATES ||
++         MF->hasBBSections() || MF->getJumpTableInfo() != nullptr))
++      report_fatal_error(Twine("LLAM certified/transport function needs one one-only code section: ") +
++                         MF->getName());
++  }
++
++  void markFunctionEnd() override {
++    if (!Selected)
++      return;
++    if (Printer.OutStreamer->getCurrentSectionOnly() != CodeSection)
++      report_fatal_error("LLAM endpoint moved out of its code section");
++    End = Printer.OutContext.createNamedTempSymbol();
++    Printer.OutStreamer->emitLabel(End);
++  }
++
++  void endFunction(const MachineFunction *) override {
++    if (Certified || Transport) {
++      if (!Begin || !End || !CodeLeader)
++        report_fatal_error("LLAM transport fixture has no codegen boundary");
++      MCContext &Ctx = Printer.OutContext;
++      MCStreamer &Stream = *Printer.OutStreamer;
++      MCSectionCOFF *Base = Ctx.getCOFFSection(
++          ".llampm$M", COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
++                            COFF::IMAGE_SCN_MEM_READ);
++      MCSectionCOFF *Meta =
++          Ctx.getAssociativeCOFFSection(Base, CodeLeader);
++      Stream.pushSection();
++      Stream.switchSection(Meta);
++      Stream.emitValueToAlignment(Align(4));
++      Stream.emitInt32(0x4d504c4c);
++      Stream.emitInt16(1);
++      Stream.emitInt16(1);
++      Stream.emitInt32(32);
++      Stream.emitInt32(48);
++      Stream.emitInt64(0);
++      Stream.emitInt32(1);
++      Stream.emitInt32(4);
++      MCSymbol *BeginField = Ctx.createTempSymbol("llam_begin_field");
++      Stream.emitLabel(BeginField);
++      Stream.emitValue(MCBinaryExpr::createSub(
++                           MCSymbolRefExpr::create(Begin, Ctx),
++                           MCSymbolRefExpr::create(BeginField, Ctx), Ctx),
++                       4);
++      MCSymbol *EndField = Ctx.createTempSymbol("llam_end_field");
++      Stream.emitLabel(EndField);
++      Stream.emitValue(MCBinaryExpr::createSub(
++                           MCSymbolRefExpr::create(End, Ctx),
++                           MCSymbolRefExpr::create(EndField, Ctx), Ctx),
++                       4);
++      Stream.emitInt32(1);
++      Stream.emitInt32(0);
++      Stream.popSection();
++      if (Certified)
++        ++EmittedCertificates;
++    }
++    Selected = nullptr;
++    Begin = nullptr;
++    End = nullptr;
++    CodeSection = nullptr;
++    CodeLeader = nullptr;
++    Transport = false;
++    Certified = false;
++  }
++  void endModule() override {
++    if (LLAMPreemptCertify && EmittedCertificates == 0U)
++      report_fatal_error("LLAM Win64 certification found no accepted function");
++  }
++};
++
+ X86AsmPrinter::X86AsmPrinter(TargetMachine &TM,
+                              std::unique_ptr<MCStreamer> Streamer)
+     : AsmPrinter(TM, std::move(Streamer), ID), FM(*this) {
++  if (LLAMPreemptCertify && LLAMPreemptProbeLLPM)
++    report_fatal_error("LLAM certification and manual transport modes are exclusive");
++  if (LLAMPreemptCertify && !TM.getTargetTriple().isWindowsGNUEnvironment())
++    report_fatal_error("LLAM certification requires Windows GNU/COFF target");
++  if ((LLAMPreemptProbeLLPM || LLAMPreemptLateAudit ||
++       LLAMPreemptLateRequire || LLAMPreemptCertify) &&
++      TM.Options.BBSections != BasicBlockSection::None)
++    report_fatal_error("LLAM late profile rejected: LAYOUT basic-block sections");
++  if (LLAMPreemptProbeLLPM && llamX86MCEmitsUnqualifiedPadding())
++    report_fatal_error("LLAM transport fixture rejected: MC branch/prefix padding");
++  if ((LLAMPreemptProbeEnd || LLAMPreemptProbeLLPM || LLAMPreemptLateAudit ||
++       LLAMPreemptLateRequire || LLAMPreemptCertify) &&
++      TM.getTargetTriple().isOSWindows() &&
++      TM.getTargetTriple().isOSBinFormatCOFF() &&
++      TM.getTargetTriple().getArch() == Triple::x86_64)
++    addAsmPrinterHandler(std::make_unique<LLAMPreemptEndProbe>(*this));
+   GetPSI = [this](Module &M) -> ProfileSummaryInfo * {
+     if (auto *PSIW = getAnalysisIfAvailable<ProfileSummaryInfoWrapperPass>())
+       return &PSIW->getPSI();

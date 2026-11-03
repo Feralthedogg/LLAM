@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "engine/runtime_watchdog_internal.h"
@@ -47,32 +47,37 @@ static void llam_io_test_submit_evacuation_unlocked(void) {
 #endif
 
 /**
- * @brief Decide whether source shard timers can be merged.
+ * @brief Rehome source timers after the source owner acknowledges a merge pause.
  *
- * Timer heaps are not migrated yet; a shard with active timers, or expired
- * timers that have been popped but not fully resolved, must remain online until
- * the timer path drains.
- *
- * @param source       Source shard.
- * @param target       Target shard.
- * @param migrated_out Optional migrated-count output, always set to 0.
- *
- * @return @c true only when the source has no timers.
+ * The timer heap helper preflights wait generations and ownership, reserves
+ * target capacity, then moves nodes while both shard lock pairs are held.
+ * Expired callbacks must already be quiescent before any heap ownership moves.
  */
 bool llam_merge_shard_timers_locked(llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
+    uint64_t request_sequence;
+    uint64_t epoch_value;
+    uint64_t worker_incarnation;
+
     if (migrated_out != NULL) {
         *migrated_out = 0U;
     }
     if (source == NULL || target == NULL || source == target) {
         return false;
     }
-    if (!llam_shard_merge_pause_requested(source)) {
+    request_sequence = atomic_load_explicit(&source->merge_pause_request_sequence,
+                                             memory_order_acquire);
+    epoch_value = atomic_load_explicit(&source->merge_pause_ack_lease_epoch,
+                                       memory_order_acquire);
+    worker_incarnation = atomic_load_explicit(
+        &source->merge_pause_ack_worker_incarnation,
+        memory_order_acquire);
+    if (!llam_shard_merge_pause_ack_matches_locked(source,
+                                                   request_sequence,
+                                                   epoch_value,
+                                                   worker_incarnation)) {
         return false;
     }
-    // Timer nodes are heap-backed; do not migrate them with the old linked-list path.
-    return source->timer_heap_len == 0U &&
-           source->timers == NULL &&
-           atomic_load_explicit(&source->timer_callbacks_active, memory_order_acquire) == 0U;
+    return llam_processor_rehome_timers_locked(source, target, migrated_out);
 }
 
 /**
@@ -653,7 +658,10 @@ static bool llam_rehome_node_watch_waiters(llam_node_t *node, llam_shard_t *sour
             pthread_mutex_unlock(&node->watch_lock);
             return false;
         }
-        target_node_index = llam_multishot_owner_node_index(node->runtime, target->io_node_index, poll_watch->fd);
+        target_node_index = llam_multishot_owner_node_index(
+            node->runtime,
+            llam_processor_io_node_index(&target->processor),
+            poll_watch->fd);
         target_owned = llam_io_waiters_all_owned_by_shard(poll_watch->wait_head, target->id);
         if (poll_watch->wait_head != NULL &&
             node->index != target_node_index &&
@@ -677,7 +685,10 @@ static bool llam_rehome_node_watch_waiters(llam_node_t *node, llam_shard_t *sour
             pthread_mutex_unlock(&node->watch_lock);
             return false;
         }
-        target_node_index = llam_multishot_owner_node_index(node->runtime, target->io_node_index, accept_watch->fd);
+        target_node_index = llam_multishot_owner_node_index(
+            node->runtime,
+            llam_processor_io_node_index(&target->processor),
+            accept_watch->fd);
         target_owned = llam_io_waiters_all_owned_by_shard(accept_watch->wait_head, target->id);
         if (accept_watch->wait_head != NULL &&
             node->index != target_node_index &&
@@ -701,7 +712,10 @@ static bool llam_rehome_node_watch_waiters(llam_node_t *node, llam_shard_t *sour
             pthread_mutex_unlock(&node->watch_lock);
             return false;
         }
-        target_node_index = llam_multishot_owner_node_index(node->runtime, target->io_node_index, recv_watch->fd);
+        target_node_index = llam_multishot_owner_node_index(
+            node->runtime,
+            llam_processor_io_node_index(&target->processor),
+            recv_watch->fd);
         target_owned = llam_io_waiters_all_owned_by_shard(recv_watch->wait_head, target->id);
         if (recv_watch->wait_head != NULL &&
             node->index != target_node_index &&
@@ -755,7 +769,11 @@ bool llam_rehome_runtime_watch_waiters(llam_runtime_t *rt,
     }
 
     if (rt->experimental_shard_rings_multishot == 0U || rt->active_nodes <= 1U) {
-        return llam_rehome_node_watch_waiters(&rt->nodes[source->io_node_index], source, target, migrated_out);
+        return llam_rehome_node_watch_waiters(
+            &rt->nodes[llam_processor_io_node_index(&source->processor)],
+            source,
+            target,
+            migrated_out);
     }
 
     for (i = 0U; i < rt->active_nodes; ++i) {

@@ -12,17 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
-"""Check the Phase 1A legacy lease and execution-publication boundaries.
+"""Check the Phase 1A lease and Phase 1B processor-resource boundaries.
 
 The Phase 0 worker-identity scanner remains the source of truth for its own
-rules.  This checker delegates to it and filters only the three explicitly
-owned Phase 1A ``active_g`` surfaces: the worker field declaration, embedded
-worker initialization, and the three worker publication helpers.  Additional
-checks below reject independent shard/processor authority, unversioned pause
-acknowledgements, unsafe watchdog target use, ownerless grants, and reverse
-lease/shard lock acquisition.
+rules. This checker delegates to it and filters the explicitly owned
+``active_g`` surfaces: the worker field declaration, embedded/registered worker
+initialization, and the worker publication helpers. Registered-M transitions
+also require their closed native ownership contracts. Additional
+checks reject independent shard authority, duplicated processor topology/wake
+fields, unapproved copied P resources, unversioned pause acknowledgements,
+unsafe watchdog target use, ownerless grants, and reverse lease/shard lock
+acquisition.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import argparse
 import bisect
 from dataclasses import dataclass
 import functools
+import hashlib
 import pathlib
 import re
 import sys
@@ -44,6 +47,54 @@ except ModuleNotFoundError:  # Imported as ``scripts.check_legacy_lease_boundary
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+# Closed publication protocols: token hashes ignore formatting/comments.
+# Guard, rollback, or call changes require re-auditing the native ownership
+# contract and its negative fixtures; no source-file-wide exemption applies.
+REGISTERED_EXECUTION_CONTRACTS = {
+    "src/core/sched/worker_registry.c": {
+        "llam_worker_init_registered": "a5b3c5d4fc582736b6f662a59dbdd5487a86ebe0eeaf967c851c66a1f4468a89",
+    },
+    "src/core/sched/execution_lease.c": {
+        "llam_execution_lease_native_owner": "354b5d9522d279671db0631eef9e517014c0dffd3429508108dc582fa53361f2",
+        "llam_execution_lease_claim_locked": "7d3aa50f5ec953134582c56bd52662d57330aaa43bd4a6c28b3cae9d0185c9d0",
+        # A separate STOPPING claim keeps shutdown drain authority out of the
+        # ordinary ticket path. Both grants reserve current_p before owner
+        # publication and roll back both projections on compose failure.
+        "llam_execution_lease_claim_drain_locked": "5137c1d5fd5ce59ed9556dde5fe32be8739b2e57acc2fa8b0173d8d03ad9e0c3",
+        "llam_execution_lease_return_locked": "acd5eb304a81960041fc943f8b9186133ae1a951abc9ad2d878074c4dfcf0ab3",
+    },
+}
+
+# Reviewed wait snapshots and all-P trylock freezes use their own lock proof.
+# Keep other functions under the ordinary lexical lock/owner audit.
+REVIEWED_OWNERSHIP_CONTRACTS = {
+    "src/core/sched/managed_scheduler.c": {
+        # An acquire/release dispatch reservation precedes context access.
+        # Losing admission only republishes to the origin's inject queue under
+        # its payload lock; it neither migrates G nor grants a P lease.
+        "llam_managed_reserve_task": "d7c1d9816aa47fcc887463460c331d4168ec947c83e351fdd66c7363da0a6694",
+    },
+    "src/core/context/windows_async_lifetime.c": {
+        "llam_windows_async_lock": "e9a7d43ee875088be25506f9395703a0954d014d8b735aa2238f7a632eb6987f",
+        "llam_windows_async_unlock": "5bdc0cca7e980ecadd9d2af52e0d165e85348514a10cec6cf6c0fdaad879c581",
+    },
+    "src/core/context/async_context_shared.c": {
+        # Registered service locks all opaque gates before any P payload lock,
+        # in increasing P order, and releases the two sets in reverse order.
+        # Legacy service takes the single home-P pair. Neither helper performs
+        # native suspension or publishes an execution owner.
+        "llam_shared_lock": "4247e56c4a5b399bb7c5ef8785b7dc4573c0ba1f5cb4460e8dff94cacde41c4e",
+        "llam_shared_unlock": "457e01c150964afa0e8277e7443597070f190c60841aca89151ff668aa5e5210",
+    },
+    "src/engine/watchdog/watchdog_deadlock.c": {
+        "llam_watchdog_confirm_deadlock": "040782bb072c903f74c9a9fc0d953e4436b96539ed76c2c4b25435e57c11202c",
+    },
+    "src/core/wait/wait_tracking.c": {
+        "llam_task_wait_dependency_read_locked": "6c4d408d43e625fa083ff1c0b00cd931e9d634b707b5e1b029893c01ce370d93",
+        "llam_task_wait_dependency_matches": "c2e126c58c3bd189e2f04476d2bbfcbc609160816f10b08b6037f73718a78052",
+    },
+}
+
 ACTIVE_G_HELPERS = frozenset(
     {
         "llam_worker_publish_active_g",
@@ -52,7 +103,104 @@ ACTIVE_G_HELPERS = frozenset(
     }
 )
 ACTIVE_G_INIT_WORKERS = frozenset({"primary_worker", "opaque_helper_worker"})
-PROCESSOR_ALLOWED_MEMBERS = frozenset({"runtime", "compat_shard", "id"})
+PROCESSOR_ALLOWED_MEMBERS = frozenset(
+    {
+        "runtime",
+        "compat_shard",
+        "id",
+        "owner_record",
+        "cpu_id",
+        "node_index",
+        "io_node_index",
+        "online",
+        "event_fd",
+        "event_pending",
+        "inject_q",
+        "inject_depth",
+        "hot_q",
+        "norm_q",
+        "norm_cldeque",
+        "norm_depth",
+        "hot_streak",
+        "direct_handoff_streak",
+        "autotune_handoff_sample_seq",
+        "autotune_wake_latency_sample_countdown",
+        "autotune_handoff_sample_current",
+        "timers",
+        "timer_heap",
+        "timer_heap_len",
+        "timer_heap_cap",
+        "timer_count",
+        "timer_callbacks_active",
+        "allocator",
+        "stack_cache_lock_initialized",
+        "stack_cache_default",
+        "stack_cache_large",
+        "stack_cache_huge",
+        "stack_cache_entry_free",
+        "stack_cache_default_count",
+        "stack_cache_large_count",
+        "stack_cache_huge_count",
+        "stack_cache_lock",
+    }
+)
+PROCESSOR_TOPOLOGY_WAKE_MEMBERS = frozenset(
+    {"cpu_id", "node_index", "io_node_index", "online", "event_fd", "event_pending"}
+)
+PROCESSOR_QUEUE_TIMER_MEMBERS = frozenset(
+    {
+        "inject_q",
+        "inject_depth",
+        "hot_q",
+        "norm_q",
+        "norm_cldeque",
+        "norm_depth",
+        "hot_streak",
+        "direct_handoff_streak",
+        "autotune_handoff_sample_seq",
+        "autotune_wake_latency_sample_countdown",
+        "autotune_handoff_sample_current",
+        "timers",
+        "timer_heap",
+        "timer_heap_len",
+        "timer_heap_cap",
+        "timer_count",
+        "timer_callbacks_active",
+    }
+)
+PROCESSOR_REQUIRED_QUEUE_TIMER_FIELDS = PROCESSOR_QUEUE_TIMER_MEMBERS
+PROCESSOR_ALLOCATOR_CACHE_MEMBERS = frozenset(
+    {
+        "allocator",
+        "stack_cache_lock_initialized",
+        "stack_cache_default",
+        "stack_cache_large",
+        "stack_cache_huge",
+        "stack_cache_entry_free",
+        "stack_cache_default_count",
+        "stack_cache_large_count",
+        "stack_cache_huge_count",
+        "stack_cache_lock",
+    }
+)
+PROCESSOR_REQUIRED_ALLOCATOR_CACHE_FIELDS = PROCESSOR_ALLOCATOR_CACHE_MEMBERS
+PROCESSOR_SHARD_MOVED_MEMBERS = (
+    PROCESSOR_TOPOLOGY_WAKE_MEMBERS
+    | PROCESSOR_QUEUE_TIMER_MEMBERS
+    | PROCESSOR_ALLOCATOR_CACHE_MEMBERS
+)
+PROCESSOR_OWNER_RECORD_HELPERS = frozenset(
+    {
+        "llam_processor_owner_snapshot",
+        "llam_processor_owner_snapshot_pair_locked",
+        "llam_processor_owner_compose_pair_locked",
+        "llam_processor_owner_compose_locked",
+        "llam_processor_owner_ticket_snapshot_pair_locked",
+        "llam_processor_owner_ticket_validate_pair_locked",
+        "llam_processor_queue_access_snapshot_pair_locked",
+        "llam_processor_queue_access_validate_locked",
+    }
+)
 PAUSE_ACK_FIELDS = frozenset({"merge_pause_ack", "steal_pause_ack"})
 PAUSE_ACK_TUPLE_SUFFIXES = (
     "_ack_sequence",
@@ -88,6 +236,7 @@ PAUSE_ACK_RESET_HELPERS = frozenset(
         "llam_runtime_set_steal_pause",
         "llam_shard_request_merge_pause",
         "llam_shard_release_merge_pause",
+        "llam_shard_release_merge_pause_if_sequence",
     }
 )
 PAUSE_ACK_SAMPLING_FUNCTIONS = frozenset(
@@ -97,7 +246,9 @@ PAUSE_ACK_SAMPLING_FUNCTIONS = frozenset(
         "llam_shard_merge_pause_ack_current_locked",
         "llam_merge_lockfree_normq_locked",
         "llam_merge_runnable_queues_locked",
+        "llam_merge_shard_timers_locked",
         "llam_runtime_offline_one_shard",
+        "llam_async_offline_idle_shard",
     }
 )
 PAUSE_ACK_KNOWN_CALLS = frozenset(
@@ -135,12 +286,15 @@ PAUSE_ACK_SAMPLING_ALLOWED_CALLS = frozenset(
         "llam_lockfree_normq_enabled",
         "llam_merge_task_to_target_locked",
         "llam_merge_shard_timers_locked",
+        "llam_processor_rehome_timers_locked",
         "llam_merge_lockfree_normq_locked",
         "llam_merge_runnable_queues_locked",
         "llam_norm_queue_depth",
         "llam_norm_queue_pop_owner_locked",
+        "llam_norm_queue_pop_merge_locked",
         "llam_norm_queue_push_owner_locked",
         "llam_norm_queue_note_dequeue",
+        "llam_queue_push_bounded_locked",
         "llam_queue_can_merge_runnable",
         "llam_queue_pop_head",
         "llam_shard_merge_pause_requested",
@@ -150,6 +304,13 @@ PAUSE_ACK_SAMPLING_ALLOWED_CALLS = frozenset(
         "llam_runtime_online_shards",
         "llam_runtime_note_online_shards",
         "llam_runtime_pick_merge_target",
+        "llam_processor_io_node_index",
+        "llam_processor_online",
+        "llam_processor_set_online",
+        "llam_processor_try_set_online",
+        "llam_async_preempt_dynamic_allowed",
+        "llam_async_preempt_idle_domain",
+        "llam_async_offline_idle_shard",
         "llam_runtime_set_steal_pause",
         "llam_runtime_wait_steal_pause_ack",
         "llam_shard_accepts_new_work",
@@ -158,6 +319,7 @@ PAUSE_ACK_SAMPLING_ALLOWED_CALLS = frozenset(
         "llam_shard_inflight_io_waiters",
         "llam_shard_load_lease_current",
         "llam_shard_release_merge_pause",
+        "llam_shard_release_merge_pause_if_sequence",
         "llam_shard_request_merge_pause",
         "llam_shard_wait_merge_pause_ack",
         "llam_rehome_inflight_io_waiters",
@@ -179,6 +341,7 @@ WATCHDOG_TARGET_MEMBERS = frozenset(
     {"native_thread", "primary_thread", "opaque_helper_thread", "preempt_thread", "thread"}
 )
 LEASE_OWNER_RECEIVERS = frozenset({"lease", "legacy_lease", "coordinator", "execution_lease"})
+LEASE_OWNER_READ_HELPERS = frozenset({"llam_processor_queue_access_snapshot_pair_locked"})
 LEASE_OWNER_WRITE_HELPERS = frozenset(
     {
         "llam_legacy_lease_grant_helper_locked",
@@ -223,8 +386,12 @@ LEASE_OWNER_ALLOWED_CALLS = frozenset(
         "llam_legacy_lease_merge_paused",
         "llam_legacy_lease_matches_worker",
         "llam_worker_binding_live",
+        "llam_processor_online",
         "llam_legacy_lease_next_counter",
         "llam_legacy_lease_assert_consistent_locked",
+        "llam_legacy_lease_compose_or_restore",
+        "llam_processor_owner_compose_locked",
+        "llam_processor_owner_compose_pair_locked",
         "atomic_load",
         "atomic_load_explicit",
         "atomic_store",
@@ -241,6 +408,9 @@ LEASE_OWNER_NULL_ALLOWED_CALLS = frozenset(
         "pthread_mutex_unlock",
         "pthread_self",
         "sizeof",
+        # Read-only origin service guard and non-returning invariant failure.
+        "llam_async_preempt_has_origin_obligations",
+        "abort",
     }
 )
 CONTROL_FLOW_NAMES = frozenset({"if", "for", "while", "switch", "catch"})
@@ -294,12 +464,26 @@ def _matching_brace(text: str, opening: int) -> int | None:
 def _function_spans(masked: str) -> list[_FunctionSpan]:
     """Find C function definition bodies in masked source text."""
 
+    # Preprocessor predicates/macros are not function declarations. Otherwise
+    # a leading #if defined(...) can consume the next real definition and hide
+    # its ownership protocol under the synthetic name "defined". Keep source
+    # offsets intact; body tokens (including directives) remain auditable.
+    declaration_lines = []
+    continued = False
+    for line in masked.splitlines(keepends=True):
+        directive = continued or line.lstrip().startswith("#")
+        continued = directive and line.rstrip().endswith("\\")
+        declaration_lines.append(
+            "".join("\n" if char == "\n" else " " for char in line)
+            if directive else line
+        )
+    declarations = "".join(declaration_lines)
     spans: list[_FunctionSpan] = []
     definition_re = re.compile(
         r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{",
         re.DOTALL,
     )
-    for match in definition_re.finditer(masked):
+    for match in definition_re.finditer(declarations):
         name = match.group("name")
         if name in CONTROL_FLOW_NAMES:
             continue
@@ -653,6 +837,19 @@ def _identifier_has_expression_write_or_move(
                 if addressed_end >= end or tokens[addressed_end].value not in {"->", "."}:
                     return True
 
+        # A bare value in a designated initializer is copied, not rebound.
+        # Other initializer fields may contain assignments after this token;
+        # inspect later uses separately instead of attributing sibling stores
+        # to this rvalue.
+        if (
+            index >= 4
+            and previous == "="
+            and tokens[index - 3].value == "."
+            and tokens[index - 4].value in {"{", ","}
+            and following in {",", "}"}
+        ):
+            continue
+
         statement_start, statement_end = _statement_bounds(tokens, index, start, end)
         # An assignment later in this statement is an expression lvalue even
         # when parentheses/casts/comma operators separate it from the name.
@@ -711,9 +908,23 @@ def _identifier_has_expression_write_or_move(
             # the same statement so scalar comparisons elsewhere cannot make
             # a direct member use fail spuriously.
             cursor = index + 1
-            while cursor < statement_end and tokens[cursor].value in {")", "]"
-            }:
+            opening = index - 1
+            while (
+                cursor < statement_end
+                and opening >= statement_start
+                and tokens[cursor].value == ")"
+                and tokens[opening].value == "("
+            ):
+                # ``call(name) + offset`` operates on the call result. Only
+                # parentheses grouping the identifier itself can expose a
+                # pointer movement after their closing delimiter.
+                if opening > statement_start and (
+                    re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tokens[opening - 1].value)
+                    or tokens[opening - 1].value in {")", "]"}
+                ):
+                    break
                 cursor += 1
+                opening -= 1
             if cursor < statement_end and tokens[cursor].value in {"+", "-"}:
                 return True
             cursor = index - 1
@@ -722,6 +933,44 @@ def _identifier_has_expression_write_or_move(
             if cursor >= statement_start and tokens[cursor].value in {"+", "-"}:
                 return True
     return False
+
+
+def _address_operand_end(
+    tokens: Sequence[phase0._Token], start: int
+) -> int:
+    """Bound a unary-address operand without crossing sibling expressions.
+
+    Grouping and postfix projections stay inside the operand, so addresses
+    such as ``&(lease->owner)`` remain visible. Commas and logical/arithmetic
+    operators end an ungrouped operand; an earlier unrelated address in a
+    guard is not an owner-slot escape.
+    """
+
+    end = len(tokens)
+    cursor = start
+    while cursor < end and tokens[cursor].value in {"*", "&", "+", "-", "!", "~", "++", "--"}:
+        cursor += 1
+    if cursor >= end:
+        return end
+    if tokens[cursor].value == "(":
+        closing = _matching_token(tokens, cursor, "(", ")")
+        if closing is None:
+            return end
+        cursor = closing + 1
+    else:
+        cursor += 1
+    while cursor < end:
+        value = tokens[cursor].value
+        if value in {"->", "."} and cursor + 1 < end:
+            cursor += 2
+        elif value in {"[", "("}:
+            closing = _matching_token(tokens, cursor, value, "]" if value == "[" else ")")
+            if closing is None:
+                return end
+            cursor = closing + 1
+        else:
+            break
+    return cursor
 
 
 def _member_mutated_in_interval(
@@ -1122,6 +1371,88 @@ def _member_accesses(
         yield line, receiver, kind, member
 
 
+def _function_token_fingerprint(
+    masked: str, tokens: Sequence[phase0._Token], function: _FunctionSpan
+) -> str:
+    begin, end = _token_range_for_span(masked, function)
+    body = "\0".join(token.value for token in tokens[begin:end]).encode()
+    return hashlib.sha256(body).hexdigest()
+
+
+def _reviewed_ownership_contract_matches(
+    relative_path: str, masked: str,
+    tokens: Sequence[phase0._Token], function: _FunctionSpan
+) -> bool:
+    expected = REVIEWED_OWNERSHIP_CONTRACTS.get(relative_path, {}).get(function.name)
+    return expected is not None and _function_token_fingerprint(masked, tokens, function) == expected
+
+
+def _reviewed_ownership_contract_errors(
+    relative_path: str, masked: str
+) -> list[tuple[int, str]]:
+    expected = REVIEWED_OWNERSHIP_CONTRACTS.get(relative_path)
+    if expected is None:
+        return []
+    tokens = phase0._tokens(masked)
+    functions = {function.name: function for function in _function_spans(masked)}
+    errors = []
+    for name in expected:
+        function = functions.get(name)
+        if function is None or not _reviewed_ownership_contract_matches(
+            relative_path, masked, tokens, function
+        ):
+            errors.append((function.start_line if function else 1,
+                           "unverified wait/aggregate ownership contract"))
+    if relative_path == "src/engine/watchdog/watchdog_deadlock.c":
+        allowed = {"LLAM_DEADLOCK_SCAN_TASK_LIMIT": "4096U",
+                   "LLAM_DEADLOCK_SCAN_PROCESSOR_LIMIT": "64U"}
+        observed = {}
+        for line, text in enumerate(masked.splitlines(), 1):
+            match = re.match(r"^\s*#\s*define\s+(\w+)\s+(.*?)\s*$", text)
+            if match:
+                name, value = match.groups()
+                if name in observed or allowed.get(name) != value:
+                    errors.append((line, "unverified cold-scan bound or macro"))
+                observed[name] = value
+        if observed != allowed:
+            errors.append((1, "unverified cold-scan bound or macro"))
+    return errors
+
+
+def _registered_execution_contract_matches(
+    relative_path: str,
+    masked: str,
+    tokens: Sequence[phase0._Token],
+    function: _FunctionSpan,
+) -> bool:
+    expected = REGISTERED_EXECUTION_CONTRACTS.get(relative_path, {}).get(function.name)
+    if expected is None:
+        return False
+    return _function_token_fingerprint(masked, tokens, function) == expected
+
+
+def _registered_execution_contract_errors(
+    relative_path: str, masked: str
+) -> list[tuple[int, str]]:
+    expected = REGISTERED_EXECUTION_CONTRACTS.get(relative_path)
+    if expected is None:
+        return []
+    tokens = phase0._tokens(masked)
+    functions = {function.name: function for function in _function_spans(masked)}
+    errors = []
+    for name in expected:
+        function = functions.get(name)
+        if function is None or not _registered_execution_contract_matches(
+            relative_path, masked, tokens, function
+        ):
+            errors.append((function.start_line if function else 1,
+                           "registered execution contract changed"))
+    for line, text in enumerate(masked.splitlines(), 1):
+        if re.match(r"^\s*#\s*define\b", text):
+            errors.append((line, "macro in registered execution contract"))
+    return errors
+
+
 def _active_g_allowed_indices(
     relative_path: str, masked: str, tokens: Sequence[phase0._Token]
 ) -> set[int]:
@@ -1161,6 +1492,18 @@ def _active_g_allowed_indices(
             statement = [tokens[item].value for item in range(statement_start, statement_end + 1)]
             if statement == ["_Atomic", "(", "llam_task_t", "*", ")", "active_g", ";"]:
                 allowed.add(index)
+        return allowed
+
+    if path == "src/core/sched/worker_registry.c":
+        functions = _function_spans(masked)
+        for function in functions:
+            if function.name != "llam_worker_init_registered" or not (
+                _registered_execution_contract_matches(path, masked, tokens, function)
+            ):
+                continue
+            begin, end = _token_range_for_span(masked, function)
+            allowed.update(index for index in range(begin, end)
+                           if tokens[index].value == "active_g")
         return allowed
 
     if path == "src/core/lifecycle/init.c":
@@ -1398,11 +1741,12 @@ def _active_g_surface_errors(relative_path: str, masked: str) -> list[tuple[int,
             if tokens[index].value == "active_g" and index not in allowed:
                 fail(tokens[index].line)
 
-        # Each active-G helper is a distinct one-operation API.  Accepting a
-        # direct atomic spelling is insufficient: an extra store/load, wrong
-        # order, wrong value, or relaxed order can publish state that callers
-        # did not audit.  Keep the null guard used by the native helpers, but
-        # require the exact atomic operation sequence below.
+        # Each active-G helper is a distinct publication API. The active-G
+        # store/load/clear and the matching M execution-state projection are
+        # one audited surface: an extra store/load, wrong state expression,
+        # wrong order, or relaxed order can publish a split M/G observation.
+        # Keep the null guard used by the native helpers and require the exact
+        # atomic operations below.
         def call_values(call: _CallSite, argument: int) -> tuple[str, ...]:
             return (
                 _arg_values(tokens, call.args[argument])
@@ -1449,16 +1793,100 @@ def _active_g_surface_errors(relative_path: str, masked: str) -> list[tuple[int,
                 fail(tokens[call.name_index].line)
 
         expected_active_target = ("&", worker, "->", "active_g")
+        expected_exec_target = ("&", worker, "->", "execution_state")
+        expected_critical_target = ("&", worker, "->", "runtime_critical_depth")
+        expected_preempt_target = ("&", worker, "->", "preempt_disable_depth")
+
+        def matching_atomic_calls(
+            operation: str, target: tuple[str, ...]
+        ) -> list[_CallSite]:
+            return [
+                call
+                for call in atomic_body_calls
+                if call.name == operation
+                and call.args
+                and call_values(call, 0) == target
+            ]
+
+        def valid_depth_state_store(call: _CallSite, idle_state: str) -> bool:
+            expected_state = (
+                "atomic_load_explicit",
+                "(",
+                "&",
+                worker,
+                "->",
+                "runtime_critical_depth",
+                ",",
+                "memory_order_acquire",
+                ")",
+                "==",
+                "0",
+                "U",
+                "&&",
+                "atomic_load_explicit",
+                "(",
+                "&",
+                worker,
+                "->",
+                "preempt_disable_depth",
+                ",",
+                "memory_order_acquire",
+                ")",
+                "==",
+                "0",
+                "U",
+                "?",
+                idle_state,
+                ":",
+                "LLAM_WORKER_EXEC_RUNTIME_UNSAFE",
+            )
+            return (
+                call.name == "atomic_store_explicit"
+                and len(call.args) == 3
+                and call_values(call, 0) == expected_exec_target
+                and call_values(call, 1) == expected_state
+                and call_values(call, 2) == ("memory_order_release",)
+            )
+
+        active_stores = matching_atomic_calls(
+            "atomic_store_explicit", expected_active_target
+        )
+        exec_stores = matching_atomic_calls(
+            "atomic_store_explicit", expected_exec_target
+        )
+        critical_loads = matching_atomic_calls(
+            "atomic_load_explicit", expected_critical_target
+        )
+        preempt_loads = matching_atomic_calls(
+            "atomic_load_explicit", expected_preempt_target
+        )
+
         if function.name == "llam_worker_publish_active_g":
-            valid = len(atomic_body_calls) == 1
+            valid = (
+                len(atomic_body_calls) == 4
+                and len(active_stores) == 1
+                and len(exec_stores) == 1
+                and len(critical_loads) == 1
+                and len(preempt_loads) == 1
+            )
             if valid:
-                call = atomic_body_calls[0]
+                active_call = active_stores[0]
+                exec_call = exec_stores[0]
+                critical_call = critical_loads[0]
+                preempt_call = preempt_loads[0]
                 valid = (
-                    call.name == "atomic_store_explicit"
-                    and len(call.args) == 3
-                    and call_values(call, 0) == expected_active_target
-                    and call_values(call, 1) == (parameters[1],)
-                    and call_values(call, 2) == ("memory_order_release",)
+                    len(active_call.args) == 3
+                    and call_values(active_call, 1) == (parameters[1],)
+                    and call_values(active_call, 2) == ("memory_order_release",)
+                    and valid_depth_state_store(
+                        exec_call, "LLAM_WORKER_EXEC_MANAGED_SAFE"
+                    )
+                    and len(critical_call.args) == 2
+                    and call_values(critical_call, 1) == ("memory_order_acquire",)
+                    and len(preempt_call.args) == 2
+                    and call_values(preempt_call, 1) == ("memory_order_acquire",)
+                    and active_call.name_index < exec_call.name_index
+                    and exec_call.name_index < critical_call.name_index < preempt_call.name_index
                 )
             if not valid:
                 fail(function.start_line)
@@ -1496,21 +1924,38 @@ def _active_g_surface_errors(relative_path: str, masked: str) -> list[tuple[int,
             if not valid:
                 fail(function.start_line)
         else:  # llam_worker_clear_active_g
-            valid = len(atomic_body_calls) == 2
+            timestamp_stores = matching_atomic_calls(
+                "atomic_store_explicit", ("&", worker, "->", "last_run_started_ns")
+            )
+            valid = (
+                len(atomic_body_calls) == 5
+                and len(active_stores) == 1
+                and len(timestamp_stores) == 1
+                and len(exec_stores) == 1
+                and len(critical_loads) == 1
+                and len(preempt_loads) == 1
+            )
             if valid:
-                active_call, timestamp_call = atomic_body_calls
+                active_call = active_stores[0]
+                timestamp_call = timestamp_stores[0]
+                exec_call = exec_stores[0]
+                critical_call = critical_loads[0]
+                preempt_call = preempt_loads[0]
                 valid = (
-                    active_call.name == "atomic_store_explicit"
-                    and len(active_call.args) == 3
-                    and call_values(active_call, 0) == expected_active_target
+                    len(active_call.args) == 3
                     and _is_zero_value(tokens, active_call.args[1])
                     and call_values(active_call, 2) == ("memory_order_release",)
-                    and timestamp_call.name == "atomic_store_explicit"
                     and len(timestamp_call.args) == 3
-                    and call_values(timestamp_call, 0)
-                    == ("&", worker, "->", "last_run_started_ns")
                     and _is_zero_value(tokens, timestamp_call.args[1])
                     and call_values(timestamp_call, 2) == ("memory_order_release",)
+                    and valid_depth_state_store(exec_call, "LLAM_WORKER_EXEC_SCHEDULER")
+                    and len(critical_call.args) == 2
+                    and call_values(critical_call, 1) == ("memory_order_acquire",)
+                    and len(preempt_call.args) == 2
+                    and call_values(preempt_call, 1) == ("memory_order_acquire",)
+                    and active_call.name_index < timestamp_call.name_index
+                    and timestamp_call.name_index < exec_call.name_index
+                    and exec_call.name_index < critical_call.name_index < preempt_call.name_index
                 )
             if not valid:
                 fail(function.start_line)
@@ -1545,6 +1990,7 @@ def _processor_struct_errors(relative_path: str, masked: str) -> list[tuple[int,
     identifier_re = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     for span in spans:
         body = masked[span.body_start : span.body_end]
+        present: set[str] = set()
         for statement in re.finditer(r"[^;]+;", body, re.DOTALL):
             statement_text = statement.group(0)
             if "(" in statement_text:
@@ -1553,12 +1999,28 @@ def _processor_struct_errors(relative_path: str, masked: str) -> list[tuple[int,
             if not identifiers:
                 continue
             field = identifiers[-1].group(0)
+            present.add(field)
             if field in PROCESSOR_ALLOWED_MEMBERS:
                 continue
             field_offset = span.body_start + statement.start() + identifiers[-1].start()
             errors.append(
                 (_line_at(masked, field_offset), "Phase 1A copied P resource in processor")
             )
+        if pathlib.PurePath(relative_path).as_posix() == "src/internal/runtime_types.h":
+            for field in sorted(PROCESSOR_REQUIRED_QUEUE_TIMER_FIELDS - present):
+                errors.append(
+                    (
+                        _line_at(masked, span.body_start),
+                        f"Phase 2 processor queue/timer field missing: {field}",
+                    )
+                )
+            for field in sorted(PROCESSOR_REQUIRED_ALLOCATOR_CACHE_FIELDS - present):
+                errors.append(
+                    (
+                        _line_at(masked, span.body_start),
+                        f"Phase 3 processor allocator/cache field missing: {field}",
+                    )
+                )
     return errors
 
 
@@ -1576,14 +2038,19 @@ def _shard_struct_errors(masked: str) -> list[tuple[int, str]]:
                 continue
             field_match = identifiers[-1]
             field = field_match.group(0)
-            if field not in {"current", "preempt_thread"}:
+            if field not in {"current", "preempt_thread"} | PROCESSOR_SHARD_MOVED_MEMBERS:
                 continue
             field_offset = span.body_start + statement.start() + field_match.start()
-            message = (
-                "Phase 1A independent shard current authority"
-                if field == "current"
-                else "Phase 1A independent preempt target"
-            )
+            if field == "current":
+                message = "Phase 1A independent shard current authority"
+            elif field == "preempt_thread":
+                message = "Phase 1A independent preempt target"
+            elif field in PROCESSOR_QUEUE_TIMER_MEMBERS:
+                message = "Phase 2 duplicate processor queue/timer field on shard"
+            elif field in PROCESSOR_ALLOCATOR_CACHE_MEMBERS:
+                message = "Phase 3 duplicate processor allocator/cache field on shard"
+            else:
+                message = "Phase 1B duplicate P topology/wake field on shard"
             errors.append((_line_at(masked, field_offset), message))
     return errors
 
@@ -4351,6 +4818,15 @@ def _unbind_owner_clear_proof(
             not in {"NULL", "0", "0U", "false"}
         ):
             continue
+        if not any(
+            call.name == "llam_processor_owner_compose_pair_locked"
+            and begin <= call.name_index < end
+            and len(call.args) == 1
+            and _arg_values(tokens, call.args[0]) == ("shard",)
+            and call.name_index > member_index
+            for call in _call_sites(tokens)
+        ):
+            continue
         return True
     return False
 
@@ -4365,6 +4841,11 @@ def _owner_assignment_errors(
     calls = _call_sites(tokens)
     function_spans = _function_spans(masked)
     owner_slot_names: set[str] = set()
+    address_operands = [
+        (index, _address_operand_end(tokens, index + 1))
+        for index, token in enumerate(tokens)
+        if token.value == "&"
+    ]
 
     def fail(line: int) -> None:
         error = (line, "Phase 1A ownerless lease grant")
@@ -4583,31 +5064,43 @@ def _owner_assignment_errors(
         function = _function_for_token(masked, tokens, function_spans, member_index)
         if function is None:
             continue
+        address_start = next(
+            (opening for opening, closing in address_operands if opening < operator < member_index < closing),
+            None,
+        )
+        if address_start is None:
+            continue
         if not (
             receiver in LEASE_OWNER_RECEIVERS
             or (receiver is not None and "lease" in receiver)
             or function.name in LEASE_OWNER_WRITE_HELPERS
             or function.name in LEASE_OWNER_NULL_WRITE_HELPERS
+            or (
+                receiver is None
+                and any(
+                    tokens[index].value in LEASE_OWNER_RECEIVERS
+                    for index in range(address_start + 1, operator)
+                )
+            )
         ):
             continue
         begin, end = _token_range_for_span(masked, function)
         statement_start = operator
         while statement_start > begin and tokens[statement_start - 1].value not in {";", "{", "}"}:
             statement_start -= 1
-        if any(tokens[index].value == "&" for index in range(statement_start, operator)):
-            equals = next(
-                (
-                    index
-                    for index in range(statement_start, operator)
-                    if tokens[index].value == "="
-                ),
-                None,
-            )
-            if equals is not None and equals > statement_start:
-                lhs = tokens[equals - 1].value
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", lhs):
-                    owner_slot_names.add(lhs)
-            fail(line)
+        equals = next(
+            (
+                index
+                for index in range(statement_start, operator)
+                if tokens[index].value == "="
+            ),
+            None,
+        )
+        if equals is not None and equals > statement_start:
+            lhs = tokens[equals - 1].value
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", lhs):
+                owner_slot_names.add(lhs)
+        fail(line)
 
     for operator, member_index, line, receiver, _kind, member in _member_access_tokens(tokens):
         if member not in {"owner", "owner_incarnation"}:
@@ -4616,6 +5109,12 @@ def _owner_assignment_errors(
         if function is None:
             continue
         begin, end = _token_range_for_span(masked, function)
+        if relative_path == "src/core/sched/execution_lease.c" and (
+            _registered_execution_contract_matches(relative_path, masked, tokens, function)
+        ):
+            # Only the exact, reviewed claim/return protocols receive this proof.
+            # Other owner stores and all address escapes still use the ordinary audit.
+            continue
         receiver_is_local_lease = receiver == "lease"
         receiver_is_direct_shard_lease = receiver == "legacy_lease"
         transition = function.name in LEASE_OWNER_WRITE_HELPERS
@@ -4842,6 +5341,13 @@ def _owner_assignment_errors(
             fail(line)
             continue
 
+        # This helper mints narrow STOPPING-drain and redirect-release queue
+        # accesses by comparing a locked lease projection to the current
+        # worker. Writes and compound/unary mutations have already been
+        # rejected above; only those exact owner reads are approved here.
+        if function.name in LEASE_OWNER_READ_HELPERS:
+            continue
+
         # A member passed to a non-control call is an indirect/macro-hidden
         # access.  No such owner path is part of the audited runtime.
         containing = _call_containing(calls, member_index)
@@ -4922,6 +5428,39 @@ def _owner_assignment_errors(
                 and len(call.args) > 1
             ):
                 fail(tokens[call.name_index].line)
+    return errors
+
+
+def _processor_owner_record_errors(
+    masked: str, relative_path: str
+) -> list[tuple[int, str]]:
+    """Limit direct owner_record access to initialization and named helpers."""
+
+    errors: list[tuple[int, str]] = []
+    path = pathlib.PurePath(relative_path).as_posix()
+    tokens = phase0._tokens(masked)
+    functions = _function_spans(masked)
+
+    for index, token in enumerate(tokens):
+        if token.value != "owner_record" or index == 0 or tokens[index - 1].value not in {".", "->"}:
+            continue
+        function = _function_for_token(masked, tokens, functions, index)
+        allowed = (
+            path == "src/internal/runtime_state.h"
+            and function is not None
+            and function.name in PROCESSOR_OWNER_RECORD_HELPERS
+        ) or (
+            path == "src/core/lifecycle/init.c"
+            and function is not None
+            and function.name == "llam_runtime_init_ex_rt_unlocked"
+        )
+        if not allowed:
+            errors.append(
+                (
+                    token.line,
+                    "direct P-owner record access outside initialization/composition/accessors",
+                )
+            )
     return errors
 
 
@@ -5177,6 +5716,8 @@ def _lock_order_errors(
         return roles.get(name)
 
     for function in functions:
+        if _reviewed_ownership_contract_matches(relative_path, masked, tokens, function):
+            continue
         begin, end = _token_range_for_span(masked, function)
         function_body_open = next(
             (index for index in range(begin, end) if tokens[index].value == "{"),
@@ -5564,6 +6105,29 @@ def _watchdog_errors_legacy(relative_path: str, masked: str) -> list[tuple[int, 
             candidates.append((index, condition_end, body_open, body_close))
         return max(candidates, key=lambda item: item[0], default=None)
 
+    def enclosing_if_body(token_index: int, begin: int, end: int):
+        """Return the nearest if whose statement body contains one token."""
+
+        candidates = []
+        for index in range(begin, min(token_index, end)):
+            if tokens[index].value != "if" or index + 1 >= end or tokens[index + 1].value != "(":
+                continue
+            condition_end = _matching_token(tokens, index + 1, "(", ")")
+            if condition_end is None:
+                continue
+            body_open = condition_end + 1
+            if body_open >= end:
+                continue
+            if tokens[body_open].value == "{":
+                body_close = _matching_token(tokens, body_open, "{", "}")
+                if body_close is None:
+                    continue
+            else:
+                _body_start, body_close = _statement_bounds(tokens, body_open, begin, end)
+            if body_open < token_index < body_close:
+                candidates.append((index, condition_end, body_open, body_close))
+        return max(candidates, key=lambda item: item[0], default=None)
+
     def proof_is_negative(proof: _CallSite) -> bool:
         before = proof.name_index - 1
         if before >= 0 and tokens[before].value == "!":
@@ -5597,6 +6161,116 @@ def _watchdog_errors_legacy(relative_path: str, masked: str) -> list[tuple[int, 
             and proof_is_negative(equality)
         )
 
+    def async_signal_expression_proven(kill: _CallSite, begin: int, end: int) -> bool:
+        """Accept only the exact opt-in signal selector over the lease-bound target."""
+
+        if direct_identifier_argument(kill, 0) != "validated_native_thread":
+            return False
+        kill_guard = enclosing_if_body(kill.name_index, begin, end)
+        if kill_guard is None:
+            return False
+        _kill_if, kill_condition_end, kill_body_open, kill_body_close = kill_guard
+        if tuple(tokens[index].value for index in range(_kill_if + 2, kill_condition_end)) != (
+            "send_signal",
+        ) or not kill_body_open < kill.name_index < kill_body_close:
+            return False
+
+        prepared_calls = [
+            candidate
+            for candidate in calls
+            if candidate.name == "llam_async_preempt_prepare_request"
+            and begin <= candidate.name_index < kill.name_index
+            and len(candidate.args) == 6
+            and _simple_identifier(tokens, candidate.args[0]) == "validated_owner"
+            and _simple_identifier(tokens, candidate.args[1]) == "current"
+            and _arg_values(tokens, candidate.args[2]) == ("&", "validated_ticket")
+            and _arg_values(tokens, candidate.args[3])
+            == (
+                "atomic_load_explicit",
+                "(",
+                "&",
+                "validated_owner",
+                "->",
+                "run_generation",
+                ",",
+                "memory_order_acquire",
+                ")",
+            )
+            and _arg_values(tokens, candidate.args[4])
+            == (
+                "atomic_load_explicit",
+                "(",
+                "&",
+                "current",
+                "->",
+                "run_generation",
+                ",",
+                "memory_order_acquire",
+                ")",
+            )
+            and _arg_values(tokens, candidate.args[5])
+            == ("&", "async_request_generation")
+            and candidate.name_index >= 2
+            and tokens[candidate.name_index - 2].value == "async_request_prepared"
+            and tokens[candidate.name_index - 1].value == "="
+        ]
+        if not prepared_calls:
+            return False
+
+        signal_default = False
+        dynamic_signal_assignments: list[int] = []
+        signal_assignment_count = 0
+        send_gate_proven = False
+        for index in range(begin, kill.name_index):
+            if tokens[index].value == "signal_number" and index + 1 < kill.name_index:
+                if tokens[index + 1].value == "=":
+                    signal_assignment_count += 1
+                    if index + 2 < kill.name_index and tokens[index + 2].value == "LLAM_PREEMPT_SIGNAL":
+                        signal_default = True
+                    elif (
+                        index + 5 < kill.name_index
+                        and tuple(tokens[item].value for item in range(index + 2, index + 6))
+                        == ("rt", "->", "async_preempt_signal", ";")
+                    ):
+                        dynamic_signal_assignments.append(index)
+                    else:
+                        return False
+            if (
+                tuple(tokens[item].value for item in range(index, min(index + 6, kill.name_index)))
+                == (
+                    "send_signal",
+                    "=",
+                    "first_request",
+                    "||",
+                    "async_request_prepared",
+                    ";",
+                )
+            ):
+                send_gate_proven = True
+
+        if not signal_default or signal_assignment_count != 2 or not send_gate_proven:
+            return False
+        for assignment in dynamic_signal_assignments:
+            guarded = enclosing_if_body(assignment, begin, end)
+            if guarded is None:
+                return False
+            guarded_if, condition_end, body_open, body_close = guarded
+            if (
+                tuple(tokens[index].value for index in range(guarded_if + 2, condition_end))
+                != (
+                    "async_request_prepared",
+                    "&&",
+                    "rt",
+                    "->",
+                    "async_preempt_signal",
+                    ">",
+                    "0",
+                )
+                or not body_open < assignment < body_close
+            ):
+                return False
+        return bool(dynamic_signal_assignments)
+
     for call in calls:
         if call.name != "pthread_kill" or len(call.args) < 2:
             continue
@@ -5607,7 +6281,10 @@ def _watchdog_errors_legacy(relative_path: str, masked: str) -> list[tuple[int, 
         begin, end = _token_range_for_span(masked, function)
         signal_target = direct_identifier_argument(call, 0)
         signal_name = _scalar_value(tokens, call.args[1])
-        if signal_target is None or signal_name != "LLAM_PREEMPT_SIGNAL":
+        async_signal = signal_name == "signal_number" and async_signal_expression_proven(
+            call, begin, end
+        )
+        if signal_target is None or (signal_name != "LLAM_PREEMPT_SIGNAL" and not async_signal):
             fail(tokens[call.name_index].line)
             continue
 
@@ -5883,6 +6560,29 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             _addressed_identifier(tokens, call.args[index]) for index in range(1, 5)
         ) == outputs
 
+    def p_ticket_snapshot_shape(call: _CallSite, output: str) -> bool:
+        return (
+            call.name == "llam_processor_owner_ticket_snapshot_pair_locked"
+            and len(call.args) == 2
+            and _simple_identifier(tokens, call.args[0]) == "shard"
+            and _addressed_identifier(tokens, call.args[1]) == output
+        )
+
+    def assignment_rhs(identifier: str) -> list[tuple[str, ...]]:
+        assignments: list[tuple[str, ...]] = []
+        for index in range(begin, end - 1):
+            if tokens[index].value != identifier or tokens[index + 1].value != "=":
+                continue
+            finish = _owner_statement_end(tokens, index + 2, end)
+            assignments.append(
+                tuple(
+                    tokens[item].value
+                    for item in range(index + 2, finish)
+                    if tokens[item].value != ";"
+                )
+            )
+        return assignments
+
     def mutex_receiver(call: _CallSite) -> tuple[str, str] | None:
         if not call.args:
             return None
@@ -6113,9 +6813,10 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
                 "!=",
                 "current",
             ),
+            ("!", "ticket_still_matches"),
         }
         seen: set[tuple[str, ...]] = set()
-        snapshot_seen = binding_seen = False
+        snapshot_seen = binding_seen = ticket_seen = False
         for part in top_level_parts(start, finish, "||"):
             part_values = values(part)
             if part_values[:1] == ("!",):
@@ -6126,6 +6827,10 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
                     and snapshot_shape(nested[0], validated_outputs)
                 ):
                     snapshot_seen = True
+                    continue
+                if part_values == ("!", "ticket_still_matches"):
+                    ticket_seen = True
+                    seen.add(part_values)
                     continue
                 if part_values[1:] == (
                     "llam_worker_binding_live",
@@ -6141,7 +6846,111 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             if part_values not in required or part_values in seen:
                 return False
             seen.add(part_values)
-        return snapshot_seen and binding_seen and seen == required
+        return snapshot_seen and binding_seen and ticket_seen and seen == required
+
+    def async_signal_selector_valid(kill: _CallSite, begin: int, end: int) -> bool:
+        """Prove the opt-in signal number is selected by a live-ticket request."""
+
+        if _simple_identifier(tokens, kill.args[1]) != "signal_number":
+            return False
+        preparations = [
+            candidate
+            for candidate in calls
+            if candidate.name == "llam_async_preempt_prepare_request"
+            and begin <= candidate.name_index < kill.name_index
+            and len(candidate.args) == 6
+            and _simple_identifier(tokens, candidate.args[0]) == "validated_owner"
+            and _simple_identifier(tokens, candidate.args[1]) == "current"
+            and _arg_values(tokens, candidate.args[2]) == ("&", "validated_ticket")
+            and _arg_values(tokens, candidate.args[3])
+            == (
+                "atomic_load_explicit",
+                "(",
+                "&",
+                "validated_owner",
+                "->",
+                "run_generation",
+                ",",
+                "memory_order_acquire",
+                ")",
+            )
+            and _arg_values(tokens, candidate.args[4])
+            == (
+                "atomic_load_explicit",
+                "(",
+                "&",
+                "current",
+                "->",
+                "run_generation",
+                ",",
+                "memory_order_acquire",
+                ")",
+            )
+            and _arg_values(tokens, candidate.args[5])
+            == ("&", "async_request_generation")
+            and candidate.name_index >= 2
+            and tokens[candidate.name_index - 2].value == "async_request_prepared"
+            and tokens[candidate.name_index - 1].value == "="
+        ]
+        if not preparations:
+            return False
+
+        signal_default = False
+        dynamic_assignment = None
+        assignment_count = 0
+        send_gate = False
+        for index in range(begin, kill.name_index):
+            if tokens[index].value == "signal_number" and index + 1 < kill.name_index:
+                if tokens[index + 1].value == "=":
+                    assignment_count += 1
+                    if (
+                        index + 2 < kill.name_index
+                        and tokens[index + 2].value == "LLAM_PREEMPT_SIGNAL"
+                    ):
+                        signal_default = True
+                    elif (
+                        index + 5 < kill.name_index
+                        and tuple(tokens[item].value for item in range(index + 2, index + 6))
+                        == ("rt", "->", "async_preempt_signal", ";")
+                    ):
+                        dynamic_assignment = index
+                    else:
+                        return False
+            if tuple(
+                tokens[item].value
+                for item in range(index, min(index + 6, kill.name_index))
+            ) == (
+                "send_signal",
+                "=",
+                "first_request",
+                "||",
+                "async_request_prepared",
+                ";",
+            ):
+                send_gate = True
+        if not signal_default or assignment_count != 2 or dynamic_assignment is None or not send_gate:
+            return False
+
+        dynamic_gate = any(
+            values((record[1], record[2]))
+            == (
+                "async_request_prepared",
+                "&&",
+                "rt",
+                "->",
+                "async_preempt_signal",
+                ">",
+                "0",
+            )
+            and record[3] < dynamic_assignment < record[4]
+            for record in if_records(begin, end)
+        )
+        kill_gate = any(
+            values((record[1], record[2])) == ("send_signal",)
+            and record[3] < kill.name_index < record[4]
+            for record in if_records(begin, end)
+        )
+        return dynamic_gate and kill_gate
 
     for call in calls:
         if call.name != "pthread_kill" or len(call.args) < 2:
@@ -6179,9 +6988,13 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
         ):
             fail(tokens[call.name_index].line)
             continue
+        signal_value = _scalar_value(tokens, call.args[1])
         if (
             _simple_identifier(tokens, call.args[0]) != "validated_native_thread"
-            or _scalar_value(tokens, call.args[1]) != "LLAM_PREEMPT_SIGNAL"
+            or (
+                signal_value != "LLAM_PREEMPT_SIGNAL"
+                and not async_signal_selector_valid(call, begin, end)
+            )
         ):
             fail(tokens[call.name_index].line)
             continue
@@ -6198,6 +7011,102 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
         if not snapshot_shape(original_snapshot, original_outputs) or not snapshot_shape(
             validated_snapshot, validated_outputs
         ):
+            fail(tokens[call.name_index].line)
+            continue
+        p_ticket_calls = [
+            candidate
+            for candidate in calls
+            if candidate.name == "llam_processor_owner_ticket_snapshot_pair_locked"
+            and begin <= candidate.name_index < call.name_index
+        ]
+        expected_initial_ticket = (
+            "llam_processor_owner_ticket_snapshot_pair_locked",
+            "(",
+            "shard",
+            ",",
+            "&",
+            "owner_ticket",
+            ")",
+            "&&",
+            "owner_ticket",
+            ".",
+            "owner_m",
+            "==",
+            "owner",
+            "&&",
+            "owner_ticket",
+            ".",
+            "worker_incarnation",
+            "==",
+            "owner_incarnation",
+            "&&",
+            "owner_ticket",
+            ".",
+            "lease_projection_epoch",
+            "==",
+            "epoch",
+        )
+        expected_validated_ticket = (
+            "llam_processor_owner_ticket_snapshot_pair_locked",
+            "(",
+            "shard",
+            ",",
+            "&",
+            "validated_ticket",
+            ")",
+            "&&",
+            "llam_processor_owner_ticket_equal",
+            "(",
+            "&",
+            "owner_ticket",
+            ",",
+            "&",
+            "validated_ticket",
+            ")",
+        )
+        expected_initial_safe_g = (
+            "p_ticket_valid",
+            "&&",
+            "llam_worker_has_safe_managed_g",
+            "(",
+            "owner",
+            ",",
+            "&",
+            "shard",
+            "->",
+            "processor",
+            ",",
+            "current",
+            ")",
+        )
+        expected_validated_safe_g = (
+            "ticket_still_matches",
+            "&&",
+            "llam_worker_has_safe_managed_g",
+            "(",
+            "validated_owner",
+            ",",
+            "&",
+            "shard",
+            "->",
+            "processor",
+            ",",
+            "current",
+            ")",
+        )
+        p_ticket_contract_valid = (
+            len(p_ticket_calls) == 2
+            and p_ticket_snapshot_shape(p_ticket_calls[0], "owner_ticket")
+            and p_ticket_snapshot_shape(p_ticket_calls[1], "validated_ticket")
+            and original_snapshot.name_index < p_ticket_calls[0].name_index
+            and p_ticket_calls[0].name_index < validated_snapshot.name_index
+            and p_ticket_calls[1].name_index < validated_snapshot.name_index
+            and assignment_rhs("p_ticket_valid") == [expected_initial_ticket]
+            and expected_validated_ticket in assignment_rhs("ticket_still_matches")
+            and expected_initial_safe_g in assignment_rhs("safe_m")
+            and expected_validated_safe_g in assignment_rhs("safe_m")
+        )
+        if not p_ticket_contract_valid:
             fail(tokens[call.name_index].line)
             continue
         if _member_mutated_in_interval(
@@ -6503,11 +7412,14 @@ def _watchdog_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
             "pthread_mutex_unlock",
             "llam_worker_load_active_g",
             "llam_worker_binding_live",
+            "llam_worker_has_safe_managed_g",
             "llam_legacy_lease_snapshot_watchdog_locked",
             "llam_task_scan_ref_release",
+            "atomic_fetch_add_explicit",
             "llam_slice_ns",
             "llam_watchdog_preempt_pressure_locked",
             "llam_trace_shard",
+            "llam_async_preempt_prepare_request",
             *ATOMIC_LOAD_NAMES,
             "atomic_exchange",
             *CONTROL_FLOW_NAMES,
@@ -6607,26 +7519,98 @@ def _extra_authority_errors(masked: str) -> list[tuple[int, str]]:
             errors.append((line, "Phase 1A independent shard current authority"))
         elif kind == "shard" and member == "preempt_thread":
             errors.append((line, "Phase 1A independent preempt target"))
+        elif kind == "shard" and member in PROCESSOR_TOPOLOGY_WAKE_MEMBERS:
+            errors.append((line, "Phase 1B duplicate P topology/wake field on shard"))
+        elif kind == "shard" and member in PROCESSOR_QUEUE_TIMER_MEMBERS:
+            errors.append((line, "Phase 2 duplicate processor queue/timer field on shard"))
+        elif kind == "shard" and member in PROCESSOR_ALLOCATOR_CACHE_MEMBERS:
+            errors.append((line, "Phase 3 duplicate processor allocator/cache field on shard"))
         elif kind == "processor" and member not in PROCESSOR_ALLOWED_MEMBERS:
-            if member not in {"executor", "current_g", "lease_epoch"}:
+            if member not in {"executor", "current_g"}:
                 errors.append((line, "Phase 1A copied P resource in processor"))
+    return errors
+
+
+def _async_drain_sender_errors(relative_path: str, masked: str) -> list[tuple[int, str]]:
+    """Keep the private drain sender operation-closed across its two owner locks.
+
+    Unlike the normal watchdog, this sender never drops its locks to run a test
+    gate. Its preparation helper validates the run/origin/service projection;
+    runtime tests cover that helper's positive and negative authorization cases.
+    A changed target, early unlock or additional call requires explicit review,
+    not a blanket exemption for the new backend's native-thread accesses.
+    """
+    if pathlib.PurePath(relative_path).as_posix() != "src/core/context/async_context_linux_x86_64.c":
+        return []
+    contract = """
+    void llam_async_preempt_drain_probe(llam_shard_t *shard, uint64_t now_ns) {
+        pthread_t native_thread;
+        llam_worker_t *request_worker = NULL;
+        uint64_t request_generation = 0U;
+        if (shard == NULL || !llam_async_preempt_drain_service_needed(shard->runtime)) {
+            return;
+        }
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        if (llam_async_prepare_drain_locked(shard, now_ns, &request_worker, &native_thread, &request_generation)) {
+            int signal_rc = pthread_kill(native_thread, shard->runtime->async_preempt_signal);
+            if (signal_rc == 0) {
+                atomic_fetch_add_explicit(&shard->metrics.preempt_signals, 1U, memory_order_relaxed);
+            } else {
+                llam_async_preempt_cancel_request(request_worker, request_generation);
+            }
+        }
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+    }
+    """
+    # Function spans begin at the function identifier, not its return type.
+    expected = tuple(token.value for token in phase0._tokens(contract))[1:]
+    tokens = phase0._tokens(masked)
+    functions = _function_spans(masked)
+    errors: list[tuple[int, str]] = []
+    for function in functions:
+        if function.name == "llam_async_prepare_drain_locked":
+            # The native target and failed-send cancellation must describe the
+            # same validated registered owner, rather than an assumed primary.
+            if _function_token_fingerprint(masked, tokens, function) != \
+                    "dea3865db2d4b341e5aca9f5a425bf42c9544c0642af456fadf3eebaef4af58e":
+                errors.append((function.start_line, "unverified async drain sender contract"))
+        if function.name != "llam_async_preempt_drain_probe":
+            continue
+        begin, end = _token_range_for_span(masked, function)
+        actual = tuple(token.value for token in tokens[begin:end])
+        if actual != expected:
+            errors.append((function.start_line, "unverified async drain sender contract"))
+    for call in _call_sites(tokens):
+        if call.name == "pthread_kill":
+            function = _function_for_token(masked, tokens, functions, call.name_index)
+            if function is None or function.name != "llam_async_preempt_drain_probe":
+                errors.append((tokens[call.name_index].line, "unverified async drain signal target"))
     return errors
 
 
 def scan_source(relative_path: str, text: str) -> list[str]:
     """Return Phase 1A boundary violations found in one C source/header."""
 
+    provided_errors = phase0._provided_source_errors(relative_path, text)
+    if provided_errors is not None:
+        return provided_errors
     masked = phase0._mask_comments_and_literals(text)
     errors: list[str] = _phase0_errors(relative_path, text)
     extra: list[tuple[int, str]] = []
+    extra.extend(_registered_execution_contract_errors(relative_path, masked))
+    extra.extend(_reviewed_ownership_contract_errors(relative_path, masked))
     extra.extend(_active_g_surface_errors(relative_path, masked))
     extra.extend(_extra_authority_errors(masked))
+    extra.extend(_processor_owner_record_errors(masked, relative_path))
     extra.extend(_processor_struct_errors(relative_path, masked))
     extra.extend(_shard_struct_errors(masked))
     extra.extend(_ack_field_errors(relative_path, masked))
     extra.extend(_owner_assignment_errors(masked, relative_path))
     extra.extend(_lock_order_errors(relative_path, masked))
     extra.extend(_watchdog_errors(relative_path, masked))
+    extra.extend(_async_drain_sender_errors(relative_path, masked))
 
     seen = set(errors)
     for line, message in extra:
@@ -6655,7 +7639,7 @@ def iter_source_files(root: pathlib.Path) -> Iterable[pathlib.Path]:
 
 
 def scan_repository(root: pathlib.Path) -> list[str]:
-    errors: list[str] = []
+    errors: list[str] = phase0._missing_provided_source_errors(root)
     for path in iter_source_files(root):
         relative = path.relative_to(root).as_posix()
         errors.extend(scan_source(relative, path.read_text(encoding="utf-8", errors="replace")))
@@ -6681,8 +7665,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    count = sum(1 for _ in iter_source_files(root))
-    print(f"check_legacy_lease_boundary ok: {count} source/header file(s)")
+    count = sum(
+        path.relative_to(root).as_posix() != phase0.PROVIDED_MAGIC2_PATH
+        for path in iter_source_files(root)
+    )
+    provided = int((root / phase0.PROVIDED_MAGIC2_PATH).is_file())
+    print(
+        f"check_legacy_lease_boundary ok: {count} source/header file(s), "
+        f"{provided} verified supplied header(s)"
+    )
     return 0
 
 

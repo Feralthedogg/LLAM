@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -578,10 +578,18 @@ long llam_linux_futex_wake_private(atomic_uint *addr, unsigned count) {
  * @param shard Shard to kick.
  */
 void llam_kick_shard(llam_shard_t *shard) {
-    if (shard == NULL || shard->event_fd < 0) {
+    int event_fd;
+    atomic_uint *event_pending;
+
+    if (shard == NULL) {
         return;
     }
-    if (llam_eventfd_try_claim(&shard->event_pending) == 0U) {
+    event_fd = llam_processor_event_fd(&shard->processor);
+    event_pending = llam_processor_event_pending(&shard->processor);
+    if (event_fd < 0 || event_pending == NULL) {
+        return;
+    }
+    if (llam_eventfd_try_claim(event_pending) == 0U) {
 #if LLAM_RUNTIME_BACKEND_KQUEUE
         /*
          * EVFILT_USER wakeups are edge-like around the drain path:
@@ -590,7 +598,7 @@ void llam_kick_shard(llam_shard_t *shard) {
          * idempotent and closes the same reset-after-producer race that Windows
          * manual-reset events need below.
          */
-        (void)llam_kick_fd_raw(shard->event_fd);
+        (void)llam_kick_fd_raw(event_fd);
 #endif
 #if LLAM_PLATFORM_WINDOWS
         /*
@@ -600,20 +608,20 @@ void llam_kick_shard(llam_shard_t *shard) {
          * bit is already claimed; SetEvent is idempotent for the common case and
          * closes the reset-after-producer race.
          */
-        (void)llam_kick_fd_raw(shard->event_fd);
+        (void)llam_kick_fd_raw(event_fd);
 #endif
         return;
     }
 #if defined(__linux__)
     // Linux scheduler workers sleep directly on the pending word via futex.
-    (void)llam_linux_futex_wake_private(&shard->event_pending, 1U);
+    (void)llam_linux_futex_wake_private(event_pending, 1U);
     if (atomic_load_explicit(&shard->opaque_helper_opaque_wait, memory_order_acquire) != 0U) {
         llam_opaque_wake_signal(shard);
     }
     return;
 #else
-    if (!llam_kick_fd_raw(shard->event_fd)) {
-        atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
+    if (!llam_kick_fd_raw(event_fd)) {
+        atomic_store_explicit(event_pending, 0U, memory_order_release);
     }
 #endif
 }
@@ -677,14 +685,25 @@ void llam_kick_node(llam_node_t *node) {
  * @param shard Shard whose wake state should be drained.
  */
 void llam_drain_shard_wake(llam_shard_t *shard) {
+    int event_fd;
+    atomic_uint *event_pending;
+
     if (shard == NULL) {
         return;
     }
+    event_fd = llam_processor_event_fd(&shard->processor);
+    event_pending = llam_processor_event_pending(&shard->processor);
+    if (event_pending == NULL) {
+        return;
+    }
 #if defined(__linux__)
-    atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
+    (void)event_fd;
+    atomic_store_explicit(event_pending, 0U, memory_order_release);
 #else
-    llam_drain_fd_raw(shard->event_fd);
-    atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
+    if (event_fd >= 0) {
+        llam_drain_fd_raw(event_fd);
+    }
+    atomic_store_explicit(event_pending, 0U, memory_order_release);
 #endif
 }
 

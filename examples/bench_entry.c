@@ -17,10 +17,13 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "bench_internal.h"
+#if defined(LLAM_BENCH_ASYNC_COMPARE)
+#include "../experiments/async_compare/bench_async.h"
+#endif
 
 static int bench_run_case(const char *name,
                           llam_task_fn entry,
@@ -32,11 +35,22 @@ static int bench_run_case(const char *name,
                           const llam_runtime_opts_t *opts) {
     llam_runtime_t *runtime = NULL;
     llam_runtime_stats_t stats;
+#if defined(LLAM_BENCH_ASYNC_COMPARE)
+    bool async_requested = bench_env_flag_default("LLAM_BENCH_ASYNC", 0U) != 0U;
+    bench_async_evidence_t async_evidence = {0};
+#endif
 
     if (llam_runtime_create(opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         perror("llam_runtime_create");
         return -1;
     }
+#if defined(LLAM_BENCH_ASYNC_COMPARE)
+    if (async_requested && bench_async_prepare(runtime, &async_evidence) != 0) {
+        perror("bench_async_prepare");
+        llam_runtime_destroy(runtime);
+        return -1;
+    }
+#endif
     if (llam_runtime_spawn_ex(runtime,
                               entry,
                               state,
@@ -65,6 +79,13 @@ static int bench_run_case(const char *name,
         llam_runtime_destroy(runtime);
         return -1;
     }
+#if defined(LLAM_BENCH_ASYNC_COMPARE)
+    if (async_requested && bench_async_report(runtime, name, &async_evidence) != 0) {
+        perror("bench_async_report");
+        llam_runtime_destroy(runtime);
+        return -1;
+    }
+#endif
     bench_print_report(name, total_rounds, warmup_rounds, ops_per_round, samples_ns, &stats);
     llam_runtime_destroy(runtime);
     return 0;
@@ -129,6 +150,15 @@ int main(void) {
     runtime_opts.idle_spin_ns = idle_spin_ns;
     runtime_opts.idle_spin_max_iters = idle_spin_iters;
     runtime_opts.sqpoll_cpu = sqpoll_cpu;
+    if (bench_env_flag_default("LLAM_BENCH_ASYNC", 0U) != 0U) {
+#if defined(LLAM_BENCH_ASYNC_COMPARE)
+        bench_async_options(&runtime_opts);
+#else
+        fputs("LLAM_BENCH_ASYNC requires the qualified bench_async_compare target\n", stderr);
+        free(samples);
+        return 1;
+#endif
+    }
     if (samples == NULL) {
         perror("calloc");
         return 1;

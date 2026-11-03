@@ -21,7 +21,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -40,14 +40,13 @@
  */
 uint64_t llam_now_ns(void) {
 #if defined(__APPLE__)
-    static atomic_uint timebase_numer;
-    static atomic_uint timebase_denom;
+    static _Atomic uint64_t timebase_ratio;
     uint64_t ticks;
     uint32_t numer;
     uint32_t denom;
 
-    denom = atomic_load_explicit(&timebase_denom, memory_order_acquire);
-    if (denom == 0U) {
+    uint64_t ratio = atomic_load_explicit(&timebase_ratio, memory_order_acquire);
+    if (ratio == 0U) {
         mach_timebase_info_data_t timebase;
 
         if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0U) {
@@ -55,16 +54,14 @@ uint64_t llam_now_ns(void) {
         }
         /*
          * Time queries can run from user threads before worker startup has
-         * settled. Publish numer before denom so an acquire load of denom sees
-         * a complete timebase without racing on a mutable static struct.
+         * settled. Publish the immutable pair in one release; warm queries
+         * need one acquire and cannot observe components from different reads.
          */
-        atomic_store_explicit(&timebase_numer, timebase.numer, memory_order_release);
-        atomic_store_explicit(&timebase_denom, timebase.denom, memory_order_release);
-        numer = timebase.numer;
-        denom = timebase.denom;
-    } else {
-        numer = atomic_load_explicit(&timebase_numer, memory_order_acquire);
+        ratio = ((uint64_t)timebase.numer << 32U) | timebase.denom;
+        atomic_store_explicit(&timebase_ratio, ratio, memory_order_release);
     }
+    numer = (uint32_t)(ratio >> 32U);
+    denom = (uint32_t)ratio;
     ticks = mach_absolute_time();
     if (numer == denom) {
         return ticks;

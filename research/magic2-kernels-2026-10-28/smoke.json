@@ -1,0 +1,1499 @@
+{
+  "metadata": {
+    "copyright": "Copyright 2026 Feralthedogg",
+    "spdx_license_identifier": "Apache-2.0",
+    "timestamp_utc": "2026-10-27T18:05:38.072198+00:00",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "binary": "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+    "binary_sha256": "f3ebad15627d8b4b76b5a59c3fc7364be6104c811322b746d1c46fe5122f2909",
+    "samples": 3,
+    "discarded_process_warmups": 0,
+    "training_activations_per_G": 16,
+    "kernels": [
+      "scalar",
+      "unroll4",
+      "neon4",
+      "neon16"
+    ],
+    "modes": [
+      "scalar",
+      "unroll4",
+      "neon4",
+      "neon16",
+      "auto-cold",
+      "auto-warm"
+    ],
+    "cases": [
+      [
+        "compute_256k",
+        65536,
+        4096,
+        32,
+        1,
+        16
+      ]
+    ],
+    "environment": "LLAM_* overrides removed; other host environment inherited",
+    "policy": "one P; RELEASE_FAST; preemption OFF; same grain, yields, cancellations, input and exact uint32 outputs",
+    "training": "All modes warm buffers with the same activation count. Auto-cold uses scalar during untimed warmup, leaving the family untrained; auto-warm uses real family observations. No synthetic timing or profile injection.",
+    "timing": "elapsed excludes plan setup and training; setup and warmup/readiness wall times are retained separately; release/join are timed",
+    "baseline": "ordinary C under identical compiler flags, without vectorization-disabling options"
+  },
+  "summaries": [
+    {
+      "case": "compute_256k",
+      "mode": "scalar",
+      "median_ms": 30.47325,
+      "paired_speedup_vs_scalar": 1.0,
+      "paired_speedup_range": [
+        1.0,
+        1.0
+      ],
+      "best_fixed_kernel_by_median": "neon16",
+      "paired_overhead_vs_best_fixed_percent": 309.4697415052824,
+      "median_setup_us": 0.041,
+      "median_warmup_readiness_ms": 15.362083,
+      "selected": {
+        "scalar": 96,
+        "unroll4": 0,
+        "neon4": 0,
+        "neon16": 0
+      },
+      "routes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "training_selected": {
+        "scalar": 48,
+        "unroll4": 0,
+        "neon4": 0,
+        "neon16": 0
+      }
+    },
+    {
+      "case": "compute_256k",
+      "mode": "unroll4",
+      "median_ms": 11.560833,
+      "paired_speedup_vs_scalar": 2.6257082858994676,
+      "paired_speedup_range": [
+        2.5919456361085342,
+        2.6387764379884397
+      ],
+      "best_fixed_kernel_by_median": "neon16",
+      "paired_overhead_vs_best_fixed_percent": 55.17409342089792,
+      "median_setup_us": 0.0,
+      "median_warmup_readiness_ms": 5.750916,
+      "selected": {
+        "scalar": 0,
+        "unroll4": 96,
+        "neon4": 0,
+        "neon16": 0
+      },
+      "routes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "training_selected": {
+        "scalar": 0,
+        "unroll4": 48,
+        "neon4": 0,
+        "neon16": 0
+      }
+    },
+    {
+      "case": "compute_256k",
+      "mode": "neon4",
+      "median_ms": 11.720833,
+      "paired_speedup_vs_scalar": 2.6217120681217985,
+      "paired_speedup_range": [
+        2.589864986558549,
+        2.6478769217992504
+      ],
+      "best_fixed_kernel_by_median": "neon16",
+      "paired_overhead_vs_best_fixed_percent": 56.18410064329744,
+      "median_setup_us": 0.0,
+      "median_warmup_readiness_ms": 5.8915,
+      "selected": {
+        "scalar": 0,
+        "unroll4": 0,
+        "neon4": 96,
+        "neon16": 0
+      },
+      "routes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "training_selected": {
+        "scalar": 0,
+        "unroll4": 0,
+        "neon4": 48,
+        "neon16": 0
+      }
+    },
+    {
+      "case": "compute_256k",
+      "mode": "neon16",
+      "median_ms": 7.442125,
+      "paired_speedup_vs_scalar": 4.094697415052824,
+      "paired_speedup_range": [
+        4.0157478075385855,
+        4.28766229644528
+      ],
+      "best_fixed_kernel_by_median": "neon16",
+      "paired_overhead_vs_best_fixed_percent": 0.0,
+      "median_setup_us": 0.042,
+      "median_warmup_readiness_ms": 3.85225,
+      "selected": {
+        "scalar": 0,
+        "unroll4": 0,
+        "neon4": 0,
+        "neon16": 96
+      },
+      "routes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "training_selected": {
+        "scalar": 0,
+        "unroll4": 0,
+        "neon4": 0,
+        "neon16": 48
+      }
+    },
+    {
+      "case": "compute_256k",
+      "mode": "auto-cold",
+      "median_ms": 10.531125,
+      "paired_speedup_vs_scalar": 2.9336227686459884,
+      "paired_speedup_range": [
+        2.8174763798525686,
+        3.027541407019668
+      ],
+      "best_fixed_kernel_by_median": "neon16",
+      "paired_overhead_vs_best_fixed_percent": 41.62192089277097,
+      "median_setup_us": 4.833,
+      "median_warmup_readiness_ms": 15.623541,
+      "selected": {
+        "scalar": 9,
+        "unroll4": 9,
+        "neon4": 9,
+        "neon16": 69
+      },
+      "routes": [
+        0,
+        96,
+        0,
+        0
+      ],
+      "training_selected": {
+        "scalar": 48,
+        "unroll4": 0,
+        "neon4": 0,
+        "neon16": 0
+      }
+    },
+    {
+      "case": "compute_256k",
+      "mode": "auto-warm",
+      "median_ms": 7.419084,
+      "paired_speedup_vs_scalar": 4.1085448889193295,
+      "paired_speedup_range": [
+        3.8229544958800004,
+        4.297486994351324
+      ],
+      "best_fixed_kernel_by_median": "neon16",
+      "paired_overhead_vs_best_fixed_percent": -0.22861495378481145,
+      "median_setup_us": 4.333,
+      "median_warmup_readiness_ms": 6.634292,
+      "selected": {
+        "scalar": 0,
+        "unroll4": 0,
+        "neon4": 0,
+        "neon16": 96
+      },
+      "routes": [
+        0,
+        96,
+        0,
+        0
+      ],
+      "training_selected": {
+        "scalar": 9,
+        "unroll4": 9,
+        "neon4": 9,
+        "neon16": 21
+      }
+    }
+  ],
+  "raw": [
+    {
+      "mode": "scalar",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 31883417,
+      "plan_setup_ns": 41,
+      "warmup_wall_ns": 16165583,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          16,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          32,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 0,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "scalar",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "unroll4",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 12300959,
+      "plan_setup_ns": 0,
+      "warmup_wall_ns": 5904917,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          16,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 0,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "unroll4",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "neon4",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 12041125,
+      "plan_setup_ns": 0,
+      "warmup_wall_ns": 6375333,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          16,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          32,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 0,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "neon4",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "neon16",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 7436084,
+      "plan_setup_ns": 41,
+      "warmup_wall_ns": 3903791,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          16
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 0,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "neon16",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "auto-cold",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 10531125,
+      "plan_setup_ns": 13625,
+      "warmup_wall_ns": 16242916,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          16,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "selected": [
+          3,
+          3,
+          3,
+          23
+        ],
+        "buckets": [
+          32,
+          0,
+          0
+        ],
+        "observations": 32
+      },
+      "case": "compute_256k",
+      "pair": 0,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "auto-cold",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "auto-warm",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 7419084,
+      "plan_setup_ns": 4000,
+      "warmup_wall_ns": 6634292,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          16,
+          0,
+          0
+        ],
+        "selected": [
+          3,
+          3,
+          3,
+          7
+        ],
+        "buckets": [
+          16,
+          0,
+          0
+        ],
+        "observations": 16
+      },
+      "measured": {
+        "routes": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "buckets": [
+          32,
+          0,
+          0
+        ],
+        "observations": 32
+      },
+      "case": "compute_256k",
+      "pair": 0,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "auto-warm",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "scalar",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 30355375,
+      "plan_setup_ns": 42,
+      "warmup_wall_ns": 15175375,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          16,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          32,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 1,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "scalar",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "auto-warm",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 7940292,
+      "plan_setup_ns": 4333,
+      "warmup_wall_ns": 7371083,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          16,
+          0,
+          0
+        ],
+        "selected": [
+          3,
+          3,
+          3,
+          7
+        ],
+        "buckets": [
+          16,
+          0,
+          0
+        ],
+        "observations": 16
+      },
+      "measured": {
+        "routes": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "buckets": [
+          32,
+          0,
+          0
+        ],
+        "observations": 32
+      },
+      "case": "compute_256k",
+      "pair": 1,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "auto-warm",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "auto-cold",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 10773959,
+      "plan_setup_ns": 4083,
+      "warmup_wall_ns": 15623541,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          16,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "selected": [
+          3,
+          3,
+          3,
+          23
+        ],
+        "buckets": [
+          32,
+          0,
+          0
+        ],
+        "observations": 32
+      },
+      "case": "compute_256k",
+      "pair": 1,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "auto-cold",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "neon16",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 7559084,
+      "plan_setup_ns": 42,
+      "warmup_wall_ns": 3852250,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          16
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 1,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "neon16",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "neon4",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 11720833,
+      "plan_setup_ns": 0,
+      "warmup_wall_ns": 5891500,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          16,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          32,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 1,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "neon4",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "unroll4",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 11560833,
+      "plan_setup_ns": 42,
+      "warmup_wall_ns": 5732542,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          16,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 1,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "unroll4",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "neon4",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 11623416,
+      "plan_setup_ns": 42,
+      "warmup_wall_ns": 5782292,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          16,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          32,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 2,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "neon4",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "neon16",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 7442125,
+      "plan_setup_ns": 83,
+      "warmup_wall_ns": 3715875,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          16
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 2,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "neon16",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "auto-cold",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 10387583,
+      "plan_setup_ns": 4833,
+      "warmup_wall_ns": 15380833,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          16,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "selected": [
+          3,
+          3,
+          3,
+          23
+        ],
+        "buckets": [
+          32,
+          0,
+          0
+        ],
+        "observations": 32
+      },
+      "case": "compute_256k",
+      "pair": 2,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "auto-cold",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "auto-warm",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 7417042,
+      "plan_setup_ns": 4875,
+      "warmup_wall_ns": 6628625,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          16,
+          0,
+          0
+        ],
+        "selected": [
+          3,
+          3,
+          3,
+          7
+        ],
+        "buckets": [
+          16,
+          0,
+          0
+        ],
+        "observations": 16
+      },
+      "measured": {
+        "routes": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          0,
+          0,
+          32
+        ],
+        "buckets": [
+          32,
+          0,
+          0
+        ],
+        "observations": 32
+      },
+      "case": "compute_256k",
+      "pair": 2,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "auto-warm",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "scalar",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 30473250,
+      "plan_setup_ns": 0,
+      "warmup_wall_ns": 15362083,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          16,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          32,
+          0,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 2,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "scalar",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    },
+    {
+      "mode": "unroll4",
+      "elements": 65536,
+      "grain": 4096,
+      "iterations": 32,
+      "tasks": 1,
+      "rounds": 16,
+      "warmup": 16,
+      "elapsed_ns": 11548250,
+      "plan_setup_ns": 0,
+      "warmup_wall_ns": 5750916,
+      "workers": 1,
+      "blocking_calls": 0,
+      "yields": 721,
+      "checksum": "00000013a5b10889",
+      "training": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          16,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "measured": {
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected": [
+          0,
+          32,
+          0,
+          0
+        ],
+        "buckets": [
+          0,
+          0,
+          0
+        ],
+        "observations": 0
+      },
+      "case": "compute_256k",
+      "pair": 2,
+      "process_warmup": false,
+      "command": [
+        "/Users/feral/Desktop/Programming/LLAM/bench_magic2_kernels",
+        "unroll4",
+        "65536",
+        "4096",
+        "32",
+        "1",
+        "16",
+        "16"
+      ],
+      "stderr": ""
+    }
+  ]
+}

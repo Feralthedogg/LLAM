@@ -1,606 +1,221 @@
 #!/usr/bin/env python3
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-# Licensed under the LLAM Commercial Reciprocity License 1.0.
-# See the LICENSE file distributed with this Software.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0.
+# See LICENSES/Apache-2.0.txt.
 
 from __future__ import annotations
 
+import shutil
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+import check_license_policy as policy
 
-CHECKER = Path(__file__).with_name("check_license_policy.py")
-SOURCE_ROOT = CHECKER.parent.parent
-LICENSE_REF = "LicenseRef-LLAM-Commercial-Reciprocity-1.0"
-ACTIVE_LICENSE_RELATIVE = (
-    "LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-)
-APACHE_LICENSE_RELATIVE = "LICENSES/OLD-LICENSE/Apache-2.0.txt"
-APACHE_MANIFEST_RELATIVE = "LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
-CURRENT_LICENSE_TEXT = (SOURCE_ROOT / "LICENSE").read_text(encoding="utf-8")
-APACHE_LICENSE_TEXT = (
-    SOURCE_ROOT / APACHE_LICENSE_RELATIVE
-).read_text(encoding="utf-8")
-CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion in LLAM, you agree
-to license that contribution under the LLAM Commercial Reciprocity License
-1.0, unless the submission is conspicuously marked "Not a Contribution" or a
-separate written agreement applies."""
-APACHE_REF = "SPDX-License-Identifier: Apache-2.0"
-APACHE_FILE_NOTICE = "See LICENSES/OLD-LICENSE/Apache-2.0.txt."
-LICENSE_NOTICE = "Licensed under the LLAM Commercial Reciprocity License 1.0."
-LICENSE_FILE_NOTICE = "See the LICENSE file distributed with this Software."
-APACHE_HEADER = (
-    "/*\n"
-    " * Copyright 2026 Feralthedogg\n"
-    f" * {APACHE_REF}\n"
-    " * Licensed under the Apache License, Version 2.0.\n"
-    f" * {APACHE_FILE_NOTICE}\n"
-    " */\n"
-)
-CUSTOM_HEADER = (
-    "/*\n"
-    " * Copyright 2026 Feralthedogg\n"
-    f" * SPDX-License-Identifier: {LICENSE_REF}\n"
-    f" * {LICENSE_NOTICE}\n"
-    f" * {LICENSE_FILE_NOTICE}\n"
-    " */\n"
-)
-INDENTED_LICENSE_TEXT = """LLAM COMMERCIAL RECIPROCITY LICENSE 1.0
-
-   1.4. "Software" means source code, object code, documentation, tests,
-        examples, build materials, configuration, and other materials to
-        which this License is expressly applied by a LICENSE file, package
-        notice, file header, or other accompanying notice, excluding
-        materials expressly identified as governed by another license.
-
-APPLICATION NOTICE (NOT PART OF THE TERMS)
-
-   This License is expressly applied to the LLAM repository snapshot,
-   distribution, or copy that contains this LICENSE file, except for materials
-   conspicuously identified as governed by another license.
-
-   LLAM-authored source files may use the following notice in the appropriate
-   comment syntax:
-
-   Copyright 2026 Feralthedogg
-   SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-   Licensed under the LLAM Commercial Reciprocity License 1.0.
-   See the LICENSE file distributed with this Software.
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+HEADER = """/* Copyright 2026 Feralthedogg
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
+ * See LICENSES/Apache-2.0.txt.
+ */
+"""
+SIDECAR = """SPDX-FileCopyrightText: 2026 Feralthedogg
+SPDX-License-Identifier: Apache-2.0
 """
 
 
 class LicensePolicyTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        subprocess.run(
-            ["git", "init", "--quiet", str(self.root)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self._write_valid_repository()
+        self.temp = tempfile.TemporaryDirectory(prefix="llam-apache-policy-")
+        self.root = Path(self.temp.name)
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
+        for relative in policy.REQUIRED_FILES:
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(SOURCE_ROOT / relative, destination)
+        self.write("src/example.c", HEADER + "int example;\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
 
     def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+        self.temp.cleanup()
 
-    def _write(self, relative: str, content: str) -> None:
-        path = self.root / relative
+    def write(self, name: str | Path, text: str) -> None:
+        path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
 
-    def _track(self, *relative_paths: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(self.root), "add", "--", *relative_paths],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+    def errors(self) -> str:
+        return "\n".join(policy.check(self.root, include_untracked=True))
+
+    def test_current_apache_repository(self) -> None:
+        self.assertEqual("", self.errors())
+
+    def test_cli(self) -> None:
+        result = subprocess.run(
+            ["python3", str(SOURCE_ROOT / "scripts/check_license_policy.py"),
+             "--root", str(self.root), "--include-untracked"],
+            capture_output=True, text=True, check=False,
         )
-
-    def _write_valid_repository(self) -> None:
-        self._write("LICENSE", CURRENT_LICENSE_TEXT)
-        self._write(ACTIVE_LICENSE_RELATIVE, CURRENT_LICENSE_TEXT)
-        self._write(APACHE_LICENSE_RELATIVE, APACHE_LICENSE_TEXT)
-        self._write(APACHE_MANIFEST_RELATIVE, "src/example.c\n")
-        self._write(
-            "README.md",
-            "LLAM is source-available and is not OSI-approved open source.\n",
-        )
-        self._write(
-            "CONTRIBUTING.md",
-            CONTRIBUTION_TERMS + "\n\nUse a Signed-off-by trailer.\n",
-        )
-        self._write(
-            ".github/SECURITY.md",
-            f"SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"{LICENSE_NOTICE}\n"
-            f"{LICENSE_FILE_NOTICE}\n"
-            "Report privately at /security/advisories/new within 7 calendar days.\n"
-            "Report non-security defects within 45 calendar days.\n",
-        )
-        self._write(
-            ".github/ISSUE_TEMPLATE/defect-report.yml",
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"# {LICENSE_NOTICE}\n"
-            f"# {LICENSE_FILE_NOTICE}\n"
-            "name: Defect report\n",
-        )
-        self._write(
-            ".github/ISSUE_TEMPLATE/config.yml",
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"# {LICENSE_NOTICE}\n"
-            f"# {LICENSE_FILE_NOTICE}\n"
-            "blank_issues_enabled: false\n"
-            "contact_links:\n"
-            "  - name: Private security report\n"
-            "    url: https://github.com/Feralthedogg/LLAM/security/advisories/new\n",
-        )
-        self._write(
-            "docs/licensing.md",
-            "LLAM is a mixed-license repository. Untagged Apache snapshots remain governed by Apache License 2.0.\n"
-            "See LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt for current Apache paths.\n",
-        )
-        self._write(
-            "scripts/package_release.sh",
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"# {LICENSE_NOTICE}\n"
-            f"# {LICENSE_FILE_NOTICE}\n"
-            'cp "$root_dir/LICENSE" "$stage/"\n'
-            'cp "$root_dir/LICENSES/OLD-LICENSE/Apache-2.0.txt" "$stage/"\n'
-            'cp "$root_dir/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt" "$stage/"\n',
-        )
-        self._write(
-            "scripts/package_release_windows.ps1",
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"# {LICENSE_NOTICE}\n"
-            f"# {LICENSE_FILE_NOTICE}\n"
-            'Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination $Stage\n'
-            'Copy-Item -LiteralPath (Join-Path $Root "LICENSES\\OLD-LICENSE\\Apache-2.0.txt") -Destination $Stage\n'
-            'Copy-Item -LiteralPath (Join-Path $Root "LICENSES\\OLD-LICENSE\\APACHE-2.0-FILES.txt") -Destination $Stage\n',
-        )
-        self._write(
-            "src/example.c",
-            APACHE_HEADER,
-        )
-        self._write(
-            "scripts/custom_example.py",
-            "# Copyright 2026 Feralthedogg\n"
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"# {LICENSE_NOTICE}\n"
-            f"# {LICENSE_FILE_NOTICE}\n",
-        )
-        subprocess.run(
-            ["git", "-C", str(self.root), "add", "--all"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-    def _run_checker(self) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["python3", str(CHECKER), "--root", str(self.root)],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-    def test_accepts_complete_repository_policy(self) -> None:
-        result = self._run_checker()
-
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-
-    def test_rejects_missing_active_license_text(self) -> None:
-        (self.root / ACTIVE_LICENSE_RELATIVE).unlink()
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("active LicenseRef text is missing", result.stderr)
-
-    def test_rejects_active_license_text_that_differs_from_root(self) -> None:
-        self._write(ACTIVE_LICENSE_RELATIVE, "different license text\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("must be byte-identical to LICENSE", result.stderr)
-
-    def test_accepts_indented_license_policy_text(self) -> None:
-        self._write("LICENSE", INDENTED_LICENSE_TEXT)
-        self._write(ACTIVE_LICENSE_RELATIVE, INDENTED_LICENSE_TEXT)
-
-        result = self._run_checker()
-
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-
-    def test_rejects_missing_apache_license_text(self) -> None:
-        (self.root / APACHE_LICENSE_RELATIVE).unlink()
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("canonical Apache text is missing", result.stderr)
-
-    def test_rejects_missing_apache_path_manifest(self) -> None:
-        (self.root / APACHE_MANIFEST_RELATIVE).unlink()
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("Apache path manifest is missing", result.stderr)
-
-    def test_rejects_custom_license_on_manifested_apache_file(self) -> None:
-        self._write("src/example.c", CUSTOM_HEADER)
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("src/example.c: Apache-2.0 notice is missing", result.stderr)
-
-    def test_rejects_apache_file_without_canonical_path_reference(self) -> None:
-        self._write(
-            "src/example.c",
-            "/*\n"
-            " * Copyright 2026 Feralthedogg\n"
-            f" * {APACHE_REF}\n"
-            " * Licensed under the Apache License, Version 2.0.\n"
-            " */\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "src/example.c: Apache application notice is incomplete",
-            result.stderr,
-        )
-
-    def test_rejects_unsorted_apache_manifest(self) -> None:
-        self._write("src/z.c", APACHE_HEADER)
-        self._track("src/z.c")
-        self._write(APACHE_MANIFEST_RELATIVE, "src/z.c\nsrc/example.c\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("Apache path manifest must be bytewise sorted", result.stderr)
-
-    def test_rejects_duplicate_apache_manifest_path(self) -> None:
-        self._write(
-            APACHE_MANIFEST_RELATIVE,
-            "src/example.c\nsrc/example.c\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("Apache path manifest contains duplicate paths", result.stderr)
-
-    def test_rejects_parent_traversal_in_apache_manifest(self) -> None:
-        self._write(APACHE_MANIFEST_RELATIVE, "../src/example.c\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("invalid Apache manifest path", result.stderr)
-
-    def test_rejects_absolute_apache_manifest_path(self) -> None:
-        self._write(APACHE_MANIFEST_RELATIVE, "/src/example.c\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("invalid Apache manifest path", result.stderr)
-
-    def test_rejects_untracked_apache_manifest_path(self) -> None:
-        self._write(APACHE_MANIFEST_RELATIVE, "src/missing.c\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("src/missing.c: Apache manifest path is not tracked", result.stderr)
-
-    def test_rejects_new_llam_script_without_current_license(self) -> None:
-        self._write("scripts/new_tool.py", "print('hello')\n")
-        self._track("scripts/new_tool.py")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("scripts/new_tool.py: current LicenseRef is missing", result.stderr)
-
-    def test_accepts_adjacent_license_file_for_generated_content(self) -> None:
-        self._write("scripts/generated.lock", "generated = true\n")
-        self._write(
-            "scripts/generated.lock.license",
-            "SPDX-FileCopyrightText: 2026 Feralthedogg\n"
-            f"SPDX-License-Identifier: {LICENSE_REF}\n",
-        )
-        self._track("scripts/generated.lock", "scripts/generated.lock.license")
-
-        result = self._run_checker()
-
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-
-    def test_accepts_apache_sidecar_for_manifested_generated_content(self) -> None:
-        self._write("scripts/generated.lock", "generated = true\n")
-        self._write(
-            "scripts/generated.lock.license",
-            "SPDX-FileCopyrightText: 2026 Feralthedogg\n"
-            f"{APACHE_REF}\n"
-            f"{APACHE_FILE_NOTICE}\n",
-        )
-        self._track("scripts/generated.lock", "scripts/generated.lock.license")
-        self._write(
-            APACHE_MANIFEST_RELATIVE,
-            "scripts/generated.lock\nsrc/example.c\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-
-    def test_rejects_adjacent_license_file_with_wrong_license(self) -> None:
-        self._write("scripts/generated.lock", "generated = true\n")
-        self._write(
-            "scripts/generated.lock.license",
-            "SPDX-FileCopyrightText: 2026 Feralthedogg\n"
-            "SPDX-License-Identifier: MIT\n",
-        )
-        self._track("scripts/generated.lock", "scripts/generated.lock.license")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("scripts/generated.lock: current LicenseRef is missing", result.stderr)
-
-    def test_rejects_modified_canonical_apache_text(self) -> None:
-        self._write(
-            APACHE_LICENSE_RELATIVE,
-            APACHE_LICENSE_TEXT + "modified\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "canonical Apache text does not match the published Apache grant",
-            result.stderr,
-        )
-
-    def test_rejects_obsolete_old_licenses_reference(self) -> None:
-        self._write(
-            "docs/licensing.md",
-            "LLAM is a mixed-license repository. Untagged Apache snapshots remain governed by Apache License 2.0.\n"
-            "See LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt and OLD-LICENSES/Apache-2.0.txt.\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("docs/licensing.md: obsolete OLD-LICENSES reference", result.stderr)
-
-    def test_rejects_changed_software_definition(self) -> None:
-        self._write(
-            "LICENSE",
-            "LLAM COMMERCIAL RECIPROCITY LICENSE 1.0\n\n"
-            '1.4. "Software" means only files with a header.\n',
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("LICENSE: approved Section 1.4 is missing", result.stderr)
-
-    def test_rejects_license_without_explicit_application_scope(self) -> None:
-        license_text = (
-            "\n\n".join(
-                paragraph
-                for paragraph in CURRENT_LICENSE_TEXT.rstrip().split("\n\n")
-                if "This License is expressly applied" not in paragraph
-            )
-            + "\n"
-        )
-        self._write("LICENSE", license_text)
-        self._write(ACTIVE_LICENSE_RELATIVE, license_text)
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("LICENSE: application scope notice is missing", result.stderr)
-
-    def test_rejects_spdx_header_without_application_notice(self) -> None:
-        self._write(
-            "scripts/custom_example.py",
-            "# Copyright 2026 Feralthedogg\n"
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "scripts/custom_example.py: current application notice is incomplete",
-            result.stderr,
-        )
-
-    def test_rejects_partial_application_notice(self) -> None:
-        self._write(
-            "scripts/custom_example.py",
-            "# Copyright 2026 Feralthedogg\n"
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"# {LICENSE_NOTICE}\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "scripts/custom_example.py: current application notice is incomplete",
-            result.stderr,
-        )
-
-    def test_rejects_application_notice_away_from_spdx_header(self) -> None:
-        self._write(
-            "scripts/custom_example.py",
-            "# Copyright 2026 Feralthedogg\n"
-            f"# SPDX-License-Identifier: {LICENSE_REF}\n\n"
-            f'const char *spdx = "SPDX-License-Identifier: {LICENSE_REF}";\n'
-            f'const char *license_notice = "{LICENSE_NOTICE}";\n'
-            f'const char *license_file_notice = "{LICENSE_FILE_NOTICE}";\n',
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "scripts/custom_example.py: current application notice is incomplete",
-            result.stderr,
-        )
-
-    def test_rejects_apache_notice_on_new_custom_file(self) -> None:
-        self._write(
-            "scripts/custom_example.py",
-            "# Copyright 2026 Feralthedogg\n"
-            f"# {APACHE_REF}\n"
-            f"# {APACHE_FILE_NOTICE}\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "scripts/custom_example.py: current LicenseRef is missing",
-            result.stderr,
-        )
-
-    def test_accepts_stale_marker_used_as_policy_test_data(self) -> None:
-        self._write(
-            "scripts/policy_data.py",
-            f'# Copyright 2026 Feralthedogg\n'
-            f'# SPDX-License-Identifier: {LICENSE_REF}\n'
-            f'# {LICENSE_NOTICE}\n'
-            f'# {LICENSE_FILE_NOTICE}\n'
-            'STALE_SPDX = "SPDX-License-Identifier: Apache-2.0"\n'
-            'STALE_BOILERPLATE = "Licensed under the Apache License, Version 2.0"\n',
-        )
-        subprocess.run(
-            ["git", "-C", str(self.root), "add", "scripts/policy_data.py"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        result = self._run_checker()
-
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-
-    def test_rejects_llam_notice_without_current_license_ref(self) -> None:
-        self._write(
-            "scripts/custom_example.py",
-            "# Copyright 2026 Feralthedogg\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            "scripts/custom_example.py: current LicenseRef is missing",
-            result.stderr,
-        )
-
-    def test_rejects_missing_operational_policy_file(self) -> None:
-        (self.root / ".github/SECURITY.md").unlink()
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(".github/SECURITY.md: required policy file is missing", result.stderr)
-
-    def test_rejects_readme_without_source_available_disclosure(self) -> None:
-        self._write("README.md", "LLAM concurrency runtime.\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("README.md: source-available disclosure is missing", result.stderr)
-
-    def test_rejects_changed_contribution_license_terms(self) -> None:
-        self._write("CONTRIBUTING.md", "Contributions are welcome.\nSigned-off-by\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("CONTRIBUTING.md: approved contribution terms are missing", result.stderr)
-
-    def test_rejects_contribution_guide_without_dco_signoff(self) -> None:
-        self._write("CONTRIBUTING.md", CONTRIBUTION_TERMS + "\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("CONTRIBUTING.md: DCO sign-off instructions are missing", result.stderr)
-
-    def test_rejects_security_policy_without_private_route_and_deadlines(self) -> None:
-        self._write(".github/SECURITY.md", "Please report security problems.\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(".github/SECURITY.md: reporting requirements are incomplete", result.stderr)
-
-    def test_rejects_obsolete_nonsecurity_reporting_deadline(self) -> None:
-        self._write(
-            ".github/SECURITY.md",
-            f"SPDX-License-Identifier: {LICENSE_REF}\n"
-            f"{LICENSE_NOTICE}\n"
-            f"{LICENSE_FILE_NOTICE}\n"
-            "Report privately at /security/advisories/new within 7 calendar days.\n"
-            "Report non-security defects within 30 calendar days.\n",
-        )
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            ".github/SECURITY.md: reporting requirements are incomplete",
-            result.stderr,
-        )
-
-    def test_rejects_release_packager_that_omits_license(self) -> None:
-        self._write("scripts/package_release.sh", 'cp "$root_dir/README.md" "$stage/"\n')
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("scripts/package_release.sh: LICENSE packaging is missing", result.stderr)
-
-    def test_rejects_issue_configuration_without_private_security_route(self) -> None:
-        self._write(".github/ISSUE_TEMPLATE/config.yml", "blank_issues_enabled: false\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(
-            ".github/ISSUE_TEMPLATE/config.yml: private security route is missing",
-            result.stderr,
-        )
-
-    def test_rejects_missing_mixed_license_documentation(self) -> None:
-        self._write("docs/licensing.md", "The current release uses the current LICENSE.\n")
-
-        result = self._run_checker()
-
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("docs/licensing.md: mixed-license policy is incomplete", result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Apache-2.0 license policy ok", result.stdout)
+
+    def test_missing_required_metadata(self) -> None:
+        for relative in ("LICENSE", "NOTICE", "LICENSES/Apache-2.0.txt", "THIRD_PARTY_NOTICES.md"):
+            with self.subTest(path=relative):
+                path = self.root / relative
+                saved = path.read_bytes()
+                path.unlink()
+                self.assertIn(relative + ": required policy file", self.errors())
+                path.write_bytes(saved)
+
+    def test_reject_symlink_license(self) -> None:
+        (self.root / "LICENSE").unlink()
+        (self.root / "LICENSE").symlink_to("LICENSES/Apache-2.0.txt")
+        self.assertIn("LICENSE: required policy file", self.errors())
+
+    def test_root_and_spdx_copy_must_match(self) -> None:
+        self.write("LICENSE", "modified\n")
+        self.assertIn("byte-identical", self.errors())
+
+    def test_canonical_text_cannot_be_rewritten_even_in_both_copies(self) -> None:
+        self.write("LICENSE", "different terms\n")
+        self.write(policy.APACHE_LICENSE, "different terms\n")
+        self.assertIn("published grant", self.errors())
+
+    def test_retired_license_text_and_manifest_rejected(self) -> None:
+        for relative in policy.RETIRED_PATHS:
+            with self.subTest(path=relative):
+                self.write(relative, "retired\n")
+                self.assertIn("retired license metadata", self.errors())
+                (self.root / relative).unlink()
+
+    def test_new_source_requires_apache_notice(self) -> None:
+        self.write("src/new.c", "int new_file;\n")
+        self.assertIn("src/new.c: Apache-2.0 header", self.errors())
+
+    def test_recorded_deleted_git_paths_are_preserved_history(self) -> None:
+        path = "research/measurement/verification.json"
+        self.write(path, json.dumps({"commands": [], "git_status_before":
+                                    " D LICENSES/" + policy.RETIRED_ID + ".txt\n"}))
+        self.write(path + ".license", SIDECAR)
+        self.assertEqual("", self.errors())
+        for changes in (
+            {"git_status_before": " M LICENSES/" + policy.RETIRED_ID + ".txt\n"},
+            {"git_status_before": policy.RETIRED_ID},
+            {"current_policy": policy.RETIRED_ID},
+        ):
+            with self.subTest(changes=changes):
+                record = {"commands": [], "git_status_before":
+                          " D LICENSES/" + policy.RETIRED_ID + ".txt\n"}
+                record.update(changes)
+                self.write(path, json.dumps(record))
+                self.assertIn("stale current-policy", self.errors())
+
+    def test_git_inventory_exception_cannot_apply_to_current_source(self) -> None:
+        self.write("src/verification.json", json.dumps({"commands": [], "git_status_before":
+                   " D LICENSES/" + policy.RETIRED_ID + ".txt\n"}))
+        self.assertIn("stale current-policy", self.errors())
+
+    def test_custom_spdx_is_not_current(self) -> None:
+        self.write("src/new.c", HEADER.replace("Apache-2.0", policy.RETIRED_ID))
+        self.assertIn("stale current-policy", self.errors())
+        self.assertIn("src/new.c: Apache-2.0 header", self.errors())
+
+    def test_new_script_requires_apache_notice(self) -> None:
+        self.write("scripts/new.py", "print('hi')\n")
+        self.assertIn("scripts/new.py: Apache-2.0 header", self.errors())
+
+    def test_no_manifest_needed_for_new_apache_file(self) -> None:
+        self.write("src/new.c", HEADER)
+        self.assertEqual("", self.errors())
+
+    def test_spdx_alone_is_not_complete(self) -> None:
+        self.write("src/new.c", "/*\n * SPDX-License-Identifier: Apache-2.0\n */\n")
+        self.assertIn("src/new.c: Apache-2.0 header", self.errors())
+
+    def test_license_string_literal_is_not_a_header(self) -> None:
+        self.write("src/new.c", 'const char *s = "SPDX-License-Identifier: Apache-2.0";\n')
+        self.assertIn("src/new.c: Apache-2.0 header", self.errors())
+
+    def test_c_cpp_hash_and_assembly_comments(self) -> None:
+        for prefix in ("// ", "# ", "; ", " * "):
+            with self.subTest(prefix=prefix):
+                self.write("src/new.c", "\n".join(prefix + line for line in (
+                    policy.APACHE_REF, policy.APACHE_NOTICE + ".", policy.APACHE_FILE_NOTICE,
+                )))
+                self.assertEqual("", self.errors())
+
+    def test_adjacent_sidecar(self) -> None:
+        self.write("scripts/generated.lock", "generated\n")
+        self.write("scripts/generated.lock.license", SIDECAR)
+        self.assertEqual("", self.errors())
+
+    def test_wrong_license_sidecar(self) -> None:
+        self.write("scripts/generated.lock", "generated\n")
+        self.write("scripts/generated.lock.license", SIDECAR.replace("Apache-2.0", "MIT"))
+        self.assertIn("generated.lock: Apache-2.0", self.errors())
+        self.assertIn("sidecar notice is incomplete", self.errors())
+
+    def test_sidecar_needs_attribution(self) -> None:
+        self.write("scripts/generated.lock", "generated\n")
+        self.write("scripts/generated.lock.license", policy.APACHE_REF)
+        self.assertIn("sidecar notice is incomplete", self.errors())
+
+    def test_untracked_source_is_optional_but_explicit_check_catches_it(self) -> None:
+        self.write("src/new.c", "no notice\n")
+        self.assertEqual([], policy.check(self.root))
+        self.assertIn("src/new.c", self.errors())
+
+    def test_third_party_terms_untouched(self) -> None:
+        self.write("third_party/fixture/a.c", "/* SPDX-License-Identifier: MIT */\n")
+        self.assertEqual("", self.errors())
+
+    def test_internal_magic2_mirror_remains_upstream(self) -> None:
+        self.write("third_party/magic2/magic2.h", "upstream\n")
+        self.write("src/internal/magic2.h", "upstream\n")
+        self.assertEqual("", self.errors())
+        self.write("src/internal/magic2.h", "changed\n")
+        self.assertIn("MIT-licensed mirror differs", self.errors())
+
+    def test_provenance_is_first_party(self) -> None:
+        self.write("third_party/magic2/UPSTREAM.md", HEADER)
+        self.assertEqual("", self.errors())
+        self.write("third_party/magic2/UPSTREAM.md", policy.RETIRED_ID)
+        self.assertIn("stale current-policy", self.errors())
+
+    def test_stale_current_document_rejected(self) -> None:
+        self.write("docs/current.md", "See LICENSES/OLD-LICENSE/Apache-2.0.txt\n")
+        self.assertIn("stale current-policy", self.errors())
+
+    def test_historical_policy_requires_explicit_supersession(self) -> None:
+        path = next(iter(policy.HISTORICAL_POLICY_FILES))
+        self.write(path, policy.RETIRED_ID)
+        self.assertIn("lacks superseded notice", self.errors())
+        self.write(path, "Superseded on 2026-09-23\n" + policy.RETIRED_ID)
+        self.assertEqual("", self.errors())
+
+    def test_voluntary_private_security_route_is_required(self) -> None:
+        self.write(".github/SECURITY.md", HEADER + "No guidance\n")
+        self.assertIn("voluntary private reporting", self.errors())
+
+    def test_mandatory_reporting_windows_are_removed(self) -> None:
+        with (self.root / ".github/SECURITY.md").open("a") as output:
+            output.write("\nReport within 7 calendar days.\n")
+        self.assertIn("retired mandatory reporting window", self.errors())
+
+    def test_contribution_terms_and_dco(self) -> None:
+        self.write("CONTRIBUTING.md", HEADER)
+        self.assertIn("Apache contribution terms", self.errors())
+        self.assertIn("DCO instructions", self.errors())
+
+    def test_notices_must_be_packaged_and_installed(self) -> None:
+        self.write("scripts/package_release.sh", HEADER)
+        self.write("scripts/install.sh", HEADER)
+        self.assertIn("missing packaging metadata", self.errors())
+        self.assertIn("attribution installation is missing", self.errors())
 
 
 if __name__ == "__main__":

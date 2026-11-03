@@ -11,9 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+// See LICENSES/Apache-2.0.txt.
 
-#include "lcwe_model.h"
+#include "lcwe_model_internal.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -23,6 +23,22 @@
 static int fail(const char *message) {
     fprintf(stderr, "[test_lcwe_model] %s\n", message);
     return 1;
+}
+
+static int test_splitmix64_stream_vectors(void) {
+    uint64_t state = 0U;
+
+    if (lcwe_model_mix64(UINT64_C(1)) !=
+            UINT64_C(0x5692161d100b05e5) ||
+        lcwe_model_splitmix64_next(&state) !=
+            UINT64_C(0xe220a8397b1dcdaf) ||
+        state != UINT64_C(0x9e3779b97f4a7c15) ||
+        lcwe_model_splitmix64_next(&state) !=
+            UINT64_C(0x6e789e6aa1b965f4) ||
+        state != UINT64_C(0x3c6ef372fe94f82a)) {
+        return fail("SplitMix64 stream vector");
+    }
+    return 0;
 }
 
 static int test_names_and_parsers(void) {
@@ -441,7 +457,8 @@ out:
 }
 
 int main(void) {
-    if (test_names_and_parsers() != 0 ||
+    if (test_splitmix64_stream_vectors() != 0 ||
+        test_names_and_parsers() != 0 ||
         test_create_validation() != 0 ||
         test_scalar_workloads() != 0 ||
         test_determinism_and_round_validation() != 0 ||

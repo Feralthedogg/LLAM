@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "llam/runtime.h"
@@ -100,6 +100,7 @@ typedef struct autotune_handoff_state {
     atomic_uint started;
     atomic_uint stop;
     atomic_uint_fast64_t deadline_ns;
+    bool await_commit;
     llam_task_t *workers[AUTOTUNE_HANDOFF_WORKERS];
 } autotune_handoff_state_t;
 
@@ -423,6 +424,9 @@ static void autotune_handoff_worker_task(void *arg) {
     atomic_fetch_add_explicit(&state->started, 1U, memory_order_release);
     while (atomic_load_explicit(&state->stop, memory_order_acquire) == 0U &&
            llam_now_ns() < deadline_ns) {
+        if (state->await_commit &&
+            atomic_load_explicit(&g_llam_runtime.autotune.commits, memory_order_acquire) != 0U)
+            break;
         if (!llam_yield_to_local_runnable()) {
             llam_yield();
         }
@@ -440,7 +444,8 @@ static void autotune_handoff_parent_task(void *arg) {
     spawn_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_DEFAULT;
     spawn_opts.flags = LLAM_SPAWN_F_PINNED;
     atomic_store_explicit(&state->deadline_ns,
-                          llam_now_ns() + 150ULL * 1000ULL * 1000ULL,
+                          llam_now_ns() + (state->await_commit ? UINT64_C(2000000000)
+                                                              : UINT64_C(150000000)),
                           memory_order_release);
 
     for (i = 0U; i < AUTOTUNE_HANDOFF_WORKERS; ++i) {
@@ -2348,8 +2353,10 @@ static int collect_runtime_env_snapshot(runtime_env_snapshot_t *snapshot) {
     snapshot->task_slab_grows = 0U;
     snapshot->stack_cache_default_count = g_llam_runtime.stack_cache_default_count;
     for (unsigned i = 0U; i < g_llam_runtime.active_shards; ++i) {
-        snapshot->task_slab_grows += g_llam_runtime.shards[i].allocator.slab_grows;
-        snapshot->stack_cache_default_count += g_llam_runtime.shards[i].stack_cache_default_count;
+        snapshot->task_slab_grows +=
+            g_llam_runtime.shards[i].processor.allocator.slab_grows;
+        snapshot->stack_cache_default_count +=
+            g_llam_runtime.shards[i].processor.stack_cache_default_count;
     }
     llam_runtime_shutdown();
     return 0;
@@ -2663,6 +2670,9 @@ static int test_autotune_handoff_budget_actuates(void) {
     atomic_init(&state.started, 0U);
     atomic_init(&state.stop, 0U);
     atomic_init(&state.deadline_ns, 0U);
+    /* Assert an observed controller commit, with a bounded allowance for a
+     * delayed watchdog under sanitizers/host load rather than a 150ms race. */
+    state.await_commit = true;
     memset(&opts, 0, sizeof(opts));
     opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
@@ -4132,13 +4142,13 @@ static void *group_promise_spawn_thread(void *opaque) {
 
 static void group_promise_lock_allocators(llam_runtime_t *rt) {
     for (unsigned i = 0U; i < rt->active_shards; ++i) {
-        pthread_mutex_lock(&rt->shards[i].allocator.lock);
+        pthread_mutex_lock(&rt->shards[i].processor.allocator.lock);
     }
 }
 
 static void group_promise_unlock_allocators(llam_runtime_t *rt) {
     for (unsigned i = rt->active_shards; i > 0U; --i) {
-        pthread_mutex_unlock(&rt->shards[i - 1U].allocator.lock);
+        pthread_mutex_unlock(&rt->shards[i - 1U].processor.allocator.lock);
     }
 }
 

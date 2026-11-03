@@ -1,0 +1,87 @@
+--- a/Makefile
++++ b/Makefile
+@@ -57,6 +57,8 @@
+ 	cpu_spike \
+ 	bench_magic2_cpu \
+ 	bench_magic2_cpu.exe \
++	bench_handoff \
++	test_handoff_protocol \
+ 	llam_broker \
+ 	server \
+ 	server_lossless \
+@@ -592,6 +594,7 @@
+ 	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o \
+ 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+ 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_probe.o \
++	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_worker.o \
+ 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
+ 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o \
+ 	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
+@@ -613,6 +616,7 @@
+ 		$(OBJDIR)/src/core/registry/registry.o \
+ 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+ 		$(OBJDIR)/src/engine/watchdog/watchdog_probe.o \
++		$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
+ 		$(OBJDIR)/src/io/api/issue.o \
+ 		$(OBJDIR)/src/io/watch/watch_queue.o \
+ 		$(OBJDIR)/src/core/platform/platform.o \
+@@ -1172,8 +1176,10 @@
+ audit-production-test-hooks: static shared
+ 	$(PYTHON) scripts/audit_production_test_hooks.py ./libllam_runtime.a ./$(SHLIB_REAL) || { status=$$?; test "$$status" -eq 77; }
+ 
+-test: test_watchdog_liveness_internal
++test: test_watchdog_liveness_internal test_handoff_protocol bench_handoff
+ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_legacy_lease_internal test_processor_resource_internal test_processor_queue_timer_internal test_processor_allocator_io_internal test_foreign_detach_internal test_relief_worker_internal test_preempt_capabilities test_default_policy_internal test_magic2_internal test_async_preempt_linux_x86_64 test_preempt_metadata test_preempt_metadata_registration test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
++	./test_handoff_protocol
++	HANDOFF_BENCH_BINARY=./bench_handoff $(PYTHON) -B scripts/test_handoff_model.py
+ 	./test_lcwe_model
+ 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model $(PYTHON) scripts/test_bench_lcwe_model.py
+ 	$(PYTHON) scripts/test_worker_identity_boundary.py
+@@ -2557,6 +2563,22 @@
+ bench_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS)
+ 	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
+ 
++# Private policy experiment; production defaults and ABI are unchanged.
++bench_handoff: $(RUNTIME_OBJS) $(OBJDIR)/experiments/handoff/bench_handoff.o
++	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
++
++test_handoff_protocol: $(RUNTIME_OBJS) $(OBJDIR)/experiments/handoff/verify_handoff.o
++	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
++
++$(OBJDIR)/experiments/handoff/%.o: experiments/handoff/%.c $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
++	@mkdir -p $(dir $@)
++	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
++
++.PHONY: test-handoff
++test-handoff: bench_handoff test_handoff_protocol
++	./test_handoff_protocol
++	HANDOFF_BENCH_BINARY=./bench_handoff $(PYTHON) -B scripts/test_handoff_model.py
++
+ test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
+ 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
+ 
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -936,6 +936,22 @@
+ )
+ target_link_libraries(bench_magic2_cpu PRIVATE llam_runtime)
+ 
++add_executable(bench_handoff EXCLUDE_FROM_ALL experiments/handoff/bench_handoff.c)
++add_executable(test_handoff_protocol experiments/handoff/verify_handoff.c)
++foreach(LLAM_HANDOFF_TARGET bench_handoff test_handoff_protocol)
++    target_include_directories(${LLAM_HANDOFF_TARGET} PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
++        ${CMAKE_CURRENT_SOURCE_DIR}/src
++        ${CMAKE_CURRENT_SOURCE_DIR}/tools/preempt)
++    target_link_libraries(${LLAM_HANDOFF_TARGET} PRIVATE llam_runtime)
++endforeach()
++add_test(NAME test_handoff_protocol COMMAND test_handoff_protocol)
++set_tests_properties(test_handoff_protocol PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
++if(Python3_FOUND)
++    add_test(NAME test_handoff_model
++        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_handoff_model.py)
++endif()
++
+ add_executable(test_async_preempt_linux_x86_64
+     tests/test_async_preempt_linux_x86_64.c
+ )

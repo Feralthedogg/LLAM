@@ -24,10 +24,16 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "windows_async_lifetime.h"
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+#include "windows_async_probe.h"
+#endif
 
 /**
  * @brief Link a task into a shard-local diagnostic task list.
@@ -144,8 +150,13 @@ int llam_task_wait_scan_refs_quiescent(llam_runtime_t *rt, llam_task_t *task) {
             errno = EOVERFLOW;
             return -1;
         }
-        if (g_llam_tls_task != NULL) {
-            llam_yield();
+#if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+        llam_windows_async_probe_note_reclaim_wait(task);
+#endif
+        if (g_llam_tls_task != NULL &&
+            atomic_load_explicit(&g_llam_tls_task->opaque_blocking_depth,
+                                 memory_order_acquire) == 0U) {
+            llam_yield_internal();
         } else {
             struct timespec ts = {
                 .tv_sec = 0,
@@ -170,6 +181,13 @@ int llam_task_wait_scan_refs_quiescent(llam_runtime_t *rt, llam_task_t *task) {
  * @return true when spawn should eagerly link the task.
  */
 bool llam_task_list_eager_enabled(const llam_runtime_t *rt) {
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    if (rt != NULL && atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U) {
+        /* Capsules exist before first dispatch; never-run Gs must reach the storage finalizer. */
+        return true;
+    }
+#endif
     return rt != NULL && rt->task_list_eager != 0U;
 }
 
@@ -262,6 +280,30 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL) {
         return;
     }
+#if LLAM_ASYNC_CONTEXT_SHARED
+    if (llam_async_shared_defer_claimed(rt, task)) {
+        return;
+    }
+#endif
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    /* The control pointer is published before enabled's release store.
+     * Acquire-gate this lock-free read so a provisional public range table
+     * cannot be mistaken for an active backend during first enable. */
+    if (atomic_load_explicit(&rt->async_preempt_enabled,
+                             memory_order_acquire) != 0U &&
+        rt->async_preempt_control != NULL && g_llam_tls_worker != NULL &&
+        g_llam_tls_task == NULL && g_llam_tls_worker->compat_shard != NULL &&
+        g_llam_tls_worker->compat_shard->runtime == rt) {
+        if (atomic_load_explicit(&task->reclaim_ready,
+                                 memory_order_acquire) == 0U) {
+            abort();
+        }
+        llam_task_invalidate_public_handle(task);
+        /* Keep the exclusive claim rooted; an M must not wait for a reader. */
+        llam_windows_async_lifetime_defer_claimed(rt, task);
+        return;
+    }
+#endif
     llam_task_invalidate_public_handle(task);
     (void)llam_remove_task_from_list(rt, task);
     /*
@@ -289,6 +331,26 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
     llam_free_task(task);
 }
 
+#if LLAM_ASYNC_CONTEXT_SHARED || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT))
+bool llam_task_try_finalize_deferred_claim(llam_runtime_t *rt,
+                                           llam_task_t *task) {
+    if (rt == NULL || task == NULL ||
+        atomic_load_explicit(&task->reclaim_ready,
+                             memory_order_acquire) == 0U) {
+        return false;
+    }
+    /* Already invalidated at claim transfer; this list is still a root. */
+    (void)llam_remove_task_from_list(rt, task);
+    if (atomic_load_explicit(&task->scan_refs,
+                             memory_order_acquire) != 0U ||
+        llam_public_active_op_count(&task->active_ops) != 0U) {
+        return false;
+    }
+    llam_free_task(task);
+    return true;
+}
+#endif
+
 /**
  * @brief Reclaim a joined task once join waiters have released it.
  *
@@ -301,11 +363,14 @@ void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL) {
         return;
     }
-    // The final join waiter marks reclaim_ready. A non-runtime thread sleeps
-    // briefly; a fiber yields so another runnable can complete the handoff.
+    // The scheduler marks reclaim_ready after leaving the target stack.
+    // A foreign caller owns no P: wait on its native M, never enqueue that G.
+    // An ordinary managed caller yields so its target can finish the handoff.
     while (atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) == 0U) {
-        if (g_llam_tls_task != NULL) {
-            llam_yield();
+        if (g_llam_tls_task != NULL &&
+            atomic_load_explicit(&g_llam_tls_task->opaque_blocking_depth,
+                                 memory_order_acquire) == 0U) {
+            llam_yield_internal();
         } else {
             struct timespec ts = {
                 .tv_sec = 0,
@@ -355,41 +420,42 @@ void llam_try_reclaim_detached_task(llam_runtime_t *rt, llam_task_t *task) {
 }
 
 /**
- * @brief Fully destroy a task object and return it to the task allocator.
+ * @brief Release task-owned resources before recycling or slab destruction.
+ *
+ * Cleared resource pointers make this safe for already recycled slab slots.
  *
  * @param task Task to free.
  */
-void llam_free_task(llam_task_t *task) {
+void llam_task_release_resources(llam_task_t *task) {
     if (task == NULL) {
         return;
     }
-    if (llam_task_wait_public_ops_quiescent(task) != 0) {
-        return;
-    }
-
-    if (task->cancel_token != NULL) {
-        // A task may still be registered as a cancellation waiter when freed
-        // through error paths. Detach it before dropping the token reference.
-        pthread_mutex_lock(&task->cancel_token->lock);
-        if (task->cancel_registered) {
-            if (task->cancel_prev != NULL) {
-                task->cancel_prev->cancel_next = task->cancel_next;
-            } else {
-                task->cancel_token->waiters = task->cancel_next;
-            }
-            if (task->cancel_next != NULL) {
-                task->cancel_next->cancel_prev = task->cancel_prev;
-            }
-            task->cancel_prev = NULL;
-            task->cancel_next = NULL;
-            task->cancel_registered = false;
-        }
-        pthread_mutex_unlock(&task->cancel_token->lock);
-        llam_cancel_token_release_task_ref(task->cancel_token);
-    }
+    llam_cancel_token_unregister_task(task);
+    if (task->cancel_token != NULL) llam_cancel_token_release_task_ref(task->cancel_token);
+    if (task->group_cancel_token != NULL) llam_cancel_token_release_task_ref(task->group_cancel_token);
+    if (task->operation_cancel_token != NULL) llam_cancel_token_release_task_ref(task->operation_cancel_token);
+    task->cancel_token = NULL;
+    task->group_cancel_token = NULL;
+    task->operation_cancel_token = NULL;
+    /* Also covers never-started tasks and spawn/shutdown error paths. */
+    llam_async_context_task_destroy(task);
     llam_ctx_destroy_fp_state(&task->ctx);
     if (task->stack_mapping != NULL && task->mapping_size != 0U) {
         (void)munmap(task->stack_mapping, task->mapping_size);
     }
+    task->stack_mapping = NULL;
+    task->mapping_size = 0U;
+    task->stack_base = NULL;
+    task->stack_size = 0U;
+    llam_task_local_clear(task);
+    /* Images outlive native capsules, stacks and task-local finalizers. */
+    llam_managed_task_release(task);
+}
+
+void llam_free_task(llam_task_t *task) {
+    if (task == NULL || llam_task_wait_public_ops_quiescent(task) != 0) {
+        return;
+    }
+    llam_task_release_resources(task);
     llam_task_allocator_free(task);
 }

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 """Verify that a LLAM shared library exports exactly the public C ABI."""
 
@@ -26,7 +26,7 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PUBLIC_HEADERS = ("runtime.h", "io.h", "platform.h")
+PUBLIC_HEADERS = ("runtime.h", "io.h", "platform.h", "managed.h")
 PUBLIC_FN_RE = re.compile(r"\bLLAM_API\b[\s\S]*?\b(llam_[A-Za-z0-9_]+)\s*\(")
 LLAM_SYMBOL_RE = re.compile(r"^_?(llam_[A-Za-z0-9_]+)$")
 

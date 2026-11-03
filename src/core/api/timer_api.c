@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -149,7 +149,8 @@ static int llam_timer_normalize_opts(const llam_timer_opts_t *opts,
     return 0;
 }
 
-int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_timer_t **out) {
+static int llam_timer_create_owned(llam_runtime_t *owner_runtime, const llam_timer_opts_t *opts,
+                                   size_t opts_size, llam_timer_t **out) {
     llam_timer_opts_t normalized;
     llam_timer_t *timer;
     size_t slot = 0U;
@@ -160,6 +161,7 @@ int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_t
         return -1;
     }
     *out = NULL;
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return -1;
     if (llam_timer_normalize_opts(opts, opts_size, &normalized) != 0) {
         return -1;
     }
@@ -167,7 +169,7 @@ int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_t
     if (timer == NULL) {
         return -1;
     }
-    timer->owner_runtime = llam_runtime_owner_for_new_object();
+    timer->owner_runtime = owner_runtime;
     llam_public_active_op_init(&timer->active_ops);
     timer->next_deadline_ns = normalized.first_deadline_ns;
     timer->interval_ns = normalized.interval_ns;
@@ -201,7 +203,40 @@ int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_t
     return 0;
 }
 
+int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_timer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+    return llam_timer_create_owned(llam_runtime_owner_for_new_object(), opts, opts_size, out);
+}
+
+int llam_runtime_timer_create_ex(llam_runtime_t *runtime, const llam_timer_opts_t *opts,
+                                size_t opts_size, llam_timer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (out == NULL) { errno = EINVAL; return -1; }
+    *out = NULL;
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return -1;
+    int result = llam_timer_create_owned(pinned, opts, opts_size, out);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
+}
+
 int llam_timer_create(uint64_t interval_ns, llam_timer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     llam_timer_opts_t opts;
 
     memset(&opts, 0, sizeof(opts));
@@ -242,6 +277,29 @@ static uint64_t llam_timer_wait_slice_deadline(uint64_t now_ns,
         slice_deadline = caller_deadline_ns;
     }
     return slice_deadline;
+}
+
+static int llam_timer_sleep_until(uint64_t deadline_ns) {
+    if (g_llam_tls_task != NULL) {
+        return llam_sleep_until(deadline_ns);
+    }
+    /* Host waits already pin the timer's owner; they need no default runtime. */
+    for (;;) {
+        uint64_t now_ns = llam_now_ns();
+        struct timespec delay;
+
+        if (now_ns >= deadline_ns) {
+            return 0;
+        }
+        delay.tv_sec = (time_t)((deadline_ns - now_ns) / 1000000000ULL);
+        delay.tv_nsec = (long)((deadline_ns - now_ns) % 1000000000ULL);
+        if (nanosleep(&delay, NULL) == 0) {
+            return 0;
+        }
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
 }
 
 static int llam_timer_wait_impl(llam_timer_t *handle, uint64_t caller_deadline_ns, uint64_t *ticks_out) {
@@ -310,7 +368,7 @@ static int llam_timer_wait_impl(llam_timer_t *handle, uint64_t caller_deadline_n
             return -1;
         }
         slice_deadline_ns = llam_timer_wait_slice_deadline(now_ns, next_deadline_ns, caller_deadline_ns);
-        if (llam_sleep_until(slice_deadline_ns) != 0) {
+        if (llam_timer_sleep_until(slice_deadline_ns) != 0) {
             int saved_errno = errno;
 
             if (pinned_runtime != NULL) {
@@ -324,14 +382,20 @@ static int llam_timer_wait_impl(llam_timer_t *handle, uint64_t caller_deadline_n
 }
 
 int llam_timer_wait(llam_timer_t *timer, uint64_t *ticks_out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_timer_wait_impl(timer, LLAM_TIMER_NO_DEADLINE, ticks_out);
 }
 
 int llam_timer_wait_until(llam_timer_t *timer, uint64_t deadline_ns, uint64_t *ticks_out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_timer_wait_impl(timer, deadline_ns, ticks_out);
 }
 
 int llam_timer_reset(llam_timer_t *handle, uint64_t first_deadline_ns, uint64_t interval_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_timer_t *timer;
     llam_runtime_t *pinned_runtime = NULL;
 
@@ -360,6 +424,8 @@ int llam_timer_reset(llam_timer_t *handle, uint64_t first_deadline_ns, uint64_t 
 }
 
 int llam_timer_cancel(llam_timer_t *handle) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_timer_t *timer;
     llam_runtime_t *pinned_runtime = NULL;
 
@@ -382,6 +448,8 @@ int llam_timer_cancel(llam_timer_t *handle) {
 }
 
 int llam_timer_destroy(llam_timer_t *handle) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t raw = (uintptr_t)handle;
     llam_timer_t *timer;
     size_t slot;

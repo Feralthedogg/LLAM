@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -127,6 +127,9 @@ static int llam_task_local_key_ref_acquire(llam_task_local_key_t key) {
     if (!llam_task_local_key_is_active_locked(key)) {
         errno = EINVAL;
         rc = -1;
+    } else if (g_llam_task_local_key_refcount[key] == SIZE_MAX) {
+        errno = EOVERFLOW;
+        rc = -1;
     } else {
         g_llam_task_local_key_refcount[key] += 1U;
     }
@@ -144,6 +147,8 @@ static void llam_task_local_key_ref_release(llam_task_local_key_t key) {
 }
 
 int llam_task_local_key_create(llam_task_local_key_t *out_key) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uint32_t key = 0U;
     bool new_key = false;
 
@@ -179,6 +184,8 @@ int llam_task_local_key_create(llam_task_local_key_t *out_key) {
 }
 
 int llam_task_local_key_delete(llam_task_local_key_t key) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     pthread_mutex_lock(&g_llam_task_local_key_lock);
     if (!llam_task_local_key_is_active_locked(key)) {
         pthread_mutex_unlock(&g_llam_task_local_key_lock);
@@ -191,6 +198,8 @@ int llam_task_local_key_delete(llam_task_local_key_t key) {
 }
 
 void *llam_task_local_get(llam_task_local_key_t key) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     llam_task_local_entry_t *entry;
     void *value = NULL;
 
@@ -227,6 +236,8 @@ void *llam_task_local_get(llam_task_local_key_t key) {
 }
 
 int llam_task_local_set(llam_task_local_key_t key, void *value) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_task_local_entry_t *entry;
     llam_task_local_entry_t *prev = NULL;
 
@@ -237,6 +248,7 @@ int llam_task_local_set(llam_task_local_key_t key, void *value) {
 
     for (entry = g_llam_tls_task->task_locals; entry != NULL; entry = entry->next) {
         if (entry->key == key) {
+            if (entry->cleanup != NULL) { errno = EBUSY; return -1; }
             if (value != NULL) {
                 /*
                  * Updating an existing entry also has to linearize with
@@ -308,4 +320,103 @@ void llam_task_local_clear(llam_task_t *task) {
         free(entry);
         entry = next;
     }
+}
+
+int llam_task_local_set_owned(llam_task_local_key_t key, void *value, llam_task_cleanup_fn cleanup) {
+    LLAM_NATIVE_API_GUARD(-1);
+    llam_task_t *task = g_llam_tls_task;
+    if (task == NULL ||
+        (task->managed_execution_class != LLAM_MANAGED_EXECUTION_NATIVE_AFFINE &&
+         (task->managed_catalog != NULL ||
+          atomic_load_explicit(&task->owner_runtime->async_preempt_enabled, memory_order_acquire) != 0U))) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (value == NULL || cleanup == NULL) { errno = EINVAL; return -1; }
+    for (llam_task_local_entry_t *entry = task->task_locals; entry != NULL; entry = entry->next) {
+        if (entry->key == key) { errno = EBUSY; return -1; }
+    }
+    if (llam_task_local_set(key, value) != 0) return -1;
+    /* set prepends new keys; no yield/native callback occurs in this interval. */
+    task->task_locals->cleanup = cleanup;
+    return 0;
+}
+
+int llam_task_local_take_result(llam_task_local_key_t key, void **out) {
+    LLAM_NATIVE_API_GUARD(-1);
+    if (out == NULL) { errno = EINVAL; return -1; }
+    *out = NULL;
+    llam_task_t *task = g_llam_tls_task;
+    if (task == NULL) { errno = ENOTSUP; return -1; }
+    llam_task_local_entry_t **link = &task->task_locals;
+    for (llam_task_local_entry_t *entry = *link; entry != NULL; entry = *link) {
+        if (entry->key == key) {
+            *link = entry->next;
+            *out = entry->value;
+            llam_task_local_key_ref_release(key);
+            free(entry);
+            return 0;
+        }
+        link = &entry->next;
+    }
+    if (!llam_task_local_key_is_active(key)) { errno = EINVAL; return -1; }
+    return 0;
+}
+
+static void *llam_task_local_cleanup_batch(void *argument) {
+    llam_task_local_entry_t *entry = argument;
+    while (entry != NULL) {
+        llam_task_local_entry_t *next = entry->next;
+        entry->cleanup(entry->value);
+        free(entry);
+        entry = next;
+    }
+    return NULL;
+}
+
+void llam_task_local_cleanup_owned(llam_task_t *task) {
+    llam_task_local_entry_t *owned = NULL;
+    llam_task_local_entry_t **link = &task->task_locals;
+    for (llam_task_local_entry_t *entry = *link; entry != NULL; entry = *link) {
+        if (entry->cleanup == NULL) { link = &entry->next; continue; }
+        *link = entry->next;
+        llam_task_local_key_ref_release(entry->key);
+        entry->next = owned;
+        owned = entry;
+    }
+    if (owned == NULL) return;
+    if (task->managed_execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) {
+        llam_call_native_affine_cleanup(llam_task_local_cleanup_batch, owned);
+    } else {
+        /* Compatibility tasks cannot carry saved compiler/native captures.
+         * Callback reentry is still excluded, and no runtime lock is held. */
+        llam_managed_native_enter();
+        (void)llam_task_local_cleanup_batch(owned);
+        llam_managed_native_leave();
+    }
+}
+
+int llam_task_set_result(void *value, int32_t application_error) {
+    LLAM_NATIVE_API_GUARD(-1);
+    llam_task_t *task = g_llam_tls_task;
+    if (task == NULL) { errno = ENOTSUP; return -1; }
+    task->application_result.value = value;
+    task->application_result.error = application_error;
+    task->application_result.flags = LLAM_TASK_RESULT_F_SET;
+    return 0;
+}
+
+int llam_task_get_result(llam_task_t *handle, llam_task_result_t *out, size_t out_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+    if (out == NULL || out_size == 0U) { errno = EINVAL; return -1; }
+    llam_task_t *task = llam_task_resolve_public_handle(handle);
+    if (task == NULL) { errno = EINVAL; return -1; }
+    int error = 0;
+    if (llam_runtime_check_object_owner(task->owner_runtime) != 0) error = errno;
+    else if (atomic_load_explicit(&task->completed, memory_order_acquire) == 0U) error = EAGAIN;
+    else memcpy(out, &task->application_result,
+                out_size < sizeof(*out) ? out_size : sizeof(*out));
+    llam_task_end_public_op(task);
+    if (error != 0) { errno = error; return -1; }
+    return 0;
 }

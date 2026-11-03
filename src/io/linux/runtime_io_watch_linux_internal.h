@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_IO_WATCH_LINUX_INTERNAL_H
@@ -62,7 +62,9 @@ typedef struct llam_recv_watch_completion {
 
 /* Backend setup, wake, and submission primitives. */
 void llam_io_uring_sqe_set_buf_group_compat(struct io_uring_sqe *sqe, int buf_group);
-uint64_t llam_hash_watch_identity_u64(uint64_t value);
+uint64_t llam_hash_watch_identity(uint64_t device,
+                                  uint64_t inode,
+                                  uint64_t descriptor);
 void llam_node_lower_worker_priority(const llam_node_t *node);
 bool llam_node_submit_needs_syscall(llam_node_t *node);
 int llam_node_submit_ring(llam_node_t *node);

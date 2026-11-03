@@ -38,7 +38,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -80,7 +80,7 @@ static bool llam_spawn_should_wake_fanout(llam_runtime_t *rt, llam_shard_t *targ
 
         if (!pressure) {
             for (unsigned i = 0U; i < rt->active_shards; ++i) {
-                if (atomic_load_explicit(&rt->shards[i].timer_count, memory_order_acquire) != 0U) {
+                if (atomic_load_explicit(&rt->shards[i].processor.timer_count, memory_order_acquire) != 0U) {
                     pressure = true;
                     break;
                 }
@@ -172,15 +172,11 @@ static uint64_t llam_spawn_next_task_id(llam_runtime_t *rt, llam_shard_t *target
  * @param task Task whose optional token reference should be released.
  */
 static void llam_spawn_release_unpublished_cancel_token(llam_task_t *task) {
-    llam_cancel_token_t *token;
-
-    if (LLAM_UNLIKELY(task == NULL || task->cancel_token == NULL)) {
-        return;
-    }
-
-    token = task->cancel_token;
-    llam_cancel_token_release_task_ref(token);
+    if (task == NULL) return;
+    if (task->cancel_token != NULL) llam_cancel_token_release_task_ref(task->cancel_token);
+    if (task->group_cancel_token != NULL) llam_cancel_token_release_task_ref(task->group_cancel_token);
     task->cancel_token = NULL;
+    task->group_cancel_token = NULL;
 }
 
 /** @brief Return true when @p task_class is a supported public task class. */
@@ -196,6 +192,60 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
            stack_class == (uint32_t)LLAM_STACK_CLASS_LARGE ||
            stack_class == (uint32_t)LLAM_STACK_CLASS_HUGE;
 }
+
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static _Atomic(llam_runtime_t *) g_windows_async_spawn_gate_runtime =
+    ATOMIC_VAR_INIT(NULL);
+static _Atomic(atomic_uint *) g_windows_async_spawn_gate_observed =
+    ATOMIC_VAR_INIT(NULL);
+static _Atomic(atomic_uint *) g_windows_async_spawn_gate_release =
+    ATOMIC_VAR_INIT(NULL);
+
+void llam_windows_async_test_host_spawn_gate(llam_runtime_t *runtime,
+                                            atomic_uint *observed,
+                                            atomic_uint *release) {
+    atomic_store_explicit(&g_windows_async_spawn_gate_observed, observed,
+                          memory_order_release);
+    atomic_store_explicit(&g_windows_async_spawn_gate_release, release,
+                          memory_order_release);
+    atomic_store_explicit(&g_windows_async_spawn_gate_runtime, runtime,
+                          memory_order_release);
+}
+
+static void llam_windows_async_test_hold_host_spawn(llam_runtime_t *runtime) {
+    atomic_uint *observed;
+    atomic_uint *release;
+
+    if (atomic_load_explicit(&g_windows_async_spawn_gate_runtime,
+                             memory_order_acquire) != runtime) {
+        return;
+    }
+    observed = atomic_load_explicit(&g_windows_async_spawn_gate_observed,
+                                    memory_order_acquire);
+    release = atomic_load_explicit(&g_windows_async_spawn_gate_release,
+                                   memory_order_acquire);
+    if (observed == NULL || release == NULL) {
+        return;
+    }
+    atomic_store_explicit(observed, 1U, memory_order_release);
+    while (atomic_load_explicit(release, memory_order_acquire) == 0U) {
+        YieldProcessor();
+    }
+}
+#endif
+
+static void llam_windows_async_host_spawn_release(llam_runtime_t *rt) {
+    if (pthread_mutex_lock(&rt->windows_async_config_lock) != 0) {
+        abort();
+    }
+    if (rt->windows_async_host_spawn_admits == 0U) {
+        abort();
+    }
+    rt->windows_async_host_spawn_admits -= 1U;
+    pthread_mutex_unlock(&rt->windows_async_config_lock);
+}
+#endif
 
 /**
  * @brief Return true when an ABI prefix contains a complete spawn option field.
@@ -253,9 +303,14 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
     llam_shard_t *target;
     size_t opts_copy_size;
     bool local_spawn;
+    llam_processor_queue_access_t queue_access;
+    bool queue_access_valid = false;
     bool task_list_eager;
     bool wake_fanout = false;
     llam_task_t *public_handle;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    bool windows_async_host_reservation = false;
+#endif
 
     if (opts != NULL) {
         if (LLAM_UNLIKELY(opts_size == 0U)) {
@@ -304,24 +359,125 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         task_class = (llam_task_class_t)opts->task_class;
     }
 
-    shard_id = llam_pick_spawn_shard(rt);
-    target = &rt->shards[shard_id];
-    local_spawn = g_llam_tls_shard == target && g_llam_tls_task != NULL;
-    task = llam_task_alloc(target);
-    if (LLAM_UNLIKELY(task == NULL)) {
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    /* A host/foreign spawn reserves the interval before live publication.
+     * Enable checks this count under the same short gate and refuses rather
+     * than waiting while a spawn owns allocator/shard locks. A task spawning
+     * into its own running runtime cannot overlap pre-run configuration. */
+    if (g_llam_tls_task == NULL || g_llam_tls_task->owner_runtime != rt) {
+        int lock_error;
+
+        if (!rt->windows_async_config_lock_initialized) {
+            errno = EINVAL;
+            return NULL;
+        }
+        /* Never park another runtime's managed M behind host configuration. */
+        lock_error = g_llam_tls_task != NULL
+                         ? pthread_mutex_trylock(&rt->windows_async_config_lock)
+                         : pthread_mutex_lock(&rt->windows_async_config_lock);
+        if (lock_error != 0) {
+            errno = lock_error;
+            return NULL;
+        }
+        if (rt->windows_async_host_spawn_admits == UINT_MAX) {
+            pthread_mutex_unlock(&rt->windows_async_config_lock);
+            errno = EOVERFLOW;
+            return NULL;
+        }
+        rt->windows_async_host_spawn_admits += 1U;
+        pthread_mutex_unlock(&rt->windows_async_config_lock);
+        windows_async_host_reservation = true;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        llam_windows_async_test_hold_host_spawn(rt);
+#endif
+    }
+#endif
+
+    /* Admission owns the execution class before allocator/task-list placement.
+     * A compatibility G must never be published on a portable P, and affine
+     * reservations must be returned if allocation fails before publication. */
+    llam_managed_admission_t admission;
+    if (llam_managed_task_admit(rt, fn, opts != NULL ? opts->flags : 0U, &admission) != 0) {
+        int saved_errno = errno;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (windows_async_host_reservation) llam_windows_async_host_spawn_release(rt);
+#endif
+        errno = saved_errno;
         return NULL;
     }
-
+    if (admission.execution_worker != NULL) {
+        shard_id = admission.execution_worker->compat_shard->id;
+    } else {
+        shard_id = llam_pick_spawn_shard(rt);
+        if (admission.catalog != NULL) {
+            if (rt->portable_processor_count == 0U) abort();
+            shard_id %= rt->portable_processor_count;
+        }
+    }
+    target = &rt->shards[shard_id];
+    local_spawn = g_llam_tls_shard == target && g_llam_tls_task != NULL;
+    if (local_spawn) {
+        queue_access_valid =
+            llam_processor_queue_access_snapshot(&target->processor, &queue_access) &&
+            (queue_access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
+             queue_access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN);
+        /* A detached M is a TLS-local observer, not the P's local producer. */
+        local_spawn = queue_access_valid;
+    }
+    uint64_t admitted = atomic_load_explicit(&rt->admitted_tasks, memory_order_relaxed);
+    int admission_error = 0;
+    for (;;) {
+        if (atomic_load_explicit(&rt->draining, memory_order_acquire) ||
+            atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire)) {
+            admission_error = ECANCELED;
+            break;
+        }
+        if (admitted == UINT64_MAX || (rt->max_tasks != 0U && admitted >= rt->max_tasks)) {
+            admission_error = EAGAIN;
+            break;
+        }
+        /* Capacity accounting only; the runnable queue publishes task storage. */
+        if (atomic_compare_exchange_weak_explicit(&rt->admitted_tasks, &admitted, admitted + 1U,
+                                                  memory_order_relaxed, memory_order_relaxed)) break;
+    }
+    if (admission_error != 0) {
+        llam_managed_admission_release(&admission);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (windows_async_host_reservation) llam_windows_async_host_spawn_release(rt);
+#endif
+        errno = admission_error;
+        return NULL;
+    }
+    task = llam_task_alloc(target);
+    if (LLAM_UNLIKELY(task == NULL)) {
+        int saved_errno = errno;
+        atomic_fetch_sub_explicit(&rt->admitted_tasks, 1U, memory_order_relaxed);
+        llam_managed_admission_release(&admission);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (windows_async_host_reservation) {
+            llam_windows_async_host_spawn_release(rt);
+        }
+#endif
+        errno = saved_errno;
+        return NULL;
+    }
+    task->admission_counted = true;
+    task->managed_catalog = admission.catalog;
+    task->managed_execution_class = admission.execution_class;
+    task->managed_execution_worker = admission.execution_worker;
+    task->managed_execution_generation = admission.execution_generation;
+    fn = admission.entry;
     task->id = llam_spawn_next_task_id(rt, target, local_spawn);
     task->state = LLAM_TASK_STATE_NEW;
     task->wait_reason = LLAM_WAIT_NONE;
-    task->flags = opts != NULL ? opts->flags : 0U;
+    task->flags = admission.spawn_flags;
     if ((task->flags & LLAM_TASK_FLAG_LATENCY_CRITICAL) != 0U) {
         task_class = LLAM_TASK_CLASS_LATENCY;
     }
     atomic_store_explicit(&task->task_class, (unsigned)task_class, memory_order_release);
     atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
-    task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
+    task->deadline_ns = 0U;
+    task->request_deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
     /*
      * Group-owned tasks must be marked before publication.  Marking after the
@@ -333,12 +489,30 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
                       llam_cancel_token_retain_task_ref_for_runtime(task->cancel_token, rt, &task->cancel_token) != 0)) {
         task->cancel_token = NULL;
         llam_task_allocator_free(task);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (windows_async_host_reservation) {
+            llam_windows_async_host_spawn_release(rt);
+        }
+#endif
+        return NULL;
+    }
+    if (owning_group != NULL && (owning_group->flags & LLAM_TASK_GROUP_F_LINK_CANCEL) != 0U &&
+        opts != NULL && opts->cancel_token != owning_group->cancel_token &&
+        llam_cancel_token_retain_task_ref_for_runtime(owning_group->cancel_token, rt,
+                                                      &task->group_cancel_token) != 0) {
+        int saved_errno = errno;
+        llam_spawn_release_unpublished_cancel_token(task);
+        llam_task_allocator_free(task);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (windows_async_host_reservation) llam_windows_async_host_spawn_release(rt);
+#endif
+        errno = saved_errno;
         return NULL;
     }
     task->entry = fn;
     task->arg = arg;
     task->forced_yield_budget = rt->forced_yield_every;
-    task->home_shard = shard_id;
+    atomic_store_explicit(&task->home_shard, shard_id, memory_order_relaxed);
     task->live_shard = shard_id;
     atomic_store_explicit(&task->last_shard, shard_id, memory_order_relaxed);
     atomic_store_explicit(&task->preempt_requested, 0U, memory_order_relaxed);
@@ -361,6 +535,11 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         // would see a permanently busy cancellation token after ENOMEM.
         llam_spawn_release_unpublished_cancel_token(task);
         llam_task_allocator_free(task);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (windows_async_host_reservation) {
+            llam_windows_async_host_spawn_release(rt);
+        }
+#endif
         errno = saved_errno;
         return NULL;
     }
@@ -386,8 +565,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         }
         llam_runtime_note_task_live(rt, target);
         if (rt->experimental_dynamic_shards != 0U &&
-            atomic_load_explicit(&target->online, memory_order_relaxed) == 0U) {
-            atomic_store_explicit(&target->online, 1U, memory_order_release);
+            llam_processor_try_set_online(&target->processor, true)) {
             llam_runtime_note_online_shards(rt,
                                           atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
         }
@@ -399,13 +577,17 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
             if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {
                 llam_enqueue_overflow_task(rt, task);
             }
-        } else if (llam_lockfree_normq_enabled(rt) && (g_llam_tls_shard != target || g_llam_tls_task == NULL)) {
+        } else if (!local_spawn || !queue_access_valid) {
             task->enqueue_hot = 0U;
-            if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(target,
+                                               &target->processor.inject_q,
+                                               LLAM_INJECT_QUEUE_CAP,
+                                               task,
+                                               NULL)) {
                 target->metrics.inject_enqueues += 1U;
             }
         } else {
-            (void)llam_norm_queue_push_owner_locked(target, task);
+            (void)llam_norm_queue_push_owner_locked(target, &queue_access, task);
         }
         if (local_spawn) {
             wake_fanout = llam_spawn_should_wake_fanout(rt, target);
@@ -418,6 +600,11 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
             llam_wake_all_shards(rt);
         }
     }
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (windows_async_host_reservation) {
+        llam_windows_async_host_spawn_release(rt);
+    }
+#endif
     return public_handle;
 }
 
@@ -434,6 +621,8 @@ llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
                                    void *arg,
                                    const llam_spawn_opts_t *opts,
                                    size_t opts_size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     llam_runtime_t *pinned_runtime = NULL;
     llam_task_t *task;
 
@@ -471,6 +660,8 @@ llam_task_t *llam_runtime_spawn_group_owned_ex(llam_runtime_t *runtime,
 }
 
 llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     llam_runtime_t *runtime = llam_runtime_current_owner();
     llam_runtime_t *pinned_runtime = NULL;
     llam_task_t *task;
@@ -493,5 +684,7 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
 }
 
 llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     return llam_spawn_ex(fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
 }

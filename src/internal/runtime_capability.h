@@ -25,7 +25,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_CAPABILITY_H
@@ -82,6 +82,10 @@ int llam_capability_key_init(llam_capability_key_t *key, const void *scope, uint
 void llam_capability_key_clear(llam_capability_key_t *key);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 LLAM_INTERNAL_API void llam_capability_test_force_entropy_failure(bool enabled);
+LLAM_INTERNAL_API void llam_capability_test_compute_mac(
+    const llam_capability_key_t *key,
+    const llam_capability_token_t *token,
+    uint8_t out_mac[LLAM_CAPABILITY_MAC_BYTES]);
 #endif
 
 int llam_capability_issue(const llam_capability_key_t *key,

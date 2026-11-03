@@ -1,0 +1,9 @@
+{
+  "command": [
+    "/Users/feral/Desktop/Programming/LLAM/scripts/bench_tokio_compare/target/release/bench_tokio_compare"
+  ],
+  "case": "channel_pingpong",
+  "returncode": 0,
+  "stdout": "[tokio-bench] config rounds=127 warmup=8 worker_threads=1 spawn_tasks=512 channel_messages=4096 select_ops=4096 io_messages=512 poll_events=512 sleep_tasks=1024 sleep_yields=4 sleep_us=30000 opaque_scopes=64\n[tokio-bench] name=channel_pingpong rounds=127 warmup=8 ops=4096 ops_per_sec=204367.16 p50_us=19992.12 p99_us=23598.50\n",
+  "stderr": ""
+}

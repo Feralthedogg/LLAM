@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -112,6 +112,8 @@ static const char *llam_debug_snapshot_wait_owners(
 
 /** @brief Return a task's runtime-assigned id, or 0 for invalid/foreign handles. */
 uint64_t llam_task_id(const llam_task_t *task) {
+    LLAM_NATIVE_API_GUARD(0);
+
     uint64_t id = 0U;
     int saved_errno = errno;
 
@@ -129,6 +131,7 @@ uint64_t llam_task_id(const llam_task_t *task) {
 
 /** @brief Return a stable task state name, or "UNKNOWN" for invalid/foreign handles. */
 const char *llam_task_state_name(const llam_task_t *task) {
+    LLAM_NATIVE_API_GUARD("UNKNOWN");
     const char *state = "UNKNOWN";
     int saved_errno = errno;
 
@@ -146,6 +149,8 @@ const char *llam_task_state_name(const llam_task_t *task) {
 
 /** @brief Return a task's scheduler class, or the default for invalid/foreign handles. */
 uint32_t llam_task_class(const llam_task_t *task) {
+    LLAM_NATIVE_API_GUARD(LLAM_TASK_CLASS_DEFAULT);
+
     uint32_t task_class = (uint32_t)LLAM_TASK_CLASS_DEFAULT;
     int saved_errno = errno;
 
@@ -163,6 +168,8 @@ uint32_t llam_task_class(const llam_task_t *task) {
 
 /** @brief Return the current managed task for this thread, or NULL outside LLAM. */
 llam_task_t *llam_current_task(void) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     return llam_task_public_handle(g_llam_tls_task);
 }
 
@@ -322,10 +329,14 @@ copy_snapshot:
 }
 
 int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_runtime_collect_stats_ex_rt(llam_runtime_default_storage(), stats, stats_size);
 }
 
 int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime, llam_runtime_stats_t *stats, size_t stats_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     if (runtime == NULL) {
         if (stats != NULL && stats_size != 0U) {
             size_t copy_size = stats_size < sizeof(*stats) ? stats_size : sizeof(*stats);
@@ -339,12 +350,13 @@ int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime, llam_runtime_s
 }
 
 int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_runtime_collect_stats_ex(stats, stats != NULL ? sizeof(*stats) : 0U);
 }
 
 /** @brief Write a human-readable runtime dump to an fd. */
-void llam_dump_runtime_state(int fd) {
-    llam_runtime_t *rt = llam_runtime_default_storage();
+static void llam_dump_runtime_state_impl(llam_runtime_t *rt, int fd) {
     llam_runtime_t *pinned_runtime = NULL;
     llam_shard_t *shards;
     llam_node_t *nodes;
@@ -573,13 +585,14 @@ void llam_dump_runtime_state(int fd) {
                     "  shard=%u lock=busy online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu\n",
                     shard->id,
                     llam_shard_is_online(shard) ? 1U : 0U,
-                    shard->cpu_id,
-                    shard->node_index,
-                    shard->io_node_index,
+                    llam_processor_cpu_id(&shard->processor),
+                    llam_processor_node_index(&shard->processor),
+                    llam_processor_io_node_index(&shard->processor),
                     current != NULL ? (unsigned long long)current->id : 0ULL,
                     atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
                     atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
-                    atomic_load_explicit(&shard->event_pending, memory_order_acquire),
+                    atomic_load_explicit(llam_processor_event_pending_const(&shard->processor),
+                                         memory_order_acquire),
                     0ULL,
                     0ULL);
             continue;
@@ -591,13 +604,14 @@ void llam_dump_runtime_state(int fd) {
                     "  shard=%u lock=busy online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu\n",
                     shard->id,
                     llam_shard_is_online(shard) ? 1U : 0U,
-                    shard->cpu_id,
-                    shard->node_index,
-                    shard->io_node_index,
+                    llam_processor_cpu_id(&shard->processor),
+                    llam_processor_node_index(&shard->processor),
+                    llam_processor_io_node_index(&shard->processor),
                     current != NULL ? (unsigned long long)current->id : 0ULL,
                     atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
                     atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
-                    atomic_load_explicit(&shard->event_pending, memory_order_acquire),
+                    atomic_load_explicit(llam_processor_event_pending_const(&shard->processor),
+                                         memory_order_acquire),
                     0ULL,
                     0ULL);
             continue;
@@ -617,13 +631,14 @@ void llam_dump_runtime_state(int fd) {
                 "  shard=%u online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu opaque_redirect=%u opaque_helper(started=%u ready=%u active=%u) opaque_depth=%u/%u redirect_depth=%u/%u queues(inject=%u hot=%u norm=%u timers=%u)\n",
                 shard->id,
                 llam_shard_is_online(shard) ? 1U : 0U,
-                shard->cpu_id,
-                shard->node_index,
-                shard->io_node_index,
+                llam_processor_cpu_id(&shard->processor),
+                llam_processor_node_index(&shard->processor),
+                llam_processor_io_node_index(&shard->processor),
                 current != NULL ? (unsigned long long)current->id : 0ULL,
                 atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
                 atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
-                atomic_load_explicit(&shard->event_pending, memory_order_acquire),
+                atomic_load_explicit(llam_processor_event_pending_const(&shard->processor),
+                                     memory_order_acquire),
                 (unsigned long long)last_safepoint_ns,
                 (unsigned long long)last_run_started_ns,
                 shard->opaque_redirect_active ? 1U : 0U,
@@ -634,10 +649,49 @@ void llam_dump_runtime_state(int fd) {
                 shard->opaque_compensation_depth_peak,
                 shard->opaque_redirect_depth,
                 shard->opaque_redirect_depth_peak,
-                shard->inject_q.depth,
-                shard->hot_q.depth,
+                shard->processor.inject_q.depth,
+                shard->processor.hot_q.depth,
                 llam_norm_queue_depth(shard),
-                shard->timers != NULL ? 1U : 0U);
+                shard->processor.timers != NULL ? 1U : 0U);
+        if (atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U) {
+            dprintf(fd, "    async origin_ready=%u origin_service=%u\n",
+                    llam_async_preempt_ready_depth(shard),
+                    llam_async_preempt_has_origin_obligations(shard) ? 1U : 0U);
+        }
+        dprintf(fd,
+                "    M primary(state=%u P=%u run=%llu critical=%u preempt_disable=%u foreign(state=%u gen=%llu G=%llu) helper(state=%u P=%u run=%llu critical=%u preempt_disable=%u foreign(state=%u gen=%llu G=%llu))\n",
+                atomic_load_explicit(&shard->primary_worker.execution_state,
+                                     memory_order_acquire),
+                atomic_load_explicit(&shard->primary_worker.current_p,
+                                     memory_order_acquire) == &shard->processor ? 1U : 0U,
+                (unsigned long long)atomic_load_explicit(
+                    &shard->primary_worker.run_generation,
+                    memory_order_acquire),
+                atomic_load_explicit(&shard->primary_worker.runtime_critical_depth,
+                                     memory_order_acquire),
+                atomic_load_explicit(&shard->primary_worker.preempt_disable_depth,
+                                     memory_order_acquire),
+                shard->primary_worker.foreign_token.state,
+                (unsigned long long)shard->primary_worker.foreign_token.generation,
+                shard->primary_worker.foreign_token.task != NULL
+                    ? (unsigned long long)shard->primary_worker.foreign_token.task->id
+                    : 0ULL,
+                atomic_load_explicit(&shard->opaque_helper_worker.execution_state,
+                                     memory_order_acquire),
+                atomic_load_explicit(&shard->opaque_helper_worker.current_p,
+                                     memory_order_acquire) == &shard->processor ? 1U : 0U,
+                (unsigned long long)atomic_load_explicit(
+                    &shard->opaque_helper_worker.run_generation,
+                    memory_order_acquire),
+                atomic_load_explicit(&shard->opaque_helper_worker.runtime_critical_depth,
+                                     memory_order_acquire),
+                atomic_load_explicit(&shard->opaque_helper_worker.preempt_disable_depth,
+                                     memory_order_acquire),
+                shard->opaque_helper_worker.foreign_token.state,
+                (unsigned long long)shard->opaque_helper_worker.foreign_token.generation,
+                shard->opaque_helper_worker.foreign_token.task != NULL
+                    ? (unsigned long long)shard->opaque_helper_worker.foreign_token.task->id
+                    : 0ULL);
         dprintf(fd,
                 "    metrics ctx_switches=%llu yields=%llu parks=%llu wakes=%llu sleeps=%llu joins=%llu steals=%llu migrations=%llu slice_budget_ns=%llu max_run_ns=%llu slice_overruns=%llu\n",
                 (unsigned long long)shard->metrics.ctx_switches,
@@ -666,6 +720,50 @@ void llam_dump_runtime_state(int fd) {
                 rt->preempt_mode,
                 rt->preempt_poll_period,
                 (unsigned long long)rt->preempt_quantum_ns);
+        {
+            /* Typed snapshots also avoid MSVC's nested C11 atomic-intrinsic inference. */
+            unsigned async_state = atomic_load_explicit(&rt->preempt_capability.async_state,
+                                                        memory_order_acquire);
+            unsigned async_enabled = atomic_load_explicit(&rt->async_preempt_enabled,
+                                                          memory_order_acquire);
+            size_t safe_ranges = atomic_load_explicit(&rt->preempt_capability.registered_safe_ranges,
+                                                      memory_order_acquire);
+            unsigned failure_reason = atomic_load_explicit(&rt->preempt_capability.failure_reason,
+                                                           memory_order_acquire);
+
+            dprintf(fd,
+                    "    preempt_capability(policy=%s compiled=0x%x async_state=%s fallback=%s safe_ranges=%zu)\n",
+                    llam_preempt_effective_policy_name(llam_preempt_effective_policy_for(
+                        rt->preempt_mode,
+                        rt->preempt_capability.compiled_backends,
+                        async_enabled != 0U && async_state == LLAM_PREEMPT_ASYNC_ACTIVE,
+                        safe_ranges)),
+                    rt->preempt_capability.compiled_backends,
+                    llam_preempt_async_state_name((llam_preempt_async_state_t)
+                        async_state),
+                    llam_preempt_failure_reason_name((llam_preempt_failure_reason_t)
+                        failure_reason),
+                    safe_ranges);
+        }
+        dprintf(fd,
+                "    metrics async_preempt(requests=%llu captures=%llu resumes=%llu deferred_unsafe=%llu deferred_stale=%llu collisions=%llu context_bytes=%llu max_ack_latency_ns=%llu)\n",
+                (unsigned long long)shard->metrics.async_preempt_requests,
+                (unsigned long long)shard->metrics.async_preempt_captures,
+                (unsigned long long)shard->metrics.async_preempt_resumes,
+                (unsigned long long)shard->metrics.async_preempt_deferred_unsafe,
+                (unsigned long long)shard->metrics.async_preempt_deferred_stale,
+                (unsigned long long)shard->metrics.async_preempt_collisions,
+                (unsigned long long)shard->metrics.async_preempt_context_bytes,
+                (unsigned long long)shard->metrics.async_preempt_max_ack_latency_ns);
+        dprintf(fd,
+                "    metrics foreign(detaches=%llu reacquires=%llu) relief(activations=%llu deferred_unsafe=%llu deferred_unknown=%llu deferred_stale=%llu deferred_unannounced=%llu)\n",
+                (unsigned long long)shard->metrics.foreign_p_detaches,
+                (unsigned long long)shard->metrics.foreign_p_reacquires,
+                (unsigned long long)shard->metrics.relief_worker_activations,
+                (unsigned long long)shard->metrics.relief_deferred_unsafe,
+                (unsigned long long)shard->metrics.relief_deferred_unknown,
+                (unsigned long long)shard->metrics.relief_deferred_stale_ticket,
+                (unsigned long long)shard->metrics.relief_deferred_unannounced);
         dprintf(fd,
                 "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) direct_yield(attempts=%llu fast=%llu locked=%llu context=%llu policy=%llu no_work=%llu self=%llu push=%llu) wake_handoff(attempts=%llu hits=%llu context=%llu policy=%llu race=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
                 (unsigned long long)shard->metrics.blocking_calls,
@@ -723,42 +821,42 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_TIMEOUT]);
         dprintf(fd,
                 "    allocator lock(acq=%llu contention=%llu grows=%llu grow_fail=%llu) burst_max(task=%llu wait=%llu timer=%llu io_req=%llu io_buf=%llu)\n",
-                (unsigned long long)shard->allocator.lock_acquires,
-                (unsigned long long)shard->allocator.lock_contentions,
-                (unsigned long long)shard->allocator.slab_grows,
-                (unsigned long long)shard->allocator.slab_grow_failures,
-                (unsigned long long)shard->allocator.task_remote_burst_max,
-                (unsigned long long)shard->allocator.wait_remote_burst_max,
-                (unsigned long long)shard->allocator.timer_remote_burst_max,
-                (unsigned long long)shard->allocator.io_req_remote_burst_max,
-                (unsigned long long)shard->allocator.io_buffer_remote_burst_max);
+                (unsigned long long)shard->processor.allocator.lock_acquires,
+                (unsigned long long)shard->processor.allocator.lock_contentions,
+                (unsigned long long)shard->processor.allocator.slab_grows,
+                (unsigned long long)shard->processor.allocator.slab_grow_failures,
+                (unsigned long long)shard->processor.allocator.task_remote_burst_max,
+                (unsigned long long)shard->processor.allocator.wait_remote_burst_max,
+                (unsigned long long)shard->processor.allocator.timer_remote_burst_max,
+                (unsigned long long)shard->processor.allocator.io_req_remote_burst_max,
+                (unsigned long long)shard->processor.allocator.io_buffer_remote_burst_max);
         dprintf(fd,
                 "    allocator task(alloc=%llu reuse=%llu free=%llu remote_free=%llu drain=%llu) wait(alloc=%llu reuse=%llu free=%llu remote_free=%llu drain=%llu) timer(alloc=%llu reuse=%llu free=%llu remote_free=%llu drain=%llu) io_req(alloc=%llu reuse=%llu free=%llu remote_free=%llu drain=%llu) io_buf(alloc=%llu reuse=%llu free=%llu remote_free=%llu drain=%llu)\n",
-                (unsigned long long)shard->allocator.task_allocs,
-                (unsigned long long)(shard->allocator.task_reuses + shard->allocator.task_external_reuses),
-                (unsigned long long)(shard->allocator.task_frees + shard->allocator.task_external_frees),
-                (unsigned long long)shard->allocator.task_remote_frees,
-                (unsigned long long)shard->allocator.task_remote_drains,
-                (unsigned long long)shard->allocator.wait_allocs,
-                (unsigned long long)shard->allocator.wait_reuses,
-                (unsigned long long)shard->allocator.wait_frees,
-                (unsigned long long)shard->allocator.wait_remote_frees,
-                (unsigned long long)shard->allocator.wait_remote_drains,
-                (unsigned long long)shard->allocator.timer_allocs,
-                (unsigned long long)shard->allocator.timer_reuses,
-                (unsigned long long)shard->allocator.timer_frees,
-                (unsigned long long)shard->allocator.timer_remote_frees,
-                (unsigned long long)shard->allocator.timer_remote_drains,
-                (unsigned long long)shard->allocator.io_req_allocs,
-                (unsigned long long)shard->allocator.io_req_reuses,
-                (unsigned long long)shard->allocator.io_req_frees,
-                (unsigned long long)shard->allocator.io_req_remote_frees,
-                (unsigned long long)shard->allocator.io_req_remote_drains,
-                (unsigned long long)shard->allocator.io_buffer_allocs,
-                (unsigned long long)shard->allocator.io_buffer_reuses,
-                (unsigned long long)shard->allocator.io_buffer_frees,
-                (unsigned long long)shard->allocator.io_buffer_remote_frees,
-                (unsigned long long)shard->allocator.io_buffer_remote_drains);
+                (unsigned long long)shard->processor.allocator.task_allocs,
+                (unsigned long long)(shard->processor.allocator.task_reuses + shard->processor.allocator.task_external_reuses),
+                (unsigned long long)(shard->processor.allocator.task_frees + shard->processor.allocator.task_external_frees),
+                (unsigned long long)shard->processor.allocator.task_remote_frees,
+                (unsigned long long)shard->processor.allocator.task_remote_drains,
+                (unsigned long long)shard->processor.allocator.wait_allocs,
+                (unsigned long long)shard->processor.allocator.wait_reuses,
+                (unsigned long long)shard->processor.allocator.wait_frees,
+                (unsigned long long)shard->processor.allocator.wait_remote_frees,
+                (unsigned long long)shard->processor.allocator.wait_remote_drains,
+                (unsigned long long)shard->processor.allocator.timer_allocs,
+                (unsigned long long)shard->processor.allocator.timer_reuses,
+                (unsigned long long)shard->processor.allocator.timer_frees,
+                (unsigned long long)shard->processor.allocator.timer_remote_frees,
+                (unsigned long long)shard->processor.allocator.timer_remote_drains,
+                (unsigned long long)shard->processor.allocator.io_req_allocs,
+                (unsigned long long)shard->processor.allocator.io_req_reuses,
+                (unsigned long long)shard->processor.allocator.io_req_frees,
+                (unsigned long long)shard->processor.allocator.io_req_remote_frees,
+                (unsigned long long)shard->processor.allocator.io_req_remote_drains,
+                (unsigned long long)shard->processor.allocator.io_buffer_allocs,
+                (unsigned long long)shard->processor.allocator.io_buffer_reuses,
+                (unsigned long long)shard->processor.allocator.io_buffer_frees,
+                (unsigned long long)shard->processor.allocator.io_buffer_remote_frees,
+                (unsigned long long)shard->processor.allocator.io_buffer_remote_drains);
         dprintf(fd, "    trace:\n");
         for (j = begin; j < begin + (unsigned)trace_count; ++j) {
             const llam_trace_event_t *event = &shard->trace_ring[j % LLAM_TRACE_RING_CAP];
@@ -855,4 +953,15 @@ void llam_dump_runtime_state(int fd) {
     }
     llam_runtime_lifecycle_unlock();
     llam_runtime_end_public_op(rt);
+}
+
+void llam_dump_runtime_state(int fd) {
+    LLAM_NATIVE_API_GUARD();
+    llam_dump_runtime_state_impl(llam_runtime_default_storage(), fd);
+}
+
+void llam_dump_runtime_state_handle(llam_runtime_t *runtime, int fd) {
+    LLAM_NATIVE_API_GUARD();
+    if (runtime == NULL || fd < 0) { errno = EINVAL; return; }
+    llam_dump_runtime_state_impl(runtime, fd);
 }

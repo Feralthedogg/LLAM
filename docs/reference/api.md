@@ -12,7 +12,7 @@ when you need field-level or binary-compatibility rules.
 | Deadlines | Absolute deadlines use `llam_now_ns()` units. `0` means already expired unless the function documents another meaning. |
 | Errors | Functions returning `-1` set `errno`; common values include `EINVAL`, `EAGAIN`, `ETIMEDOUT`, `ECANCELED`, `EPIPE`, `EBUSY`, `EXDEV`, `ENOTSUP`, and `ENOMEM`. |
 | Runtime ownership | Runtime-aware objects are bound to the runtime that created them. Cross-runtime managed use fails with `EXDEV`. |
-| ABI-sized structs | Initialize option structs with the matching `*_opts_init()` helper and pass `*_CURRENT_SIZE`. |
+| ABI-sized structs | Use a matching `*_opts_init()` helper where provided and pass `*_CURRENT_SIZE`. Windows async opt-in deliberately has no initializer that could silently acknowledge process-wide fail-fast. |
 | Nullable payloads | Channel and blocking APIs with `_result` suffix distinguish a successful `NULL` payload from failure. |
 | Windows files | `llam_fd_t` is a socket on Windows. Use HANDLE APIs for file and pipe I/O. |
 
@@ -41,10 +41,46 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `llam_runtime_default` | Return the default runtime handle. |
 | `llam_runtime_create` | Canonical embedding entry point for an explicit runtime handle. |
 | `llam_runtime_run_handle` | Canonical embedding scheduler driver for one runtime handle. |
+| `llam_runtime_request_stop_handle` | Stop one explicit runtime; peer managed tasks get `EXDEV`. |
+| `llam_runtime_get_resources_ex` | Caller-sized snapshot of pool sizes, live/retained work and closing state. |
+| `llam_runtime_drain_until` | Host bounded stop/drain; timeout preserves runtime and resources. |
 | `llam_run` | Drive the process-default compatibility runtime. |
 | `llam_runtime_request_stop` | Request cooperative stop and wake workers. |
 | `llam_runtime_destroy` | Canonical embedding teardown. Passing `NULL` aliases default shutdown. |
 | `llam_runtime_shutdown` | Stop and release default-runtime resources. |
+
+## Managed runtimes
+
+For compiler-qualified C, use the [managed runtime API](managed-runtime.md):
+`llam_preempt_opts_init`, `llam_runtime_create_managed`,
+`llam_runtime_preempt_info_ex`, `llam_runtime_module_register_ex`,
+`llam_runtime_module_unregister`, and `llam_call_native_affine_result`.
+`<llam/managed.h>` defines caller-sized policy, resource and module structures.
+The constructor defaults to `ASYNC_AUTO`; `ASYNC_REQUIRED` rejects an
+unqualified entry or native profile before user entry. Existing constructors
+and the expert Windows interface below retain their compatibility contracts.
+
+## Experimental Windows asynchronous preemption
+
+`llam_runtime_enable_experimental_windows_async_preempt_ex()` atomically opts
+an idle, fixed-primary Win64 runtime into the experimental backend. The caller passes
+nonoverlapping, half-open, **caller-certified** PE-image PC ranges and the
+`LLAM_WINDOWS_ASYNC_PREEMPT_ACK_PROCESS_FAILFAST` flag. LLAM copies the ranges,
+checks PE executable backing and machine support, and pins their modules; it
+cannot prove that arbitrary code is safe to interrupt. A committed remote
+context failure can terminate the entire hosting process. Other builds retain
+the public symbol but return `ENOTSUP`. See [Options](options.md) and the
+[Windows build contract](../build.md#native-windows-build) before using it.
+A successful call racing destroy reports that enablement committed first, not
+that the runtime remains usable after the call returns.
+Each actual primary worker must register before user dispatch starts. Captured
+full native contexts stay on their capture worker; only a completed eligible
+explicit cooperative yield with all old asynchronous ownership retired can
+release a G for ordinary migration. Internal yields and park/offload wakes
+remain origin-bound. Do not retain native-TLS addresses across migration.
+Dynamic scaling, async helper/relief execution and inline foreign detach are
+not admitted. Native qualification currently covers two and three primary Ms
+with the pinned scalar-leaf fixture, not every workload or compiler profile.
 
 ## Tasks
 
@@ -63,14 +99,20 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `LLAM_PREEMPT_POLL_EVERY` | Safepoint macro for counted loops. Arguments are evaluated once. |
 | `llam_task_set_class` | Change the current task scheduler class. |
 
+`llam_task_set_result` publishes an application value/error at completion.
+`llam_join_result` and `llam_join_result_until` copy it before consuming a normal
+handle; `llam_task_get_result` peeks after completion, including a borrowed group
+child. An unsuccessful join leaves output untouched.
+
 ## Task Groups
 
 | API | Purpose |
 | --- | --- |
-| `llam_task_group_create` | Create a group that can own child tasks. |
+| `llam_task_group_create` | Legacy group: explicit child tokens override group cancellation. |
+| `llam_task_group_create_ex` / `llam_runtime_task_group_create_ex` | Opt in to `LLAM_TASK_GROUP_F_LINK_CANCEL`: group OR explicit token. |
 | `llam_task_group_spawn_ex` | Spawn a grouped child with explicit option size. |
 | `llam_task_group_spawn` | Convenience grouped spawn wrapper. |
-| `llam_task_group_cancel` | Cancel all current and future observers in the group. |
+| `llam_task_group_cancel` | Cancel the group source; external tokens themselves are never cancelled. |
 | `llam_task_group_join` | Join all grouped children. |
 | `llam_task_group_join_until` | Join grouped children until an absolute deadline. |
 | `llam_task_group_destroy` | Destroy a group after child work is drained or cancelled. |
@@ -205,8 +247,8 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `llam_runtime_collect_stats_ex` | Size-aware stats snapshot for the current/default runtime. |
 | `llam_runtime_collect_stats_ex_handle` | Size-aware stats snapshot for an explicit runtime handle. |
 | `llam_runtime_collect_stats` | Convenience stats snapshot. |
-| `llam_runtime_write_stats_json` | Write one machine-readable JSON stats object. |
-| `llam_dump_runtime_state` | Write a human-readable incident dump. |
+| `llam_runtime_write_stats_json` / `llam_runtime_write_stats_json_handle` | Write JSON statistics for selected/default or explicit runtime. |
+| `llam_dump_runtime_state` / `llam_dump_runtime_state_handle` | Best-effort dump for selected/default or explicit runtime. |
 | `LLAM_RUNTIME_STATS_CURRENT_SIZE` | Size token for `llam_runtime_collect_stats_ex` and handle-scoped stats. |
 | `llam_task_flags` | Return task spawn/runtime flags. |
 | `llam_task_id` | Return the runtime-assigned task id. |
@@ -234,9 +276,32 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Portable fd/socket invalid sentinel and predicate. |
 | `LLAM_INVALID_HANDLE` / `LLAM_HANDLE_IS_INVALID` | Portable handle invalid sentinel and predicate. |
 | `LLAM_PLATFORM_WINDOWS` / `LLAM_PLATFORM_POSIX` | Major platform-family feature macros. |
-| `LLAM_PLATFORM_LINUX` / `LLAM_PLATFORM_DARWIN` / `LLAM_PLATFORM_BSD` | Unix-family backend feature macros. |
-| `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | BSD-family platform macros. |
-| `LLAM_PLATFORM_KQUEUE` | Non-zero on Darwin or supported BSD-family targets. |
+| `LLAM_PLATFORM_LINUX` / `LLAM_PLATFORM_DARWIN` / `LLAM_PLATFORM_BSD` | Platform detection macros; BSD detection now leads to a build error. |
+| `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | Legacy BSD detection macros; unsupported in 3.0.0. |
+| `LLAM_PLATFORM_KQUEUE` | Non-zero on macOS targets. |
 | `LLAM_ARCH_X86_64` / `LLAM_ARCH_AARCH64` | Public architecture feature macros. |
 | `LLAM_PLATFORM_NAME` | Human-readable platform name used by diagnostics. |
 | `LLAM_API` | Public symbol visibility/import/export macro. |
+
+## Explicit Ownership And I/O Budgets (ABI 2.3)
+
+Host-side constructors are `llam_runtime_channel_create`,
+`llam_runtime_mutex_create`, `llam_runtime_cond_create`,
+`llam_runtime_cancel_token_create`, `llam_runtime_task_group_create[_ex]`,
+`llam_runtime_timer_create_ex` and `llam_runtime_signal_set_create_ex`. They
+retain the runtime through publication and preserve existing object lifetimes.
+Old constructors retain current-task/default-runtime selection.
+
+`llam_wait_opts_init` initializes the caller-sized common wait policy.
+`llam_read_ex`, `llam_write_ex`, `llam_connect_ex`, `llam_poll_fd_ex`,
+`llam_read_handle_ex` and `llam_write_handle_ex` accept it. Stream fd operations
+also have absolute `read_until`, `write_until`, `connect_until`, `poll_fd_until`
+forms. New poll forms take an `int` mask in the short-mask range; legacy poll ABI
+is unchanged. Poll timeout returns 0; byte/connect timeout returns -1/`ETIMEDOUT`.
+
+`llam_read_exact[_ex]` and `llam_write_all[_ex]` report confirmed progress through
+a required `size_t *`, including on failure. Early EOF is `EPIPE`; premature
+zero write is `EIO`. `llam_task_local_set_owned` adds nonblocking same-M exit
+cleanup and `llam_task_local_take_result` transfers the value without cleanup.
+See [Embedding LLAM](../guides/embedding.md) for cancellation composition,
+endpoint restrictions, drain timeout recovery and complete failure cleanup.

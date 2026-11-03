@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "llam/runtime.h"
@@ -2042,21 +2042,21 @@ static void timer_heap_overflow_task(void *arg) {
     }
 
     pthread_mutex_lock(&shard->lock);
-    state->saved_len = shard->timer_heap_len;
-    state->saved_cap = shard->timer_heap_cap;
-    state->saved_heap = shard->timer_heap;
-    state->saved_root = shard->timers;
-    state->saved_timer_count = atomic_load_explicit(&shard->timer_count, memory_order_acquire);
+    state->saved_len = shard->processor.timer_heap_len;
+    state->saved_cap = shard->processor.timer_heap_cap;
+    state->saved_heap = shard->processor.timer_heap;
+    state->saved_root = shard->processor.timers;
+    state->saved_timer_count = atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire);
     /*
      * Simulate a corrupted or future-imported heap at the overflow boundary.
      * Before the guard, timer_heap_len + 1 wrapped to zero, reserve succeeded,
      * and insertion wrote through timer_heap[SIZE_MAX].
      */
-    shard->timer_heap_len = SIZE_MAX;
-    shard->timer_heap_cap = 0U;
-    shard->timer_heap = NULL;
-    shard->timers = NULL;
-    atomic_store_explicit(&shard->timer_count, 0U, memory_order_release);
+    shard->processor.timer_heap_len = SIZE_MAX;
+    shard->processor.timer_heap_cap = 0U;
+    shard->processor.timer_heap = NULL;
+    shard->processor.timers = NULL;
+    atomic_store_explicit(&shard->processor.timer_count, 0U, memory_order_release);
     pthread_mutex_unlock(&shard->lock);
 
     deadline_ns = llam_now_ns() + 1000000000ULL;
@@ -2065,11 +2065,11 @@ static void timer_heap_overflow_task(void *arg) {
     state->sleep_errno = errno;
 
     pthread_mutex_lock(&shard->lock);
-    shard->timer_heap_len = state->saved_len;
-    shard->timer_heap_cap = state->saved_cap;
-    shard->timer_heap = state->saved_heap;
-    shard->timers = state->saved_root;
-    atomic_store_explicit(&shard->timer_count, state->saved_timer_count, memory_order_release);
+    shard->processor.timer_heap_len = state->saved_len;
+    shard->processor.timer_heap_cap = state->saved_cap;
+    shard->processor.timer_heap = state->saved_heap;
+    shard->processor.timers = state->saved_root;
+    atomic_store_explicit(&shard->processor.timer_count, state->saved_timer_count, memory_order_release);
     pthread_mutex_unlock(&shard->lock);
 
     if (state->sleep_rc != -1 || state->sleep_errno != ENOMEM) {
@@ -3764,10 +3764,10 @@ static int test_timer_heap_counter_accounting_guard(void) {
     atomic_init(&runtime.stop_requested, false);
     atomic_init(&runtime.initialized, false);
     atomic_init(&runtime.exec_started, false);
-    atomic_init(&shard.timer_count, UINT_MAX);
+    atomic_init(&shard.processor.timer_count, UINT_MAX);
     shard.runtime = &runtime;
-    shard.timer_heap = heap;
-    shard.timer_heap_cap = 1U;
+    shard.processor.timer_heap = heap;
+    shard.processor.timer_heap_cap = 1U;
 
     /*
      * This direct internal test avoids running the scheduler after intentionally
@@ -3778,26 +3778,26 @@ static int test_timer_heap_counter_accounting_guard(void) {
     errno = 0;
     if (llam_timer_heap_push_locked(&shard, &overflow_node) ||
         errno != EOVERFLOW ||
-        shard.timer_heap_len != 0U ||
-        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != UINT_MAX ||
+        shard.processor.timer_heap_len != 0U ||
+        atomic_load_explicit(&shard.processor.timer_count, memory_order_acquire) != UINT_MAX ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
         return fail_errno("timer heap counter overflow guard failed");
     }
 
     atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
     atomic_store_explicit(&runtime.stop_requested, false, memory_order_release);
-    atomic_store_explicit(&shard.timer_count, 0U, memory_order_release);
+    atomic_store_explicit(&shard.processor.timer_count, 0U, memory_order_release);
     heap[0] = NULL;
-    shard.timer_heap_len = 0U;
-    shard.timers = NULL;
+    shard.processor.timer_heap_len = 0U;
+    shard.processor.timers = NULL;
     normal_node.deadline_ns = 42U;
 
     errno = 0;
     if (!llam_timer_heap_push_locked(&shard, &normal_node) ||
         errno != 0 ||
-        shard.timer_heap_len != 1U ||
-        shard.timers != &normal_node ||
-        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 1U) {
+        shard.processor.timer_heap_len != 1U ||
+        shard.processor.timers != &normal_node ||
+        atomic_load_explicit(&shard.processor.timer_count, memory_order_acquire) != 1U) {
         return fail_errno("timer heap counter normal push accounting failed");
     }
 
@@ -3805,26 +3805,26 @@ static int test_timer_heap_counter_accounting_guard(void) {
     removed = llam_timer_heap_remove_at_locked(&shard, 0U);
     if (removed != &normal_node ||
         errno != 0 ||
-        shard.timer_heap_len != 0U ||
-        shard.timers != NULL ||
-        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 0U) {
+        shard.processor.timer_heap_len != 0U ||
+        shard.processor.timers != NULL ||
+        atomic_load_explicit(&shard.processor.timer_count, memory_order_acquire) != 0U) {
         return fail_errno("timer heap counter normal pop accounting failed");
     }
 
     atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
     atomic_store_explicit(&runtime.stop_requested, false, memory_order_release);
-    atomic_store_explicit(&shard.timer_count, 0U, memory_order_release);
+    atomic_store_explicit(&shard.processor.timer_count, 0U, memory_order_release);
     underflow_node.heap_index = 0U;
     heap[0] = &underflow_node;
-    shard.timer_heap_len = 1U;
-    shard.timers = &underflow_node;
+    shard.processor.timer_heap_len = 1U;
+    shard.processor.timers = &underflow_node;
 
     errno = 0;
     removed = llam_timer_heap_remove_at_locked(&shard, 0U);
     if (removed != &underflow_node ||
         errno != EINVAL ||
-        shard.timer_heap_len != 0U ||
-        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 0U ||
+        shard.processor.timer_heap_len != 0U ||
+        atomic_load_explicit(&shard.processor.timer_count, memory_order_acquire) != 0U ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
         return fail_errno("timer heap counter underflow guard failed");
     }

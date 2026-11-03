@@ -17,23 +17,82 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "llam/runtime.h"
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 typedef uint32_t (*abi_version_fn)(void);
 typedef const char *(*version_string_fn)(void);
 typedef int (*abi_info_fn)(llam_abi_info_t *info, size_t info_size);
 typedef int (*connect_fn)(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 
-#if defined(__APPLE__) && defined(__MACH__)
+#if defined(_WIN32)
+typedef HMODULE llam_test_shared_handle_t;
+
+static llam_test_shared_handle_t llam_test_shared_open(const char *path) {
+    return LoadLibraryA(path);
+}
+
+static void *llam_test_shared_symbol(llam_test_shared_handle_t handle,
+                                     const char *name) {
+    FARPROC procedure = GetProcAddress(handle, name);
+    void *symbol = NULL;
+
+    _Static_assert(sizeof(procedure) == sizeof(symbol),
+                   "Windows procedure and object pointer sizes must match");
+    memcpy(&symbol, &procedure, sizeof(symbol));
+    return symbol;
+}
+
+static const char *llam_test_shared_error(void) {
+    static char message[48];
+
+    (void)snprintf(message, sizeof(message), "GetLastError=%lu",
+                   (unsigned long)GetLastError());
+    return message;
+}
+
+static void llam_test_shared_close(llam_test_shared_handle_t handle) {
+    (void)FreeLibrary(handle);
+}
+#else
+typedef void *llam_test_shared_handle_t;
+
+static llam_test_shared_handle_t llam_test_shared_open(const char *path) {
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+static void *llam_test_shared_symbol(llam_test_shared_handle_t handle,
+                                     const char *name) {
+    (void)dlerror();
+    return dlsym(handle, name);
+}
+
+static const char *llam_test_shared_error(void) {
+    const char *message = dlerror();
+
+    return message != NULL ? message : "unknown dlerror";
+}
+
+static void llam_test_shared_close(llam_test_shared_handle_t handle) {
+    (void)dlclose(handle);
+}
+#endif
+
+#if defined(_WIN32)
+#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.dll"
+#elif defined(__APPLE__) && defined(__MACH__)
 #define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.2.dylib"
 #elif defined(__linux__)
 #define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so.3.0.0"
@@ -43,10 +102,11 @@ typedef int (*connect_fn)(llam_fd_t fd, const struct sockaddr *addr, socklen_t a
 
 #define LOAD_FN(handle, name, out)                                                           \
     do {                                                                                     \
-        void *symbol__ = dlsym((handle), (name));                                            \
+        void *symbol__ = llam_test_shared_symbol((handle), (name));                         \
         _Static_assert(sizeof(out) == sizeof(symbol__), "function pointer size mismatch");   \
         if (symbol__ == NULL) {                                                              \
-            fprintf(stderr, "[test_shared_load] missing symbol %s: %s\n", (name), dlerror()); \
+            fprintf(stderr, "[test_shared_load] missing symbol %s: %s\n",                  \
+                    (name), llam_test_shared_error());                                      \
             return 1;                                                                        \
         }                                                                                    \
         memcpy(&(out), &symbol__, sizeof(out));                                              \
@@ -57,24 +117,22 @@ static int test_fail(const char *message) {
     return 1;
 }
 
-static int require_symbol(void *handle, const char *name) {
+static int require_symbol(llam_test_shared_handle_t handle, const char *name) {
     void *symbol;
 
-    (void)dlerror();
-    symbol = dlsym(handle, name);
+    symbol = llam_test_shared_symbol(handle, name);
     if (symbol == NULL) {
-        const char *error = dlerror();
-
         fprintf(stderr,
                 "[test_shared_load] missing public symbol %s: %s\n",
                 name,
-                error != NULL ? error : "unknown dlerror");
+                llam_test_shared_error());
         return 1;
     }
     return 0;
 }
 
-static int require_symbols(void *handle, const char *const *symbols, size_t count) {
+static int require_symbols(llam_test_shared_handle_t handle,
+                           const char *const *symbols, size_t count) {
     size_t i;
 
     for (i = 0U; i < count; ++i) {
@@ -85,11 +143,11 @@ static int require_symbols(void *handle, const char *const *symbols, size_t coun
     return 0;
 }
 
-static int require_absent_symbol(void *handle, const char *name) {
+static int require_absent_symbol(llam_test_shared_handle_t handle,
+                                 const char *name) {
     void *symbol;
 
-    (void)dlerror();
-    symbol = dlsym(handle, name);
+    symbol = llam_test_shared_symbol(handle, name);
     if (symbol != NULL) {
         fprintf(stderr, "[test_shared_load] internal symbol is exported: %s\n", name);
         return 1;
@@ -97,7 +155,8 @@ static int require_absent_symbol(void *handle, const char *name) {
     return 0;
 }
 
-static int require_absent_symbols(void *handle, const char *const *symbols, size_t count) {
+static int require_absent_symbols(llam_test_shared_handle_t handle,
+                                  const char *const *symbols, size_t count) {
     size_t i;
 
     for (i = 0U; i < count; ++i) {
@@ -114,6 +173,7 @@ int main(int argc, char **argv) {
         "llam_version_string",
         "llam_abi_get_info",
         "llam_runtime_opts_init",
+        "llam_runtime_enable_experimental_windows_async_preempt_ex",
         "llam_spawn_opts_init",
         "llam_runtime_init_ex",
         "llam_runtime_init",
@@ -221,6 +281,10 @@ int main(int argc, char **argv) {
         "llam_broker_client_self_test_exchange",
         "llam_broker_client_self_test_local",
         "llam_broker_client_self_test_unix",
+        "llam_windows_async_lifetime_enable_certified_ranges",
+        "llam_windows_async_pe_collect_ranges",
+        "llam_windows_async_pe_release_ranges",
+        "llam_windows_async_test_ctrl_entry_gate",
     };
     const char *path = argc > 1 ? argv[1] : LLAM_TEST_DEFAULT_SHARED_PATH;
     char expected_version[32];
@@ -229,11 +293,12 @@ int main(int argc, char **argv) {
     abi_info_fn llam_abi_get_info_ptr = NULL;
     connect_fn llam_connect_ptr = NULL;
     llam_abi_info_t info;
-    void *handle;
+    llam_test_shared_handle_t handle;
 
-    handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    handle = llam_test_shared_open(path);
     if (handle == NULL) {
-        fprintf(stderr, "[test_shared_load] dlopen(%s) failed: %s\n", path, dlerror());
+        fprintf(stderr, "[test_shared_load] open(%s) failed: %s\n",
+                path, llam_test_shared_error());
         return 1;
     }
 
@@ -242,47 +307,47 @@ int main(int argc, char **argv) {
     LOAD_FN(handle, "llam_abi_get_info", llam_abi_get_info_ptr);
     LOAD_FN(handle, "llam_connect", llam_connect_ptr);
     if (require_symbols(handle, llam_symbols, sizeof(llam_symbols) / sizeof(llam_symbols[0])) != 0) {
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return 1;
     }
     /*
      * The shared library may link these helpers internally, but they are not
-     * part of the stable C ABI and must not be reachable through dlsym().
+     * part of the stable C ABI and must not be reachable through the loader.
      */
     if (require_absent_symbols(handle, internal_symbols, sizeof(internal_symbols) / sizeof(internal_symbols[0])) != 0) {
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return 1;
     }
 
     if (llam_abi_version_ptr() != LLAM_ABI_VERSION) {
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return test_fail("loaded ABI version does not match headers");
     }
     (void)snprintf(expected_version, sizeof(expected_version), "%u.%u.%u",
                    LLAM_VERSION_MAJOR, LLAM_VERSION_MINOR, LLAM_VERSION_PATCH);
     if (llam_version_string_ptr() == NULL || strcmp(llam_version_string_ptr(), expected_version) != 0) {
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return test_fail("loaded version string is unexpected");
     }
     memset(&info, 0, sizeof(info));
     if (llam_abi_get_info_ptr(&info, LLAM_ABI_INFO_CURRENT_SIZE) != 0) {
         fprintf(stderr, "[test_shared_load] loaded llam_abi_get_info failed: errno=%d (%s)\n", errno, strerror(errno));
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return 1;
     }
     if (info.abi_major != LLAM_ABI_VERSION_MAJOR ||
         info.abi_minor != LLAM_ABI_VERSION_MINOR ||
         info.runtime_name == NULL ||
         strcmp(info.runtime_name, "LLAM") != 0) {
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return test_fail("loaded ABI metadata is inconsistent");
     }
     if (llam_connect_ptr == NULL) {
-        (void)dlclose(handle);
+        llam_test_shared_close(handle);
         return test_fail("llam_connect symbol resolved to NULL");
     }
 
-    (void)dlclose(handle);
+    llam_test_shared_close(handle);
     printf("[test_shared_load] ok\n");
     return 0;
 }

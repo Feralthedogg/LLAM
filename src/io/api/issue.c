@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -94,6 +94,7 @@ void llam_task_exit_internal(void) {
         abort();
     }
     rt = task->owner_runtime;
+    llam_task_local_cleanup_owned(task);
 
     pthread_mutex_lock(&task->lock);
     task->state = LLAM_TASK_STATE_DEAD;
@@ -560,7 +561,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
             llam_disarm_task_wait_deadline(task);
         }
     }
-    if (task->cancel_token != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
+    if (llam_task_has_cancel_tokens(task) && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
         if (llam_cancel_token_register_task(task) != 0) {
             int saved_errno = errno;
             bool wait_for_completion = false;
@@ -595,7 +596,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
     /* Retire execution publication before the task enters the I/O wait. */
     pthread_mutex_lock(&shard->lock);
-    if (g_llam_tls_worker != NULL && g_llam_tls_worker->compat_shard == shard) {
+    if (llam_worker_matches_shard(g_llam_tls_worker, shard)) {
         llam_worker_clear_active_g(g_llam_tls_worker);
     }
     pthread_mutex_unlock(&shard->lock);
@@ -610,7 +611,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking_or_abort(task);
     shard->metrics.io_completions += 1U;
-    errno = req->error_code;
+    llam_thread_errno_store(req->error_code);
     return req->error_code == 0 ? 0 : -1;
 }
 
@@ -651,7 +652,10 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
     }
 
     /* Multishot is reserved for indefinite watch-style waits; timed waits stay on the one-shot path. */
-    node = &rt->nodes[llam_multishot_owner_node_index(rt, shard->io_node_index, req->fd)];
+    node = &rt->nodes[llam_multishot_owner_node_index(
+        rt,
+        llam_processor_io_node_index(&shard->processor),
+        req->fd)];
     if (!node->ring_ready || !node->supports_multishot_poll) {
         errno = EAGAIN;
         return -1;
@@ -781,7 +785,10 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
     }
 
     /* Accept multishot is only safe when the runtime owns buffering for the watch lifetime. */
-    node = &rt->nodes[llam_multishot_owner_node_index(rt, shard->io_node_index, req->fd)];
+    node = &rt->nodes[llam_multishot_owner_node_index(
+        rt,
+        llam_processor_io_node_index(&shard->processor),
+        req->fd)];
     if (!node->ring_ready || !node->supports_multishot_accept) {
         errno = EAGAIN;
         return -1;
@@ -898,7 +905,10 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
         return -1;
     }
 
-    node = &rt->nodes[llam_multishot_owner_node_index(rt, shard->io_node_index, req->fd)];
+    node = &rt->nodes[llam_multishot_owner_node_index(
+        rt,
+        llam_processor_io_node_index(&shard->processor),
+        req->fd)];
     if (!node->ring_ready || !node->supports_multishot_recv) {
         errno = EAGAIN;
         return -1;
@@ -955,7 +965,7 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
             req->owned_buffer->provided_storage = false;
             req->owned_buffer->provided_bid = 0U;
             req->owned_buffer->data = req->owned_buffer->inline_data;
-            req->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+            req->owned_buffer->capacity = req->owned_buffer->inline_capacity;
             req->owned_buffer->external_storage = false;
             req->use_provided_buffer = false;
         }
@@ -1041,7 +1051,10 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
         return -1;
     }
 
-    node = &rt->nodes[shard->io_node_index];
+    llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
+    req->deadline_ns = has_deadline ? deadline_ns : 0U;
+    if (has_deadline && llam_now_ns() >= deadline_ns) { errno = ETIMEDOUT; return -1; }
+    node = &rt->nodes[llam_processor_io_node_index(&shard->processor)];
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     if (req->kind == LLAM_IO_KIND_POLL && !llam_windows_iocp_poll_supported(req->fd, req->poll_events)) {
         atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);

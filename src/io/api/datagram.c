@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -150,6 +150,8 @@ ssize_t llam_recvfrom(llam_fd_t fd,
                       int flags,
                       struct sockaddr *src_addr,
                       socklen_t *addrlen) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     if (llam_datagram_validate_addr_pair(src_addr, addrlen) != 0) {
         return -1;
     }
@@ -239,6 +241,8 @@ ssize_t llam_sendto(llam_fd_t fd,
                     int flags,
                     const struct sockaddr *dst_addr,
                     socklen_t addrlen) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_task_safepoint();
     if (g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
         return llam_platform_sendto_fd(fd, buf, count, flags, dst_addr, addrlen);
@@ -300,6 +304,12 @@ ssize_t llam_recvfrom_owned(llam_fd_t fd,
                             struct sockaddr *src_addr,
                             socklen_t *addrlen,
                             llam_io_buffer_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     llam_io_buffer_t *buffer;
     llam_io_buffer_t *public_handle;
     ssize_t nread;

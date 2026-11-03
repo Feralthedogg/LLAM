@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/windows/runtime_io_watch_windows_internal.h"
@@ -104,6 +104,10 @@ static int llam_windows_submit_handle_rw(llam_node_t *node, llam_io_req_t *req, 
 
         if (err == ERROR_IO_PENDING) {
             return 0;
+        }
+        if (!write_op && err == ERROR_HANDLE_EOF) {
+            op->immediate_bytes = 0U;
+            return 1;
         }
         errno = llam_windows_system_error_to_errno(err);
         return -1;

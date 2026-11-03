@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -245,7 +245,10 @@ static size_t llam_channel_round_capacity(size_t capacity) {
     return rounded;
 }
 
-llam_channel_t *llam_channel_create(size_t capacity) {
+static llam_channel_t *llam_channel_create_owned(size_t capacity, llam_runtime_t *owner_runtime) {
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
+
+
     llam_channel_t *channel;
     size_t ring_capacity;
     int rc;
@@ -280,7 +283,7 @@ llam_channel_t *llam_channel_create(size_t capacity) {
         return NULL;
     }
 
-    channel->owner_runtime = llam_runtime_owner_for_new_object();
+    channel->owner_runtime = owner_runtime;
     llam_public_active_op_init(&channel->active_ops);
     channel->buffer = calloc(ring_capacity, sizeof(*channel->buffer));
     if (channel->buffer == NULL) {
@@ -307,7 +310,25 @@ llam_channel_t *llam_channel_create(size_t capacity) {
     return llam_channel_public_handle(channel);
 }
 
+llam_channel_t *llam_channel_create(size_t capacity) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    return llam_channel_create_owned(capacity, llam_runtime_owner_for_new_object());
+}
+
+llam_channel_t *llam_runtime_channel_create(llam_runtime_t *runtime, size_t capacity) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return NULL;
+    llam_channel_t *result = llam_channel_create_owned(capacity, pinned);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
+}
+
 int llam_channel_destroy(llam_channel_t *channel) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t handle = (uintptr_t)channel;
     size_t slot;
     uint32_t generation;

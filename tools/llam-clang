@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSES/Apache-2.0.txt.
+
+set -euo pipefail
+
+llam_mode="off"
+llam_preempt_requested=0
+llam_managed_mode=""
+llam_compiler="${LLAM_CLANG:-clang}"
+llam_plugin="${LLAM_PREEMPT_PLUGIN:-}"
+llam_forwarded=()
+llam_plain_forwarded=()
+llam_has_optimization=0
+llam_link_step=1
+llam_output="a.out"
+llam_output_next=0
+
+for llam_argument in "$@"; do
+    if [ "$llam_output_next" -eq 1 ]; then
+        llam_output="$llam_argument"
+        llam_output_next=0
+        llam_forwarded+=("$llam_argument")
+        continue
+    fi
+    case "$llam_argument" in
+        --llam-managed=off|--llam-managed=auto|--llam-managed=required)
+            llam_managed_mode="${llam_argument#--llam-managed=}"
+            ;;
+        --llam-managed=*)
+            printf 'llam-clang: unknown managed mode: %s\n' "$llam_argument" >&2
+            exit 2
+            ;;
+        --llam-preempt=off)
+            llam_mode="off"
+            llam_preempt_requested=1
+            ;;
+        --llam-preempt=auto)
+            llam_mode="auto"
+            llam_preempt_requested=1
+            ;;
+        --llam-preempt=required)
+            llam_mode="required"
+            llam_preempt_requested=1
+            ;;
+        --llam-preempt=*)
+            printf 'llam-clang: unknown preemption mode: %s\n' "$llam_argument" >&2
+            exit 2
+            ;;
+        -O|-O*)
+            llam_has_optimization=1
+            llam_forwarded+=("$llam_argument")
+            ;;
+        -o)
+            llam_output_next=1
+            llam_forwarded+=("$llam_argument")
+            ;;
+        -o?*)
+            llam_output="${llam_argument#-o}"
+            llam_forwarded+=("$llam_argument")
+            ;;
+        -c|-S|-E|-M|-MM|-fsyntax-only|-###)
+            llam_link_step=0
+            llam_forwarded+=("$llam_argument")
+            ;;
+        *)
+            llam_forwarded+=("$llam_argument")
+            ;;
+    esac
+done
+
+if [ -n "$llam_managed_mode" ]; then
+    if [ "$llam_preempt_requested" -ne 0 ]; then
+        printf 'llam-clang: --llam-managed and --llam-preempt select different compiler contracts\n' >&2
+        exit 2
+    fi
+    if [ "$llam_managed_mode" = "off" ]; then
+        exec "$llam_compiler" "${llam_forwarded[@]}"
+    fi
+    llam_script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+    llam_managed_driver="$llam_script_dir/llam-managed-clang"
+    if [ ! -x "$llam_managed_driver" ]; then
+        printf 'llam-clang: managed compiler driver is unavailable\n' >&2
+        exit 77
+    fi
+    exec "$llam_managed_driver" "--llam-managed=$llam_managed_mode" "${llam_forwarded[@]}"
+fi
+
+if [ "$llam_mode" = "off" ]; then
+    exec "$llam_compiler" "${llam_forwarded[@]}"
+fi
+
+llam_host_os="$(uname -s)"
+llam_host_arch="$(uname -m)"
+if [ "$llam_host_os" != "Linux" ] ||
+   { [ "$llam_host_arch" != "x86_64" ] && [ "$llam_host_arch" != "amd64" ]; }; then
+    if [ "$llam_mode" = "required" ]; then
+        printf 'llam-clang: required async metadata is unsupported on %s/%s\n' \
+            "$llam_host_os" "$llam_host_arch" >&2
+        exit 77
+    fi
+    printf 'llam-clang: async metadata unavailable on %s/%s; using the compiler unchanged\n' \
+        "$llam_host_os" "$llam_host_arch" >&2
+    exec "$llam_compiler" "${llam_forwarded[@]}"
+fi
+
+if [ -z "$llam_plugin" ]; then
+    llam_script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+    for llam_candidate in \
+        "$llam_script_dir/../lib/llam/llam_preempt_pass.so" \
+        "$llam_script_dir"/../lib/*/llam/llam_preempt_pass.so \
+        "$llam_script_dir/../libexec/llam/llam_preempt_pass.so" \
+        "$llam_script_dir/preempt/build/llam_preempt_pass.so" \
+        "$llam_script_dir/../build-preempt-tools/llam_preempt_pass.so"; do
+        if [ -r "$llam_candidate" ]; then
+            llam_plugin="$llam_candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$llam_plugin" ] || [ ! -r "$llam_plugin" ]; then
+    if [ "$llam_mode" = "required" ]; then
+        printf 'llam-clang: required LLVM pass plugin is unavailable\n' >&2
+        exit 77
+    fi
+    printf 'llam-clang: LLVM pass plugin unavailable; using the compiler unchanged\n' >&2
+    exec "$llam_compiler" "${llam_forwarded[@]}"
+fi
+
+llam_script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+
+if [ "$llam_mode" = "required" ]; then
+    for llam_argument in "${llam_forwarded[@]}"; do
+        if [ "$llam_argument" = "-O0" ]; then
+            printf 'llam-clang: --llam-preempt=required cannot be combined with -O0\n' >&2
+            exit 2
+        fi
+    done
+    LLAM_PREEMPT_REQUIRED=1
+    LLAM_ASYNC_REQUIRED=1
+    export LLAM_PREEMPT_REQUIRED
+    export LLAM_ASYNC_REQUIRED
+fi
+
+llam_plain_forwarded=("${llam_forwarded[@]}")
+if [ "$llam_has_optimization" -eq 0 ]; then
+    llam_forwarded+=("-O1")
+fi
+llam_forwarded+=("-fpass-plugin=$llam_plugin")
+if [ "$llam_link_step" -eq 0 ]; then
+    exec "$llam_compiler" "${llam_forwarded[@]}"
+fi
+
+if [ "$llam_mode" != "required" ]; then
+    set +e
+    "$llam_compiler" "${llam_forwarded[@]}"
+    llam_compiler_status=$?
+    set -e
+    if [ "$llam_compiler_status" -ne 0 ]; then
+        printf 'llam-clang: LLVM pass failed in auto mode; retrying plain compilation\n' >&2
+        exec "$llam_compiler" "${llam_plain_forwarded[@]}"
+    fi
+    exit 0
+fi
+
+set +e
+"$llam_compiler" "${llam_forwarded[@]}"
+llam_compiler_status=$?
+set -e
+if [ "$llam_compiler_status" -ne 0 ]; then
+    exit "$llam_compiler_status"
+fi
+
+llam_inspector="${LLAM_PREEMPT_METADATA_INSPECT:-}"
+if [ -z "$llam_inspector" ]; then
+    for llam_candidate in \
+        "$llam_script_dir/llam_preempt_metadata_inspect" \
+        "$llam_script_dir/../build-preempt-tools/llam_preempt_metadata_inspect" \
+        "$(dirname -- "$llam_plugin")/llam_preempt_metadata_inspect" \
+        "$(dirname -- "$llam_plugin")/../../bin/llam_preempt_metadata_inspect"; do
+        if [ -x "$llam_candidate" ]; then
+            llam_inspector="$llam_candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$llam_inspector" ] || [ ! -x "$llam_inspector" ]; then
+    printf 'llam-clang: required final-link metadata inspector is unavailable\n' >&2
+    exit 77
+fi
+
+llam_objcopy="${OBJCOPY:-objcopy}"
+if ! command -v "$llam_objcopy" >/dev/null 2>&1; then
+    printf 'llam-clang: required final-link section extractor is unavailable\n' >&2
+    exit 77
+fi
+llam_metadata_tmp="$(mktemp "${TMPDIR:-/tmp}/llam-preempt-link.XXXXXX")"
+trap 'rm -f "$llam_metadata_tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! "$llam_objcopy" --dump-section ".llam.preempt=$llam_metadata_tmp" "$llam_output"; then
+    printf 'llam-clang: final output has no readable .llam.preempt section\n' >&2
+    exit 77
+fi
+if [ ! -s "$llam_metadata_tmp" ]; then
+    printf 'llam-clang: final output has no readable .llam.preempt section\n' >&2
+    exit 77
+fi
+set +e
+"$llam_inspector" --required "$llam_metadata_tmp"
+llam_inspector_status=$?
+set -e
+exit "$llam_inspector_status"

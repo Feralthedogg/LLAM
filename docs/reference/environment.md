@@ -12,8 +12,14 @@ diagnostics, benchmarks, and CI.
 | `LLAM_PREEMPT_MODE` | `off`, `cooperative`, `auto`, `strict` | Select cooperative preemption policy. |
 | `LLAM_PREEMPT_POLL_PERIOD` | `0`-`4096` | Override task-local safepoint flag-poll period. |
 | `LLAM_PREEMPT_QUANTUM_NS` | nanoseconds | Override global preemption slice. |
+
 | `LLAM_SAFEPOINT_CLOCK_PERIOD` | `0`-`4096` | Bound cheap-safepoint clock sampling. |
 | `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, unset | Allow ordinary yields to switch directly to same-shard runnable work when safe. |
+
+`auto` and `strict` do not by themselves enable signal-context capture. The
+experimental async path is a Linux x86-64 build option and still requires
+explicit safe-range registration; see
+[Compiler preemption metadata](../tooling/preempt-metadata.md).
 
 ## Experimental Runtime Options
 
@@ -63,7 +69,7 @@ diagnostics, benchmarks, and CI.
 
 | Variable | Values | Meaning |
 | --- | --- | --- |
-| `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata slabs. |
+| `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata per processor, rounded up to 16-object slabs; default 16 in balanced/debug-safe and 128 in release-fast/io-latency. `0` disables prewarm; capped at 4096. |
 | `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm stack caches. |
 | `LLAM_TIMER_HEAP_PREWARM` | timer slots | Preallocate timer heap capacity. |
 | `LLAM_STACK_SAMPLING` | `0`, `1` | Enable stack high-water diagnostics. |

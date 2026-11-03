@@ -28,10 +28,13 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "windows_async_lifetime.h"
+#endif
 
 /** @brief Sentinel used to mark an explicit user yield without sampling a real timestamp. */
 #define LLAM_RECENT_EXPLICIT_YIELD UINT64_MAX
@@ -57,6 +60,7 @@ static void llam_publish_direct_active_g(llam_shard_t *shard,
                               now_ns != 0U ? now_ns : llam_now_ns(),
                               memory_order_release);
     }
+    llam_worker_begin_g_run(worker, task);
     llam_worker_publish_active_g(worker, task);
 }
 
@@ -81,7 +85,7 @@ static void llam_yield_direct_record_attempt(llam_shard_t *shard) {
     if (current != NULL) {
         current->handoff_sample_current = sample;
     } else {
-        shard->autotune_handoff_sample_current = sample;
+        shard->processor.autotune_handoff_sample_current = sample;
     }
     if (sample) {
         shard->metrics.yield_direct_attempts += 1U;
@@ -95,14 +99,14 @@ static void llam_yield_direct_record_hit(llam_shard_t *shard, bool fast) {
     if (shard == NULL) {
         return;
     }
-    sample = current != NULL ? current->handoff_sample_current : shard->autotune_handoff_sample_current;
+    sample = current != NULL ? current->handoff_sample_current : shard->processor.autotune_handoff_sample_current;
     if (!sample) {
         return;
     }
     if (current != NULL) {
         current->handoff_sample_current = false;
     } else {
-        shard->autotune_handoff_sample_current = false;
+        shard->processor.autotune_handoff_sample_current = false;
     }
     if (fast) {
         shard->metrics.yield_direct_fast_hits += 1U;
@@ -118,14 +122,14 @@ static void llam_yield_direct_record_fail(llam_shard_t *shard, llam_yield_direct
     if (shard == NULL) {
         return;
     }
-    sample = current != NULL ? current->handoff_sample_current : shard->autotune_handoff_sample_current;
+    sample = current != NULL ? current->handoff_sample_current : shard->processor.autotune_handoff_sample_current;
     if (!sample) {
         return;
     }
     if (current != NULL) {
         current->handoff_sample_current = false;
     } else {
-        shard->autotune_handoff_sample_current = false;
+        shard->processor.autotune_handoff_sample_current = false;
     }
     switch (reason) {
     case LLAM_YIELD_DIRECT_FAIL_CONTEXT:
@@ -164,6 +168,14 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    if (rt != NULL &&
+        atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U) {
+        /* Async continuations must pass the scheduler's context-kind dispatch. */
+        return 0U;
+    }
+#endif
     if (value < 0) {
         const char *env = llam_env_get("LLAM_YIELD_DIRECT_HANDOFF");
 
@@ -218,6 +230,24 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
  * needed: the current task is the single owner of the Chase-Lev bottom and FIFO
  * yield lane. This removes one lock/unlock pair from tight spawn/yield bursts.
  */
+/* Runtime retry/safepoint frames may hold source-M/P state. Only the public
+ * explicit user-yield path qualifies an experimental Windows service release. */
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+void llam_yield_internal(void) {
+    llam_task_t *task = g_llam_tls_task;
+    if (task != NULL && task->async_preempt_task != NULL) {
+        if (task->windows_async_internal_yield_depth == UINT_MAX) {
+            abort();
+        }
+        ++task->windows_async_internal_yield_depth;
+        llam_yield();
+        --task->windows_async_internal_yield_depth;
+        return;
+    }
+    llam_yield();
+}
+#endif
+
 static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail_reason) {
 #if LLAM_DIRECT_OWNER_HANDOFF
     llam_shard_t *shard = g_llam_tls_shard;
@@ -242,7 +272,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         !llam_shard_accepts_new_work(shard) ||
         shard->opaque_redirect_active ||
         (rt->direct_handoff_allow_timers == 0U &&
-         atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U)) {
+         atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U)) {
         if (fail_reason != NULL) {
             *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
         }
@@ -250,7 +280,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     }
     if (rt->direct_handoff_live_limit != 0U &&
         llam_runtime_live_tasks(rt) > rt->direct_handoff_live_limit) {
-        shard->direct_handoff_streak = 0U;
+        shard->processor.direct_handoff_streak = 0U;
         if (fail_reason != NULL) {
             *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
         }
@@ -259,8 +289,8 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     {
         unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
 
-        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
-            shard->direct_handoff_streak = 0U;
+        if (handoff_budget != 0U && shard->processor.direct_handoff_streak >= handoff_budget) {
+            shard->processor.direct_handoff_streak = 0U;
             if (fail_reason != NULL) {
                 *fail_reason = LLAM_YIELD_DIRECT_FAIL_BUDGET;
             }
@@ -305,7 +335,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
 
     shard->metrics.yields += 1U;
     shard->metrics.ctx_switches += 1U;
-    shard->direct_handoff_streak += 1U;
+    shard->processor.direct_handoff_streak += 1U;
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
@@ -338,7 +368,7 @@ static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
         fail_reason = LLAM_YIELD_DIRECT_FAIL_NO_WORK;
     }
     if (shard != NULL) {
-        shard->direct_handoff_streak = 0U;
+        shard->processor.direct_handoff_streak = 0U;
     }
     llam_yield_direct_record_fail(shard, fail_reason);
     return false;
@@ -356,11 +386,19 @@ static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
  * no-ops because there is no cooperative scheduler frame to return to.
  */
 void llam_yield(void) {
+    LLAM_NATIVE_API_GUARD();
+
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    DWORD caller_last_error = GetLastError();
+#endif
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
     llam_runtime_t *rt;
+    llam_processor_queue_access_t queue_access;
+    bool queue_access_valid;
     unsigned direct_mode;
     int caller_errno = llam_thread_errno_load();
+    bool async_stack_sampled = false;
 
     if (shard == NULL || task == NULL) {
         return;
@@ -369,28 +407,76 @@ void llam_yield(void) {
     if (rt == NULL) {
         return;
     }
+#if defined(__linux__) && defined(__x86_64__)
+    async_stack_sampled = llam_async_preempt_sample_task_stack(task);
+#endif
+    /*
+     * A foreign M has relinquished P, on both helper and redirect paths.
+     * A failed stop-time leave also retains this depth/token. Keep that
+     * continuation on its native M until leave succeeds or the task exits:
+     * queueing it here can strand it without a P or let the helper resume
+     * its context before this M has finished saving it.
+     */
+    if (atomic_load_explicit(&task->opaque_blocking_depth, memory_order_acquire) != 0U) {
+        return;
+    }
     direct_mode = llam_direct_yield_handoff_mode(rt);
-    if (direct_mode != 0U &&
+    if (rt->execution_lease_mode == LLAM_EXECUTION_LEASE_LEGACY &&
+        direct_mode != 0U &&
         (direct_mode >= 2U || g_llam_tls_io_handoff_yield != 0U) &&
         llam_yield_try_direct_handoff(shard)) {
         return;
     }
 
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    llam_windows_async_lifetime_prepare_yield(task);
+#endif
     task->forced_yield_budget = rt->forced_yield_every;
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
     task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
+    queue_access_valid = llam_processor_queue_access_snapshot(&shard->processor,
+                                                              &queue_access);
     pthread_mutex_lock(&shard->lock);
-    (void)llam_norm_queue_push_yield_locked(shard, task);
+    /* Registered continuations always publish to P first; the dequeue adapter
+     * routes native-origin work after context saving and dispatch-owner release.
+     * Every backend's legacy enqueue helper is a no-op for this lease mode. */
+    if (rt->execution_lease_mode != LLAM_EXECUTION_LEASE_REGISTERED &&
+        llam_async_preempt_enqueue_locked(shard, task)) {
+        /* Same-M consumer cannot run until this G has saved its cooperative context. */
+    } else if (queue_access_valid &&
+        llam_processor_queue_access_validate_owner_mutation_locked(shard,
+                                                                    &queue_access)) {
+        (void)llam_norm_queue_push_yield_locked(shard, &queue_access, task);
+    } else if (llam_queue_push_bounded_locked(shard,
+                                              &shard->processor.inject_q,
+                                              LLAM_INJECT_QUEUE_CAP,
+                                              task,
+                                              NULL)) {
+        shard->metrics.inject_enqueues += 1U;
+    }
     llam_worker_clear_active_g(g_llam_tls_worker);
     shard->metrics.yields += 1U;
     llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&shard->lock);
 
-    llam_task_sample_live_stack(task);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (rt->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        /* Expose queue publication before context save without holding P locks. */
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_REGISTERED_YIELD);
+    }
+#endif
+    if (!async_stack_sampled) {
+        llam_task_sample_live_stack(task);
+    }
     llam_thread_errno_store(caller_errno);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (task->async_preempt_task != NULL) {
+        SetLastError(caller_last_error);
+    }
+#endif
     llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
 }
 
@@ -408,6 +494,17 @@ bool llam_yield_to_local_runnable(void) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_yield_direct_fail_t fail_reason = LLAM_YIELD_DIRECT_FAIL_NONE;
 
+    if (shard != NULL && shard->runtime != NULL &&
+        shard->runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        return false;
+    }
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    if (shard != NULL &&
+        atomic_load_explicit(&shard->runtime->async_preempt_enabled, memory_order_acquire) != 0U) {
+        return false;
+    }
+#endif
     llam_yield_direct_record_attempt(shard);
     if (llam_yield_to_local_runnable_unlocked(&fail_reason)) {
         llam_yield_direct_record_hit(shard, true);
@@ -418,7 +515,7 @@ bool llam_yield_to_local_runnable(void) {
         fail_reason = LLAM_YIELD_DIRECT_FAIL_NO_WORK;
     }
     if (shard != NULL) {
-        shard->direct_handoff_streak = 0U;
+        shard->processor.direct_handoff_streak = 0U;
     }
     llam_yield_direct_record_fail(shard, fail_reason);
     return false;
@@ -427,6 +524,7 @@ bool llam_yield_to_local_runnable(void) {
 #if !LLAM_DIRECT_OWNER_HANDOFF
     llam_task_t *current = g_llam_tls_task;
     llam_task_t *next = NULL;
+    llam_processor_queue_access_t queue_access;
     int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || shard->runtime == NULL) {
@@ -442,21 +540,28 @@ bool llam_yield_to_local_runnable(void) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
         return false;
     }
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &queue_access) ||
+        (queue_access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         queue_access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
+        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_CONTEXT);
+        return false;
+    }
 
     pthread_mutex_lock(&shard->lock);
-    if (shard->opaque_redirect_active ||
-        shard->inject_q.depth > 0U ||
-        (shard->runtime->direct_handoff_allow_timers == 0U && shard->timers != NULL) ||
-        shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &queue_access) ||
+        shard->opaque_redirect_active ||
+        shard->processor.inject_q.depth > 0U ||
+        (shard->runtime->direct_handoff_allow_timers == 0U && shard->processor.timers != NULL) ||
+        shard->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         pthread_mutex_unlock(&shard->lock);
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
         return false;
     }
-    if (shard->hot_q.depth > 0U) {
-        next = llam_queue_pop_head(&shard->hot_q);
+    if (shard->processor.hot_q.depth > 0U) {
+        next = llam_queue_pop_head(&shard->processor.hot_q);
     }
     if (next == NULL) {
-        next = llam_norm_queue_pop_owner_locked(shard);
+        next = llam_norm_queue_pop_owner_locked(shard, &queue_access);
     }
     if (next == NULL || next == current) {
         pthread_mutex_unlock(&shard->lock);
@@ -464,8 +569,8 @@ bool llam_yield_to_local_runnable(void) {
         return false;
     }
 
-    if (!llam_norm_queue_push_yield_locked(shard, current)) {
-        (void)llam_norm_queue_push_owner_locked(shard, next);
+    if (!llam_norm_queue_push_yield_locked(shard, &queue_access, current)) {
+        (void)llam_norm_queue_push_owner_locked(shard, &queue_access, next);
         pthread_mutex_unlock(&shard->lock);
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_PUSH);
         return false;
@@ -520,6 +625,18 @@ bool llam_yield_to_local_runnable(void) {
  * @return true when the current parked joiner switched directly to local work.
  */
 static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *current) {
+    if (shard != NULL && shard->runtime != NULL &&
+        shard->runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        return false;
+    }
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    if (shard != NULL &&
+        atomic_load_explicit(&shard->runtime->async_preempt_enabled, memory_order_acquire) != 0U) {
+        /* A queued peer may hold an async capsule instead of a cooperative ctx. */
+        return false;
+    }
+#endif
 #if LLAM_DIRECT_OWNER_HANDOFF
     llam_task_t *next;
     llam_runtime_t *rt;
@@ -536,19 +653,19 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         !llam_lockfree_normq_enabled(rt) ||
         !llam_shard_accepts_new_work(shard) ||
         shard->opaque_redirect_active ||
-        atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U) {
+        atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U) {
         return false;
     }
     if (rt->direct_handoff_live_limit != 0U &&
         llam_runtime_live_tasks(rt) > rt->direct_handoff_live_limit) {
-        shard->direct_handoff_streak = 0U;
+        shard->processor.direct_handoff_streak = 0U;
         return false;
     }
     {
         unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
 
-        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
-            shard->direct_handoff_streak = 0U;
+        if (handoff_budget != 0U && shard->processor.direct_handoff_streak >= handoff_budget) {
+            shard->processor.direct_handoff_streak = 0U;
             return false;
         }
     }
@@ -572,12 +689,13 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     g_llam_tls_task = next;
 
     shard->metrics.ctx_switches += 1U;
-    shard->direct_handoff_streak += 1U;
+    shard->processor.direct_handoff_streak += 1U;
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
 #else
     llam_task_t *next = NULL;
+    llam_processor_queue_access_t queue_access;
     int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || shard->runtime == NULL) {
@@ -591,19 +709,25 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         !llam_shard_accepts_new_work(shard)) {
         return false;
     }
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &queue_access) ||
+        (queue_access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         queue_access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
+        return false;
+    }
 
     pthread_mutex_lock(&shard->lock);
-    if (shard->opaque_redirect_active ||
-        shard->inject_q.depth > 0U ||
-        shard->timers != NULL) {
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &queue_access) ||
+        shard->opaque_redirect_active ||
+        shard->processor.inject_q.depth > 0U ||
+        shard->processor.timers != NULL) {
         pthread_mutex_unlock(&shard->lock);
         return false;
     }
-    if (shard->hot_q.depth > 0U) {
-        next = llam_queue_pop_head(&shard->hot_q);
+    if (shard->processor.hot_q.depth > 0U) {
+        next = llam_queue_pop_head(&shard->processor.hot_q);
     }
     if (next == NULL) {
-        next = llam_norm_queue_pop_owner_locked(shard);
+        next = llam_norm_queue_pop_owner_locked(shard, &queue_access);
     }
     if (next == NULL || next == current) {
         pthread_mutex_unlock(&shard->lock);
@@ -639,13 +763,20 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
  * including timed joins whose deadline has already expired. Completion wins over
  * timeout because no parking or waiting is required.
  */
-static bool llam_join_try_completed_fast(llam_runtime_t *rt, llam_task_t *task) {
+static void llam_join_copy_result(llam_task_t *task, llam_task_result_t *out, size_t out_size) {
+    if (out != NULL) memcpy(out, &task->application_result,
+                            out_size < sizeof(*out) ? out_size : sizeof(*out));
+}
+
+static bool llam_join_try_completed_fast(llam_runtime_t *rt, llam_task_t *task,
+                                          llam_task_result_t *out, size_t out_size) {
     if (rt == NULL || task == NULL) {
         return false;
     }
     if (atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) == 0U) {
         return false;
     }
+    llam_join_copy_result(task, out, out_size);
     llam_try_reclaim_joined_task(rt, task);
     return true;
 }
@@ -676,10 +807,49 @@ static void llam_task_release_join_claim(llam_task_t *task) {
 static int llam_join_claimed_impl(llam_task_t *task,
                                   llam_runtime_t *rt,
                                   bool has_deadline,
-                                  uint64_t deadline_ns) {
+                                  uint64_t deadline_ns,
+                                  llam_task_result_t *out, size_t out_size) {
     llam_task_t *self = g_llam_tls_task;
     llam_runtime_t *pinned_runtime = NULL;
     int caller_errno = llam_thread_errno_load();
+
+    llam_task_merge_wait_deadline(self, &has_deadline, &deadline_ns);
+
+    if (self != NULL &&
+        atomic_load_explicit(&self->opaque_blocking_depth, memory_order_acquire) != 0U) {
+        /*
+         * Announced foreign execution remains on its native M and owns no P.
+         * It must not publish a managed join waiter or yield for reclamation.
+         * The live caller keeps this run/runtime alive; the consuming join
+         * claim keeps the target from another join/detach consumer. Unlike an
+         * unmanaged caller, no public-operation pin was acquired for this G.
+         */
+        while (atomic_load_explicit(&task->completed, memory_order_acquire) == 0U) {
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 100000L};
+            int wait_error = atomic_load_explicit(&rt->fatal_errno, memory_order_acquire);
+
+            if (wait_error == 0 && has_deadline && llam_deadline_passed(deadline_ns)) {
+                wait_error = ETIMEDOUT;
+            }
+            if (wait_error == 0 &&
+                (llam_task_cancel_token_is_cancelled(self) ||
+                 atomic_load_explicit(&rt->stop_requested, memory_order_acquire) ||
+                 atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire))) {
+                wait_error = ECANCELED;
+            }
+            if (wait_error != 0) {
+                llam_task_release_join_claim(task);
+                errno = wait_error;
+                return -1;
+            }
+            nanosleep(&ts, NULL);
+        }
+        /* Completion won. Keep the existing off-stack/scan-reference drain. */
+        llam_join_copy_result(task, out, out_size);
+        llam_try_reclaim_joined_task(rt, task);
+        llam_thread_errno_store(caller_errno);
+        return 0;
+    }
 
     if (self == NULL) {
         if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
@@ -720,13 +890,14 @@ static int llam_join_claimed_impl(llam_task_t *task,
             return -1;
         }
         llam_task_end_public_op(task);
+        llam_join_copy_result(task, out, out_size);
         llam_try_reclaim_joined_task(rt, task);
         llam_runtime_end_public_op(pinned_runtime);
         llam_thread_errno_store(caller_errno);
         return 0;
     }
 
-    if (llam_join_try_completed_fast(rt, task)) {
+    if (llam_join_try_completed_fast(rt, task, out, out_size)) {
         llam_thread_errno_store(caller_errno);
         return 0;
     }
@@ -740,6 +911,7 @@ static int llam_join_claimed_impl(llam_task_t *task,
     }
     if (atomic_load_explicit(&task->completed, memory_order_acquire) != 0U) {
         pthread_mutex_unlock(&task->lock);
+        llam_join_copy_result(task, out, out_size);
         llam_try_reclaim_joined_task(rt, task);
         llam_thread_errno_store(caller_errno);
         return 0;
@@ -773,7 +945,7 @@ static int llam_join_claimed_impl(llam_task_t *task,
         llam_task_release_join_claim(task);
         return -1;
     }
-    if (self->cancel_token != NULL && llam_cancel_token_register_task(self) != 0) {
+    if (llam_task_has_cancel_tokens(self) && llam_cancel_token_register_task(self) != 0) {
         llam_disarm_task_wait_deadline(self);
         pthread_mutex_unlock(&task->lock);
         self->state = LLAM_TASK_STATE_RUNNING;
@@ -811,10 +983,11 @@ static int llam_join_claimed_impl(llam_task_t *task,
 
         if (wake_error != 0) {
             llam_task_release_join_claim(task);
-            errno = wake_error;
+            llam_thread_errno_store(wake_error);
             return -1;
         }
     }
+    llam_join_copy_result(task, out, out_size);
     llam_try_reclaim_joined_task(rt, task);
     llam_thread_errno_store(caller_errno);
     return 0;
@@ -829,7 +1002,7 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
     if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt, &task_pinned) != 0) {
         return -1;
     }
-    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns);
+    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns, NULL, 0U);
 }
 
 int llam_task_group_join_child_handle(llam_task_t *task_handle,
@@ -844,7 +1017,7 @@ int llam_task_group_join_child_handle(llam_task_t *task_handle,
     if (llam_task_claim_group_join_public_handle(task_handle, group, self, &task, &rt, &task_pinned) != 0) {
         return -1;
     }
-    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns);
+    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns, NULL, 0U);
 }
 
 /**
@@ -855,6 +1028,8 @@ int llam_task_group_join_child_handle(llam_task_t *task_handle,
  * @return 0 on completion, or -1 with @c errno set on failure.
  */
 int llam_join(llam_task_t *task) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_join_impl(task, false, 0U);
 }
 
@@ -869,6 +1044,8 @@ int llam_join(llam_task_t *task) {
  *         another error propagated from ::llam_join_impl.
  */
 int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_join_impl(task, true, deadline_ns);
 }
 
@@ -882,6 +1059,8 @@ int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
  *         when another join/detach path already owns the public handle.
  */
 int llam_detach(llam_task_t *task_handle) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_task_t *task = NULL;
     llam_runtime_t *rt = NULL;
     llam_runtime_t *pinned_runtime = NULL;
@@ -936,6 +1115,8 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     bool timer_inserted;
     bool timer_completion_pending = false;
 
+    uint64_t requested_wake = deadline_ns;
+
     llam_task_safepoint();
 
     if (task == NULL) {
@@ -971,6 +1152,10 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
             }
         }
     }
+    shard = g_llam_tls_shard; /* A safepoint may have moved this G to another P. */
+    bool has_budget = true;
+    llam_task_merge_wait_deadline(task, &has_budget, &deadline_ns);
+    bool budget_shortened_sleep = deadline_ns < requested_wake;
     if (shard == NULL) {
         errno = EINVAL;
         return -1;
@@ -982,8 +1167,8 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     }
 
     if (deadline_ns <= llam_now_ns()) {
-        llam_thread_errno_store(caller_errno);
-        return 0;
+        llam_thread_errno_store(budget_shortened_sleep ? ETIMEDOUT : caller_errno);
+        return budget_shortened_sleep ? -1 : 0;
     }
 
     node = llam_sync_wait_node_acquire(shard);
@@ -1033,7 +1218,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
         errno = timer_insert_errno != 0 ? timer_insert_errno : ENOMEM;
         return -1;
     }
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+    if (llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
         int saved_errno = errno != 0 ? errno : ECANCELED;
         bool removed;
 
@@ -1072,10 +1257,17 @@ sleep_wait_ready:
         pthread_mutex_unlock(&shard->lock);
     }
 
+    /* Sleep has a private wait-node arm path; close stop's scan-before-park race. */
+    if (atomic_load_explicit(&shard->runtime->stop_requested,
+                             memory_order_acquire) ||
+        atomic_load_explicit(&shard->runtime->shutdown_requested,
+                             memory_order_acquire)) {
+        llam_cancel_task_wait(task);
+    }
     if (llam_wait_node_should_park(node)) {
         /* Retire execution publication before the task enters the sleep wait. */
         pthread_mutex_lock(&shard->lock);
-        if (g_llam_tls_worker != NULL && g_llam_tls_worker->compat_shard == shard) {
+        if (llam_worker_matches_shard(g_llam_tls_worker, shard)) {
             llam_worker_clear_active_g(g_llam_tls_worker);
         }
         pthread_mutex_unlock(&shard->lock);
@@ -1093,13 +1285,17 @@ sleep_wait_ready:
         rc = node_error;
     }
     if (rc != 0) {
-        errno = rc;
+        llam_thread_errno_store(rc);
         return -1;
     }
-    if (task->cancel_token != NULL &&
+    if (llam_task_has_cancel_tokens(task) &&
         !llam_deadline_passed(deadline_ns) &&
         llam_task_cancel_token_is_cancelled(task)) {
-        errno = ECANCELED;
+        llam_thread_errno_store(ECANCELED);
+        return -1;
+    }
+    if (budget_shortened_sleep && llam_now_ns() >= deadline_ns) {
+        llam_thread_errno_store(ETIMEDOUT);
         return -1;
     }
     llam_thread_errno_store(caller_errno);
@@ -1120,6 +1316,8 @@ sleep_wait_ready:
  *         cancellation, or unexpected @c nanosleep failure outside the runtime.
  */
 int llam_sleep_until(uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_sleep_until_impl(deadline_ns, false, 0U);
 }
 
@@ -1131,6 +1329,8 @@ int llam_sleep_until(uint64_t deadline_ns) {
  * @return 0 on success, or -1 with @c errno set by ::llam_sleep_until.
  */
 int llam_sleep_ns(uint64_t duration_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uint64_t now_ns = llam_now_ns();
     uint64_t deadline_ns;
 
@@ -1146,4 +1346,25 @@ int llam_sleep_ns(uint64_t duration_ns) {
         deadline_ns = now_ns + duration_ns;
     }
     return llam_sleep_until_impl(deadline_ns, true, now_ns);
+}
+
+static int llam_join_result_impl(llam_task_t *handle, bool has_deadline, uint64_t deadline_ns,
+                                 llam_task_result_t *out, size_t out_size) {
+    if (out == NULL || out_size == 0U) { errno = EINVAL; return -1; }
+    llam_task_t *task = NULL;
+    llam_runtime_t *rt = NULL;
+    bool pinned = false;
+    if (llam_task_claim_join_public_handle(handle, g_llam_tls_task, &task, &rt, &pinned) != 0) return -1;
+    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns, out, out_size);
+}
+
+int llam_join_result(llam_task_t *task, llam_task_result_t *out, size_t out_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+    return llam_join_result_impl(task, false, 0U, out, out_size);
+}
+
+int llam_join_result_until(llam_task_t *task, uint64_t deadline_ns,
+                            llam_task_result_t *out, size_t out_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+    return llam_join_result_impl(task, true, deadline_ns, out, out_size);
 }

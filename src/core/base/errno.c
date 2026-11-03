@@ -24,10 +24,38 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "windows_async_lifetime.h"
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+#include "windows_async_probe.h"
+#endif
+
+/* noinline is also required under LTO: the native TLS address must be resolved
+ * in this new activation, after any migration of the caller's C frame. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value) {
+    errno = value;
+}
+
+/* Resolve errno in a fresh activation after an opaque LLAM call may migrate
+ * its caller. libc's const errno-address accessor must not be hoisted across it. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+LLAM_NO_SANITIZE_THREAD int llam_thread_errno_load_current(void) {
+    return errno;
+}
 
 /**
  * @brief Snapshot the current thread-local @c errno into a managed task.
@@ -36,6 +64,11 @@
  */
 void llam_task_save_errno(llam_task_t *task) {
     if (task != NULL) {
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (task->async_preempt_task != NULL) {
+            task->windows_async_saved_last_error = GetLastError();
+        }
+#endif
         task->saved_errno = llam_thread_errno_load();
     }
 }
@@ -47,6 +80,11 @@ void llam_task_save_errno(llam_task_t *task) {
  */
 void llam_task_restore_errno(const llam_task_t *task) {
     llam_thread_errno_store(task != NULL ? task->saved_errno : 0);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (task != NULL && task->async_preempt_task != NULL) {
+        SetLastError(task->windows_async_saved_last_error);
+    }
+#endif
 }
 
 /**
@@ -73,15 +111,80 @@ void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx)
  */
 void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task) {
     int scheduler_errno;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    bool windows_async_enabled;
+    DWORD scheduler_last_error = 0U;
+#endif
 
     if (scheduler_ctx == NULL || task == NULL) {
         abort();
     }
 
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && \
+    defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_windows_async_lifetime_test_scheduler_error(task, true);
+#endif
     scheduler_errno = llam_thread_errno_load();
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    windows_async_enabled =
+        atomic_load_explicit(&task->owner_runtime->async_preempt_enabled,
+                             memory_order_acquire) != 0U;
+    if (windows_async_enabled) {
+        scheduler_last_error = GetLastError();
+    }
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    llam_windows_async_probe_record_scheduler_errno(task, scheduler_errno);
+#endif
+#if defined(__linux__) && defined(__x86_64__) && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    llam_async_preempt_save_scheduler_state();
+#endif
+#if !LLAM_ASYNC_CONTEXT_SHARED
     llam_task_restore_errno(task);
+#endif
+#if defined(__linux__) && defined(__x86_64__) && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (!llam_async_preempt_resume_task(scheduler_ctx, task)) {
+        llam_ctx_switch(scheduler_ctx, &task->ctx);
+    }
+#elif LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (!llam_windows_async_lifetime_resume_task(scheduler_ctx, task)) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        if (!llam_windows_async_probe_resume(scheduler_ctx, task)) {
+            llam_ctx_switch(scheduler_ctx, &task->ctx);
+        }
+#else
+        llam_ctx_switch(scheduler_ctx, &task->ctx);
+#endif
+    }
+    /* The first return seam must consume G-local state before scheduler restore. */
+    (void)llam_windows_async_lifetime_arrival(task);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_windows_async_probe_arrival(task);
+#endif
+#elif LLAM_ASYNC_CONTEXT_SHARED
+    llam_async_shared_switch_scheduler_to_task(scheduler_ctx, task, scheduler_errno);
+#elif defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    if (!llam_windows_async_probe_resume(scheduler_ctx, task)) {
+        llam_ctx_switch(scheduler_ctx, &task->ctx);
+    }
+    /* The remote bridge leaves target-local errno/LastError intact until here. */
+    llam_windows_async_probe_arrival(task);
+#else
     llam_ctx_switch(scheduler_ctx, &task->ctx);
+#endif
     llam_thread_errno_store(scheduler_errno);
+#if LLAM_ASYNC_CONTEXT_SHARED && defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_async_shared_test_scheduler_error(task, scheduler_errno);
+#endif
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (windows_async_enabled) {
+        SetLastError(scheduler_last_error);
+    }
+#endif
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && \
+    defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_windows_async_lifetime_test_scheduler_error(task, false);
+#endif
 }
 
 /**

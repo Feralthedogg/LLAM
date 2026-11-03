@@ -7,41 +7,46 @@ independent schedulers live in one process.
 
 ```c
 #include <llam/runtime.h>
+#include <errno.h>
 
-static void root(void *arg) {
+static void child(void *arg) {
     (void)arg;
-    llam_sleep_ns(1000000);
+    int error = llam_sleep_ns(1000000) == 0 ? 0 : errno;
+    (void)llam_task_set_result(NULL, error);
 }
 
 int main(void) {
     llam_runtime_t *runtime = NULL;
-
-    if (llam_runtime_create(NULL, 0, &runtime) != 0) {
+    if (llam_runtime_create(NULL, 0, &runtime) != 0) return 1;
+    llam_task_t *task = llam_runtime_spawn_ex(runtime, child, NULL, NULL, 0);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0) {
+        llam_runtime_destroy(runtime);
         return 1;
     }
-
-    llam_task_t *task = llam_runtime_spawn_ex(runtime, root, NULL, NULL, 0);
-    int rc = llam_runtime_run_handle(runtime);
-
-    if (task != NULL) {
-        (void)llam_join(task);
-    }
-
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
     llam_runtime_destroy(runtime);
-    return rc;
+    return failed;
 }
 ```
+
+For a group, explicit host-created channel/token, cancellation and complete
+cleanup, build the checked `example_explicit_runtime` target and run both
+`./example_explicit_runtime` and `./example_explicit_runtime --cancel`.
+See the [embedding guide](../guides/embedding.md) for ownership and drain rules.
+
 
 ## Runtime Options
 
 ```c
 llam_runtime_opts_t opts;
-llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) return 1;
 
 opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
 llam_runtime_t *runtime = NULL;
-llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime);
+if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) return 1;
 ```
 
 ## Dynamic Loading Check

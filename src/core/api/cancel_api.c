@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -196,6 +196,8 @@ static bool llam_public_task_class_valid(uint32_t task_class) {
  * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c ENOTSUP.
  */
 int llam_task_set_class(uint32_t task_class) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     if (!llam_public_task_class_valid(task_class)) {
         errno = EINVAL;
         return -1;
@@ -219,6 +221,8 @@ int llam_task_set_class(uint32_t task_class) {
  * @return Task flags, or 0 for invalid, foreign, or @c NULL handles.
  */
 uint32_t llam_task_flags(const llam_task_t *task) {
+    LLAM_NATIVE_API_GUARD(0);
+
     uint32_t flags = 0U;
     int saved_errno = errno;
 
@@ -239,7 +243,10 @@ uint32_t llam_task_flags(const llam_task_t *task) {
  *
  * @return New token on success, or @c NULL with @c errno set on failure.
  */
-llam_cancel_token_t *llam_cancel_token_create(void) {
+llam_cancel_token_t *llam_cancel_token_create_owned(llam_runtime_t *owner_runtime) {
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
+
+
     llam_cancel_token_t *token = calloc(1, sizeof(*token));
     int rc;
 
@@ -253,7 +260,8 @@ llam_cancel_token_t *llam_cancel_token_create(void) {
         errno = rc;
         return NULL;
     }
-    token->owner_runtime = llam_runtime_owner_for_new_object();
+    token->owner_runtime = owner_runtime;
+    atomic_init(&token->cancelled, false);
     llam_public_active_op_init(&token->active_ops);
     if (llam_cancel_token_register_live(token) != 0) {
         pthread_mutex_destroy(&token->lock);
@@ -261,6 +269,22 @@ llam_cancel_token_t *llam_cancel_token_create(void) {
         return NULL;
     }
     return llam_cancel_token_public_handle(token);
+}
+
+llam_cancel_token_t *llam_cancel_token_create(void) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    return llam_cancel_token_create_owned(llam_runtime_owner_for_new_object());
+}
+
+llam_cancel_token_t *llam_runtime_cancel_token_create(llam_runtime_t *runtime) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return NULL;
+    llam_cancel_token_t *result = llam_cancel_token_create_owned(pinned);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
 }
 
 /**
@@ -275,6 +299,8 @@ llam_cancel_token_t *llam_cancel_token_create(void) {
  *         @c EXDEV for managed cross-runtime cleanup attempts.
  */
 int llam_cancel_token_destroy(llam_cancel_token_t *token) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t handle = (uintptr_t)token;
     size_t slot;
     uint32_t generation;
@@ -373,18 +399,14 @@ void llam_cancel_token_release_task_ref(llam_cancel_token_t *token) {
  * be armed.
  */
 bool llam_task_cancel_token_is_cancelled(const llam_task_t *task) {
-    llam_cancel_token_t *token;
-    bool cancelled;
-
-    if (task == NULL || task->cancel_token == NULL) {
-        return false;
+    if (task == NULL) return false;
+    /* Task/group sources are retained for G lifetime. The operation source is
+     * G-owned and stable until every offloaded callback has completed. */
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        const llam_cancel_token_t *token = llam_task_cancel_source(task, i);
+        if (token != NULL && atomic_load_explicit(&token->cancelled, memory_order_acquire)) return true;
     }
-
-    token = task->cancel_token;
-    pthread_mutex_lock(&token->lock);
-    cancelled = token->cancelled;
-    pthread_mutex_unlock(&token->lock);
-    return cancelled;
+    return false;
 }
 
 /**
@@ -400,8 +422,10 @@ bool llam_task_cancel_token_is_cancelled(const llam_task_t *task) {
  *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_cancel_token_cancel(llam_cancel_token_t *token) {
-    llam_task_t *waiters;
-    llam_task_t *iter;
+    LLAM_NATIVE_API_GUARD(-1);
+
+    llam_cancel_registration_t *waiters;
+    llam_cancel_registration_t *iter;
     llam_cancel_token_t *raw_token = NULL;
     llam_runtime_t *pinned_runtime = NULL;
 
@@ -426,13 +450,13 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
         return -1;
     }
     waiters = token->waiters;
-    for (iter = waiters; iter != NULL; iter = iter->cancel_next) {
-        if (!llam_task_scan_ref_try_acquire(token->owner_runtime, iter)) {
+    for (iter = waiters; iter != NULL; iter = iter->next) {
+        if (!llam_task_scan_ref_try_acquire(token->owner_runtime, iter->task)) {
             int saved_errno = errno;
-            llam_task_t *rollback;
+            llam_cancel_registration_t *rollback;
 
-            for (rollback = waiters; rollback != iter; rollback = rollback->cancel_next) {
-                (void)llam_task_scan_ref_release(token->owner_runtime, rollback);
+            for (rollback = waiters; rollback != iter; rollback = rollback->next) {
+                (void)llam_task_scan_ref_release(token->owner_runtime, rollback->task);
             }
             pthread_mutex_unlock(&token->lock);
             llam_runtime_end_public_op(pinned_runtime);
@@ -441,25 +465,30 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
             return -1;
         }
     }
-    token->cancelled = true;
     token->waiters = NULL;
-    for (iter = waiters; iter != NULL; iter = iter->cancel_next) {
+    for (iter = waiters; iter != NULL; iter = iter->next) {
         /*
          * Keep unregister state consistent under the token lock.  Scan refs
          * were acquired before detaching, so the chain can be processed after
          * unlock without racing task reclaim.
          */
-        iter->cancel_prev = NULL;
-        iter->cancel_registered = false;
+        iter->prev = NULL;
+        iter->registered = false;
+        atomic_store_explicit(&iter->delivering, true, memory_order_relaxed);
     }
+    /* Release publishes delivery ownership before a lock-free cancelled read. */
+    atomic_store_explicit(&token->cancelled, true, memory_order_release);
     pthread_mutex_unlock(&token->lock);
 
     while (waiters != NULL) {
-        llam_task_t *next = waiters->cancel_next;
-
-        waiters->cancel_next = NULL;
-        llam_cancel_task_wait(waiters);
-        (void)llam_task_scan_ref_release(token->owner_runtime, waiters);
+        llam_cancel_registration_t *next = waiters->next;
+        llam_task_t *task = waiters->task;
+        waiters->next = NULL;
+        llam_cancel_task_wait_generation(task, waiters->wait_generation);
+        /* No node access after this release: G may start another I/O scope.
+         * The scan pin is dropped afterward, using only the captured task. */
+        atomic_store_explicit(&waiters->delivering, false, memory_order_release);
+        (void)llam_task_scan_ref_release(token->owner_runtime, task);
         waiters = next;
     }
 
@@ -477,6 +506,8 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
  *         @c EINVAL, @c EBUSY, or @c EXDEV.
  */
 int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     int cancelled;
     llam_cancel_token_t *mutable_token;
 

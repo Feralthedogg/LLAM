@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 name: Release
 
@@ -24,6 +24,9 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
       - '[0-9]+.[0-9]+.[0-9]+*'
+
+env:
+  LLAM_CI_VERSION: "3.0.0"
 
 jobs:
   build-artifacts:
@@ -125,9 +128,10 @@ jobs:
           grep '/examples/server_flood_stats.c$' package-files.txt
           grep '/examples/server_flood_stats.h$' package-files.txt
           grep '/LICENSE$' package-files.txt
-          grep '/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt$' package-files.txt
-          grep '/LICENSES/OLD-LICENSE/Apache-2.0.txt$' package-files.txt
-          grep '/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt$' package-files.txt
+          grep '/NOTICE$' package-files.txt
+          grep '/LICENSES/Apache-2.0.txt$' package-files.txt
+          grep '/THIRD_PARTY_NOTICES.md$' package-files.txt
+          grep '/LICENSES/THIRD_PARTY/magic2/LICENSE$' package-files.txt
           rm -f package-files.txt
           tmp="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-smoke.XXXXXX")"
           trap 'rm -rf "$tmp"' EXIT
@@ -144,12 +148,12 @@ jobs:
           test "$(cat "$tmp/prefix-success/share/llam/ABI_MAJOR")" = "2"
           test "$(cat "$tmp/prefix-success/share/llam/LIBRARY_VERSION")" = "$version"
           cmp LICENSE "$tmp/prefix-success/share/llam/LICENSE"
-          cmp LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt \
-            "$tmp/prefix-success/share/llam/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-          cmp LICENSES/OLD-LICENSE/Apache-2.0.txt \
-            "$tmp/prefix-success/share/llam/LICENSES/OLD-LICENSE/Apache-2.0.txt"
-          cmp LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt \
-            "$tmp/prefix-success/share/llam/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
+          cmp NOTICE \
+            "$tmp/prefix-success/share/llam/NOTICE"
+          cmp LICENSES/Apache-2.0.txt \
+            "$tmp/prefix-success/share/llam/LICENSES/Apache-2.0.txt"
+          cmp THIRD_PARTY_NOTICES.md \
+            "$tmp/prefix-success/share/llam/THIRD_PARTY_NOTICES.md"
           mkdir -p "$tmp/outside"
           ln -s "$tmp/outside" "$tmp/prefix-link"
           if sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --prefix "$tmp/prefix-link" --force > "$tmp/install-symlink.out" 2>&1; then
@@ -192,10 +196,11 @@ jobs:
         shell: pwsh
         run: |
           $dryRun = (& .\scripts\install.ps1 -DryRun -Target "${{ matrix.target }}" 6>&1 | Out-String)
-          if ($dryRun -notmatch "/releases/download/v2\.2\.1/") {
-            throw "standalone Windows installer default URL did not use the v3.0.0 release tag"
+          $expectedTag = "/releases/download/v$env:LLAM_CI_VERSION/"
+          if ($dryRun -notmatch [regex]::Escape($expectedTag)) {
+            throw "standalone Windows installer default URL did not use $expectedTag"
           }
-          $version = "3.0.0"
+          $version = $env:LLAM_CI_VERSION
           $releaseVersion = "dev"
           if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
             $tagName = $env:GITHUB_REF_NAME
@@ -211,9 +216,10 @@ jobs:
           $root = Join-Path $tmp "llam-$packageVersion-${{ matrix.target }}"
           foreach ($file in @(
             "LICENSE",
-            "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt",
-            "LICENSES\OLD-LICENSE\Apache-2.0.txt",
-            "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt",
+            "NOTICE",
+            "LICENSES\Apache-2.0.txt",
+            "THIRD_PARTY_NOTICES.md",
+            (Join-Path (Join-Path (Join-Path "LICENSES" "THIRD_PARTY") "magic2") "LICENSE"),
             "install.sh",
             "install.ps1",
             "include\llam\runtime.h",
@@ -255,20 +261,26 @@ jobs:
           if ($sourceLicense -ne $installedLicense) {
             throw "archive-local Windows installer changed the current root license"
           }
-          $sourceLicenseRef = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt").Hash
-          $installedLicenseRef = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt")).Hash
-          if ($sourceLicenseRef -ne $installedLicenseRef) {
-            throw "archive-local Windows installer changed the active LicenseRef text"
+          $sourceNotice = (Get-FileHash -Algorithm SHA256 -LiteralPath "NOTICE").Hash
+          $installedNotice = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\NOTICE")).Hash
+          if ($sourceNotice -ne $installedNotice) {
+            throw "archive-local Windows installer changed the NOTICE attribution"
           }
-          $sourceApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\OLD-LICENSE\Apache-2.0.txt").Hash
-          $installedApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\OLD-LICENSE\Apache-2.0.txt")).Hash
+          $sourceApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\Apache-2.0.txt").Hash
+          $installedApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\Apache-2.0.txt")).Hash
           if ($sourceApacheLicense -ne $installedApacheLicense) {
             throw "archive-local Windows installer changed the Apache 2.0 text"
           }
-          $sourceApacheManifest = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt").Hash
-          $installedApacheManifest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt")).Hash
-          if ($sourceApacheManifest -ne $installedApacheManifest) {
-            throw "archive-local Windows installer changed the Apache 2.0 file manifest"
+          $sourceThirdPartyNotices = (Get-FileHash -Algorithm SHA256 -LiteralPath "THIRD_PARTY_NOTICES.md").Hash
+          $installedThirdPartyNotices = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\THIRD_PARTY_NOTICES.md")).Hash
+          if ($sourceThirdPartyNotices -ne $installedThirdPartyNotices) {
+            throw "archive-local Windows installer changed the third-party attributions"
+          }
+          $sourceMagic2License = (Get-FileHash -Algorithm SHA256 -LiteralPath "third_party\magic2\LICENSE").Hash
+          $installedMagic2LicensePath = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $successPrefix "share") "llam") "LICENSES") "THIRD_PARTY") "magic2"
+          $installedMagic2License = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $installedMagic2LicensePath "LICENSE")).Hash
+          if ($sourceMagic2License -ne $installedMagic2License) {
+            throw "archive-local Windows installer changed the vendored magic2 license"
           }
           $hardlinkPrefix = Join-Path $tmp "prefix-hardlink"
           $hardlinkHeaderDir = Join-Path $hardlinkPrefix "include\llam"
@@ -368,227 +380,10 @@ jobs:
             target/dist/*.zip.sha256
           if-no-files-found: error
 
-  build-bsd-artifacts:
-    name: build-artifacts (${{ matrix.target }})
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        shell: cpa.sh {0}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: freebsd-x86_64
-            os: freebsd
-            version: '15.0'
-            arch: x86-64
-          - target: openbsd-x86_64
-            os: openbsd
-            version: '7.8'
-            arch: x86-64
-          - target: netbsd-x86_64
-            os: netbsd
-            version: '10.1'
-            arch: x86-64
-          - target: dragonflybsd-x86_64
-            os: dragonflybsd
-            version: '6.4.2'
-            arch: x86-64
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Start BSD VM
-        uses: cross-platform-actions/action@v1.1.0
-        timeout-minutes: 10
-        with:
-          operating_system: ${{ matrix.os }}
-          version: ${{ matrix.version }}
-          architecture: ${{ matrix.arch }}
-          shell: sh
-          memory: 6G
-          cpu_count: 2
-
-      - name: Install BSD packages
-        run: |
-          set -eu
-          retry() {
-            attempts=0
-            max_attempts="${LLAM_BSD_PKG_RETRIES:-10}"
-            delay_seconds="${LLAM_BSD_PKG_RETRY_DELAY:-30}"
-            while ! "$@"; do
-              attempts=$((attempts + 1))
-              if [ "$attempts" -ge "$max_attempts" ]; then
-                return 1
-              fi
-              sleep "$delay_seconds"
-            done
-          }
-          dragonfly_release_tools_available() {
-            command -v gmake >/dev/null 2>&1 &&
-              command -v cmake >/dev/null 2>&1 &&
-              command -v xz >/dev/null 2>&1
-          }
-          configure_dragonfly_pkg_repo() {
-            sudo mkdir -p /usr/local/etc/pkg/repos
-            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
-          AUTO: {
-            url             : "__LLAM_DRAGONFLY_REPO__"
-            mirror_type     : NONE
-            enabled         : yes
-          }
-          Avalon: {
-            enabled         : no
-          }
-          EOF
-            sudo sed -i.bak "s|__LLAM_DRAGONFLY_REPO__|$1|g" /usr/local/etc/pkg/repos/llam-auto.conf
-          }
-          retry_dragonfly_pkg_update() {
-            attempts=0
-            max_attempts="${LLAM_DRAGONFLY_PKG_UPDATE_RETRIES:-2}"
-            delay_seconds="${LLAM_DRAGONFLY_PKG_UPDATE_RETRY_DELAY:-5}"
-            while ! sudo pkg update -f; do
-              attempts=$((attempts + 1))
-              if [ "$attempts" -ge "$max_attempts" ]; then
-                return 1
-              fi
-              sleep "$delay_seconds"
-            done
-          }
-          install_dragonfly_release_tools() {
-            if dragonfly_release_tools_available; then
-              return 0
-            fi
-            for repo_url in \
-              "https://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
-              "http://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
-              "https://mirrors.nycbug.org/pub/DragonflyBSD/dports/\${ABI}/LATEST" \
-              "https://ftp.jaist.ac.jp/pub/DragonFly/dports/\${ABI}/LATEST" \
-              "https://ftp.kr.freebsd.org/pub/dragonflybsd/dports/\${ABI}/LATEST" \
-              "https://www.mirrorservice.org/sites/ftp.dragonflybsd.org/dports/\${ABI}/LATEST"
-            do
-              echo "Trying DragonFly pkg repo: $repo_url"
-              configure_dragonfly_pkg_repo "$repo_url"
-              pkg -vv | sed -n '/Repositories:/,$p' || true
-              if retry_dragonfly_pkg_update &&
-                 { command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake; } &&
-                 { command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake; } &&
-                 { command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz; } &&
-                 dragonfly_release_tools_available; then
-                return 0
-              fi
-            done
-            return 1
-          }
-          case "$(uname -s)" in
-            FreeBSD)
-              command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
-              command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
-              command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
-              ;;
-            DragonFly)
-              pkg config ABI || true
-              install_dragonfly_release_tools
-              ;;
-            OpenBSD)
-              sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
-              command -v gmake >/dev/null 2>&1 || retry sudo pkg_add gmake
-              command -v cmake >/dev/null 2>&1 || retry sudo pkg_add cmake
-              command -v xz >/dev/null 2>&1 || retry sudo pkg_add xz
-              ;;
-            NetBSD)
-              command -v gmake >/dev/null 2>&1 || retry sudo pkgin -y install gmake
-              command -v cmake >/dev/null 2>&1 || retry sudo pkgin -y install cmake
-              command -v xz >/dev/null 2>&1 || retry sudo pkgin -y install xz
-              ;;
-          esac
-
-      - name: Build, test, and package BSD
-        run: |
-          set -eu
-          version="3.0.0"
-          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          fi
-          gmake clean
-          gmake -j2 demo \
-            stress \
-            bench \
-            server \
-            server_lossless \
-            server_flood \
-            static \
-            shared \
-            test_abi_contract \
-            test_abi_compat \
-            test_runtime_core \
-            test_multi_runtime_core \
-            test_runtime_api_edges \
-            test_runtime_select_edges \
-            test_io_buffers \
-            test_shared_load \
-            CC=cc \
-            LLAM_VERSION="$version"
-          ./test_abi_contract
-          ./test_abi_compat
-          ./test_runtime_core
-          ./test_multi_runtime_core
-          ./test_runtime_api_edges
-          ./test_runtime_select_edges
-          ./test_io_buffers
-          ./test_shared_load ./libllam_runtime.so."$version"
-          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
-          cmake --build build/bsd --parallel 2 --target \
-            test_abi_contract \
-            test_abi_compat \
-            test_runtime_core \
-            test_multi_runtime_core \
-            test_runtime_api_edges \
-            test_runtime_select_edges \
-            test_io_buffers \
-            test_shared_load
-          ctest --test-dir build/bsd --output-on-failure --timeout 180 \
-            -R 'test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_io_buffers|test_shared_load'
-          LLAM_RELEASE_VERSION="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}" \
-          LLAM_VERSION="$version" \
-            ./scripts/package_release.sh "${{ matrix.target }}"
-          package_version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
-          package_version="${package_version#v}"
-          archive="target/dist/llam-${package_version}-${{ matrix.target }}.tar.xz"
-          if ! tar -tf "$archive" > package-files.txt 2>/dev/null; then
-            xz -dc "$archive" | tar -tf - > package-files.txt
-          fi
-          grep '/include/llam/runtime.h$' package-files.txt
-          grep '/include/llam/platform.h$' package-files.txt
-          grep '/lib/libllam_runtime.so$' package-files.txt
-          grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
-          grep '/lib/pkgconfig/llam.pc$' package-files.txt
-          grep '/LICENSE$' package-files.txt
-          grep '/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt$' package-files.txt
-          grep '/LICENSES/OLD-LICENSE/Apache-2.0.txt$' package-files.txt
-          grep '/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt$' package-files.txt
-          rm -f package-files.txt
-
-      - name: Sync BSD artifacts back to runner
-        shell: bash
-        run: cpa.sh --sync-files vm-to-runner
-
-      - name: Upload BSD platform artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-${{ matrix.target }}
-          path: |
-            target/dist/*.tar.xz
-            target/dist/*.tar.xz.sha256
-          if-no-files-found: error
-
   publish-release:
     name: publish-release
     needs:
       - build-artifacts
-      - build-bsd-artifacts
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
@@ -645,12 +440,12 @@ jobs:
           {
             echo "# LLAM ${version}"
             echo
-            echo "LLAM ${version} publishes native runtime builds for Linux, macOS, BSD, and Windows x86_64."
+            echo "LLAM ${version} publishes native runtime builds for Linux, macOS, and Windows x86_64."
             echo
             echo "## Highlights"
             echo
             echo "- Native Darwin x86_64 assembly context switching for Intel Mac builds."
-            echo "- kqueue-based macOS and BSD I/O backend coverage."
+            echo "- kqueue-based macOS I/O backend coverage."
             echo "- io_uring/liburing Linux I/O backend for x86_64 and aarch64."
             echo "- Windows x86_64 IOCP backend archive with WSARecv/WSASend/AcceptEx/ConnectEx coverage."
             echo "- SDK metadata for CMake and pkg-config consumers."
@@ -664,10 +459,6 @@ jobs:
               "linux-aarch64|Linux aarch64" \
               "macos-x86_64|macOS x86_64" \
               "macos-aarch64|macOS arm64" \
-              "freebsd-x86_64|FreeBSD x86_64" \
-              "openbsd-x86_64|OpenBSD x86_64" \
-              "netbsd-x86_64|NetBSD x86_64" \
-              "dragonflybsd-x86_64|DragonFly BSD x86_64" \
               "windows-x86_64|Windows x86_64"; do
               target="${row%%|*}"
               label="${row#*|}"

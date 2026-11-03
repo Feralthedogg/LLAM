@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_IO_API_INTERNAL_H
@@ -77,7 +77,12 @@ static inline ssize_t llam_platform_read_handle(llam_handle_t handle, void *buf,
             return -1;
         }
         if (!ReadFile((HANDLE)handle, buf, (DWORD)count, &transferred, NULL)) {
-            errno = llam_windows_system_error_to_errno(GetLastError());
+            DWORD error_code = GetLastError();
+
+            if (error_code == ERROR_HANDLE_EOF) {
+                return 0;
+            }
+            errno = llam_windows_system_error_to_errno(error_code);
             return -1;
         }
         return (ssize_t)transferred;
@@ -89,6 +94,7 @@ static inline ssize_t llam_platform_read_handle(llam_handle_t handle, void *buf,
 
 static inline ssize_t llam_platform_write_handle(llam_handle_t handle, const void *buf, size_t count) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
+
     {
         DWORD transferred = 0;
 
@@ -175,6 +181,85 @@ static inline ssize_t llam_platform_pwrite_fd(llam_fd_t fd, const void *buf, siz
 }
 
 #if LLAM_RUNTIME_BACKEND_WINDOWS
+/* The documented NT file-information ABI, kept local to avoid SDK typedef clashes. */
+typedef struct llam_windows_file_io_status {
+    union { LONG status; PVOID pointer; } value;
+    ULONG_PTR information;
+} llam_windows_file_io_status_t;
+
+static inline int llam_windows_query_file_ulong(HANDLE handle, ULONG info_class, ULONG *out) {
+    typedef LONG(NTAPI *query_fn)(HANDLE, llam_windows_file_io_status_t *, PVOID, ULONG, ULONG);
+    query_fn query = NULL;
+    HMODULE module = GetModuleHandleA("ntdll.dll");
+    FARPROC symbol = module != NULL ? GetProcAddress(module, "NtQueryInformationFile") : NULL;
+    llam_windows_file_io_status_t status = {0};
+
+    if (symbol == NULL || sizeof(query) != sizeof(symbol)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    memcpy(&query, &symbol, sizeof(query));
+    if (query(handle, &status, out, (ULONG)sizeof(*out), info_class) < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+static inline int llam_windows_handle_is_synchronous(HANDLE handle, bool *out) {
+    ULONG mode = 0U;
+
+    if (llam_windows_query_file_ulong(handle, 16U, &mode) != 0) {
+        return -1;
+    }
+    *out = (mode & 0x30U) != 0U; /* FILE_SYNCHRONOUS_IO_ALERT / NONALERT */
+    return 0;
+}
+
+static inline HANDLE llam_windows_positional_handle(HANDLE handle, bool write_op, bool *reopened) {
+    ULONG mode = 0U;
+    ULONG access = 0U;
+    DWORD needed = write_op ? FILE_WRITE_DATA : FILE_READ_DATA;
+    DWORD flags = FILE_FLAG_OVERLAPPED;
+    HANDLE result;
+
+    *reopened = false;
+    if (llam_windows_query_file_ulong(handle, 16U, &mode) != 0) {
+        return INVALID_HANDLE_VALUE;
+    }
+    if ((mode & 0x30U) == 0U) {
+        return handle;
+    }
+    if (GetFileType(handle) != FILE_TYPE_DISK) {
+        errno = ENOTSUP;
+        return INVALID_HANDLE_VALUE;
+    }
+    /* Reopening must not acquire data access absent from the caller's handle. */
+    if (llam_windows_query_file_ulong(handle, 8U, &access) != 0) {
+        return INVALID_HANDLE_VALUE;
+    }
+    if ((access & needed) == 0U) {
+        errno = EBADF;
+        return INVALID_HANDLE_VALUE;
+    }
+    /* Preserve the source file object's buffering/durability mode on reopen. */
+    if ((mode & 0x2U) != 0U) { /* FILE_WRITE_THROUGH */
+        flags |= FILE_FLAG_WRITE_THROUGH;
+    }
+    if ((mode & 0x8U) != 0U) { /* FILE_NO_INTERMEDIATE_BUFFERING */
+        flags |= FILE_FLAG_NO_BUFFERING;
+    }
+    result = ReOpenFile(handle, needed | SYNCHRONIZE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        flags);
+    if (result == INVALID_HANDLE_VALUE) {
+        errno = llam_windows_system_error_to_errno(GetLastError());
+        return result;
+    }
+    *reopened = true;
+    return result;
+}
+
 static inline void llam_windows_set_overlapped_offset(OVERLAPPED *overlapped, uint64_t offset) {
     if (overlapped != NULL) {
         overlapped->Offset = (DWORD)(offset & UINT64_C(0xffffffff));
@@ -188,6 +273,9 @@ static inline ssize_t llam_platform_pread_handle(llam_handle_t handle, void *buf
     {
         OVERLAPPED overlapped;
         DWORD transferred = 0;
+        HANDLE io_handle, event;
+        bool reopened;
+        DWORD error_code = ERROR_SUCCESS;
 
         if (buf == NULL && count != 0U) {
             errno = EINVAL;
@@ -197,16 +285,40 @@ static inline ssize_t llam_platform_pread_handle(llam_handle_t handle, void *buf
             errno = EINVAL;
             return -1;
         }
-        memset(&overlapped, 0, sizeof(overlapped));
-        llam_windows_set_overlapped_offset(&overlapped, offset);
-        if (!ReadFile((HANDLE)handle, buf, (DWORD)count, &transferred, &overlapped)) {
-            DWORD err = GetLastError();
-
-            if (err != ERROR_IO_PENDING ||
-                !GetOverlappedResult((HANDLE)handle, &overlapped, &transferred, TRUE)) {
-                errno = llam_windows_system_error_to_errno(err != ERROR_IO_PENDING ? err : GetLastError());
-                return -1;
+        io_handle = llam_windows_positional_handle((HANDLE)handle, false, &reopened);
+        if (io_handle == INVALID_HANDLE_VALUE) {
+            return -1;
+        }
+        event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (event == NULL) {
+            error_code = GetLastError();
+            if (reopened) {
+                CloseHandle(io_handle);
             }
+            errno = llam_windows_system_error_to_errno(error_code);
+            return -1;
+        }
+        memset(&overlapped, 0, sizeof(overlapped));
+        /* The low event bit suppresses IOCP packets referencing stack storage. */
+        overlapped.hEvent = (HANDLE)((uintptr_t)event | 1U);
+        llam_windows_set_overlapped_offset(&overlapped, offset);
+        if (!ReadFile(io_handle, buf, (DWORD)count, &transferred, &overlapped)) {
+            error_code = GetLastError();
+            if (error_code == ERROR_IO_PENDING) {
+                error_code = GetOverlappedResult(io_handle, &overlapped, &transferred, TRUE)
+                                 ? ERROR_SUCCESS : GetLastError();
+            }
+        }
+        CloseHandle(event);
+        if (reopened) {
+            CloseHandle(io_handle);
+        }
+        if (error_code == ERROR_HANDLE_EOF) {
+            return 0;
+        }
+        if (error_code != ERROR_SUCCESS) {
+            errno = llam_windows_system_error_to_errno(error_code);
+            return -1;
         }
         return (ssize_t)transferred;
     }
@@ -220,6 +332,9 @@ static inline ssize_t llam_platform_pwrite_handle(llam_handle_t handle, const vo
     {
         OVERLAPPED overlapped;
         DWORD transferred = 0;
+        HANDLE io_handle, event;
+        bool reopened;
+        DWORD error_code = ERROR_SUCCESS;
 
         if (buf == NULL && count != 0U) {
             errno = EINVAL;
@@ -229,16 +344,36 @@ static inline ssize_t llam_platform_pwrite_handle(llam_handle_t handle, const vo
             errno = EINVAL;
             return -1;
         }
-        memset(&overlapped, 0, sizeof(overlapped));
-        llam_windows_set_overlapped_offset(&overlapped, offset);
-        if (!WriteFile((HANDLE)handle, buf, (DWORD)count, &transferred, &overlapped)) {
-            DWORD err = GetLastError();
-
-            if (err != ERROR_IO_PENDING ||
-                !GetOverlappedResult((HANDLE)handle, &overlapped, &transferred, TRUE)) {
-                errno = llam_windows_system_error_to_errno(err != ERROR_IO_PENDING ? err : GetLastError());
-                return -1;
+        io_handle = llam_windows_positional_handle((HANDLE)handle, true, &reopened);
+        if (io_handle == INVALID_HANDLE_VALUE) {
+            return -1;
+        }
+        event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (event == NULL) {
+            error_code = GetLastError();
+            if (reopened) {
+                CloseHandle(io_handle);
             }
+            errno = llam_windows_system_error_to_errno(error_code);
+            return -1;
+        }
+        memset(&overlapped, 0, sizeof(overlapped));
+        overlapped.hEvent = (HANDLE)((uintptr_t)event | 1U);
+        llam_windows_set_overlapped_offset(&overlapped, offset);
+        if (!WriteFile(io_handle, buf, (DWORD)count, &transferred, &overlapped)) {
+            error_code = GetLastError();
+            if (error_code == ERROR_IO_PENDING) {
+                error_code = GetOverlappedResult(io_handle, &overlapped, &transferred, TRUE)
+                                 ? ERROR_SUCCESS : GetLastError();
+            }
+        }
+        CloseHandle(event);
+        if (reopened) {
+            CloseHandle(io_handle);
+        }
+        if (error_code != ERROR_SUCCESS) {
+            errno = llam_windows_system_error_to_errno(error_code);
+            return -1;
         }
         return (ssize_t)transferred;
     }
@@ -300,6 +435,7 @@ int llam_platform_poll_handle(llam_handle_t handle, short events, int timeout_ms
 int llam_platform_poll_now(llam_fd_t fd, short events, short *revents);
 
 llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alignment, uint32_t flags);
+int llam_io_scope_error(const llam_task_t *task);
 int llam_io_buffer_public_register(llam_io_buffer_t *buffer);
 llam_io_buffer_t *llam_io_buffer_public_handle(llam_io_buffer_t *buffer);
 llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *buffer);

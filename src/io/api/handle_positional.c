@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -31,6 +31,8 @@
  * @brief Write bytes to a generic platform handle.
  */
 ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count) {
+    LLAM_NATIVE_API_GUARD(-1);
+
 #if LLAM_PLATFORM_POSIX
     /*
      * Public POSIX handles alias file descriptors. Keep the handle wrapper a
@@ -95,6 +97,7 @@ static ssize_t llam_positional_handle_rw(llam_handle_t handle, void *buf, size_t
 #else
     llam_io_req_t *req;
     ssize_t result;
+    bool synchronous;
 
     if (buf == NULL && count != 0U) {
         errno = EINVAL;
@@ -108,6 +111,9 @@ static ssize_t llam_positional_handle_rw(llam_handle_t handle, void *buf, size_t
         return write_op ? llam_platform_pwrite_handle(handle, buf, count, offset) :
                           llam_platform_pread_handle(handle, buf, count, offset);
     }
+    if (llam_windows_handle_is_synchronous((HANDLE)handle, &synchronous) != 0) {
+        return -1;
+    }
     req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
@@ -118,8 +124,10 @@ static ssize_t llam_positional_handle_rw(llam_handle_t handle, void *buf, size_t
     req->buf = buf;
     req->count = count;
     req->offset = offset;
-    if (llam_issue_io(req, false, 0U) != 0) {
-        if (!llam_io_capability_error(errno)) {
+    /* A synchronous HANDLE changes its file pointer even with OVERLAPPED offsets.
+     * Park the G and reopen that file on a blocking worker with independent position. */
+    if (synchronous || llam_issue_io(req, false, 0U) != 0) {
+        if (!synchronous && !llam_io_capability_error(errno)) {
             llam_api_io_req_release(g_llam_tls_shard, req);
             return -1;
         }
@@ -147,14 +155,20 @@ static ssize_t llam_positional_handle_rw(llam_handle_t handle, void *buf, size_t
 }
 
 ssize_t llam_pread_handle(llam_handle_t handle, void *buf, size_t count, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_positional_handle_rw(handle, buf, count, offset, false);
 }
 
 ssize_t llam_pwrite_handle(llam_handle_t handle, const void *buf, size_t count, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_positional_handle_rw(handle, (void *)buf, count, offset, true);
 }
 
 ssize_t llam_preadv_handle(llam_handle_t handle, const llam_mut_iovec_t *iov, int iovcnt, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
 #if LLAM_PLATFORM_POSIX
     return llam_preadv((llam_fd_t)handle, iov, iovcnt, offset);
 #else
@@ -204,6 +218,8 @@ ssize_t llam_preadv_handle(llam_handle_t handle, const llam_mut_iovec_t *iov, in
 }
 
 ssize_t llam_pwritev_handle(llam_handle_t handle, const llam_iovec_t *iov, int iovcnt, uint64_t offset) {
+    LLAM_NATIVE_API_GUARD(-1);
+
 #if LLAM_PLATFORM_POSIX
     return llam_pwritev((llam_fd_t)handle, iov, iovcnt, offset);
 #else

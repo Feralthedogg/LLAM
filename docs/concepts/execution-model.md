@@ -8,26 +8,12 @@ when to park, resume, migrate, or wake it.
 
 Embedding hosts should treat explicit runtime handles as the primary lifecycle:
 
-```c
-llam_runtime_t *rt = NULL;
-llam_runtime_create(NULL, 0, &rt);
-
-llam_task_t *task = llam_runtime_spawn_ex(rt, root, arg, NULL, 0);
-llam_runtime_run_handle(rt);
-llam_join(task);
-llam_runtime_destroy(rt);
-```
-
-The process-default compatibility path is still available for simple
-single-runtime programs:
-
-```c
-llam_runtime_init(NULL);
-llam_task_t *task = llam_spawn(root, arg, NULL);
-llam_run();
-llam_join(task);
-llam_runtime_shutdown();
-```
+Create an explicit runtime, spawn root/group work for that handle, run its
+driver, consume completed handles and destroy the runtime. Check each operation;
+the [minimal program](../getting-started.md#minimal-program) and
+[complete embedding example](../examples/embedding.md) cover success, failure and
+cancellation. The process-default APIs remain a compatibility path for simple
+single-runtime programs.
 
 See [Runtime Handles](runtime-handles.md) for the owner rules behind that
 boundary.
@@ -40,9 +26,9 @@ blocking compensation region.
 
 Every task handle returned by `llam_spawn*()` must be consumed by one of:
 
-- `llam_join()` or `llam_join_until()`
+- `llam_join()` / `llam_join_until()` or their result-returning forms
 - `llam_detach()`
-- `llam_task_group_join()` or `llam_task_group_destroy()` for grouped children
+- `llam_task_group_join()` / `llam_task_group_join_until()` for grouped children; destroy requires no live child handles
 
 Deadline APIs use absolute `llam_now_ns()` timestamps:
 
@@ -53,9 +39,12 @@ int rc = llam_join_until(task, deadline);
 
 ## Scheduling Boundaries
 
-LLAM is stackful and cooperative at the actual context-switch boundary. A
-CPU-bound loop that never calls LLAM can delay cancellation, wake handoff, and
-shutdown. Use safepoints in hot loops:
+Compatibility constructors use boundary/safepoint preemption. An unqualified
+CPU-bound loop can delay cancellation and shutdown. Managed constructors admit
+compiler/image metadata and probe native Ms before asynchronous capture; use the
+[managed C guide](../reference/managed-runtime.md) and query requested/effective
+policy. Arbitrary unqualified C loops have no async interruption guarantee.
+Compatibility code can use safepoints in hot loops:
 
 ```c
 size_t poll_counter = 0;
@@ -84,3 +73,8 @@ IOCP, or a blocking-helper fallback.
 drains runtime-owned work and releases backend resources. Managed wrappers route
 to the current task's owner runtime, so explicit-runtime code does not
 accidentally stop the process default runtime.
+
+For a host-owned runtime, `llam_runtime_request_stop_handle` targets that handle
+and `llam_runtime_drain_until` bounds waiting without freeing resources. Timeout
+requires retaining callback memory and retrying or completing final teardown;
+see [Embedding LLAM](../guides/embedding.md#bound-resources-and-shutdown-waiting).

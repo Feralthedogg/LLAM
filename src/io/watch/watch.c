@@ -22,16 +22,18 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
 
-uint64_t llam_hash_watch_identity_u64(uint64_t value) {
-    value ^= value >> 30;
-    value *= UINT64_C(0xbf58476d1ce4e5b9);
-    value ^= value >> 27;
-    value *= UINT64_C(0x94d049bb133111eb);
-    value ^= value >> 31;
-    return value;
+uint64_t llam_hash_watch_identity(uint64_t device,
+                                  uint64_t inode,
+                                  uint64_t descriptor) {
+    uint64_t hash;
+
+    /* Preserve field order so device/inode swaps cannot cancel through XOR. */
+    hash = llam_mix64(device ^ UINT64_C(0x6465766963650001));
+    hash = llam_mix64(hash ^ inode ^ UINT64_C(0x696e6f6465000002));
+    return llam_mix64(hash ^ descriptor ^ UINT64_C(0x6664000000000003));
 }

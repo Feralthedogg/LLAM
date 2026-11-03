@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -117,6 +117,9 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
     atomic_init(&req->free_after_cancel, 0U);
     atomic_init(&req->backend_event_refs, 0U);
     atomic_init(&req->release_after_event, 0U);
+#if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS
+    req->windows_test_completion_flag = NULL;
+#endif
     req->use_recv_op = false;
     req->use_provided_buffer = false;
     /* Publish an idle slot only after every reusable field is initialized. */
@@ -200,22 +203,22 @@ static void llam_io_req_publish(llam_io_req_t *req) {
     owner = &rt->shards[req->alloc_owner_shard];
     req->next = NULL;
     req->alloc_next = NULL;
-    if (g_llam_tls_shard == owner) {
-        req->alloc_next = owner->allocator.io_req_free;
-        owner->allocator.io_req_free = req;
-        owner->allocator.io_req_frees += 1U;
+    if (llam_processor_tls_owns_resources(&owner->processor)) {
+        req->alloc_next = owner->processor.allocator.io_req_free;
+        owner->processor.allocator.io_req_free = req;
+        owner->processor.allocator.io_req_frees += 1U;
         return;
     }
 
     do {
-        head = atomic_load_explicit(&owner->allocator.io_req_remote_free, memory_order_acquire);
+        head = atomic_load_explicit(&owner->processor.allocator.io_req_remote_free, memory_order_acquire);
         req->alloc_next = head;
-    } while (!atomic_compare_exchange_weak_explicit(&owner->allocator.io_req_remote_free,
+    } while (!atomic_compare_exchange_weak_explicit(&owner->processor.allocator.io_req_remote_free,
                                                      &head,
                                                      req,
                                                      memory_order_release,
                                                      memory_order_acquire));
-    atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+    atomic_store_explicit(&owner->processor.allocator.remote_free_pending, 1U, memory_order_release);
 }
 
 bool llam_io_req_lifetime_release(llam_io_req_t *req) {
@@ -351,13 +354,13 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
     }
 
     for (;;) {
-        if (g_llam_tls_shard == shard) {
+        if (llam_processor_tls_owns_resources(&shard->processor)) {
             // Owner-shard request allocation is lock-free and dominates the I/O
             // submission path.
-            req = shard->allocator.io_req_free;
+            req = shard->processor.allocator.io_req_free;
             if (req != NULL) {
-                shard->allocator.io_req_free = req->alloc_next;
-                shard->allocator.io_req_reuses += 1U;
+                shard->processor.allocator.io_req_free = req->alloc_next;
+                shard->processor.allocator.io_req_reuses += 1U;
                 llam_io_req_reset(req, shard->runtime, shard->id, shard->id);
                 if (!llam_io_req_lifetime_activate(req)) {
                     return NULL;
@@ -366,19 +369,19 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
             }
         } else {
             // Cold external path: serialize access to the owner-local free list.
-            llam_allocator_lock(&shard->allocator);
-            req = shard->allocator.io_req_free;
+            llam_allocator_lock(&shard->processor.allocator);
+            req = shard->processor.allocator.io_req_free;
             if (req != NULL) {
-                shard->allocator.io_req_free = req->alloc_next;
-                shard->allocator.io_req_reuses += 1U;
-                llam_allocator_unlock(&shard->allocator);
+                shard->processor.allocator.io_req_free = req->alloc_next;
+                shard->processor.allocator.io_req_reuses += 1U;
+                llam_allocator_unlock(&shard->processor.allocator);
                 llam_io_req_reset(req, shard->runtime, shard->id, shard->id);
                 if (!llam_io_req_lifetime_activate(req)) {
                     return NULL;
                 }
                 return req;
             }
-            llam_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->processor.allocator);
         }
         // Grow lazily so startup does not reserve request objects for inactive
         // shards or workloads that never touch I/O.
@@ -415,20 +418,24 @@ llam_io_buffer_t *llam_io_buffer_allocator_alloc(llam_shard_t *shard, size_t min
     }
 
     for (;;) {
-        if (g_llam_tls_shard == shard) {
+        if (llam_processor_tls_owns_resources(&shard->processor)) {
             // Inline buffers stay entirely inside the slab object; large payload
             // requests attach external storage only for that allocation.
-            buffer = shard->allocator.io_buffer_free;
+            buffer = shard->processor.allocator.io_buffer_free;
             if (buffer != NULL) {
-                shard->allocator.io_buffer_free = buffer->alloc_next;
-                shard->allocator.io_buffer_reuses += 1U;
+                size_t inline_capacity = buffer->inline_capacity;
+
+                shard->processor.allocator.io_buffer_free = buffer->alloc_next;
+                shard->processor.allocator.io_buffer_reuses += 1U;
                 memset(buffer, 0, sizeof(*buffer));
+                buffer->inline_capacity = inline_capacity;
+                buffer->inline_data = (unsigned char *)(buffer + 1);
                 buffer->owner_runtime = shard->runtime;
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
-                buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+                buffer->capacity = inline_capacity;
                 buffer->alignment = sizeof(void *);
-                if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
+                if (min_capacity > inline_capacity) {
                     buffer->data = calloc(1, min_capacity);
                     if (buffer->data == NULL) {
                         llam_io_buffer_allocator_free(buffer);
@@ -436,25 +443,31 @@ llam_io_buffer_t *llam_io_buffer_allocator_alloc(llam_shard_t *shard, size_t min
                     }
                     buffer->capacity = min_capacity;
                     buffer->external_storage = true;
+                } else {
+                    memset(buffer->inline_data, 0, inline_capacity);
                 }
                 return buffer;
             }
         } else {
             // Foreign allocation is rare, but keeps public API calls legal from
             // threads that are not currently running a scheduler shard.
-            llam_allocator_lock(&shard->allocator);
-            buffer = shard->allocator.io_buffer_free;
+            llam_allocator_lock(&shard->processor.allocator);
+            buffer = shard->processor.allocator.io_buffer_free;
             if (buffer != NULL) {
-                shard->allocator.io_buffer_free = buffer->alloc_next;
-                shard->allocator.io_buffer_reuses += 1U;
-                llam_allocator_unlock(&shard->allocator);
+                size_t inline_capacity = buffer->inline_capacity;
+
+                shard->processor.allocator.io_buffer_free = buffer->alloc_next;
+                shard->processor.allocator.io_buffer_reuses += 1U;
+                llam_allocator_unlock(&shard->processor.allocator);
                 memset(buffer, 0, sizeof(*buffer));
+                buffer->inline_capacity = inline_capacity;
+                buffer->inline_data = (unsigned char *)(buffer + 1);
                 buffer->owner_runtime = shard->runtime;
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
-                buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+                buffer->capacity = inline_capacity;
                 buffer->alignment = sizeof(void *);
-                if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
+                if (min_capacity > inline_capacity) {
                     buffer->data = calloc(1, min_capacity);
                     if (buffer->data == NULL) {
                         llam_io_buffer_allocator_free(buffer);
@@ -462,10 +475,12 @@ llam_io_buffer_t *llam_io_buffer_allocator_alloc(llam_shard_t *shard, size_t min
                     }
                     buffer->capacity = min_capacity;
                     buffer->external_storage = true;
+                } else {
+                    memset(buffer->inline_data, 0, inline_capacity);
                 }
                 return buffer;
             }
-            llam_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->processor.allocator);
         }
         // The requested capacity is handled after a wrapper is obtained; slab
         // growth only creates wrapper objects with inline storage.
@@ -505,7 +520,7 @@ void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
     buffer->detached_wrapper = false;
     buffer->data = buffer->inline_data;
     buffer->size = 0U;
-    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    buffer->capacity = buffer->inline_capacity;
     buffer->alignment = sizeof(void *);
     buffer->alloc_next = NULL;
 
@@ -525,21 +540,21 @@ void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
     }
 
     owner = &pinned_rt->shards[buffer->alloc_owner_shard];
-    if (g_llam_tls_shard == owner) {
+    if (llam_processor_tls_owns_resources(&owner->processor)) {
         // Owner-local recycle avoids allocator locking and malloc churn.  A
         // different runtime may have the same shard id and must use remote-free.
-        buffer->alloc_next = owner->allocator.io_buffer_free;
-        owner->allocator.io_buffer_free = buffer;
-        owner->allocator.io_buffer_frees += 1U;
+        buffer->alloc_next = owner->processor.allocator.io_buffer_free;
+        owner->processor.allocator.io_buffer_free = buffer;
+        owner->processor.allocator.io_buffer_frees += 1U;
         llam_runtime_end_public_op(pinned_rt);
         return;
     }
 
     // Remote frees are batched for the owner shard just like task/request frees.
     do {
-        head = atomic_load(&owner->allocator.io_buffer_remote_free);
+        head = atomic_load(&owner->processor.allocator.io_buffer_remote_free);
         buffer->alloc_next = head;
-    } while (!atomic_compare_exchange_weak(&owner->allocator.io_buffer_remote_free, &head, buffer));
-    atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+    } while (!atomic_compare_exchange_weak(&owner->processor.allocator.io_buffer_remote_free, &head, buffer));
+    atomic_store_explicit(&owner->processor.allocator.remote_free_pending, 1U, memory_order_release);
     llam_runtime_end_public_op(pinned_rt);
 }

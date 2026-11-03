@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -309,13 +309,13 @@ static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buff
          */
         copy_size = buffer->capacity;
     }
-    if (copy_size <= sizeof(buffer->inline_data)) {
+    if (copy_size <= buffer->inline_capacity) {
         if (copy_size != 0U) {
             memcpy(buffer->inline_data, buffer->data, copy_size);
         }
         buffer->data = buffer->inline_data;
         buffer->size = copy_size;
-        buffer->capacity = sizeof(buffer->inline_data);
+        buffer->capacity = buffer->inline_capacity;
         buffer->alignment = sizeof(void *);
         buffer->external_storage = false;
         buffer->aligned_storage = false;
@@ -328,7 +328,7 @@ static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buff
              */
             buffer->data = buffer->inline_data;
             buffer->size = 0U;
-            buffer->capacity = sizeof(buffer->inline_data);
+            buffer->capacity = buffer->inline_capacity;
             buffer->alignment = sizeof(void *);
             buffer->external_storage = false;
             buffer->aligned_storage = false;

@@ -1,8 +1,18 @@
 <!--
 Copyright 2026 Feralthedogg
-SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-Licensed under the LLAM Commercial Reciprocity License 1.0.
-See the LICENSE file distributed with this Software.
+SPDX-License-Identifier: Apache-2.0
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+See LICENSES/Apache-2.0.txt.
 -->
 
 # Contributing to LLAM
@@ -15,8 +25,8 @@ not through a public issue or pull request.
 ## Contribution license
 
 By intentionally submitting a contribution for inclusion in LLAM, you agree
-to license that contribution under the LLAM Commercial Reciprocity License
-1.0, unless the submission is conspicuously marked "Not a Contribution" or a
+to license that contribution under the Apache License, Version 2.0,
+unless the submission is conspicuously marked "Not a Contribution" or a
 separate written agreement applies.
 
 The controlling license text is in [LICENSE](LICENSE). If material in a
@@ -33,9 +43,19 @@ For C-family files, use:
 ```c
 /*
  * Copyright 2026 Feralthedogg
- * SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
- * Licensed under the LLAM Commercial Reciprocity License 1.0.
- * See the LICENSE file distributed with this Software.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * See LICENSES/Apache-2.0.txt.
  */
 ```
 
@@ -43,9 +63,19 @@ For formats with `#` comments, use:
 
 ```text
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-# Licensed under the LLAM Commercial Reciprocity License 1.0.
-# See the LICENSE file distributed with this Software.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSES/Apache-2.0.txt.
 ```
 
 If a generated or uncommentable file cannot retain a header, add an adjacent
@@ -53,7 +83,7 @@ file named `<original-name>.license` containing:
 
 ```text
 SPDX-FileCopyrightText: 2026 Feralthedogg
-SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+SPDX-License-Identifier: Apache-2.0
 ```
 
 Do not apply that identifier to third-party material. Separately licensed
@@ -100,5 +130,6 @@ For platform-specific setup and the extended verification matrix, see
 Use the structured defect issue form for non-security problems. Include the
 affected version, environment, backend, modification status, expected and
 observed behavior, a reproducer when available, impact, and a follow-up contact.
-The reporting windows and sensitive-data rules are described in
+Reporting is voluntary, not a condition of the software license. The private
+reporting route and sensitive-data guidance are described in
 [.github/SECURITY.md](.github/SECURITY.md).

@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -127,7 +127,10 @@ void llam_mutex_end_public_op(llam_mutex_t *mutex) {
  *
  * @return New mutex on success, or @c NULL with @c errno set on failure.
  */
-llam_mutex_t *llam_mutex_create(void) {
+static llam_mutex_t *llam_mutex_create_owned(llam_runtime_t *owner_runtime) {
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
+
+
     llam_mutex_t *mutex = calloc(1, sizeof(*mutex));
     int rc;
 
@@ -135,7 +138,7 @@ llam_mutex_t *llam_mutex_create(void) {
         return NULL;
     }
 
-    mutex->owner_runtime = llam_runtime_owner_for_new_object();
+    mutex->owner_runtime = owner_runtime;
     llam_public_active_op_init(&mutex->active_ops);
     atomic_init(&mutex->owner, (uintptr_t)0);
     rc = pthread_mutex_init(&mutex->lock, NULL);
@@ -155,6 +158,22 @@ llam_mutex_t *llam_mutex_create(void) {
     return llam_mutex_public_handle(mutex);
 }
 
+llam_mutex_t *llam_mutex_create(void) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    return llam_mutex_create_owned(llam_runtime_owner_for_new_object());
+}
+
+llam_mutex_t *llam_runtime_mutex_create(llam_runtime_t *runtime) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return NULL;
+    llam_mutex_t *result = llam_mutex_create_owned(pinned);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
+}
+
 /**
  * @brief Destroy a runtime-aware mutex.
  *
@@ -167,6 +186,8 @@ llam_mutex_t *llam_mutex_create(void) {
  *         @c EXDEV for managed cross-runtime cleanup attempts.
  */
 int llam_mutex_destroy(llam_mutex_t *mutex) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t handle = (uintptr_t)mutex;
     size_t slot;
     uint32_t generation;

@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_PLATFORM_H
@@ -66,6 +66,22 @@
 #define LLAM_RUNTIME_BACKEND_DARWIN 0
 #define LLAM_RUNTIME_BACKEND_BSD 0
 #define LLAM_RUNTIME_BACKEND_KQUEUE 0
+#endif
+
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((LLAM_PLATFORM_LINUX && LLAM_ARCH_AARCH64) || (defined(__FreeBSD__) && LLAM_ARCH_X86_64))
+#define LLAM_ASYNC_CONTEXT_SIGNAL 1
+#else
+#define LLAM_ASYNC_CONTEXT_SIGNAL 0
+#endif
+
+/* Compilation alone does not qualify a runtime. Each selected native M must
+ * pass the startup probe before the managed catalog commits async execution. */
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((LLAM_PLATFORM_DARWIN && (LLAM_ARCH_AARCH64 || LLAM_ARCH_X86_64)) || LLAM_ASYNC_CONTEXT_SIGNAL)
+#define LLAM_ASYNC_CONTEXT_SHARED 1
+#else
+#define LLAM_ASYNC_CONTEXT_SHARED 0
 #endif
 
 // Native Windows builds must opt into the staged backend explicitly so accidental

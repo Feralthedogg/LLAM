@@ -16,9 +16,12 @@ output you should trust. For API-level runtime knobs, use
 | `server_lossless` | Lossless chat server build. | `./server_lossless 7777` |
 | `server_flood` | Native throughput and accounting load. | `./server_flood --server ./server --clients 16 --duration 60` |
 | `llam_broker` | Broker capability smoke and local transport hooks. | `./llam_broker --self-test` |
+| `llam_preempt_metadata_inspect` | Validate and print linked `.llam.preempt` records. | `./llam_preempt_metadata_inspect --required preempt.bin` |
+| `tools/llam-clang` | Optional Linux x86-64 LLVM instrumentation driver. | `tools/llam-clang --llam-preempt=auto app.c -o app` |
 | `scripts/stress_server.py` | Exact chat fanout correctness. | `python3 scripts/stress_server.py --clients 16 --messages 8` |
 | `scripts/stress_server_composite.py` | Correctness, flood, edge, and soak profiles. | `python3 scripts/stress_server_composite.py --quick` |
 | `scripts/bench_runtime_compare.py` | LLAM, Go, and Tokio comparison artifacts. | `python3 scripts/bench_runtime_compare.py --runtime all --isolate-cases` |
+| `scripts/cpu_spike_compare.py` | Unpolled CPU saturation versus Go asynchronous preemption. | `make cpu-spike-compare` |
 | `scripts/bench_guard.py` | Conservative regression gate. | `python3 scripts/bench_guard.py` |
 | `scripts/runtime_soak.py` | Time-bounded core runtime soak loop. | `python3 scripts/runtime_soak.py --duration 300` |
 
@@ -199,6 +202,26 @@ python3 scripts/bench_runtime_compare.py \
 | `--samples <n>` | `3` | Process-level samples per runtime. |
 | `--sample-policy <mode>` | `median` | Row selection policy when multiple samples are collected. |
 | `--spread-warning-ratio <r>` | `1.50` | Warn when max/min sample spread exceeds this ratio; `0` disables. |
+
+`cpu_spike_compare.py` fills every LLAM worker with a busy task that has no
+preemption poll and compares timer, I/O, and scheduled control-trigger latency
+with Go at the same `GOMAXPROCS` width. It uses nearest-rank percentiles, so p99
+normally equals max when fewer than 100 rounds are requested:
+
+```sh
+python3 scripts/cpu_spike_compare.py --rounds 7 --spike-ms 200
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--rounds <n>` | `7` | Independent CPU-spike samples. |
+| `--spike-ms <n>` | `200` | Duration of the fully occupied worker interval. |
+| `--settle-ms <n>` | `100` | Time to park probes and start hogs before the trigger. |
+| `--timeout <sec>` | `60` | Per-runtime process timeout. |
+| `--out-dir <dir>` | `object/cpu_spike` | Go binary and comparison CSV directory. |
+| `--llam-bin <path>` | `cpu_spike` | LLAM diagnostic executable. |
+| `--go-bin <path>` | generated under `--out-dir` | Go diagnostic executable. |
+| `--no-build` | off | Reuse both executables without rebuilding. |
 
 `bench_guard.py` is the fast regression gate:
 

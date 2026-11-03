@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 name: macos
 
@@ -69,6 +69,7 @@ jobs:
           cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
           cmake --build build/macos
           LLAM_SELECT_RACE_ROUNDS=4 ctest --test-dir build/macos --output-on-failure --timeout 180
+          ctest --test-dir build/macos --output-on-failure -R "test_preempt_capabilities|test_default_policy_internal|test_preempt_metadata|test_preempt_sdk_metadata|test_preempt_cmake_install|test_preempt_package"
 
       - name: Benchmark smoke
         run: |

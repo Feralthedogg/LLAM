@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -87,10 +87,11 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
             return true;
         }
         rt = llam_direct_current_runtime();
-        if (shard == NULL || rt == NULL || shard->io_node_index >= rt->active_nodes) {
+        if (shard == NULL || rt == NULL ||
+            llam_processor_io_node_index(&shard->processor) >= rt->active_nodes) {
             return false;
         }
-        node = &rt->nodes[shard->io_node_index];
+        node = &rt->nodes[llam_processor_io_node_index(&shard->processor)];
         return timeout_ms < 0 && (!node->ring_ready || !node->supports_poll);
 #elif LLAM_RUNTIME_BACKEND_KQUEUE
         const llam_runtime_t *rt = llam_direct_current_runtime();
@@ -382,7 +383,7 @@ bool llam_io_shard_has_local_work(void) {
     // Recheck under shard lock to include hot/inject queues and avoid missing a
     // just-enqueued task when deciding whether to hand off after a write.
     pthread_mutex_lock(&shard->lock);
-    has_local_work = llam_norm_queue_depth(shard) > 0U || shard->hot_q.depth > 0U || shard->inject_q.depth > 0U;
+    has_local_work = llam_norm_queue_depth(shard) > 0U || shard->processor.hot_q.depth > 0U || shard->processor.inject_q.depth > 0U;
     pthread_mutex_unlock(&shard->lock);
     return has_local_work;
 }
@@ -526,7 +527,7 @@ void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool know
     }
     if (known_socket && !llam_write_handoff_check_fd_enabled()) {
         g_llam_tls_io_handoff_yield += 1U;
-        llam_yield();
+        llam_yield_internal();
         g_llam_tls_io_handoff_yield -= 1U;
         return;
     }
@@ -538,7 +539,7 @@ void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool know
         return;
     }
     g_llam_tls_io_handoff_yield += 1U;
-    llam_yield();
+    llam_yield_internal();
     g_llam_tls_io_handoff_yield -= 1U;
 }
 
@@ -637,6 +638,7 @@ int llam_try_direct_blocking_rw(llam_fd_t fd,
                                      bool recv_op,
                                      int recv_flags,
                                      ssize_t *result_out) {
+    if (g_llam_tls_task != NULL && (g_llam_tls_task->io_scope_active || llam_task_request_deadline(g_llam_tls_task) != 0U)) return 0;
     return llam_try_direct_blocking_rw_impl(fd, buf, count, write_op, recv_op, recv_flags, result_out, false);
 }
 
@@ -748,6 +750,7 @@ int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents) {
  *         -1 on error.
  */
 int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, short *revents) {
+    if (g_llam_tls_task != NULL && (g_llam_tls_task->io_scope_active || llam_task_request_deadline(g_llam_tls_task) != 0U)) return INT_MIN;
     struct pollfd pfd;
     int rc;
     int saved_errno = 0;

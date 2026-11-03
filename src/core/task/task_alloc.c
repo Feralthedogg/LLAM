@@ -3,11 +3,11 @@
  * @brief Task object allocation, reuse, and task-id assignment.
  *
  * @details
- * Task objects are owned by the shard allocator that created them. The owner
- * worker allocates and recycles normal tasks from its local free list without
+ * Task objects are owned by the processor allocator that created them. The
+ * owner worker allocates and recycles normal tasks from its local free list without
  * locking. Host-control spawns use a separate external cache so unmanaged
  * public runtime handles never race the owner free-list hot path. Foreign
- * shards return normal tasks through the owner's atomic remote-free list, which
+ * processors return normal tasks through the owner's atomic remote-free list, which
  * is drained at quiescent scheduler points.
  *
  * @copyright Copyright 2026 Feralthedogg
@@ -25,7 +25,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -44,7 +44,6 @@
  */
 static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runtime, unsigned shard_id) {
     bool lock_initialized;
-    unsigned i;
 
     if (task == NULL) {
         return;
@@ -52,15 +51,18 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
 
     lock_initialized = task->lock_initialized;
     task->owner_runtime = owner_runtime;
+    task->admission_counted = false;
     task->id = 0U;
     atomic_store_explicit(&task->active_ops, 0U, memory_order_release);
     atomic_init(&task->state, (unsigned)LLAM_TASK_STATE_NEW);
     task->wait_reason = LLAM_WAIT_NONE;
+    atomic_init(&task->run_generation, 0U);
     task->flags = 0U;
-    task->home_shard = 0U;
+    atomic_init(&task->home_shard, 0U);
     task->live_shard = 0U;
     atomic_init(&task->last_shard, 0U);
     task->parked_shard = 0U;
+    atomic_init(&task->active_timer_heap_shard, UINT_MAX);
     atomic_init(&task->task_class, (unsigned)LLAM_TASK_CLASS_DEFAULT);
     atomic_init(&task->base_task_class, (unsigned)LLAM_TASK_CLASS_DEFAULT);
     memset((char *)task + offsetof(llam_task_t, deadline_ns),
@@ -69,8 +71,25 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     memset((char *)task + offsetof(llam_task_t, stack_mapping),
            0,
            offsetof(llam_task_t, lock) - offsetof(llam_task_t, stack_mapping));
+    atomic_init(&task->managed_dispatch_owner, NULL);
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    task->async_preempt_task = NULL;
+#endif
     atomic_init(&task->task_listed, 0U);
     atomic_init(&task->scan_refs, 0U);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    task->windows_async_retire_next = NULL;
+    task->windows_async_retire_queued = false;
+    atomic_init(&task->windows_async_execution_owed, 0U);
+    task->windows_async_debt_owner = UINT_MAX;
+    task->windows_async_debt_run = 0U;
+    task->windows_async_saved_last_error = 0U;
+    task->windows_async_internal_yield_depth = 0U;
+    task->windows_async_finalizer_owner = UINT_MAX;
+    task->windows_async_finalizer_next = NULL;
+    task->windows_async_finalizer_queued = false;
+#endif
     task->all_next = NULL;
     task->all_prev = NULL;
     task->alloc_next = NULL;
@@ -81,12 +100,21 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     atomic_init(&task->join_waiter_hint, 0U);
     atomic_init(&task->join_target, NULL);
     task->wait_next = NULL;
-    task->cancel_next = NULL;
-    task->cancel_prev = NULL;
-    llam_wait_node_reset(&task->embedded_wait_node, owner_runtime, UINT_MAX);
-    for (i = 0U; i < LLAM_TASK_EMBEDDED_SELECT_NODES; ++i) {
-        llam_wait_node_reset(&task->embedded_select_nodes[i], owner_runtime, UINT_MAX);
+    task->group_cancel_token = NULL;
+    task->operation_cancel_token = NULL;
+    task->operation_deadline_ns = 0U;
+    task->request_deadline_ns = 0U;
+    task->io_scope_active = false;
+    memset(&task->application_result, 0, sizeof(task->application_result));
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        task->cancel_links[i].task = task;
+        task->cancel_links[i].next = NULL;
+        task->cancel_links[i].prev = NULL;
+        task->cancel_links[i].wait_generation = 0U;
+        task->cancel_links[i].registered = false;
+        atomic_init(&task->cancel_links[i].delivering, false);
     }
+    llam_wait_node_reset(&task->embedded_wait_node, owner_runtime, UINT_MAX);
     /*
      * Wait ownership fields are atomics because runtime stop/cancel and timeout
      * paths can sample them from other OS threads. Initialize them explicitly;
@@ -110,7 +138,6 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     atomic_init(&task->active_io_generation, 0U);
     atomic_init(&task->active_block_job, NULL);
     task->task_locals = NULL;
-    task->cancel_registered = false;
     task->handoff_sample_current = false;
     task->enqueue_hot = 0U;
     task->last_runnable_ns = 0U;
@@ -161,53 +188,11 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
  * @return Task object on success, or NULL on allocation failure.
  */
 static llam_task_t *llam_task_alloc_external(llam_shard_t *shard) {
-    llam_task_t *task;
-    int rc;
-
-    llam_allocator_lock(&shard->allocator);
-    task = shard->allocator.task_external_free;
-    if (task != NULL) {
-        shard->allocator.task_external_free = task->alloc_next;
-        shard->allocator.task_external_reuses += 1U;
-    }
-    llam_allocator_unlock(&shard->allocator);
-    if (task != NULL) {
-        return task;
-    }
-
-    task = calloc(1, sizeof(*task));
-    if (task == NULL) {
-        return NULL;
-    }
-    rc = pthread_mutex_init(&task->lock, NULL);
-    if (rc != 0) {
-        free(task);
-        errno = rc;
-        return NULL;
-    }
-    task->lock_initialized = true;
-    task->alloc_owner_shard = shard->id;
-    task->alloc_external_pool = true;
-    if (llam_allocator_record_chunk(&shard->allocator,
-                                    task,
-                                    sizeof(*task),
-                                    false,
-                                    LLAM_ALLOC_CHUNK_TASK,
-                                    1U) != 0) {
-        pthread_mutex_destroy(&task->lock);
-        free(task);
-        errno = ENOMEM;
-        return NULL;
-    }
-    llam_task_register_public_slab(task, 1U);
-    llam_allocator_lock(&shard->allocator);
-    shard->allocator.task_allocs += 1U;
-    llam_allocator_unlock(&shard->allocator);
-    return task;
+    return llam_task_span_alloc_external(shard);
 }
 
 /**
- * @brief Allocate a task object from a shard-local cache.
+ * @brief Allocate a task object from a processor-local cache.
  *
  * @param shard Shard that should own the returned task object.
  * @return Reinitialized task object on success, or NULL on allocation failure.
@@ -224,7 +209,7 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
         return NULL;
     }
 
-    local_owner = g_llam_tls_shard == shard;
+    local_owner = llam_processor_tls_owns_resources(&shard->processor);
     if (!local_owner) {
         task = llam_task_alloc_external(shard);
         if (task == NULL) {
@@ -240,10 +225,10 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
     }
 
     for (;;) {
-        task = shard->allocator.task_free;
+        task = shard->processor.allocator.task_free;
         if (task != NULL) {
-            shard->allocator.task_free = task->alloc_next;
-            shard->allocator.task_reuses += 1U;
+            shard->processor.allocator.task_free = task->alloc_next;
+            shard->processor.allocator.task_reuses += 1U;
             break;
         }
         // Empty cache: grow one slab and retry so callers see normal allocation
@@ -275,29 +260,32 @@ void llam_task_allocator_free(llam_task_t *task) {
         return;
     }
 
+    if (task->admission_counted) {
+        task->admission_counted = false;
+        /* This counter owns capacity only; task publication/reclamation has its
+         * own release/acquire protocol. No storage is published through it. */
+        atomic_fetch_sub_explicit(&rt->admitted_tasks, 1U, memory_order_relaxed);
+    }
     llam_task_local_clear(task);
+    llam_managed_task_release(task);
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
     if (task->alloc_external_pool) {
-        llam_allocator_lock(&owner->allocator);
-        task->alloc_next = owner->allocator.task_external_free;
-        owner->allocator.task_external_free = task;
-        owner->allocator.task_external_frees += 1U;
-        llam_allocator_unlock(&owner->allocator);
+        llam_task_span_release_external(owner, task);
         return;
     }
-    if (g_llam_tls_shard == owner) {
-        task->alloc_next = owner->allocator.task_free;
-        owner->allocator.task_free = task;
-        owner->allocator.task_frees += 1U;
+    if (llam_processor_tls_owns_resources(&owner->processor)) {
+        task->alloc_next = owner->processor.allocator.task_free;
+        owner->processor.allocator.task_free = task;
+        owner->processor.allocator.task_frees += 1U;
         return;
     }
 
     // Foreign frees publish onto a lock-free remote list and set one pending
     // flag. The owner drains the list in llam_allocator_quiescent().
     do {
-        head = atomic_load(&owner->allocator.task_remote_free);
+        head = atomic_load(&owner->processor.allocator.task_remote_free);
         task->alloc_next = head;
-    } while (!atomic_compare_exchange_weak(&owner->allocator.task_remote_free, &head, task));
-    atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+    } while (!atomic_compare_exchange_weak(&owner->processor.allocator.task_remote_free, &head, task));
+    atomic_store_explicit(&owner->processor.allocator.remote_free_pending, 1U, memory_order_release);
 }

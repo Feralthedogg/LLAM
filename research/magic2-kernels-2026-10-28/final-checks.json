@@ -1,0 +1,352 @@
+[
+  {
+    "command": [
+      "make",
+      "-j4",
+      "CC=clang",
+      "bench_magic2_kernels"
+    ],
+    "exit_code": 0,
+    "seconds": 0.7880867079948075,
+    "stdout": "clang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/experiments/magic2/bench_magic2_kernels.o experiments/magic2/bench_magic2_kernels.c\nclang -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -o bench_magic2_kernels object/src/core/sched/worker_registry.o object/src/core/sched/execution_lease.o object/src/core/lifecycle/runtime.o object/src/core/base/abi.o object/src/core/base/errno.o object/src/core/base/util.o object/src/core/base/io_udata.o object/src/core/registry/capability.o object/src/core/broker/broker.o object/src/core/broker/broker_lifecycle.o object/src/core/broker/broker_ops.o object/src/core/broker/broker_validate.o object/src/core/broker/broker_buffer.o object/src/core/broker/broker_descriptor.o object/src/core/broker/broker_channel.o object/src/core/broker/broker_revoke.o object/src/core/broker/broker_task.o object/src/core/broker/broker_windows_security.o object/src/core/broker/transport/broker_transport_dispatch.o object/src/core/broker/transport/broker_transport_ops.o object/src/core/broker/transport/broker_transport_response.o object/src/core/broker/transport/broker_transport_rollback.o object/src/core/broker/transport/broker_transport_ring.o object/src/core/broker/transport/broker_transport.o object/src/core/broker/transport/broker_transport_windows.o object/src/core/broker/transport/broker_transport_windows_fd_stubs.o object/src/core/broker/transport/broker_transport_windows_pipe.o object/src/core/broker/transport/broker_transport_windows_session.o object/src/core/broker/transport/broker_transport_posix.o object/src/core/broker/transport/broker_transport_posix_message.o object/src/core/broker/transport/broker_transport_posix_socket.o object/src/core/broker/transport/broker_transport_unix.o object/src/core/broker/transport/broker_transport_selftest.o object/src/core/broker/ring/broker_ring.o object/src/core/broker/ring/broker_ring_buffer_grant.o object/src/core/broker/ring/broker_ring_doorbell.o object/src/core/broker/ring/broker_ring_dispatch.o object/src/core/broker/ring/broker_ring_ops.o object/src/core/broker/ring/broker_ring_queue.o object/src/core/broker/ring/broker_ring_stats.o object/src/core/broker/ring/broker_ring_shm.o object/src/core/broker/ring/broker_ring_shm_posix.o object/src/core/broker/ring/broker_ring_shm_windows.o object/src/core/debug/fault.o object/src/core/base/names.o object/src/core/time/time.o object/src/core/context/fp.o object/src/core/context/stack_sample.o object/src/core/context/async_context.o object/src/core/context/async_context_shared.o object/src/core/context/context_portable.o object/src/core/sched/queue_base.o object/src/core/sched/norm_queue_depth.o object/src/core/sched/norm_queue.o object/src/core/sched/core_queue.o object/src/core/memory/alloc.o object/src/core/memory/task_span.o object/src/core/memory/allocator_quiescent.o object/src/core/task/task_alloc.o object/src/core/task/task_handle_registry.o object/src/core/task/task_handle_claim.o object/src/core/memory/io_object_alloc.o object/src/core/wait/wait_timer_alloc.o object/src/core/debug/trace.o object/src/core/sched/wake.o object/src/core/platform/platform.o object/src/core/preempt/capabilities.o object/tools/preempt/metadata.o object/src/core/platform/windows_policy.o object/src/core/sched/safepoint.o object/src/core/wait/wait.o object/src/core/task/task_reclaim.o object/src/core/task/task_stack.o object/src/core/sched/reinject.o object/src/core/wait/wait_accounting.o object/src/core/wait/wait_tracking.o object/src/core/time/timer_heap.o object/src/core/time/timer.o object/src/core/api/timer_api.o object/src/core/api/signal_api.o object/src/engine/scheduler/scheduler_engine.o object/src/engine/scheduler/block.o object/src/io/engine/io_engine.o object/src/engine/watchdog/watchdog.o object/src/engine/watchdog/watchdog_probe.o object/src/engine/watchdog/watchdog_merge.o object/src/engine/watchdog/watchdog_rehome.o object/src/engine/watchdog/watchdog_scale.o object/src/engine/watchdog/watchdog_worker.o object/src/engine/watchdog/watchdog_autotune.o object/src/core/api/core_api.o object/src/core/task/spawn.o object/src/core/task/yield_join_sleep.o object/src/core/api/blocking_api.o object/src/core/api/magic2_api.o object/src/core/api/cancel_api.o object/src/core/lifecycle/lifecycle.o object/src/core/sched/scheduler.o object/src/core/lifecycle/init.o object/src/core/lifecycle/shutdown.o object/src/core/lifecycle/run.o object/src/core/sync/sync.o object/src/core/sync/mutex_lifecycle.o object/src/core/sync/mutex.o object/src/core/sync/cond_lifecycle.o object/src/core/sync/cond.o object/src/core/sync/channel_cache.o object/src/core/sync/channel_lifecycle.o object/src/core/sync/channel_fast.o object/src/core/sync/channel.o object/src/core/sync/channel_select_fast.o object/src/core/sync/channel_select.o object/src/core/registry/handle.o object/src/core/registry/owner.o object/src/core/registry/registry.o object/src/core/task/task_group.o object/src/core/task/task_group_registry.o object/src/core/task/task_local.o object/src/io/api/io_api.o object/src/io/api/direct.o object/src/io/api/direct_tuning.o object/src/io/api/issue.o object/src/io/api/blocking_ops.o object/src/io/api/blocking_file_ops.o object/src/io/api/blocking_wrappers.o object/src/io/buffer/buffer_registry.o object/src/io/api/owned.o object/src/io/api/datagram.o object/src/io/api/handle_positional.o object/src/io/api/positional.o object/src/io/api/positional_util.o object/src/io/api/public.o object/src/io/windows/watch/iocp.o object/src/core/debug/debug_dump_helpers.o object/src/core/debug/debug_stats_json.o object/src/core/debug/debug.o object/src/io/watch/watch.o object/src/io/watch/watch_index.o object/src/io/watch/close.o object/src/io/watch/watch_lookup.o object/src/io/watch/migration.o object/src/io/watch/watch_queue.o object/src/io/watch/waiter.o object/src/io/darwin/watch/darwin_state.o object/src/io/darwin/watch/darwin_migration_live.o object/src/io/darwin/watch/darwin_migration_rehome.o object/src/io/darwin/watch/darwin_control.o object/src/io/darwin/watch/darwin_completion.o object/src/io/darwin/watch/events.o object/src/io/darwin/watch/darwin_worker.o object/src/core/context/context_arm64.o object/src/asm/darwin/arm64/darwin_context_arm64.o object/experiments/magic2/bench_magic2_kernels.o -pthread\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "--self-test"
+    ],
+    "exit_code": 0,
+    "seconds": 0.011486290954053402,
+    "stdout": "{\"self_test\":\"passed\",\"checks\":2400,\"kernels\":4}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "clang",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Werror",
+      "-O1",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fsanitize=address,undefined",
+      "-Iinclude",
+      "-Isrc/internal",
+      "-Isrc",
+      "-Itools/preempt",
+      "-D_GNU_SOURCE",
+      "-D_XOPEN_SOURCE=700",
+      "-D_DARWIN_C_SOURCE",
+      "experiments/magic2/bench_magic2_kernels.c",
+      "libllam_runtime.a",
+      "-pthread",
+      "-o",
+      "/Users/feral/Desktop/Programming/LLAM/research/magic2-kernels-2026-10-28/kernel-asan"
+    ],
+    "exit_code": 0,
+    "seconds": 0.49833050003508106,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/Users/feral/Desktop/Programming/LLAM/research/magic2-kernels-2026-10-28/kernel-asan",
+      "--self-test"
+    ],
+    "exit_code": 0,
+    "seconds": 0.08559341600630432,
+    "stdout": "{\"self_test\":\"passed\",\"checks\":2400,\"kernels\":4}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "scalar",
+      "257",
+      "17",
+      "4",
+      "1",
+      "3",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.005182249995414168,
+    "stdout": "{\"mode\":\"scalar\",\"elements\":257,\"grain\":17,\"iterations\":4,\"tasks\":1,\"rounds\":3,\"warmup\":16,\"elapsed_ns\":13208,\"plan_setup_ns\":41,\"warmup_wall_ns\":61334,\"workers\":1,\"blocking_calls\":0,\"yields\":301,\"checksum\":\"0000000135bda05d\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[16,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[4,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "unroll4",
+      "257",
+      "17",
+      "4",
+      "1",
+      "3",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.0039880420081317425,
+    "stdout": "{\"mode\":\"unroll4\",\"elements\":257,\"grain\":17,\"iterations\":4,\"tasks\":1,\"rounds\":3,\"warmup\":16,\"elapsed_ns\":13041,\"plan_setup_ns\":42,\"warmup_wall_ns\":51542,\"workers\":1,\"blocking_calls\":0,\"yields\":301,\"checksum\":\"0000000135bda05d\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,16,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,4,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "neon4",
+      "257",
+      "17",
+      "4",
+      "1",
+      "3",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.0038454169989563525,
+    "stdout": "{\"mode\":\"neon4\",\"elements\":257,\"grain\":17,\"iterations\":4,\"tasks\":1,\"rounds\":3,\"warmup\":16,\"elapsed_ns\":13167,\"plan_setup_ns\":0,\"warmup_wall_ns\":51750,\"workers\":1,\"blocking_calls\":0,\"yields\":301,\"checksum\":\"0000000135bda05d\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,0,16,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,0,4,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "neon16",
+      "257",
+      "17",
+      "4",
+      "1",
+      "3",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.004844165989197791,
+    "stdout": "{\"mode\":\"neon16\",\"elements\":257,\"grain\":17,\"iterations\":4,\"tasks\":1,\"rounds\":3,\"warmup\":16,\"elapsed_ns\":13459,\"plan_setup_ns\":0,\"warmup_wall_ns\":51750,\"workers\":1,\"blocking_calls\":0,\"yields\":301,\"checksum\":\"0000000135bda05d\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,0,0,16],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,0,0,4],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-cold",
+      "257",
+      "17",
+      "4",
+      "1",
+      "3",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.004199374991003424,
+    "stdout": "{\"mode\":\"auto-cold\",\"elements\":257,\"grain\":17,\"iterations\":4,\"tasks\":1,\"rounds\":3,\"warmup\":16,\"elapsed_ns\":14458,\"plan_setup_ns\":13250,\"warmup_wall_ns\":55000,\"workers\":1,\"blocking_calls\":0,\"yields\":301,\"checksum\":\"0000000135bda05d\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[16,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[4,0,0,0],\"selected\":[0,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-warm",
+      "257",
+      "17",
+      "4",
+      "1",
+      "3",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.004028540977742523,
+    "stdout": "{\"mode\":\"auto-warm\",\"elements\":257,\"grain\":17,\"iterations\":4,\"tasks\":1,\"rounds\":3,\"warmup\":16,\"elapsed_ns\":13792,\"plan_setup_ns\":3542,\"warmup_wall_ns\":53208,\"workers\":1,\"blocking_calls\":0,\"yields\":301,\"checksum\":\"0000000135bda05d\",\"training\":{\"routes\":[16,0,0,0],\"selected\":[0,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[4,0,0,0],\"selected\":[0,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "scalar",
+      "65536",
+      "4096",
+      "4",
+      "4",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.08423312497325242,
+    "stdout": "{\"mode\":\"scalar\",\"elements\":65536,\"grain\":4096,\"iterations\":4,\"tasks\":4,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":14914542,\"plan_setup_ns\":0,\"warmup_wall_ns\":61653625,\"workers\":1,\"blocking_calls\":0,\"yields\":1204,\"checksum\":\"00000009b740c8da\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[64,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[16,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "unroll4",
+      "65536",
+      "4096",
+      "4",
+      "4",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.03696300002047792,
+    "stdout": "{\"mode\":\"unroll4\",\"elements\":65536,\"grain\":4096,\"iterations\":4,\"tasks\":4,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":5854375,\"plan_setup_ns\":42,\"warmup_wall_ns\":22967417,\"workers\":1,\"blocking_calls\":0,\"yields\":1204,\"checksum\":\"00000009b740c8da\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,64,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,16,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "neon4",
+      "65536",
+      "4096",
+      "4",
+      "4",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.03713329101447016,
+    "stdout": "{\"mode\":\"neon4\",\"elements\":65536,\"grain\":4096,\"iterations\":4,\"tasks\":4,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":5914000,\"plan_setup_ns\":83,\"warmup_wall_ns\":23167458,\"workers\":1,\"blocking_calls\":0,\"yields\":1204,\"checksum\":\"00000009b740c8da\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,0,64,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,0,16,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "neon16",
+      "65536",
+      "4096",
+      "4",
+      "4",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.026937999995425344,
+    "stdout": "{\"mode\":\"neon16\",\"elements\":65536,\"grain\":4096,\"iterations\":4,\"tasks\":4,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":4101792,\"plan_setup_ns\":0,\"warmup_wall_ns\":14845958,\"workers\":1,\"blocking_calls\":0,\"yields\":1204,\"checksum\":\"00000009b740c8da\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,0,0,64],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,0,0,16],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-cold",
+      "65536",
+      "4096",
+      "4",
+      "4",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.08284529100637883,
+    "stdout": "{\"mode\":\"auto-cold\",\"elements\":65536,\"grain\":4096,\"iterations\":4,\"tasks\":4,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":13098375,\"plan_setup_ns\":4042,\"warmup_wall_ns\":60763042,\"workers\":1,\"blocking_calls\":0,\"yields\":1204,\"checksum\":\"00000009b740c8da\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[64,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,4,12,0],\"selected\":[1,1,1,1],\"buckets\":[0,4,0],\"observations\":4}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-warm",
+      "65536",
+      "4096",
+      "4",
+      "4",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.0729419169947505,
+    "stdout": "{\"mode\":\"auto-warm\",\"elements\":65536,\"grain\":4096,\"iterations\":4,\"tasks\":4,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":12141375,\"plan_setup_ns\":3959,\"warmup_wall_ns\":52854292,\"workers\":1,\"blocking_calls\":0,\"yields\":1204,\"checksum\":\"00000009b740c8da\",\"training\":{\"routes\":[0,16,48,0],\"selected\":[3,3,3,7],\"buckets\":[0,16,0],\"observations\":16},\"measured\":{\"routes\":[0,4,12,0],\"selected\":[0,0,0,4],\"buckets\":[0,4,0],\"observations\":4}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "scalar",
+      "64",
+      "64",
+      "64",
+      "1",
+      "1",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.0046092080301605165,
+    "stdout": "{\"mode\":\"scalar\",\"elements\":64,\"grain\":64,\"iterations\":64,\"tasks\":1,\"rounds\":1,\"warmup\":16,\"elapsed_ns\":5000,\"plan_setup_ns\":42,\"warmup_wall_ns\":6333,\"workers\":1,\"blocking_calls\":0,\"yields\":1,\"checksum\":\"000000221fa0f9ac\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[16,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[64,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "unroll4",
+      "64",
+      "64",
+      "64",
+      "1",
+      "1",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.00418458302738145,
+    "stdout": "{\"mode\":\"unroll4\",\"elements\":64,\"grain\":64,\"iterations\":64,\"tasks\":1,\"rounds\":1,\"warmup\":16,\"elapsed_ns\":3916,\"plan_setup_ns\":41,\"warmup_wall_ns\":6417,\"workers\":1,\"blocking_calls\":0,\"yields\":1,\"checksum\":\"000000221fa0f9ac\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,16,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,64,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "neon4",
+      "64",
+      "64",
+      "64",
+      "1",
+      "1",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.004390167014207691,
+    "stdout": "{\"mode\":\"neon4\",\"elements\":64,\"grain\":64,\"iterations\":64,\"tasks\":1,\"rounds\":1,\"warmup\":16,\"elapsed_ns\":3750,\"plan_setup_ns\":0,\"warmup_wall_ns\":5584,\"workers\":1,\"blocking_calls\":0,\"yields\":1,\"checksum\":\"000000221fa0f9ac\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,0,16,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,0,64,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "neon16",
+      "64",
+      "64",
+      "64",
+      "1",
+      "1",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.00397633301327005,
+    "stdout": "{\"mode\":\"neon16\",\"elements\":64,\"grain\":64,\"iterations\":64,\"tasks\":1,\"rounds\":1,\"warmup\":16,\"elapsed_ns\":4083,\"plan_setup_ns\":0,\"warmup_wall_ns\":6334,\"workers\":1,\"blocking_calls\":0,\"yields\":1,\"checksum\":\"000000221fa0f9ac\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[0,0,0,16],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[0,0,0,0],\"selected\":[0,0,0,64],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-cold",
+      "64",
+      "64",
+      "64",
+      "1",
+      "1",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.003685500007122755,
+    "stdout": "{\"mode\":\"auto-cold\",\"elements\":64,\"grain\":64,\"iterations\":64,\"tasks\":1,\"rounds\":1,\"warmup\":16,\"elapsed_ns\":5666,\"plan_setup_ns\":3750,\"warmup_wall_ns\":5417,\"workers\":1,\"blocking_calls\":0,\"yields\":1,\"checksum\":\"000000221fa0f9ac\",\"training\":{\"routes\":[0,0,0,0],\"selected\":[16,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[64,0,0,0],\"selected\":[0,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-warm",
+      "64",
+      "64",
+      "64",
+      "1",
+      "1",
+      "16"
+    ],
+    "exit_code": 0,
+    "seconds": 0.003960041038226336,
+    "stdout": "{\"mode\":\"auto-warm\",\"elements\":64,\"grain\":64,\"iterations\":64,\"tasks\":1,\"rounds\":1,\"warmup\":16,\"elapsed_ns\":5709,\"plan_setup_ns\":4166,\"warmup_wall_ns\":7041,\"workers\":1,\"blocking_calls\":0,\"yields\":1,\"checksum\":\"000000221fa0f9ac\",\"training\":{\"routes\":[16,0,0,0],\"selected\":[0,0,0,0],\"buckets\":[0,0,0],\"observations\":0},\"measured\":{\"routes\":[64,0,0,0],\"selected\":[0,0,0,0],\"buckets\":[0,0,0],\"observations\":0}}\n",
+    "stderr": ""
+  }
+]

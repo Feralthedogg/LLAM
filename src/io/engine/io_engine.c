@@ -27,7 +27,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -133,8 +133,8 @@ static unsigned llam_node_default_sqpoll_cpu(llam_runtime_t *rt, unsigned node_i
     unsigned i;
 
     for (i = 0; i < rt->active_shards; ++i) {
-        if (rt->shards[i].io_node_index == node_index) {
-            return rt->shards[i].cpu_id;
+        if (llam_processor_io_node_index(&rt->shards[i].processor) == node_index) {
+            return llam_processor_cpu_id(&rt->shards[i].processor);
         }
     }
     return rt->allowed_cpus[0];

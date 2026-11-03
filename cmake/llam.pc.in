@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
-prefix=@CMAKE_INSTALL_PREFIX@
+prefix=${pcfiledir}/@LLAM_PC_PREFIX_RELATIVE@
 exec_prefix=${prefix}
-libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
-includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+libdir=@LLAM_PC_LIBDIR@
+includedir=@LLAM_PC_INCLUDEDIR@
 
 Name: LLAM
 Description: Stackful user-thread runtime for C applications

@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -30,7 +30,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,6 +37,7 @@
 #include <string.h>
 
 #if LLAM_PLATFORM_POSIX
+#include <pthread.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
@@ -434,6 +434,8 @@ static void test_fail(test_failure_state_t *state, const char *message) {
     }
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_acq_rel) == 0U) {
         state->first_failure = message;
+        /* Preserve the first cause even if bounded teardown subsequently fails. */
+        fprintf(stderr, "test_legacy_lease_internal: %s\n", message);
     }
 }
 
@@ -584,6 +586,48 @@ static int snapshot_lease_locked_for_test(llam_shard_t *shard,
     rc = llam_legacy_lease_snapshot_locked(shard, snapshot) ? 0 : -1;
     pthread_mutex_unlock(&shard->opaque_lock);
     return rc;
+}
+
+static void assert_processor_owner_projection(
+    test_failure_state_t *failure,
+    llam_shard_t *shard,
+    const llam_lease_test_snapshot_t *lease,
+    llam_processor_owner_state_t expected_state,
+    const char *message) {
+    llam_processor_owner_record_t owner;
+    llam_processor_owner_ticket_t ticket;
+    llam_worker_t *expected_worker =
+        lease != NULL && lease->owner_worker != 0U
+            ? (llam_worker_t *)lease->owner_worker
+            : NULL;
+    uint64_t expected_incarnation =
+        expected_worker != NULL ? lease->owner_incarnation : 0U;
+    bool ticket_expected = expected_state == LLAM_PROCESSOR_OWNER_OWNED &&
+                           shard != NULL && lease != NULL &&
+                           (lease->state == LLAM_LEASE_PRIMARY_OWNED ||
+                            lease->state == LLAM_LEASE_HELPER_OWNED) &&
+                           llam_processor_online(&shard->processor);
+    bool ticket_available;
+
+    if (shard == NULL || lease == NULL ||
+        !llam_processor_owner_snapshot(&shard->processor, &owner) ||
+        owner.owner_m != expected_worker ||
+        owner.worker_incarnation != expected_incarnation ||
+        owner.lease_projection_epoch != lease->epoch ||
+        owner.lease_state != (llam_legacy_lease_state_t)lease->state ||
+        owner.state != expected_state || owner.p_generation == 0U) {
+        test_fail(failure, message);
+        return;
+    }
+    ticket_available = llam_processor_owner_ticket_snapshot(&shard->processor, &ticket);
+    if (ticket_available != ticket_expected ||
+        (ticket_available &&
+         (!llam_processor_owner_ticket_validate(&shard->processor, &ticket) ||
+          ticket.owner_m != expected_worker ||
+          ticket.worker_incarnation != expected_incarnation ||
+          ticket.lease_projection_epoch != lease->epoch))) {
+        test_fail(failure, "P-owner ticket disagreed with the composed lease lifecycle");
+    }
 }
 
 static int wait_for_lease_state_direct(llam_shard_t *shard,
@@ -901,6 +945,10 @@ static void takeover_root_task(void *arg) {
     state->root_enter_rc = llam_enter_blocking();
     state->root_enter_errno = errno;
     if (state->root_enter_rc != 0) {
+        fprintf(stderr, "test_legacy_lease_internal: enter rc=%d errno=%d stop=%u shutdown=%u\n",
+                state->root_enter_rc, state->root_enter_errno,
+                (unsigned)atomic_load_explicit(&state->runtime->stop_requested, memory_order_acquire),
+                (unsigned)atomic_load_explicit(&state->runtime->shutdown_requested, memory_order_acquire));
         test_fail(&state->failure, "primary helper activation failed");
     }
     pthread_mutex_lock(&shard->opaque_lock);
@@ -1138,6 +1186,12 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "transfer-request gate published an unexpected lease episode");
     }
+    assert_processor_owner_projection(
+        &state.takeover.failure,
+        shard,
+        &snapshot,
+        LLAM_PROCESSOR_OWNER_OWNED,
+        "transfer-request gate did not retain the matching primary P-owner projection");
     transfer_sequence = snapshot.transfer_sequence;
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST, false);
     if (wait_for_lease_state(runtime,
@@ -1159,6 +1213,12 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "owner-clear gate published an unexpected lease episode");
     }
+    assert_processor_owner_projection(
+        &state.takeover.failure,
+        shard,
+        &snapshot,
+        LLAM_PROCESSOR_OWNER_FREE,
+        "owner-clear gate retained a P owner after the lease became ownerless");
     pthread_mutex_lock(&shard->opaque_lock);
     if (llam_legacy_lease_can_reacquire_locked(
             shard,
@@ -1195,6 +1255,12 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "grant gate published an unexpected lease episode");
     }
+    assert_processor_owner_projection(
+        &state.takeover.failure,
+        shard,
+        &snapshot,
+        LLAM_PROCESSOR_OWNER_OWNED,
+        "grant gate did not publish the matching helper P-owner projection");
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_GRANT, false);
     if (wait_flag(&state.takeover.helper_done, legacy_deadline()) != 0) {
         test_fail(&state.takeover.failure,
@@ -1209,6 +1275,12 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "nested helper redirect handback did not complete one exact episode");
     }
+    assert_processor_owner_projection(
+        &state.takeover.failure,
+        shard,
+        &snapshot,
+        LLAM_PROCESSOR_OWNER_OWNED,
+        "nested helper handback did not preserve the lease-matching P-owner projection");
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HANDBACK_ACK, true);
     atomic_store_explicit(&state.takeover.release_root_leave, 1U, memory_order_release);
     if (wait_for_lease_state(runtime,
@@ -1232,6 +1304,12 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "handback gate published an unexpected lease episode");
     }
+    assert_processor_owner_projection(
+        &state.takeover.failure,
+        shard,
+        &snapshot,
+        LLAM_PROCESSOR_OWNER_OWNED,
+        "handback ACK gate did not publish the matching primary P-owner projection");
     pthread_mutex_lock(&shard->opaque_lock);
     if (!shard->opaque_helper_active || shard->opaque_compensation_depth != 0U) {
         test_fail(&state.takeover.failure,
@@ -1268,6 +1346,12 @@ static int test_lease_handoff_windows(void) {
         test_fail(&state.takeover.failure,
                   "post-run lease cleanup did not retain exactly the completed episode");
     }
+    assert_processor_owner_projection(
+        &state.takeover.failure,
+        shard,
+        &snapshot,
+        LLAM_PROCESSOR_OWNER_FREE,
+        "worker unbind left a live P-owner projection after lease cleanup");
     if (state.run_rc != 0 || state.fatal_errno != 0) {
         test_fail(&state.takeover.failure,
                   "lease-window transfer changed run or fatal semantics");
@@ -2135,9 +2219,16 @@ static void ownerless_shutdown_root_task(void *arg) {
     state->root_leave_rc = llam_leave_blocking();
     state->root_leave_errno = errno;
     atomic_store_explicit(&state->root_done, 1U, memory_order_release);
-    bounded_join_task(helper_task,
-                      &state->helper_done,
-                      "ownerless shutdown helper join exceeded its deadline");
+    /*
+     * helper_done precedes the helper's terminal context switch. A stop-time
+     * join may therefore observe cancellation before completed, or consume an
+     * already completed target. Cancellation is non-consuming; runtime drain
+     * still owns the live helper and must finish it before freeing storage.
+     */
+    if (wait_flag(&state->helper_done, legacy_deadline()) != 0 ||
+        (llam_join_until(helper_task, legacy_deadline()) != 0 && errno != ECANCELED)) {
+        test_fail(&state->failure, "ownerless shutdown helper join failed outside completion/cancel race");
+    }
 }
 
 static void *ownerless_shutdown_run(void *arg) {
@@ -3318,6 +3409,8 @@ static void lease_binding_observer_task(void *arg) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_worker_t *worker = g_llam_tls_worker;
     llam_lease_test_snapshot_t snapshot;
+    llam_processor_owner_record_t owner_record;
+    llam_processor_owner_ticket_t ticket;
 
     if (shard == NULL || worker == NULL || worker != &shard->primary_worker ||
         g_llam_tls_processor != &shard->processor ||
@@ -3357,6 +3450,7 @@ static void lease_binding_observer_task(void *arg) {
         test_fail(&observation->failure,
                   "primary binding did not publish the caller's native thread");
     }
+    memset(&snapshot, 0, sizeof(snapshot));
     if (snapshot_lease_locked_for_test(shard, &snapshot) != 0 ||
         snapshot.state != LLAM_LEASE_PRIMARY_OWNED ||
         snapshot.owner_worker != (uintptr_t)&shard->primary_worker ||
@@ -3364,6 +3458,20 @@ static void lease_binding_observer_task(void *arg) {
         snapshot.return_worker != 0U || snapshot.return_incarnation != 0U) {
         test_fail(&observation->failure,
                   "primary scheduler entry did not publish the primary lease");
+    }
+    if (!llam_processor_owner_snapshot(&shard->processor, &owner_record) ||
+        owner_record.state != LLAM_PROCESSOR_OWNER_OWNED ||
+        owner_record.owner_m != &shard->primary_worker ||
+        owner_record.worker_incarnation != observation->incarnation ||
+        owner_record.lease_projection_epoch != snapshot.epoch ||
+        owner_record.lease_state != LLAM_LEASE_PRIMARY_OWNED ||
+        !llam_processor_owner_ticket_snapshot(&shard->processor, &ticket) ||
+        !llam_processor_owner_ticket_validate(&shard->processor, &ticket) ||
+        ticket.owner_m != &shard->primary_worker ||
+        ticket.worker_incarnation != observation->incarnation ||
+        ticket.lease_projection_epoch != snapshot.epoch || ticket.processor != &shard->processor) {
+        test_fail(&observation->failure,
+                  "primary bind did not compose a matching online P-owner ticket");
     }
     observation->lease_state = snapshot.state;
     observation->lease_owner = snapshot.owner_worker;
@@ -3540,7 +3648,6 @@ static int test_active_g_publication_ordering_gates(void) {
     llam_runtime_t *runtime = NULL;
     llam_shard_t *shard;
     pthread_t run_thread;
-    cleanup_release_state_t release;
     bool run_created = false;
     bool task_joined = false;
     int rc = 0;
@@ -3569,8 +3676,6 @@ static int test_active_g_publication_ordering_gates(void) {
 
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_TASK_STATE_PREPARE, true);
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_ACTIVE_G_PUBLISH, true);
-    release.runtime = runtime;
-    release.release_flag = NULL;
     if (pthread_create(&run_thread, NULL, publication_gate_run, &state) != 0) {
         test_fail(&state.failure, "publication ordering run thread setup failed");
         reset_lease_test_gates();
@@ -3671,7 +3776,6 @@ static int run_park_publication_case(bool io_wait, int read_fd, int write_fd) {
     publication_gate_state_t state;
     llam_runtime_t *runtime = NULL;
     pthread_t run_thread;
-    cleanup_release_state_t release;
     llam_lease_test_point_t point = io_wait
                                         ? LLAM_LEASE_TEST_AFTER_IO_PARK
                                         : LLAM_LEASE_TEST_AFTER_SLEEP_PARK;
@@ -3703,8 +3807,6 @@ static int run_park_publication_case(bool io_wait, int read_fd, int write_fd) {
         return failure_result(&state.failure, "park publication cleanup failed");
     }
     llam_lease_test_set_gate(point, true);
-    release.runtime = runtime;
-    release.release_flag = NULL;
     if (pthread_create(&run_thread, NULL, publication_gate_run, &state) != 0) {
         test_fail(&state.failure, "park publication run thread setup failed");
         reset_lease_test_gates();
@@ -3766,8 +3868,8 @@ static int run_park_publication_case(bool io_wait, int read_fd, int write_fd) {
 
 cleanup:
     reset_lease_test_gates();
-    if (run_created && io_wait && write_fd >= 0) {
-        (void)write(write_fd, "x", 1U);
+    if (run_created && io_wait && write_fd >= 0 && write(write_fd, "x", 1U) != 1) {
+        test_fail(&state.failure, "I/O park cleanup wake write failed");
     }
     if (run_created) {
         bounded_join_thread(run_thread,
@@ -6053,51 +6155,70 @@ cleanup:
 }
 
 int main(void) {
-    static int (*const tests[])(void) = {
-        test_lease_test_gate_contract,
-        test_watchdog_lease_snapshot_binding_contract,
-        test_versioned_pause_ack_contract,
-        test_stale_merge_ack_rejected_after_helper_handoff,
-        test_startup_during_merge_pause_reacquires_lease,
-        test_redirect_rejected_during_merge_pause,
-        test_watchdog_signal_suppressed_after_task_reclaim,
-        test_watchdog_signal_suppressed_after_helper_handoff,
-        test_watchdog_signal_suppressed_after_worker_rebind,
-        test_runtime_steal_pause_generation_reuse,
-        test_lease_binding_lifecycle,
-        test_shutdown_rejects_unbound_lease,
-        test_active_g_publication_ordering_gates,
-        test_park_publication_cleanup,
-        test_active_g_publication_and_cleanup,
-        test_primary_helper_activation_and_return,
-        test_lease_handoff_windows,
-        test_clean_stop_completes_handback,
-        test_failed_handback_does_not_republish,
-        test_shutdown_raced_transfer_request,
-        test_shutdown_raced_owner_clear,
-        test_helper_reblocking_through_redirect,
-        test_ownerless_return_ordering,
-        test_ownerless_redirect_active_destroy,
-        test_repeated_shard_zero_runs_two_callers,
-        test_helper_shutdown_while_idle,
-        test_helper_shutdown_while_active,
-        test_dynamic_merge_pause,
-        test_watchdog_task_exit_overlap,
-        test_partial_helper_start_failure,
-        test_direct_yield_publication_gate,
-        test_direct_reinject_publication_gate,
+#define LLAM_LEASE_CASE(fn) {#fn, fn}
+    static const struct {
+        const char *name;
+        int (*run)(void);
+    } tests[] = {
+        LLAM_LEASE_CASE(test_lease_test_gate_contract),
+        LLAM_LEASE_CASE(test_watchdog_lease_snapshot_binding_contract),
+        LLAM_LEASE_CASE(test_versioned_pause_ack_contract),
+        LLAM_LEASE_CASE(test_stale_merge_ack_rejected_after_helper_handoff),
+        LLAM_LEASE_CASE(test_startup_during_merge_pause_reacquires_lease),
+        LLAM_LEASE_CASE(test_redirect_rejected_during_merge_pause),
+        LLAM_LEASE_CASE(test_watchdog_signal_suppressed_after_task_reclaim),
+        LLAM_LEASE_CASE(test_watchdog_signal_suppressed_after_helper_handoff),
+        LLAM_LEASE_CASE(test_watchdog_signal_suppressed_after_worker_rebind),
+        LLAM_LEASE_CASE(test_runtime_steal_pause_generation_reuse),
+        LLAM_LEASE_CASE(test_lease_binding_lifecycle),
+        LLAM_LEASE_CASE(test_shutdown_rejects_unbound_lease),
+        LLAM_LEASE_CASE(test_active_g_publication_ordering_gates),
+        LLAM_LEASE_CASE(test_park_publication_cleanup),
+        LLAM_LEASE_CASE(test_active_g_publication_and_cleanup),
+        LLAM_LEASE_CASE(test_primary_helper_activation_and_return),
+        LLAM_LEASE_CASE(test_lease_handoff_windows),
+        LLAM_LEASE_CASE(test_clean_stop_completes_handback),
+        LLAM_LEASE_CASE(test_failed_handback_does_not_republish),
+        LLAM_LEASE_CASE(test_shutdown_raced_transfer_request),
+        LLAM_LEASE_CASE(test_shutdown_raced_owner_clear),
+        LLAM_LEASE_CASE(test_helper_reblocking_through_redirect),
+        LLAM_LEASE_CASE(test_ownerless_return_ordering),
+        LLAM_LEASE_CASE(test_ownerless_redirect_active_destroy),
+        LLAM_LEASE_CASE(test_repeated_shard_zero_runs_two_callers),
+        LLAM_LEASE_CASE(test_helper_shutdown_while_idle),
+        LLAM_LEASE_CASE(test_helper_shutdown_while_active),
+        LLAM_LEASE_CASE(test_dynamic_merge_pause),
+        LLAM_LEASE_CASE(test_watchdog_task_exit_overlap),
+        LLAM_LEASE_CASE(test_partial_helper_start_failure),
+        LLAM_LEASE_CASE(test_direct_yield_publication_gate),
+        LLAM_LEASE_CASE(test_direct_reinject_publication_gate),
     };
+    const char *filter = getenv("LLAM_LEGACY_LEASE_TEST");
+    bool verbose = getenv("LLAM_LEGACY_LEASE_VERBOSE") != NULL;
     unsigned i;
     unsigned skipped = 0U;
+    unsigned executed = 0U;
+#undef LLAM_LEASE_CASE
 
     for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); ++i) {
-        int rc = tests[i]();
+        int rc;
+
+        if (filter != NULL && filter[0] != '\0' && strcmp(filter, tests[i].name) != 0) {
+            continue;
+        }
+        executed += 1U;
+        if (verbose) fprintf(stderr, "test_legacy_lease_internal: begin %s\n", tests[i].name);
+        rc = tests[i].run();
 
         if (rc == 77) {
             skipped += 1U;
         } else if (rc != 0) {
             return 1;
         }
+    }
+    if (executed == 0U) {
+        fprintf(stderr, "test_legacy_lease_internal: unknown test filter: %s\n", filter);
+        return 1;
     }
     if (skipped != 0U) {
         printf("test_legacy_lease_internal: checks passed; skipped=%u\n", skipped);

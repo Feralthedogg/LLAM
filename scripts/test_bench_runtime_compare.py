@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 """Regression tests for benchmark comparison diagnostics."""
 
@@ -261,6 +261,52 @@ def test_main_rejects_duplicate_case_args_without_traceback() -> None:
         fail(f"duplicate case diagnostic leaked traceback: {stderr_text!r}")
 
 
+def test_prebuilt_commands_are_used_without_building() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-prebuilt-compare-") as tmp:
+        directory = Path(tmp)
+        binaries = {runtime: directory / name for runtime, name in
+                    (("LLAM", "llam"), ("Goroutine", "go"), ("Tokio", "tokio"))}
+        for path in binaries.values():
+            path.write_text("test executable placeholder", encoding="utf-8")
+        seen = []
+
+        def fake_run(_root, runtime, command, _env, _timeout, _sample, _samples, case=None):
+            if command != [str(binaries[runtime].resolve())] or case != "channel_pingpong":
+                fail(f"prebuilt executable was not used: {runtime} {command} {case}")
+            seen.append(runtime)
+            return [bench.BenchRow(runtime, case, 1000.0, 1.0, 2.0)]
+
+        with patched_main(fake_run):
+            sys.argv = ["bench_runtime_compare.py", "--runtime", "all", "--no-build",
+                        "--llam-binary", str(binaries["LLAM"]),
+                        "--go-binary", str(binaries["Goroutine"]),
+                        "--tokio-binary", str(binaries["Tokio"]),
+                        "--cases", "channel_pingpong", "--isolate-cases", "--samples", "1",
+                        "--out-dir", str(directory / "results")]
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                if bench.main() != 0:
+                    fail("prebuilt comparison failed")
+        if seen != ["LLAM", "Goroutine", "Tokio"]:
+            fail(f"prebuilt runtimes were not all executed: {seen}")
+
+
+def test_prebuilt_options_require_no_build() -> None:
+    original = sys.argv
+    try:
+        for option in ("--llam-binary", "--go-binary", "--tokio-binary"):
+            sys.argv = ["bench_runtime_compare.py", option, "unused"]
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    bench.main()
+                except SystemExit as exc:
+                    if exc.code != 2:
+                        fail(f"unexpected prebuilt argument exit: {exc.code}")
+                else:
+                    fail("prebuilt path accepted without --no-build")
+    finally:
+        sys.argv = original
+
+
 def main() -> int:
     test_sample_csv_filters_requested_cases_and_warns()
     test_isolated_warning_omits_isolation_hint()
@@ -270,6 +316,8 @@ def main() -> int:
     test_parse_output_rejects_duplicate_metric_fields()
     test_parse_cases_rejects_duplicate_requests()
     test_main_rejects_duplicate_case_args_without_traceback()
+    test_prebuilt_commands_are_used_without_building()
+    test_prebuilt_options_require_no_build()
     print("[test_bench_runtime_compare] ok")
     return 0
 

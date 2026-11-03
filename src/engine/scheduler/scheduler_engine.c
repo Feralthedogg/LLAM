@@ -25,10 +25,13 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "windows_async_lifetime.h"
+#endif
 
 static uint64_t llam_worker_idle_wake_load(const llam_shard_t *shard) {
     const llam_worker_t *worker = g_llam_tls_worker;
@@ -88,7 +91,7 @@ static bool llam_should_steal_from_victim(llam_shard_t *thief, llam_shard_t *vic
     }
 
     pthread_mutex_lock(&victim->lock);
-    busy = victim->inject_q.depth > 0U || victim->hot_q.depth > 0U || victim->opaque_redirect_active;
+    busy = victim->processor.inject_q.depth > 0U || victim->processor.hot_q.depth > 0U || victim->opaque_redirect_active;
     pthread_mutex_unlock(&victim->lock);
     if (busy) {
         // Hot/injected work usually has affinity or urgency; leave it local.
@@ -144,7 +147,7 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
             task = llam_norm_queue_steal(victim);
         } else {
             pthread_mutex_lock(&victim->lock);
-            task = llam_queue_pop_tail(&victim->norm_q);
+            task = llam_queue_pop_tail(&victim->processor.norm_q);
             if (task != NULL) {
                 (void)llam_norm_queue_note_dequeue(victim);
             }
@@ -157,7 +160,11 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
             // Pinned tasks must remain on the victim; put them back on inject.
             pthread_mutex_lock(&victim->lock);
             task->enqueue_hot = 0U;
-            if (llam_queue_push_bounded_locked(victim, &victim->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(victim,
+                                               &victim->processor.inject_q,
+                                               LLAM_INJECT_QUEUE_CAP,
+                                               task,
+                                               NULL)) {
                 victim->metrics.inject_enqueues += 1U;
             }
             pthread_mutex_unlock(&victim->lock);
@@ -166,8 +173,26 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
             continue;
         }
 
-        pthread_mutex_lock(&thief->lock);
-        (void)llam_norm_queue_push_owner_locked(thief, task);
+        {
+            llam_processor_queue_access_t access;
+            bool owner_access =
+                llam_processor_queue_access_snapshot(&thief->processor, &access) &&
+                (access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
+                 access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN);
+
+            pthread_mutex_lock(&thief->lock);
+            if (owner_access &&
+                llam_processor_queue_access_validate_locked(thief, &access)) {
+                (void)llam_norm_queue_push_owner_locked(thief, &access, task);
+            } else if (llam_queue_push_bounded_locked(
+                           thief,
+                           &thief->processor.inject_q,
+                           LLAM_INJECT_QUEUE_CAP,
+                           task,
+                           NULL)) {
+                thief->metrics.inject_enqueues += 1U;
+            }
+        }
         thief->metrics.migrations += 1U;
         llam_trace_shard(thief, task, LLAM_TRACE_STEAL, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_NONE);
         pthread_mutex_unlock(&thief->lock);
@@ -212,7 +237,9 @@ llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard) {
         unsigned depth;
 
         // Prefer same-locality work first; remote stealing is the fallback below.
-        if (rt->shards[i].id == shard->id || rt->shards[i].node_index != shard->node_index ||
+        if (rt->shards[i].id == shard->id ||
+            llam_processor_node_index(&rt->shards[i].processor) !=
+                llam_processor_node_index(&shard->processor) ||
             !llam_shard_is_online(&rt->shards[i])) {
             continue;
         }
@@ -230,7 +257,9 @@ llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard) {
     for (i = 0; i < rt->active_shards; ++i) {
         unsigned depth;
 
-        if (rt->shards[i].node_index == shard->node_index || !llam_shard_is_online(&rt->shards[i])) {
+        if (llam_processor_node_index(&rt->shards[i].processor) ==
+                llam_processor_node_index(&shard->processor) ||
+            !llam_shard_is_online(&rt->shards[i])) {
             continue;
         }
 
@@ -268,20 +297,20 @@ static int llam_shard_next_timeout(llam_shard_t *shard, bool *has_timeout, uint6
     if (timeout_ns != NULL) {
         *timeout_ns = 0U;
     }
-    if (atomic_load_explicit(&shard->timer_count, memory_order_acquire) == 0U) {
+    if (atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) == 0U) {
         return timeout_ms;
     }
 
     now = llam_now_ns();
     pthread_mutex_lock(&shard->lock);
-    if (shard->timers != NULL) {
+    if (shard->processor.timers != NULL) {
         if (has_timeout != NULL) {
             *has_timeout = true;
         }
-        if (shard->timers->deadline_ns <= now) {
+        if (shard->processor.timers->deadline_ns <= now) {
             timeout_ms = 0;
         } else {
-            uint64_t delta_ns = shard->timers->deadline_ns - now;
+            uint64_t delta_ns = shard->processor.timers->deadline_ns - now;
             uint64_t delta_ms = delta_ns / 1000000ULL;
 
             if (timeout_ns != NULL) {
@@ -309,11 +338,18 @@ static bool llam_idle_spin_ready(llam_shard_t *shard, uint64_t now_ns) {
     llam_runtime_t *rt = shard->runtime;
     bool ready = false;
 
-    if (atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) {
+    if (atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        && !llam_windows_async_lifetime_has_debt(rt)
+#endif
+    ) {
         return true;
     }
     if (llam_runtime_overflow_depth(rt) > 0U) {
         // Overflow work is runtime-global, so any idle shard can help drain it.
+        return true;
+    }
+    if (llam_async_preempt_ready_depth(shard) > 0U) {
         return true;
     }
     if (llam_norm_queue_depth(shard) > 0U) {
@@ -321,8 +357,8 @@ static bool llam_idle_spin_ready(llam_shard_t *shard, uint64_t now_ns) {
     }
 
     pthread_mutex_lock(&shard->lock);
-    ready = shard->inject_q.depth > 0U || shard->hot_q.depth > 0U || llam_norm_queue_depth(shard) > 0U;
-    if (!ready && shard->timers != NULL && shard->timers->deadline_ns <= now_ns) {
+    ready = shard->processor.inject_q.depth > 0U || shard->processor.hot_q.depth > 0U || llam_norm_queue_depth(shard) > 0U;
+    if (!ready && shard->processor.timers != NULL && shard->processor.timers->deadline_ns <= now_ns) {
         ready = true;
     }
     pthread_mutex_unlock(&shard->lock);
@@ -434,10 +470,14 @@ static bool llam_idle_spin(llam_shard_t *shard, int timeout_ms) {
  */
 static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
     int wait_timeout_ms = timeout_ms < 0 ? LLAM_IDLE_POLL_TIMEOUT_MS : timeout_ms;
+    atomic_uint *event_pending = llam_processor_event_pending(&shard->processor);
     struct timespec ts;
     struct timespec *ts_ptr = NULL;
 
-    if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
+    if (event_pending == NULL) {
+        return;
+    }
+    if (atomic_exchange_explicit(event_pending, 0U, memory_order_acq_rel) != 0U) {
         llam_worker_idle_wake_store(shard, llam_now_ns());
         return;
     }
@@ -451,10 +491,10 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
     }
 
     for (;;) {
-        long rc = llam_linux_futex_wait_private_timeout(&shard->event_pending, 0U, ts_ptr);
+        long rc = llam_linux_futex_wait_private_timeout(event_pending, 0U, ts_ptr);
 
         if (rc == 0) {
-            atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
+            atomic_store_explicit(event_pending, 0U, memory_order_release);
             llam_worker_idle_wake_store(shard, llam_now_ns());
             return;
         }
@@ -462,7 +502,7 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
             continue;
         }
         if (errno == EAGAIN) {
-            atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
+            atomic_store_explicit(event_pending, 0U, memory_order_release);
             llam_worker_idle_wake_store(shard, llam_now_ns());
         }
         return;
@@ -487,7 +527,17 @@ void llam_idle_wait(llam_shard_t *shard) {
     uint64_t precise_timeout_ns = 0U;
 #endif
 
-    if (rt != NULL && !llam_runtime_has_live_tasks(rt)) {
+    /*
+     * A Win64 async lifetime debt may outlive the last application G. Keep
+     * the ordinary bounded idle wait (10 ms fallback), so a task-only scan
+     * reader can release its final reference without making an unsafe wake
+     * call after that release. Binding operations signal their own release.
+     */
+    if (rt != NULL && !llam_runtime_has_live_tasks(rt)
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        && !llam_windows_async_lifetime_has_debt(rt)
+#endif
+    ) {
         llam_request_stop(rt);
         return;
     }
@@ -513,9 +563,12 @@ void llam_idle_wait(llam_shard_t *shard) {
         uint64_t wait_timeout_ns =
             has_precise_timeout ? precise_timeout_ns : (uint64_t)wait_timeout_ms * 1000000ULL;
         // Darwin and Windows keep the precise timer delta to avoid millisecond rounding drift.
-        int rc = llam_wake_handle_wait_ns(shard->event_fd, wait_timeout_ms, wait_timeout_ns);
+        int rc = llam_wake_handle_wait_ns(llam_processor_event_fd(&shard->processor),
+                                          wait_timeout_ms,
+                                          wait_timeout_ns);
 #else
-        int rc = llam_wake_handle_wait(shard->event_fd, wait_timeout_ms);
+        int rc = llam_wake_handle_wait(llam_processor_event_fd(&shard->processor),
+                                       wait_timeout_ms);
 #endif
         if (rc < 0 && errno == EINTR) {
             continue;

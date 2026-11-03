@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -167,7 +167,9 @@ llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short 
         return NULL;
     }
 
-    watch = node->poll_watches;
+    llam_watch_index_entry_t *entry = llam_watch_index_first(&node->poll_watch_index, fd);
+    bool indexed = node->poll_watch_index.capacity != 0U;
+    watch = indexed ? (entry != NULL ? entry->watch : NULL) : node->poll_watches;
     while (watch != NULL) {
         if (!watch->retired &&
             !watch->destroy_pending &&
@@ -178,7 +180,12 @@ llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short 
             watch->st_ino == st_ino) {
             return watch;
         }
-        watch = watch->next;
+        if (indexed) {
+            entry = entry->next;
+            watch = entry != NULL ? entry->watch : NULL;
+        } else {
+            watch = watch->next;
+        }
     }
     return NULL;
 }
@@ -208,7 +215,9 @@ llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
         return NULL;
     }
 
-    watch = node->accept_watches;
+    llam_watch_index_entry_t *entry = llam_watch_index_first(&node->accept_watch_index, fd);
+    bool indexed = node->accept_watch_index.capacity != 0U;
+    watch = indexed ? (entry != NULL ? entry->watch : NULL) : node->accept_watches;
     while (watch != NULL) {
         if (!watch->retired &&
             !watch->destroy_pending &&
@@ -222,7 +231,12 @@ llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
                                                has_local_addr)) {
             return watch;
         }
-        watch = watch->next;
+        if (indexed) {
+            entry = entry->next;
+            watch = entry != NULL ? entry->watch : NULL;
+        } else {
+            watch = watch->next;
+        }
     }
     return NULL;
 }
@@ -243,7 +257,9 @@ llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t 
         return NULL;
     }
 
-    watch = node->recv_watches;
+    llam_watch_index_entry_t *entry = llam_watch_index_first(&node->recv_watch_index, fd);
+    bool indexed = node->recv_watch_index.capacity != 0U;
+    watch = indexed ? (entry != NULL ? entry->watch : NULL) : node->recv_watches;
     while (watch != NULL) {
         if (!watch->retired &&
             !watch->destroy_pending &&
@@ -253,7 +269,12 @@ llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t 
             watch->st_ino == st_ino) {
             return watch;
         }
-        watch = watch->next;
+        if (indexed) {
+            entry = entry->next;
+            watch = entry != NULL ? entry->watch : NULL;
+        } else {
+            watch = watch->next;
+        }
     }
     return NULL;
 }
@@ -275,7 +296,9 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
         return NULL;
     }
 
-    watch = node->poll_watches;
+    llam_watch_index_entry_t *entry = llam_watch_index_first(&node->poll_watch_index, fd);
+    bool indexed = node->poll_watch_index.capacity != 0U;
+    watch = indexed ? (entry != NULL ? entry->watch : NULL) : node->poll_watches;
     while (watch != NULL) {
         if (!watch->retired &&
             !watch->destroy_pending &&
@@ -286,7 +309,12 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
             watch->st_ino == st_ino) {
             return watch;
         }
-        watch = watch->next;
+        if (indexed) {
+            entry = entry->next;
+            watch = entry != NULL ? entry->watch : NULL;
+        } else {
+            watch = watch->next;
+        }
     }
 
     watch = calloc(1, sizeof(*watch));
@@ -307,6 +335,7 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
     watch->live_transferred = false;
     watch->next = node->poll_watches;
     node->poll_watches = watch;
+    llam_watch_index_insert(&node->poll_watch_index, &watch->index_entry, fd, watch);
     return watch;
 }
 
@@ -335,7 +364,9 @@ llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, i
         return NULL;
     }
 
-    watch = node->accept_watches;
+    llam_watch_index_entry_t *entry = llam_watch_index_first(&node->accept_watch_index, fd);
+    bool indexed = node->accept_watch_index.capacity != 0U;
+    watch = indexed ? (entry != NULL ? entry->watch : NULL) : node->accept_watches;
     while (watch != NULL) {
         if (!watch->retired &&
             !watch->destroy_pending &&
@@ -349,7 +380,12 @@ llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, i
                                                has_local_addr)) {
             return watch;
         }
-        watch = watch->next;
+        if (indexed) {
+            entry = entry->next;
+            watch = entry != NULL ? entry->watch : NULL;
+        } else {
+            watch = watch->next;
+        }
     }
     watch = calloc(1, sizeof(*watch));
     if (watch == NULL) {
@@ -368,6 +404,7 @@ llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, i
     watch->live_transferred = false;
     watch->next = node->accept_watches;
     node->accept_watches = watch;
+    llam_watch_index_insert(&node->accept_watch_index, &watch->index_entry, fd, watch);
     return watch;
 }
 
@@ -387,7 +424,9 @@ llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int f
         return NULL;
     }
 
-    watch = node->recv_watches;
+    llam_watch_index_entry_t *entry = llam_watch_index_first(&node->recv_watch_index, fd);
+    bool indexed = node->recv_watch_index.capacity != 0U;
+    watch = indexed ? (entry != NULL ? entry->watch : NULL) : node->recv_watches;
     while (watch != NULL) {
         if (!watch->retired &&
             !watch->destroy_pending &&
@@ -397,7 +436,12 @@ llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int f
             watch->st_ino == st_ino) {
             return watch;
         }
-        watch = watch->next;
+        if (indexed) {
+            entry = entry->next;
+            watch = entry != NULL ? entry->watch : NULL;
+        } else {
+            watch = watch->next;
+        }
     }
 
     watch = calloc(1, sizeof(*watch));
@@ -412,6 +456,7 @@ llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int f
     watch->live_transferred = false;
     watch->next = node->recv_watches;
     node->recv_watches = watch;
+    llam_watch_index_insert(&node->recv_watch_index, &watch->index_entry, fd, watch);
     return watch;
 }
 
@@ -436,6 +481,7 @@ void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch)
                 watch->destroy_pending = true;
                 return;
             }
+            llam_watch_index_remove(&node->poll_watch_index, &watch->index_entry);
             *cursor = watch->next;
             free(watch);
             return;
@@ -465,6 +511,7 @@ void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *wa
                 watch->destroy_pending = true;
                 return;
             }
+            llam_watch_index_remove(&node->accept_watch_index, &watch->index_entry);
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
                 llam_accept_ready_t *next = watch->ready_head->next;

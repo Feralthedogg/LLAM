@@ -24,11 +24,13 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_TYPES_H
 #define LLAM_RUNTIME_TYPES_H
+
+#include "runtime_watch_index.h"
 
 #include "llam_internal.h"
 #include "runtime_platform.h"
@@ -64,6 +66,7 @@
 #include <mach/mach.h>
 #endif
 
+#include "runtime_mix.h"
 #include "runtime_public_slot.h"
 
 #if LLAM_RUNTIME_BACKEND_WINDOWS
@@ -154,8 +157,6 @@ typedef struct llam_cpu_set {
 #define LLAM_TASK_SLAB_COUNT 16U
 /** Number of wait nodes allocated per wait-node slab. */
 #define LLAM_WAIT_NODE_SLAB_COUNT 64U
-/** Number of multi-channel select wait nodes embedded in each task. */
-#define LLAM_TASK_EMBEDDED_SELECT_NODES 4U
 /** Number of timer nodes allocated per timer-node slab. */
 #define LLAM_TIMER_NODE_SLAB_COUNT 64U
 /** Number of I/O requests allocated per request slab. */
@@ -164,7 +165,7 @@ typedef struct llam_cpu_set {
 #define LLAM_IO_BUFFER_SLAB_COUNT 16U
 /** Experimental huge-allocation I/O buffer wrapper slab width. */
 #define LLAM_IO_BUFFER_HUGE_SLAB_COUNT 512U
-/** Inline bytes embedded in each owned I/O buffer wrapper. */
+/** Maximum inline payload size and backend provided-buffer slice size. */
 #define LLAM_IO_BUFFER_INLINE_BYTES 4096U
 /** Provided-buffer ring entries per Linux I/O node. */
 #define LLAM_IO_RECV_BUF_RING_ENTRIES 128U
@@ -209,6 +210,8 @@ typedef struct llam_node llam_node_t;
 typedef struct llam_stack_cache_entry llam_stack_cache_entry_t;
 /** @brief Per-task task-local storage entry. */
 typedef struct llam_task_local_entry llam_task_local_entry_t;
+typedef struct llam_managed_catalog llam_managed_catalog_t;
+struct llam_capsule_pool;
 /** @brief Active multi-channel select wait owned by a parked task. */
 typedef struct llam_channel_select_state llam_channel_select_state_t;
 /** @brief Synchronization wait node shared by wait/wake handshakes. */
@@ -256,7 +259,15 @@ typedef struct llam_alloc_chunk {
     unsigned item_kind;
     unsigned item_count;
     bool mmapped;
+    bool external_task_span;
     struct llam_alloc_chunk *next;
+    struct llam_alloc_chunk **prev_link;
+    /* Host-task spans use these fields under the allocation owner's lock. */
+    llam_task_t *task_free;
+    struct llam_alloc_chunk *pool_next;
+    struct llam_alloc_chunk *pool_prev;
+    unsigned task_live;
+    unsigned pool_state;
 } llam_alloc_chunk_t;
 
 /** @brief Allocation chunk kinds that require specialized cleanup. */
@@ -347,6 +358,21 @@ typedef struct llam_metrics {
     atomic_uint_fast64_t opaque_leave_wait_samples;
     atomic_uint_fast64_t opaque_leave_wait_max_ns;
     atomic_uint_fast64_t opaque_redirect_activations;
+    atomic_uint_fast64_t foreign_p_detaches;
+    atomic_uint_fast64_t foreign_p_reacquires;
+    atomic_uint_fast64_t relief_worker_activations;
+    atomic_uint_fast64_t relief_deferred_unsafe;
+    atomic_uint_fast64_t relief_deferred_unknown;
+    atomic_uint_fast64_t relief_deferred_stale_ticket;
+    atomic_uint_fast64_t relief_deferred_unannounced;
+    atomic_uint_fast64_t async_preempt_requests;
+    atomic_uint_fast64_t async_preempt_captures;
+    atomic_uint_fast64_t async_preempt_resumes;
+    atomic_uint_fast64_t async_preempt_deferred_unsafe;
+    atomic_uint_fast64_t async_preempt_deferred_stale;
+    atomic_uint_fast64_t async_preempt_collisions;
+    atomic_uint_fast64_t async_preempt_context_bytes;
+    atomic_uint_fast64_t async_preempt_max_ack_latency_ns;
     atomic_uint_fast64_t wake_reason_hist[LLAM_WAIT_TIMEOUT + 1U];
 } llam_metrics_t;
 
@@ -522,6 +548,7 @@ typedef struct llam_block_job {
     llam_wait_node_t *wait_node;
     atomic_uint state;
     bool holds_task_ref;
+    bool async_slot_reserved;
     struct llam_block_job *next;
 } llam_block_job_t;
 
@@ -581,6 +608,10 @@ typedef struct llam_io_req {
     atomic_uint free_after_cancel;
     atomic_uint backend_event_refs;
     atomic_uint release_after_event;
+#if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS
+    /* Benchmark-only completion sink for a request with no managed G waiter. */
+    atomic_uint *windows_test_completion_flag;
+#endif
     bool use_recv_op;
     bool use_provided_buffer;
 } llam_io_req_t;
@@ -631,6 +662,41 @@ struct llam_channel_select_state {
     /* Timers pin this stack-backed state until their final callback access. */
     atomic_uint timer_refs;
 };
+
+/** @brief Lifecycle of a task's explicit M-bound foreign detach token. */
+typedef enum llam_foreign_token_state {
+    LLAM_FOREIGN_TOKEN_INACTIVE = 0,
+    LLAM_FOREIGN_TOKEN_ACTIVE = 1,
+    LLAM_FOREIGN_TOKEN_RETURNING = 2
+} llam_foreign_token_state_t;
+
+/** @brief P handoff mechanism used by one explicit foreign detach. */
+typedef enum llam_foreign_token_mode {
+    LLAM_FOREIGN_TOKEN_MODE_NONE = 0,
+    LLAM_FOREIGN_TOKEN_MODE_HELPER = 1,
+    LLAM_FOREIGN_TOKEN_MODE_REDIRECT = 2
+} llam_foreign_token_mode_t;
+
+/**
+ * @brief Generation-bearing identity for one G held on a foreign M stack.
+ *
+ * Fields are published and validated under the shard lock pair. The token is
+ * not an execution lease: the legacy lease and P ticket remain authoritative.
+ */
+typedef struct llam_foreign_token {
+    llam_worker_t *worker;
+    llam_processor_t *processor;
+    llam_task_t *task;
+    uint64_t generation;
+    uint64_t worker_incarnation;
+    uint64_t worker_run_generation;
+    uint64_t task_run_generation;
+    uint64_t lease_projection_epoch;
+    uint64_t p_generation;
+    uint64_t transfer_sequence;
+    llam_foreign_token_state_t state;
+    llam_foreign_token_mode_t mode;
+} llam_foreign_token_t;
 
 /** @brief Control messages processed by an I/O node thread. */
 typedef enum llam_io_control_kind {
@@ -707,6 +773,7 @@ struct llam_poll_watch {
     llam_io_req_t *wait_head;
     llam_io_req_t *wait_tail;
     llam_poll_watch_t *next;
+    llam_watch_index_entry_t index_entry;
 };
 
 /**
@@ -739,6 +806,7 @@ struct llam_accept_watch {
     llam_accept_ready_t *ready_head;
     llam_accept_ready_t *ready_tail;
     llam_accept_watch_t *next;
+    llam_watch_index_entry_t index_entry;
 };
 
 /** @brief Receive watch with ready-buffer ownership and waiter tracking. */
@@ -763,6 +831,7 @@ struct llam_recv_watch {
     llam_recv_ready_t *ready_head;
     llam_recv_ready_t *ready_tail;
     llam_recv_watch_t *next;
+    llam_watch_index_entry_t index_entry;
 };
 
 /** @brief Timer heap node embedded in tasks when possible and allocated otherwise. */
@@ -781,8 +850,8 @@ typedef struct llam_timer_node {
 } llam_timer_node_t;
 
 /**
- * @brief Per-shard allocator with remote-free queues.  Objects are usually returned
- * to the shard that allocated them; cross-shard frees are batched through
+ * @brief Per-processor allocator with remote-free queues. Objects are usually
+ * returned to the processor that allocated them; cross-processor frees are batched through
  * lock-free remote lists and drained at safe points.
  */
 typedef struct llam_allocator {
@@ -791,6 +860,17 @@ typedef struct llam_allocator {
     llam_alloc_chunk_t *chunks;
     llam_task_t *task_free;
     llam_task_t *task_external_free;
+    /* Compatibility head above mirrors the selected span's free list. */
+    llam_alloc_chunk_t *task_external_partial;
+    llam_alloc_chunk_t *task_external_empty;
+    llam_alloc_chunk_t *task_external_empty_tail;
+    llam_alloc_chunk_t *task_external_retired;
+    llam_alloc_chunk_t *task_external_retired_tail;
+    unsigned task_external_empty_count;
+    unsigned task_external_next_count;
+    unsigned task_external_max_count;
+    size_t task_external_dense_bytes;
+    atomic_uint task_external_retire_pending;
     llam_wait_node_t *wait_free;
     llam_timer_node_t *timer_free;
     llam_io_req_t *io_req_free;
@@ -842,7 +922,7 @@ typedef struct llam_allocator {
     uint64_t io_buffer_remote_burst_max;
 } llam_allocator_t;
 
-/** @brief Runtime-owned I/O buffer.  Small reads use inline_data; large/provided buffers can attach external storage. */
+/** @brief Owned I/O buffer with an optional, allocation-sized inline payload. */
 struct llam_io_buffer {
     llam_runtime_t *owner_runtime;
     struct llam_io_buffer *alloc_next;
@@ -861,20 +941,42 @@ struct llam_io_buffer {
     bool detached_wrapper;
     bool provided_storage;
     unsigned short provided_bid;
-    _Alignas(16) unsigned char inline_data[LLAM_IO_BUFFER_INLINE_BYTES];
+    /* Immutable backing capacity, independent of a transferred/provided payload. */
+    size_t inline_capacity;
+    /* Inline bytes follow the header in the same allocation. Keep an explicit
+     * pointer so this private layout also builds with MSVC's strict warnings. */
+    _Alignas(16) unsigned char *inline_data;
 };
 
-/** @brief Shared cancellation state.  Waiters are task links protected by lock. */
+/* A G can observe its task token, an optional group token and one I/O scope.
+ * Registration links belong to the G; delivery keeps its scan pin until the
+ * release flag permits reuse, avoiding allocation and detached-list ABA. */
+#define LLAM_CANCEL_SOURCE_COUNT 3U
+typedef struct llam_cancel_registration {
+    llam_task_t *task;
+    struct llam_cancel_registration *next;
+    struct llam_cancel_registration *prev;
+    uint64_t wait_generation;
+    bool registered;                 /* Source token lock. */
+    atomic_bool delivering;
+} llam_cancel_registration_t;
+
+typedef struct llam_cancel_lock_set {
+    llam_cancel_token_t *tokens[LLAM_CANCEL_SOURCE_COUNT];
+    unsigned count;
+} llam_cancel_lock_set_t;
+
+/** @brief Shared cancellation state. Waiter links are protected by lock. */
 struct llam_cancel_token {
     llam_runtime_t *owner_runtime;
     struct llam_cancel_token *registry_next;
     size_t public_handle_slot;
     uint32_t public_handle_generation;
     pthread_mutex_t lock;
-    bool cancelled;
+    atomic_bool cancelled;
     unsigned refcount;
     _Atomic size_t active_ops;
-    llam_task_t *waiters;
+    llam_cancel_registration_t *waiters;
 };
 
 /** @brief Runtime-aware mutex: owner is atomic for the fast path, waiters are lock protected. */
@@ -949,20 +1051,39 @@ struct llam_task {
      */
     atomic_uint state;
     atomic_uint wait_reason;
+    atomic_uint_fast64_t run_generation;
     unsigned flags;
-    unsigned home_shard;
+    /* Atomic locality hint, updated when parked ownership is rehomed. */
+    atomic_uint home_shard;
     unsigned live_shard;
     atomic_uint last_shard;
     atomic_uint parked_shard;
+    /* Heap-lock owner for active_timer; UINT_MAX means detached/no active heap. */
+    atomic_uint active_timer_heap_shard;
     atomic_uint task_class;
     atomic_uint base_task_class;
     uint64_t deadline_ns;
     llam_cancel_token_t *cancel_token;
+    llam_cancel_token_t *group_cancel_token; /* Retained, immutable after spawn. */
+    llam_cancel_token_t *operation_cancel_token; /* G-owned, stable through callback completion. */
+    uint64_t operation_deadline_ns;
+    uint64_t request_deadline_ns; /* Immutable spawn budget; deadline_ns belongs to the active timer. */
+    bool io_scope_active;
     /* Non-NULL means the task handle is borrowed and only this group may join it. */
     llam_task_group_t *owning_group;
     llam_task_fn entry;
     void *arg;
+    llam_managed_catalog_t *managed_catalog;
+    uint32_t managed_execution_class;
+    llam_worker_t *managed_execution_worker;
+    uint64_t managed_execution_generation;
     _Alignas(16) llam_ctx_t ctx;
+    _Atomic(llam_worker_t *) managed_dispatch_owner;
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    /* Persistent async capsules belong to this G, not a worker landing stack. */
+    void *async_preempt_task;
+#endif
     void *stack_mapping;
     size_t mapping_size;
     void *stack_base;
@@ -972,6 +1093,20 @@ struct llam_task {
     bool lock_initialized;
     atomic_uint task_listed;
     atomic_uint scan_refs;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    /* Scheduler-owned terminal G: neither the allocator nor controller owns this link. */
+    llam_task_t *windows_async_retire_next;
+    bool windows_async_retire_queued;
+    atomic_uint windows_async_execution_owed;
+    unsigned windows_async_debt_owner;
+    uint64_t windows_async_debt_run;
+    DWORD windows_async_saved_last_error;
+    unsigned windows_async_internal_yield_depth;
+    /* Exclusive reclaim claim, retained until the scheduler finalizes it. */
+    llam_task_t *windows_async_finalizer_next;
+    bool windows_async_finalizer_queued;
+    unsigned windows_async_finalizer_owner;
+#endif
     llam_task_t *all_next;
     llam_task_t *all_prev;
     llam_task_t *alloc_next;
@@ -982,10 +1117,8 @@ struct llam_task {
     atomic_uint join_waiter_hint;
     _Atomic(llam_task_t *) join_target;
     llam_task_t *wait_next;
-    llam_task_t *cancel_next;
-    llam_task_t *cancel_prev;
+    llam_cancel_registration_t cancel_links[LLAM_CANCEL_SOURCE_COUNT];
     llam_wait_node_t embedded_wait_node;
-    llam_wait_node_t embedded_select_nodes[LLAM_TASK_EMBEDDED_SELECT_NODES];
     /*
      * Wait ownership is mutated by the scheduler thread that parked the task
      * and can be sampled or cleared by runtime-stop, timeout, cancellation, and
@@ -1011,11 +1144,12 @@ struct llam_task {
     /* Operation generation published with active_io_req to reject address ABA. */
     atomic_uint_fast64_t active_io_generation;
     _Atomic(llam_block_job_t *) active_block_job;
+    llam_task_result_t application_result; /* Published by completed release. */
     llam_task_local_entry_t *task_locals;
-    bool cancel_registered;
     bool handoff_sample_current;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
+    bool admission_counted;
     bool alloc_external_pool;
     uint64_t last_runnable_ns;
     uint64_t last_yield_ns;
@@ -1051,6 +1185,10 @@ struct llam_task {
     atomic_uint detached;
     unsigned join_waiter_count_at_exit;
     unsigned forced_yield_budget;
+    /* Immutable backing span for host-pool tasks; NULL for managed slabs. */
+    llam_alloc_chunk_t *alloc_span;
+    /* Allocation-registry unlink only; protected by its registry mutex. */
+    struct llam_task **registry_prev_link;
 };
 
 /** @brief Intrusive task-local storage value linked from its owning task. */
@@ -1058,6 +1196,7 @@ struct llam_task_local_entry {
     llam_task_local_entry_t *next;
     llam_task_local_key_t key;
     void *value;
+    llam_task_cleanup_fn cleanup;
 };
 
 /** @brief Structured-concurrency group that owns a set of child task handles. */
@@ -1073,15 +1212,46 @@ struct llam_task_group {
     _Atomic size_t active_ops;
     size_t public_handle_slot;
     uint32_t public_handle_generation;
+    uint32_t flags;
     bool joining;
     bool lock_initialized;
 };
 
-/** @brief Scheduler worker role represented by an embedded identity slot. */
+/** @brief Legacy and registered native worker roles. */
 typedef enum llam_worker_role {
     LLAM_WORKER_ROLE_PRIMARY = 1,
     LLAM_WORKER_ROLE_OPAQUE_HELPER = 2,
+    LLAM_WORKER_ROLE_MANAGED = 3,
+    LLAM_WORKER_ROLE_NATIVE_AFFINE = 4,
+    LLAM_WORKER_ROLE_LEGACY_COMPAT = 5,
 } llam_worker_role_t;
+
+/** @brief One immutable execution-authority protocol for a runtime run. */
+typedef enum llam_execution_lease_mode {
+    LLAM_EXECUTION_LEASE_LEGACY = 0,
+    LLAM_EXECUTION_LEASE_REGISTERED = 1
+} llam_execution_lease_mode_t;
+
+/** @brief M execution state used by cooperative detach and relief checks. */
+typedef enum llam_worker_exec_state {
+    LLAM_WORKER_EXEC_IDLE = 0,
+    LLAM_WORKER_EXEC_SCHEDULER = 1,
+    LLAM_WORKER_EXEC_MANAGED_SAFE = 2,
+    LLAM_WORKER_EXEC_RUNTIME_UNSAFE = 3,
+    LLAM_WORKER_EXEC_FOREIGN = 4,
+    LLAM_WORKER_EXEC_STOPPING = 5
+} llam_worker_exec_state_t;
+
+/** @brief Why the fail-closed relief gate rejected a candidate M. */
+typedef enum llam_relief_defer_reason {
+    LLAM_RELIEF_DEFER_NONE = 0,
+    LLAM_RELIEF_DEFER_NO_TASK = 1,
+    LLAM_RELIEF_DEFER_RUNTIME_CRITICAL = 2,
+    LLAM_RELIEF_DEFER_PREEMPT_DISABLED = 3,
+    LLAM_RELIEF_DEFER_UNSAFE_STATE = 4,
+    LLAM_RELIEF_DEFER_UNKNOWN_STATE = 5,
+    LLAM_RELIEF_DEFER_STALE_P_TICKET = 6
+} llam_relief_defer_reason_t;
 
 /** @brief Legacy execution-lease state owned by one scheduler shard. */
 typedef enum llam_legacy_lease_state {
@@ -1090,7 +1260,9 @@ typedef enum llam_legacy_lease_state {
     LLAM_LEASE_HELPER_OWNED = 3,
     LLAM_LEASE_TRANSFER_TO_PRIMARY = 4,
     LLAM_LEASE_REDIRECTED_NO_EXECUTOR = 5,
-    LLAM_LEASE_STOPPING = 6
+    LLAM_LEASE_STOPPING = 6,
+    LLAM_LEASE_REGISTERED_FREE = 7,
+    LLAM_LEASE_REGISTERED_OWNED = 8
 } llam_legacy_lease_state_t;
 
 /**
@@ -1111,38 +1283,226 @@ typedef struct llam_legacy_lease {
     llam_legacy_lease_state_t state;
 } llam_legacy_lease_t;
 
+/** @brief Versioned owner state for the private processor (P) projection. */
+typedef enum llam_processor_owner_state {
+    LLAM_PROCESSOR_OWNER_FREE = 0,
+    LLAM_PROCESSOR_OWNER_OWNED = 1,
+    LLAM_PROCESSOR_OWNER_TRANSFERRING = 2,
+    LLAM_PROCESSOR_OWNER_STOPPING = 3
+} llam_processor_owner_state_t;
+
 /**
- * @brief Minimal processor identity cell associated with one scheduler shard.
+ * @brief Generation-checked M/P ownership projection.
  *
- * The shard remains authoritative for scheduler state.  This cell only gives
- * worker-side code a stable processor identity to pair with its worker slot.
+ * The record is protected by the compatibility shard's existing @c lock, the
+ * first P payload lock. The lease state and epoch identify which Phase 1A
+ * publication this record projects; the P generation versions changes to
+ * that projection. The lease remains the execution-publication authority.
+ */
+typedef struct llam_processor_owner_record {
+    llam_worker_t *owner_m;
+    uint64_t worker_incarnation;
+    uint64_t lease_projection_epoch;
+    uint64_t p_generation;
+    llam_legacy_lease_state_t lease_state;
+    llam_processor_owner_state_t state;
+} llam_processor_owner_record_t;
+
+/**
+ * @brief Non-owning, processor-bound ticket for one operational lease owner.
+ *
+ * This tuple pins neither the worker nor its processor/runtime storage. The
+ * caller must otherwise keep that storage alive and revalidate the ticket at
+ * every operation boundary before using P-owned resources.
+ */
+typedef struct llam_processor_owner_ticket {
+    const llam_processor_t *processor;
+    llam_worker_t *owner_m;
+    uint64_t worker_incarnation;
+    uint64_t lease_projection_epoch;
+    uint64_t p_generation;
+    llam_legacy_lease_state_t lease_state;
+    llam_processor_owner_state_t state;
+} llam_processor_owner_ticket_t;
+
+/** @brief Distinct authorization modes for bounded P queue operations. */
+typedef enum llam_processor_queue_access_mode {
+    LLAM_PROCESSOR_QUEUE_ACCESS_NONE = 0,
+    LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION = 1,
+    LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN = 2,
+    LLAM_PROCESSOR_QUEUE_ACCESS_REDIRECT_RELEASE = 3
+} llam_processor_queue_access_mode_t;
+
+/**
+ * @brief Non-owning authority snapshot for one bounded P queue operation.
+ *
+ * EXECUTION is derived from an ordinary live P ticket. STOPPING_DRAIN is a
+ * separate, restricted shutdown capability, and REDIRECT_RELEASE authorizes
+ * only evacuation by the lease return claimant. None of these snapshots pins
+ * runtime, processor, or worker lifetime.
+ */
+typedef struct llam_processor_queue_access {
+    const llam_processor_t *processor;
+    llam_worker_t *actor_m;
+    uint64_t actor_incarnation;
+    llam_worker_t *projected_owner_m;
+    uint64_t projected_worker_incarnation;
+    uint64_t lease_projection_epoch;
+    uint64_t p_generation;
+    llam_legacy_lease_state_t lease_state;
+    llam_processor_owner_state_t owner_state;
+    llam_processor_queue_access_mode_t mode;
+} llam_processor_queue_access_t;
+
+/** @brief Immutable half-open code interval eligible for experimental capture. */
+typedef struct llam_async_preempt_range {
+    uintptr_t begin;
+    uintptr_t end;
+} llam_async_preempt_range_t;
+
+typedef enum llam_preempt_backend_flag {
+    LLAM_PREEMPT_BACKEND_COOPERATIVE = UINT32_C(1) << 0U,
+    LLAM_PREEMPT_BACKEND_ASYNC_CONTEXT = UINT32_C(1) << 1U,
+    LLAM_PREEMPT_BACKEND_METADATA_V1 = UINT32_C(1) << 2U
+} llam_preempt_backend_flag_t;
+
+typedef enum llam_preempt_async_state {
+    LLAM_PREEMPT_ASYNC_UNAVAILABLE = 0,
+    LLAM_PREEMPT_ASYNC_DISABLED = 1,
+    LLAM_PREEMPT_ASYNC_RANGES_READY = 2,
+    LLAM_PREEMPT_ASYNC_ACTIVE = 3,
+    LLAM_PREEMPT_ASYNC_PREPARED = 4
+} llam_preempt_async_state_t;
+
+typedef enum llam_preempt_failure_reason {
+    LLAM_PREEMPT_FAILURE_NONE = 0,
+    LLAM_PREEMPT_FAILURE_BUILD_DISABLED = 1,
+    LLAM_PREEMPT_FAILURE_UNSUPPORTED_PLATFORM = 2,
+    LLAM_PREEMPT_FAILURE_COOPERATIVE_MODE = 3,
+    LLAM_PREEMPT_FAILURE_NO_SAFE_RANGES = 4,
+    LLAM_PREEMPT_FAILURE_SINGLE_SHARD_REQUIRED = 5,
+    LLAM_PREEMPT_FAILURE_DETERMINISTIC_REQUIRED = 6,
+    LLAM_PREEMPT_FAILURE_HELPER_ACTIVE = 7,
+    LLAM_PREEMPT_FAILURE_SIGNAL_CONFLICT = 8,
+    LLAM_PREEMPT_FAILURE_CONTEXT_UNSUPPORTED = 9,
+    LLAM_PREEMPT_FAILURE_CONTEXT_ALLOCATION = 10,
+    LLAM_PREEMPT_FAILURE_CAPTURE_SLOT_BUSY = 11,
+    LLAM_PREEMPT_FAILURE_SIGNAL_FRAME_UNSUPPORTED = 12,
+    LLAM_PREEMPT_FAILURE_WORKER_START = 13,
+    LLAM_PREEMPT_FAILURE_DYNAMIC_UNSUPPORTED = 14,
+    LLAM_PREEMPT_FAILURE_INVALID_CONFIG = 15
+} llam_preempt_failure_reason_t;
+
+typedef enum llam_preempt_effective_policy {
+    LLAM_PREEMPT_EFFECTIVE_OFF = 0,
+    LLAM_PREEMPT_EFFECTIVE_COOPERATIVE = 1,
+    LLAM_PREEMPT_EFFECTIVE_HYBRID = 2
+} llam_preempt_effective_policy_t;
+
+/**
+ * @brief Private backend capability/fallback record; not part of the public ABI.
+ */
+typedef struct llam_preempt_capability_record {
+    uint32_t compiled_backends;
+    atomic_uint async_state;
+    atomic_uint failure_reason;
+    atomic_uint_fast64_t registered_safe_ranges;
+} llam_preempt_capability_record_t;
+
+/**
+ * @brief Processor resource cell associated with one scheduler shard.
+ *
+ * The compatibility identity fields remain the stable link to the legacy
+ * shard. Topology, ordinary scheduler wake state, runnable queues, normal-lane
+ * depth/fairness, active timer heap, allocator, and processor-local stack
+ * caches live in this cell. I/O-node backends, task registry, metrics, trace,
+ * and the Phase 1A lease remain on their existing owners.
  */
 struct llam_processor {
     llam_runtime_t *runtime;
     llam_shard_t *compat_shard;
     unsigned id;
+    llam_processor_owner_record_t owner_record;
+    unsigned cpu_id;
+    unsigned node_index;
+    unsigned io_node_index;
+    atomic_uint online;
+    int event_fd;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
+    llam_queue_t inject_q;
+    atomic_uint inject_depth;
+    llam_queue_t hot_q;
+    llam_queue_t norm_q;
+    llam_cldeque_t norm_cldeque;
+    atomic_uint norm_depth;
+    unsigned hot_streak;
+    unsigned direct_handoff_streak;
+    unsigned autotune_handoff_sample_seq;
+    unsigned autotune_wake_latency_sample_countdown;
+    bool autotune_handoff_sample_current;
+    llam_timer_node_t *timers;
+    llam_timer_node_t **timer_heap;
+    size_t timer_heap_len;
+    size_t timer_heap_cap;
+    atomic_uint timer_count;
+    atomic_uint timer_callbacks_active;
+    llam_allocator_t allocator;
+    bool stack_cache_lock_initialized;
+    llam_stack_cache_entry_t *stack_cache_default;
+    llam_stack_cache_entry_t *stack_cache_large;
+    llam_stack_cache_entry_t *stack_cache_huge;
+    llam_stack_cache_entry_t *stack_cache_entry_free;
+    unsigned stack_cache_default_count;
+    unsigned stack_cache_large_count;
+    unsigned stack_cache_huge_count;
+    pthread_mutex_t stack_cache_lock;
 };
 
 /**
- * @brief Minimal primary/helper worker identity slot.
+ * @brief Registered M identity and execution-publication slot.
  *
  * Incarnation changes whenever the owning native scheduler entry starts.
- * Execution publication and its sampling timestamps are local to this worker;
- * queues, timers, allocator/cache, I/O, and public metrics remain on the shard.
+ * Execution publication, current-P publication, run generations, M state, and
+ * one explicit foreign token are local to this worker. P-owned queues/timers/
+ * allocator/cache live on its current processor. The compatibility home stays
+ * stable across P loans; legacy metrics remain on that home shard.
  */
 struct llam_worker {
+    /* Immutable membership; slots and their storage live until runtime teardown. */
+    llam_runtime_t *registry_runtime;
+    size_t registry_slot;
     llam_shard_t *compat_shard;
     llam_processor_t *associated_processor;
     llam_worker_role_t role;
     atomic_uint_fast64_t incarnation;
-    /* Native binding metadata is published/cleared under the shard lease lock. */
+    /* Native binding metadata uses the immutable home shard's lease lock. */
     pthread_t native_thread;
     atomic_bool native_thread_live;
     atomic_uint_fast64_t binding_incarnation;
     /* Set while a live primary binding waits for a merge pause boundary. */
     atomic_bool lease_reacquire_pending;
-    /* Worker-local execution publication; the lease owner is its authority. */
+    /* Worker-local G and P publications; the lease remains their authority. */
     _Atomic(llam_task_t *) active_g;
+    _Atomic(llam_processor_t *) current_p;
+    atomic_uint execution_state;
+    atomic_uint runtime_critical_depth;
+    atomic_uint preempt_disable_depth;
+    /* Native entry thunks revoke public G/P authority through nested callbacks. */
+    atomic_uint_fast64_t managed_reservation;
+    atomic_bool managed_slot_used;
+    atomic_bool managed_slot_closing;
+    atomic_uint native_domain_depth;
+    unsigned native_domain_slot;
+    atomic_uint_fast64_t run_generation;
+    atomic_uintptr_t async_preempt_state;
+    /* Backend routing cache, published before native enable and cleared after
+     * all Ms join. This pointer grants no execution or native authority. */
+    void *async_preempt_control;
+    /* Lock-free advisory mirror for signal-time validation of the P ticket. */
+    atomic_uint_fast64_t async_preempt_ticket_lease_epoch;
+    atomic_uint_fast64_t async_preempt_ticket_generation;
+    uint64_t foreign_token_generation;
+    llam_foreign_token_t foreign_token;
     atomic_uint_fast64_t last_run_started_ns;
     atomic_uint_fast64_t last_safepoint_ns;
     atomic_uint_fast64_t last_idle_wake_ns;
@@ -1154,9 +1514,10 @@ struct llam_worker {
 };
 
 /**
- * @brief Scheduler shard.  Each shard owns a worker thread, runnable queues, timer
- * heap, allocator, stack caches, metrics, and opaque-blocking compensation
- * state.  Most hot scheduler state is shard-local to avoid global locks.
+ * @brief Scheduler shard and compatibility composition root. The embedded
+ * processor owns topology, ordinary scheduler wake state, queues, timers,
+ * allocator, and processor-local stack caches. The shard retains worker and
+ * lease lifecycle, task registry, metrics, and opaque-blocking compensation.
  */
 struct llam_shard {
     llam_runtime_t *runtime;
@@ -1165,10 +1526,6 @@ struct llam_shard {
     llam_worker_t primary_worker;
     llam_worker_t opaque_helper_worker;
     llam_legacy_lease_t legacy_lease;
-    unsigned cpu_id;
-    unsigned node_index;
-    unsigned io_node_index;
-    atomic_uint online;
     atomic_uint inflight_io_waiters;
     atomic_uint merge_pause_requested;
     atomic_uint merge_pause_ack;
@@ -1185,8 +1542,6 @@ struct llam_shard {
     atomic_uint_fast64_t steal_pause_ack_worker_incarnation;
     bool thread_started;
     pthread_t thread;
-    int event_fd;
-    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t lock;
     pthread_mutex_t opaque_lock;
     pthread_cond_t opaque_cv;
@@ -1208,7 +1563,6 @@ struct llam_shard {
     atomic_bool opaque_helper_exit_ack;
     bool opaque_helper_ready;
     bool opaque_helper_active;
-    bool stack_cache_lock_initialized;
     atomic_uint opaque_helper_active_hint;
 #if defined(__linux__)
     atomic_uint opaque_helper_opaque_wait;
@@ -1221,37 +1575,18 @@ struct llam_shard {
     unsigned opaque_compensation_depth_peak;
     unsigned opaque_redirect_depth;
     unsigned opaque_redirect_depth_peak;
-    llam_queue_t inject_q;
-    atomic_uint inject_depth;
-    llam_queue_t hot_q;
-    llam_queue_t norm_q;
-    llam_cldeque_t norm_cldeque;
     llam_task_t *all_tasks;
-    llam_timer_node_t *timers;
-    llam_timer_node_t **timer_heap;
-    size_t timer_heap_len;
-    size_t timer_heap_cap;
-    atomic_uint timer_count;
-    atomic_uint timer_callbacks_active;
-    llam_stack_cache_entry_t *stack_cache_default;
-    llam_stack_cache_entry_t *stack_cache_large;
-    llam_stack_cache_entry_t *stack_cache_huge;
-    llam_stack_cache_entry_t *stack_cache_entry_free;
-    unsigned stack_cache_default_count;
-    unsigned stack_cache_large_count;
-    unsigned stack_cache_huge_count;
-    pthread_mutex_t stack_cache_lock;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    llam_task_t *windows_async_retire_head;
+    atomic_uint windows_async_retire_count;
+    atomic_uint windows_async_execution_debt;
+    llam_task_t *windows_async_finalizer_head;
+    atomic_uint windows_async_finalizer_count;
+#endif
     _Alignas(16) llam_ctx_t scheduler_ctx;
     _Alignas(16) llam_ctx_t opaque_scheduler_ctx;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
     uint64_t next_task_seq;
-    atomic_uint norm_depth;
-    unsigned hot_streak;
-    unsigned direct_handoff_streak;
-    unsigned autotune_handoff_sample_seq;
-    unsigned autotune_wake_latency_sample_countdown;
-    bool autotune_handoff_sample_current;
-    llam_allocator_t allocator;
     llam_metrics_t metrics;
     llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
     atomic_uint trace_head;
@@ -1323,6 +1658,9 @@ struct llam_node {
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;
     llam_recv_watch_t *recv_watches;
+    llam_watch_index_t poll_watch_index;
+    llam_watch_index_t accept_watch_index;
+    llam_watch_index_t recv_watch_index;
     llam_poll_watch_t *retired_poll_watches;
     llam_accept_watch_t *retired_accept_watches;
     llam_recv_watch_t *retired_recv_watches;
@@ -1379,6 +1717,10 @@ struct llam_runtime {
     _Atomic size_t active_ops;
     atomic_bool initialized;
     atomic_bool exec_started;
+    atomic_bool draining; /* Persistent closing gate; ordinary stop remains reusable. */
+    _Atomic uint64_t admitted_tasks;
+    uint64_t max_tasks;
+    uint64_t max_blocking_jobs;
     unsigned observed_shards;
     unsigned active_shards;
     atomic_uint online_shards;
@@ -1421,6 +1763,22 @@ struct llam_runtime {
     unsigned *allowed_cpus;
     unsigned *kernel_node_ids;
     llam_shard_t *shards;
+    /* Constructed before native threads start; never resized during execution. */
+    llam_execution_lease_mode_t execution_lease_mode;
+    llam_managed_catalog_t *managed_catalog;
+    const struct llam_managed_scheduler_ops *managed_scheduler_ops;
+    void *managed_scheduler_data;
+    llam_worker_t **worker_slots;
+    size_t worker_slot_count;
+    llam_worker_t *managed_workers;
+    size_t managed_worker_count;
+    /* Accepted foreign callbacks waiting to resume on a fresh P. Advisory
+     * pressure only; their per-M tokens retain the actual G/native lifetime. */
+    atomic_uint managed_foreign_returns_pending;
+    struct llam_capsule_pool *managed_capsule_pool; /* Native-enabled publication gate. */
+    unsigned portable_processor_count;
+    unsigned compatibility_processor_count;
+    bool managed_policy_pools;
     llam_node_t *nodes;
     pthread_t *block_threads;
     pthread_t ctrl_thread;
@@ -1429,6 +1787,11 @@ struct llam_runtime {
     bool stack_cache_lock_initialized;
     bool block_lock_initialized;
     bool overflow_lock_initialized;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    bool windows_async_config_lock_initialized;
+    pthread_mutex_t windows_async_config_lock;
+    unsigned windows_async_host_spawn_admits;
+#endif
     pthread_mutex_t task_list_lock;
     pthread_mutex_t stack_cache_lock;
     llam_task_t *all_tasks;
@@ -1439,6 +1802,9 @@ struct llam_runtime {
     unsigned stack_cache_default_count;
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
+    /* Fallback counts include both tiers; warm entries are popped first. */
+    llam_stack_cache_entry_t *stack_cache_cold[3];
+    unsigned stack_cache_warm_count[3];
     pthread_mutex_t block_lock;
     pthread_cond_t block_cv;
     pthread_mutex_t overflow_lock;
@@ -1490,6 +1856,20 @@ struct llam_runtime {
     unsigned preempt_mode;
     unsigned preempt_poll_period;
     uint64_t preempt_quantum_ns;
+    llam_preempt_capability_record_t preempt_capability;
+    atomic_uint async_preempt_enabled;
+    int async_preempt_signal;
+    llam_async_preempt_range_t *async_preempt_ranges;
+    size_t async_preempt_range_count;
+    size_t async_preempt_range_capacity;
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    /* Private all-worker preparation, admission and run-generation record. */
+    void *async_preempt_control;
+#endif
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    uint64_t windows_async_range_generation;
+#endif
     unsigned spawn_fanout_wake_interval;
     unsigned spawn_fanout_wake_interval_forced;
     unsigned spawn_fanout_adaptive;
@@ -1552,8 +1932,8 @@ static inline bool llam_runtime_should_record_handoff_stats(llam_shard_t *shard)
     if (mask == 0U) {
         return true;
     }
-    state = llam_autotune_sample_xorshift(shard->autotune_handoff_sample_seq, shard->id + 1U);
-    shard->autotune_handoff_sample_seq = state;
+    state = llam_autotune_sample_xorshift(shard->processor.autotune_handoff_sample_seq, shard->id + 1U);
+    shard->processor.autotune_handoff_sample_seq = state;
     return (state & mask) == 0U;
 }
 
@@ -1570,7 +1950,7 @@ static inline bool llam_runtime_should_stamp_runnable_latency(llam_shard_t *shar
         return false;
     }
     mask = shard->runtime->autotune_wake_latency_sample_mask;
-    return llam_autotune_sample_countdown(&shard->autotune_wake_latency_sample_countdown, mask);
+    return llam_autotune_sample_countdown(&shard->processor.autotune_wake_latency_sample_countdown, mask);
 }
 
 static inline unsigned llam_autotune_wake_latency_bucket_index(uint64_t latency_ns) {

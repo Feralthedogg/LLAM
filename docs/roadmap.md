@@ -9,7 +9,7 @@ rather than broad ABI churn.
 - Keep install, build, ABI, operations, and security boundaries discoverable
 from the first navigation level.
 - Add FFI-focused examples for size-aware structs and dynamic ABI checks.
-- Add platform-specific verification guides for Linux, macOS, BSD, and Windows.
+- Add platform-specific verification guides for Linux, macOS, and Windows.
 
 ## Runtime Stabilization
 
@@ -33,6 +33,5 @@ from the first navigation level.
 - macOS: tune kqueue timer batching and helper handoff latency.
 - Windows: improve IOCP direct-handoff hit rate and Windows-version batching
   policy.
-- BSD: keep hard gates green for FreeBSD, OpenBSD, and NetBSD while deciding
-  when DragonFly BSD can become a hard gate.
+- BSD: support ended in 3.0.0; keep retired targets rejected by current tooling.
 - RISC-V: start with cross-build and QEMU smoke before publishing artifacts.

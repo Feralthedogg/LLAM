@@ -3,10 +3,10 @@
  * @brief Quiescent-state allocator reclamation helpers.
  *
  * @details
- * Cross-shard frees cannot safely splice objects directly into another shard's
- * local free lists without taking that shard's allocator lock. Instead, remote
+ * Cross-processor frees cannot safely splice objects directly into another P's
+ * local free lists without taking that processor's allocator lock. Instead, remote
  * producers push objects onto atomic remote-free lists and set a single pending
- * flag. The owner shard later calls ::llam_allocator_quiescent at a safe point to
+ * flag. The owner P later calls ::llam_allocator_quiescent at a safe point to
  * drain those lists back into local caches in one locked batch.
  *
  * @copyright Copyright 2026 Feralthedogg
@@ -24,22 +24,22 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
 
 /**
- * @brief Drain remote-free lists into a shard's local allocator caches.
+ * @brief Drain remote-free lists into a processor's local allocator caches.
  *
- * @param shard Owner shard reaching a quiescent point.
+ * @param shard Compatibility shard whose processor reaches a quiescent point.
  *
  * @note This function assumes @p shard is valid. Callers normally invoke it from
- *       scheduler safe points where the owner shard is active and can absorb
+ *       scheduler safe points where the owner P is active and can absorb
  *       remote returns without racing local cache users.
  */
 void llam_allocator_quiescent(llam_shard_t *shard) {
-    llam_allocator_t *allocator = &shard->allocator;
+    llam_allocator_t *allocator = &shard->processor.allocator;
     llam_task_t *task_head;
     llam_wait_node_t *wait_head;
     llam_timer_node_t *timer_head;
@@ -68,6 +68,11 @@ void llam_allocator_quiescent(llam_shard_t *shard) {
     timer_head = atomic_exchange(&allocator->timer_remote_free, NULL);
     io_head = atomic_exchange(&allocator->io_req_remote_free, NULL);
     io_buffer_head = atomic_exchange(&allocator->io_buffer_remote_free, NULL);
+
+    /* Host spans can be quarantined by a transient registry lock or reader.
+     * Their hint shares remote_free_pending, so owner progress does not depend
+     * on another host allocation and the empty fast path still returns above. */
+    llam_task_span_quiescent(shard);
 
     if (task_head == NULL && wait_head == NULL && timer_head == NULL && io_head == NULL && io_buffer_head == NULL) {
         return;

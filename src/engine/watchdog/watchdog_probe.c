@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "engine/runtime_watchdog_internal.h"
@@ -63,11 +63,13 @@ static bool llam_watchdog_preempt_pressure_locked(llam_shard_t *shard) {
     if (rt->preempt_mode == LLAM_PREEMPT_STRICT) {
         return true;
     }
-    if (atomic_load_explicit(&shard->inject_depth, memory_order_acquire) != 0U ||
-        shard->hot_q.depth != 0U ||
+    if (atomic_load_explicit(&shard->processor.inject_depth, memory_order_acquire) != 0U ||
+        shard->processor.hot_q.depth != 0U ||
         llam_norm_queue_depth(shard) != 0U ||
-        atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&shard->event_pending, memory_order_acquire) != 0U ||
+        llam_async_preempt_ready_depth(shard) != 0U ||
+        atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U ||
+        atomic_load_explicit(llam_processor_event_pending_const(&shard->processor),
+                             memory_order_acquire) != 0U ||
         llam_runtime_overflow_depth(rt) != 0U ||
         atomic_load_explicit(&rt->block_pending, memory_order_acquire) != 0U) {
         return true;
@@ -91,10 +93,13 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
     llam_worker_t *owner = NULL;
     llam_worker_t *validated_owner = NULL;
     llam_task_t *current = NULL;
+    llam_processor_owner_ticket_t owner_ticket = {0};
+    llam_processor_owner_ticket_t validated_ticket = {0};
     uint64_t owner_incarnation = 0U;
     uint64_t epoch = 0U;
     uint64_t validated_incarnation = 0U;
     uint64_t validated_epoch = 0U;
+    bool ticket_still_matches = false;
     pthread_t native_thread;
     pthread_t validated_native_thread;
     bool scan_ref = false;
@@ -130,8 +135,44 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
                                                                                              memory_order_acquire));
             unsigned task_state = atomic_load_explicit(&current->state,
                                                         memory_order_acquire);
+            bool p_ticket_valid =
+                llam_processor_owner_ticket_snapshot_pair_locked(shard,
+                                                                  &owner_ticket) &&
+                owner_ticket.owner_m == owner &&
+                owner_ticket.worker_incarnation == owner_incarnation &&
+                owner_ticket.lease_projection_epoch == epoch;
+            bool safe_m = p_ticket_valid &&
+                          llam_worker_has_safe_managed_g(owner,
+                                                        &shard->processor,
+                                                        current);
 
-            if ((current->flags & LLAM_TASK_FLAG_NO_PREEMPT) == 0U &&
+            if (!safe_m &&
+                (current->flags & LLAM_TASK_FLAG_NO_PREEMPT) == 0U &&
+                task_state == LLAM_TASK_STATE_RUNNING &&
+                atomic_load_explicit(&current->opaque_blocking_depth,
+                                     memory_order_acquire) == 0U) {
+                unsigned exec_state = atomic_load_explicit(&owner->execution_state,
+                                                            memory_order_acquire);
+
+                if (exec_state > LLAM_WORKER_EXEC_STOPPING) {
+                    atomic_fetch_add_explicit(&shard->metrics.relief_deferred_unknown,
+                                              1U,
+                                              memory_order_relaxed);
+                } else if (!p_ticket_valid ||
+                           atomic_load_explicit(&owner->current_p,
+                                                memory_order_acquire) !=
+                               &shard->processor) {
+                    atomic_fetch_add_explicit(&shard->metrics.relief_deferred_stale_ticket,
+                                              1U,
+                                              memory_order_relaxed);
+                } else {
+                    atomic_fetch_add_explicit(&shard->metrics.relief_deferred_unsafe,
+                                              1U,
+                                              memory_order_relaxed);
+                }
+            }
+            if (safe_m &&
+                (current->flags & LLAM_TASK_FLAG_NO_PREEMPT) == 0U &&
                 atomic_load_explicit(&current->opaque_blocking_depth,
                                      memory_order_acquire) == 0U &&
                 task_state == LLAM_TASK_STATE_RUNNING) {
@@ -170,6 +211,14 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
 
     pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
+    ticket_still_matches =
+        llam_processor_owner_ticket_snapshot_pair_locked(shard,
+                                                          &validated_ticket) &&
+        llam_processor_owner_ticket_equal(&owner_ticket, &validated_ticket);
+    atomic_fetch_add_explicit(&shard->metrics.relief_deferred_stale_ticket,
+                              ticket_still_matches ? 0U : 1U,
+                              memory_order_relaxed);
+
     if (!llam_legacy_lease_snapshot_watchdog_locked(shard,
                                                      &validated_owner,
                                                      &validated_incarnation,
@@ -179,7 +228,8 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
         validated_epoch != epoch ||
         pthread_equal(validated_native_thread, native_thread) == 0 ||
         llam_worker_load_active_g(validated_owner) != current ||
-        !llam_worker_binding_live(validated_owner, validated_incarnation)) {
+        !llam_worker_binding_live(validated_owner, validated_incarnation) ||
+        !ticket_still_matches) {
         (void)llam_task_scan_ref_release(rt, current);
         pthread_mutex_unlock(&shard->lock);
         pthread_mutex_unlock(&shard->opaque_lock);
@@ -196,32 +246,81 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
                                                                                          memory_order_acquire));
         unsigned task_state = atomic_load_explicit(&current->state,
                                                     memory_order_acquire);
+        bool safe_m = ticket_still_matches &&
+                      llam_worker_has_safe_managed_g(validated_owner,
+                                                     &shard->processor,
+                                                     current);
         bool overdue;
 
         if (rt->preempt_mode != LLAM_PREEMPT_STRICT &&
             slice_ns <= UINT64_MAX / 2U) {
             slice_ns *= 2U;
         }
-        overdue = last_safepoint > 0U && now_ns > last_safepoint &&
+        overdue = safe_m && last_safepoint > 0U && now_ns > last_safepoint &&
                   now_ns - last_safepoint > slice_ns &&
                   (current->flags & LLAM_TASK_FLAG_NO_PREEMPT) == 0U &&
                   atomic_load_explicit(&current->opaque_blocking_depth,
                                        memory_order_acquire) == 0U &&
                   task_state == LLAM_TASK_STATE_RUNNING &&
                   llam_watchdog_preempt_pressure_locked(shard);
-        if (overdue && atomic_exchange(&current->preempt_requested, 1U) == 0U) {
-            shard->metrics.watchdog_hits += 1U;
-            shard->metrics.long_no_safepoint += 1U;
-            shard->metrics.preempt_requests += 1U;
-            llam_trace_shard(shard,
-                             current,
-                             LLAM_TRACE_WATCHDOG,
-                             LLAM_TASK_STATE_RUNNING,
-                             LLAM_TASK_STATE_RUNNING,
-                             LLAM_WAIT_NONE);
-            /* Advisory only: no asynchronous context capture is attempted. */
-            if (pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL) == 0) {
-                shard->metrics.preempt_signals += 1U;
+        if (overdue) {
+            bool first_request = atomic_exchange(&current->preempt_requested, 1U) == 0U;
+            bool send_signal = first_request;
+            int signal_number = LLAM_PREEMPT_SIGNAL;
+            uint64_t async_request_generation = 0U;
+            bool async_request_prepared = false;
+            int signal_rc;
+
+            if (first_request) {
+                shard->metrics.watchdog_hits += 1U;
+                shard->metrics.long_no_safepoint += 1U;
+                shard->metrics.preempt_requests += 1U;
+                /* An overdue G with no announced boundary stays on cooperative recovery. */
+                atomic_fetch_add_explicit(&shard->metrics.relief_deferred_unannounced,
+                                          1U,
+                                          memory_order_relaxed);
+                llam_trace_shard(shard,
+                                 current,
+                                 LLAM_TRACE_WATCHDOG,
+                                 LLAM_TASK_STATE_RUNNING,
+                                 LLAM_TASK_STATE_RUNNING,
+                                 LLAM_WAIT_NONE);
+            }
+            /*
+             * The experiment is strictly opt-in. A live, exact P ticket is
+             * embedded in the generation-bearing request; all other cases
+             * retain the ordinary one-store cooperative signal path.
+             */
+            async_request_prepared = llam_async_preempt_prepare_request(
+                validated_owner,
+                current,
+                &validated_ticket,
+                atomic_load_explicit(&validated_owner->run_generation,
+                                     memory_order_acquire),
+                atomic_load_explicit(&current->run_generation,
+                                     memory_order_acquire),
+                &async_request_generation);
+            if (async_request_prepared && rt->async_preempt_signal > 0) {
+                signal_number = rt->async_preempt_signal;
+            }
+            send_signal = first_request || async_request_prepared;
+#if LLAM_ASYNC_CONTEXT_SHARED
+            if (atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U) {
+                /* The exact G request was already stored above. Shared native
+                 * adapters own their transport; a second SIGUSR1 can leave a
+                 * Unix signal activation in flight across a Mach redirect. */
+                send_signal = false;
+            }
+#endif
+            if (send_signal) {
+                signal_rc = pthread_kill(validated_native_thread, signal_number);
+                if (signal_rc == 0) {
+                    shard->metrics.preempt_signals += 1U;
+                }
+                if (async_request_prepared && signal_rc != 0) {
+                    llam_async_preempt_cancel_request(validated_owner,
+                                                      async_request_generation);
+                }
             }
         }
     }
@@ -244,8 +343,8 @@ bool llam_runtime_has_pending_timers(llam_runtime_t *rt) {
         bool has_timer;
 
         pthread_mutex_lock(&rt->shards[i].lock);
-        has_timer = rt->shards[i].timers != NULL ||
-                    atomic_load_explicit(&rt->shards[i].timer_callbacks_active, memory_order_acquire) != 0U;
+        has_timer = rt->shards[i].processor.timers != NULL ||
+                    atomic_load_explicit(&rt->shards[i].processor.timer_callbacks_active, memory_order_acquire) != 0U;
         pthread_mutex_unlock(&rt->shards[i].lock);
         if (has_timer) {
             return true;
@@ -280,7 +379,8 @@ bool llam_runtime_has_runnable_work(llam_runtime_t *rt) {
 
         pthread_mutex_lock(&rt->shards[i].opaque_lock);
         pthread_mutex_lock(&rt->shards[i].lock);
-        has_work = rt->shards[i].inject_q.depth > 0U || rt->shards[i].hot_q.depth > 0U || llam_norm_queue_depth(&rt->shards[i]) > 0U ||
+        has_work = rt->shards[i].processor.inject_q.depth > 0U || rt->shards[i].processor.hot_q.depth > 0U || llam_norm_queue_depth(&rt->shards[i]) > 0U ||
+                   llam_async_preempt_ready_depth(&rt->shards[i]) > 0U ||
                    llam_shard_load_lease_current(&rt->shards[i]) != NULL;
         pthread_mutex_unlock(&rt->shards[i].lock);
         pthread_mutex_unlock(&rt->shards[i].opaque_lock);
@@ -320,9 +420,10 @@ bool llam_runtime_has_runnable_backlog(llam_runtime_t *rt) {
         bool has_backlog;
 
         pthread_mutex_lock(&rt->shards[i].lock);
-        has_backlog = rt->shards[i].inject_q.depth > 0U ||
-                      rt->shards[i].hot_q.depth > 0U ||
-                      llam_norm_queue_depth(&rt->shards[i]) > 0U;
+        has_backlog = rt->shards[i].processor.inject_q.depth > 0U ||
+                      rt->shards[i].processor.hot_q.depth > 0U ||
+                      llam_norm_queue_depth(&rt->shards[i]) > 0U ||
+                      llam_async_preempt_ready_depth(&rt->shards[i]) > 0U;
         pthread_mutex_unlock(&rt->shards[i].lock);
         if (has_backlog) {
             return true;
@@ -407,11 +508,12 @@ unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard) {
 
     pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
-    load = shard->inject_q.depth + shard->hot_q.depth + llam_norm_queue_depth(shard);
+    load = shard->processor.inject_q.depth + shard->processor.hot_q.depth + llam_norm_queue_depth(shard);
+    load += llam_async_preempt_ready_depth(shard);
     if (llam_shard_load_lease_current(shard) != NULL) {
         load += 1U;
     }
-    if (shard->timers != NULL) {
+    if (shard->processor.timers != NULL) {
         load += 1U;
     }
     if (shard->opaque_redirect_active) {

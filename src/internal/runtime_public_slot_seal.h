@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_PUBLIC_SLOT_SEAL_H
@@ -37,14 +37,7 @@
 #endif
 
 static inline uint64_t llam_public_slot_mix64(uint64_t value) {
-    uint64_t x = value;
-
-    x ^= x >> 33U;
-    x *= UINT64_C(0xff51afd7ed558ccd);
-    x ^= x >> 33U;
-    x *= UINT64_C(0xc4ceb9fe1a85ec53);
-    x ^= x >> 33U;
-    return x;
+    return llam_mix64(value);
 }
 
 static inline bool llam_public_slot_entropy_from_os(uint64_t *out_secret) {

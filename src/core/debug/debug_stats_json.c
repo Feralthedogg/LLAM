@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -380,5 +380,16 @@ int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd) {
 }
 
 int llam_runtime_write_stats_json(int fd) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_runtime_write_stats_json_rt(llam_runtime_default_storage(), fd);
+}
+
+int llam_runtime_write_stats_json_handle(llam_runtime_t *runtime, int fd) {
+    LLAM_NATIVE_API_GUARD(-1);
+    if (runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    return llam_runtime_write_stats_json_rt(runtime, fd);
 }

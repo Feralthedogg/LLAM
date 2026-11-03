@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
@@ -231,18 +231,18 @@ bool llam_darwin_assign_owned_buffer(llam_io_req_t *req,
         buffer->data = owned_data;
         buffer->capacity = owned_capacity;
         buffer->external_storage = true;
-    } else if (size <= LLAM_IO_BUFFER_INLINE_BYTES) {
+    } else if (size <= buffer->inline_capacity) {
         if (size > 0U && data != NULL) {
             memcpy(buffer->inline_data, data, size);
         }
         buffer->data = buffer->inline_data;
-        buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+        buffer->capacity = buffer->inline_capacity;
         buffer->external_storage = false;
     } else {
         buffer->data = malloc(size);
         if (buffer->data == NULL) {
             buffer->data = buffer->inline_data;
-            buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+            buffer->capacity = buffer->inline_capacity;
             buffer->external_storage = false;
             return false;
         }

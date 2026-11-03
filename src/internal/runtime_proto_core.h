@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_PROTO_CORE_H
@@ -45,9 +45,17 @@ bool llam_task_list_eager_enabled(const llam_runtime_t *rt);
 void llam_task_ensure_listed(llam_task_t *task);
 int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class);
 void llam_free_task(llam_task_t *task);
+void llam_task_release_resources(llam_task_t *task);
 void llam_task_release_stack(llam_task_t *task);
 void llam_task_mark_reclaim_ready(llam_task_t *task);
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+void llam_yield_internal(void);
+#else
+#define llam_yield_internal llam_yield
+#endif
 void llam_task_local_clear(llam_task_t *task);
+void llam_task_local_cleanup_owned(llam_task_t *task);
+void llam_call_native_affine_cleanup(llam_blocking_fn fn, void *arg);
 bool llam_task_scan_ref_try_acquire(llam_runtime_t *rt, llam_task_t *task);
 bool llam_task_scan_ref_release(llam_runtime_t *rt, llam_task_t *task);
 int llam_task_wait_scan_refs_quiescent(llam_runtime_t *rt, llam_task_t *task);
@@ -59,6 +67,7 @@ void llam_task_allocator_free(llam_task_t *task);
 void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt);
 void llam_task_register_public_slab(llam_task_t *items, unsigned count);
 int llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
+bool llam_task_try_unregister_public_slab(llam_task_t *items, unsigned count);
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle);
 void llam_task_end_public_op(llam_task_t *task);
 int llam_task_wait_public_ops_quiescent(llam_task_t *task);
@@ -136,9 +145,9 @@ static inline LLAM_NO_SANITIZE_THREAD int llam_thread_errno_load(void) {
     return errno;
 }
 
-static inline LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value) {
-    errno = value;
-}
+/* A resumed G can be on another native M. Keep the store out of line so the
+ * compiler cannot reuse a const libc errno accessor from before ctx_switch. */
+LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value);
 
 /**
  * @brief Inline task-to-task switch for validated hot handoff paths.
@@ -178,6 +187,13 @@ int llam_allocator_grow_timer_slab(llam_shard_t *shard);
 int llam_allocator_grow_wait_slab(llam_shard_t *shard);
 void llam_allocator_lock(llam_allocator_t *allocator);
 void llam_allocator_unlock(llam_allocator_t *allocator);
+void llam_allocator_link_chunk_locked(llam_allocator_t *allocator, llam_alloc_chunk_t *chunk);
+llam_task_t *llam_task_span_alloc_external(llam_shard_t *shard);
+void llam_task_span_release_external(llam_shard_t *owner, llam_task_t *task);
+void llam_task_span_quiescent(llam_shard_t *owner);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_task_span_test_fail_next(unsigned stage);
+#endif
 
 /*
  * Public task-handle tagging.
@@ -211,7 +227,7 @@ void llam_task_invalidate_public_handle(llam_task_t *task);
 llam_io_buffer_t *llam_io_buffer_allocator_alloc(llam_shard_t *shard, size_t min_capacity);
 void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer);
 llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard);
-void llam_shard_drain_stack_cache(llam_shard_t *shard);
+void llam_processor_drain_stack_cache(llam_processor_t *processor);
 void llam_runtime_drain_stack_cache(llam_runtime_t *rt);
 void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt);
 
@@ -243,7 +259,7 @@ unsigned llam_find_or_add_node_id(unsigned *node_ids,
                                 unsigned kernel_node_id);
 void llam_restore_init_thread_affinity(llam_runtime_t *rt);
 void llam_tune_block_worker_thread(void);
-void llam_tune_ctrl_thread(void);
+void llam_tune_ctrl_thread(bool native_progress);
 void llam_tune_io_worker_thread(llam_node_t *node);
 void llam_tune_scheduler_thread(llam_shard_t *shard, bool opaque_helper);
 
@@ -263,6 +279,152 @@ void llam_worker_test_force_sigaltstack_error(llam_worker_role_t role, int error
 #endif
 void llam_preempt_signal_handler(int signo);
 void llam_restore_process_signal_handlers(llam_runtime_t *rt);
+void llam_preempt_capabilities_init(llam_runtime_t *runtime);
+void llam_preempt_capabilities_note_ranges(llam_runtime_t *runtime, size_t range_count);
+void llam_preempt_capabilities_note_async_result(
+    llam_runtime_t *runtime,
+    bool enabled,
+    llam_preempt_failure_reason_t failure_reason);
+llam_preempt_effective_policy_t llam_preempt_effective_policy_for(
+    unsigned preempt_mode,
+    uint32_t compiled_backends,
+    bool async_enabled,
+    size_t registered_safe_ranges);
+const char *llam_preempt_effective_policy_name(llam_preempt_effective_policy_t policy);
+const char *llam_preempt_async_state_name(llam_preempt_async_state_t state);
+const char *llam_preempt_failure_reason_name(llam_preempt_failure_reason_t reason);
+int llam_preempt_module_register(llam_runtime_t *runtime,
+                                 uintptr_t image_base,
+                                 size_t image_size,
+                                 const void *metadata,
+                                 size_t metadata_size,
+                                 bool required_mode);
+#if defined(__linux__) && defined(__x86_64__) && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+unsigned llam_async_preempt_ready_depth(const llam_shard_t *shard);
+bool llam_async_preempt_has_origin_obligations(const llam_shard_t *shard);
+unsigned llam_async_preempt_task_origin_shard(const llam_task_t *task);
+bool llam_async_preempt_enqueue_locked(llam_shard_t *shard, llam_task_t *task);
+llam_task_t *llam_async_preempt_take_ready(llam_shard_t *shard, bool fallback);
+void llam_async_preempt_bind_task(llam_worker_t *worker, llam_task_t *task);
+int llam_async_preempt_run_begin(llam_runtime_t *runtime);
+void llam_async_preempt_run_abort(llam_runtime_t *runtime, int error,
+                                  llam_preempt_failure_reason_t reason);
+void llam_async_preempt_run_end(llam_runtime_t *runtime);
+int llam_async_preempt_block_reserve(llam_runtime_t *runtime, bool *reserved);
+void llam_async_preempt_block_release(llam_runtime_t *runtime);
+bool llam_async_preempt_drain_service_needed(const llam_runtime_t *runtime);
+void llam_async_preempt_drain_probe(llam_shard_t *shard, uint64_t now_ns);
+bool llam_async_preempt_dynamic_allowed(const llam_runtime_t *runtime);
+bool llam_async_preempt_idle_domain(const llam_shard_t *shard);
+#else
+#if LLAM_ASYNC_CONTEXT_SHARED || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT))
+unsigned llam_async_preempt_ready_depth(const llam_shard_t *shard);
+bool llam_async_preempt_has_origin_obligations(const llam_shard_t *shard);
+unsigned llam_async_preempt_task_origin_shard(const llam_task_t *task);
+bool llam_async_preempt_enqueue_locked(llam_shard_t *shard, llam_task_t *task);
+llam_task_t *llam_async_preempt_take_ready(llam_shard_t *shard, bool fallback);
+void llam_async_preempt_bind_task(llam_worker_t *worker, llam_task_t *task);
+#else
+static inline unsigned llam_async_preempt_ready_depth(const llam_shard_t *shard) {
+    (void)shard;
+    return 0U;
+}
+static inline bool llam_async_preempt_has_origin_obligations(const llam_shard_t *shard) {
+    (void)shard;
+    return false;
+}
+static inline unsigned llam_async_preempt_task_origin_shard(const llam_task_t *task) {
+    (void)task;
+    return UINT_MAX;
+}
+static inline bool llam_async_preempt_enqueue_locked(llam_shard_t *shard, llam_task_t *task) {
+    (void)shard;
+    (void)task;
+    return false;
+}
+static inline llam_task_t *llam_async_preempt_take_ready(llam_shard_t *shard, bool fallback) {
+    (void)shard;
+    (void)fallback;
+    return NULL;
+}
+static inline void llam_async_preempt_bind_task(llam_worker_t *worker, llam_task_t *task) {
+    (void)worker;
+    (void)task;
+}
+#endif
+static inline int llam_async_preempt_block_reserve(llam_runtime_t *runtime, bool *reserved) {
+    (void)runtime;
+    *reserved = false;
+    return 0;
+}
+static inline void llam_async_preempt_block_release(llam_runtime_t *runtime) {
+    (void)runtime;
+}
+static inline bool llam_async_preempt_drain_service_needed(const llam_runtime_t *runtime) {
+    (void)runtime;
+    return false;
+}
+static inline void llam_async_preempt_drain_probe(llam_shard_t *shard, uint64_t now_ns) {
+    (void)shard;
+    (void)now_ns;
+}
+static inline bool llam_async_preempt_dynamic_allowed(const llam_runtime_t *runtime) {
+    (void)runtime;
+    return true;
+}
+static inline bool llam_async_preempt_idle_domain(const llam_shard_t *shard) {
+    (void)shard;
+    return true;
+}
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+int llam_async_preempt_register_safe_range(llam_runtime_t *runtime,
+                                           uintptr_t begin,
+                                           uintptr_t end);
+int llam_async_preempt_enable_runtime(llam_runtime_t *runtime);
+void llam_async_preempt_shutdown_runtime(llam_runtime_t *runtime);
+int llam_async_preempt_worker_ready(llam_worker_t *worker);
+bool llam_async_preempt_prepare_request(
+    llam_worker_t *worker,
+    llam_task_t *task,
+    const llam_processor_owner_ticket_t *ticket,
+    uint64_t worker_run_generation,
+    uint64_t task_run_generation,
+    uint64_t *out_request_generation);
+void llam_async_preempt_cancel_request(llam_worker_t *worker,
+                                      uint64_t request_generation);
+bool llam_async_preempt_sample_task_stack(llam_task_t *task);
+void llam_async_preempt_trampoline_c(void *opaque_state);
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+int llam_async_preempt_task_init(llam_task_t *task);
+void llam_async_preempt_task_destroy(llam_task_t *task);
+void llam_async_preempt_save_scheduler_state(void);
+bool llam_async_preempt_resume_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
+void llam_async_preempt_scheduler_return(llam_shard_t *shard, llam_task_t *task);
+void llam_async_preempt_worker_stopped(llam_worker_t *worker);
+#endif
+#else
+static inline bool llam_async_preempt_prepare_request(
+    llam_worker_t *worker,
+    llam_task_t *task,
+    const llam_processor_owner_ticket_t *ticket,
+    uint64_t worker_run_generation,
+    uint64_t task_run_generation,
+    uint64_t *out_request_generation) {
+    (void)worker;
+    (void)task;
+    (void)ticket;
+    (void)worker_run_generation;
+    (void)task_run_generation;
+    (void)out_request_generation;
+    return false;
+}
+static inline void llam_async_preempt_cancel_request(llam_worker_t *worker,
+                                                     uint64_t request_generation) {
+    (void)worker;
+    (void)request_generation;
+}
+#endif
 
 /*
  * Wake handles and low-level Linux futex/eventfd wrappers.
@@ -306,6 +468,17 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,
                          bool heap_allocated);
+/* Storage/lease bootstrap only; it does not qualify managed code or native contexts. */
+int llam_runtime_init_registered_rt(llam_runtime_t *rt,
+                                    const llam_runtime_opts_t *opts,
+                                    size_t opts_size,
+                                    bool heap_allocated,
+                                    size_t managed_worker_count);
+int llam_runtime_init_managed_rt(llam_runtime_t *runtime,
+                                 const llam_runtime_opts_t *opts,
+                                 size_t opts_size, bool heap_allocated,
+                                 size_t affine_capacity, unsigned compatibility_processors);
+
 int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated);
 int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated);
 void llam_runtime_unregister_handle(llam_runtime_t *rt);
@@ -313,6 +486,36 @@ void llam_runtime_retire_heap_handle(llam_runtime_t *rt);
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size);
 llam_runtime_t *llam_runtime_current_owner(void);
 llam_runtime_t *llam_runtime_owner_for_new_object(void);
+int llam_runtime_check_creation_owner(llam_runtime_t *owner);
+int llam_runtime_begin_object_creation(llam_runtime_t *runtime, llam_runtime_t **out);
+/* Caller retains the owner runtime through handle publication. */
+llam_cancel_token_t *llam_cancel_token_create_owned(llam_runtime_t *owner_runtime);
+static inline llam_cancel_token_t *llam_task_cancel_source(const llam_task_t *task, unsigned index) {
+    return index == 0U ? task->cancel_token
+         : index == 1U ? task->group_cancel_token : task->operation_cancel_token;
+}
+static inline bool llam_task_has_cancel_tokens(const llam_task_t *task) {
+    return task != NULL && (task->cancel_token != NULL || task->group_cancel_token != NULL ||
+                            task->operation_cancel_token != NULL);
+}
+static inline uint64_t llam_task_request_deadline(const llam_task_t *task) {
+    if (task == NULL) return 0U;
+    uint64_t a = task->request_deadline_ns, b = task->operation_deadline_ns;
+    return a == 0U ? b : (b == 0U || a < b ? a : b);
+}
+static inline void llam_task_merge_wait_deadline(const llam_task_t *task,
+                                                 bool *has_deadline, uint64_t *deadline_ns) {
+    uint64_t budget = llam_task_request_deadline(task);
+    if (budget != 0U && (!*has_deadline || budget < *deadline_ns)) {
+        *has_deadline = true;
+        *deadline_ns = budget;
+    }
+}
+int llam_thread_errno_load_current(void);
+int llam_cancel_token_lock_task(llam_task_t *task, llam_cancel_lock_set_t *set);
+void llam_cancel_token_unlock_task(const llam_cancel_lock_set_t *set);
+void llam_cancel_token_register_task_locked(llam_task_t *task);
+void llam_cancel_token_unregister_task_locked(llam_task_t *task);
 int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime);
 int llam_runtime_check_object_owner_for_cleanup(const llam_runtime_t *owner_runtime);
 bool llam_runtime_object_owner_is_live(const llam_runtime_t *owner_runtime);
@@ -331,6 +534,10 @@ int llam_runtime_request_stop_rt(llam_runtime_t *rt);
 int llam_runtime_run_rt(llam_runtime_t *rt);
 void llam_runtime_shutdown_rt(llam_runtime_t *rt);
 void llam_runtime_destroy_rt(llam_runtime_t *rt);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_runtime_test_fail_after_stack_cache_prewarm(void);
+void llam_runtime_test_fail_ctrl_thread_start(void);
+#endif
 int llam_task_group_join_child_handle(llam_task_t *task,
                                       llam_task_group_t *group,
                                       bool has_deadline,
@@ -347,8 +554,17 @@ void llam_task_safepoint(void);
 void llam_task_sample_live_stack(llam_task_t *task);
 void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp);
 bool llam_timer_heap_push_locked(llam_shard_t *shard, llam_timer_node_t *node);
+bool llam_processor_rehome_timers_locked(llam_shard_t *source,
+                                         llam_shard_t *target,
+                                         unsigned *migrated_out);
 llam_timer_node_t *llam_timer_heap_remove_at_locked(llam_shard_t *shard, size_t index);
 llam_timer_node_t *llam_timer_heap_pop_min_locked(llam_shard_t *shard);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_timer_cancel_owner_sample_hook_fn)(void);
+void llam_timer_test_fail_next_rehome_reserve(void);
+void llam_timer_test_set_cancel_owner_sample_hook(
+    llam_timer_cancel_owner_sample_hook_fn hook);
+#endif
 const char *llam_trace_kind_name(llam_trace_kind_t kind);
 void llam_trace_shard(llam_shard_t *shard,
                     llam_task_t *task,

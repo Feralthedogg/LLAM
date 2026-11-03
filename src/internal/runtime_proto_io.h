@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_PROTO_IO_H
@@ -43,7 +43,9 @@ bool llam_abort_io_wait_claimed(llam_task_t *task,
 llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason);
 void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason);
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard);
-uint64_t llam_hash_watch_identity_u64(uint64_t value);
+uint64_t llam_hash_watch_identity(uint64_t device,
+                                  uint64_t inode,
+                                  uint64_t descriptor);
 bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta);
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 bool llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);

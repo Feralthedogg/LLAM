@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 param(
     [string]$Target = "windows-x86_64",
@@ -23,6 +23,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Target -match '^(freebsd|openbsd|netbsd|dragonflybsd)-') {
+    throw "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling"
+}
 
 if (-not ("LlamWin32FileInfo" -as [type])) {
     Add-Type -TypeDefinition @"
@@ -225,6 +229,7 @@ foreach ($Dir in @(
     "include",
     "lib",
     "LICENSES",
+    "LICENSES\THIRD_PARTY\magic2",
     "scripts",
     "share\llam\cmake",
     "lib\pkgconfig"
@@ -268,9 +273,10 @@ $SharedImportLib = Find-BuildArtifact "llam_runtime_shared.lib" (Join-Path $Conf
 $BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 
 Require-Input (Join-Path $Root "LICENSE")
-Require-Input (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt")
-Require-Input (Join-Path $Root "LICENSES\OLD-LICENSE\Apache-2.0.txt")
-Require-Input (Join-Path $Root "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt")
+Require-Input (Join-Path $Root "NOTICE")
+Require-Input (Join-Path $Root "THIRD_PARTY_NOTICES.md")
+Require-Input (Join-Path $Root "LICENSES\Apache-2.0.txt")
+Require-Input (Join-Path $Root "third_party\magic2\LICENSE")
 Require-Input (Join-Path $Root "README.md")
 Require-Input (Join-Path $Root "CHANGELOG.md")
 Require-Input (Join-Path $Root "scripts\install.sh")
@@ -286,9 +292,10 @@ Require-Input $BenchExe
 
 foreach ($InputPath in @(
     (Join-Path $Root "LICENSE"),
-    (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"),
-    (Join-Path $Root "LICENSES\OLD-LICENSE\Apache-2.0.txt"),
-    (Join-Path $Root "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt"),
+    (Join-Path $Root "NOTICE"),
+    (Join-Path $Root "THIRD_PARTY_NOTICES.md"),
+    (Join-Path $Root "LICENSES\Apache-2.0.txt"),
+    (Join-Path $Root "third_party\magic2\LICENSE"),
     (Join-Path $Root "README.md"),
     (Join-Path $Root "CHANGELOG.md"),
     (Join-Path $Root "scripts\install.sh"),
@@ -308,13 +315,10 @@ foreach ($InputPath in @(
 Set-Content -LiteralPath (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "ABI_MAJOR") -Value $AbiMajor -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "LIBRARY_VERSION") -Value $LibraryVersion -NoNewline
-Copy-Item -LiteralPath @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md"), (Join-Path $Root "CHANGELOG.md")) -Destination $Stage
-New-Item -ItemType Directory -Force -Path (Join-Path $Stage "LICENSES\OLD-LICENSE") | Out-Null
-Copy-Item -LiteralPath (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt") -Destination (Join-Path $Stage "LICENSES")
-Copy-Item -LiteralPath @(
-    (Join-Path $Root "LICENSES\OLD-LICENSE\Apache-2.0.txt"),
-    (Join-Path $Root "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt")
-) -Destination (Join-Path $Stage "LICENSES\OLD-LICENSE")
+Copy-Item -LiteralPath @((Join-Path $Root "LICENSE"), (Join-Path $Root "NOTICE"), (Join-Path $Root "THIRD_PARTY_NOTICES.md"), (Join-Path $Root "README.md"), (Join-Path $Root "CHANGELOG.md")) -Destination $Stage
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage "LICENSES") | Out-Null
+Copy-Item -LiteralPath (Join-Path $Root "LICENSES\Apache-2.0.txt") -Destination (Join-Path $Stage "LICENSES")
+Copy-Item -LiteralPath (Join-Path $Root "third_party\magic2\LICENSE") -Destination (Join-Path $Stage "LICENSES\THIRD_PARTY\magic2")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.sh") -Destination $Stage
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 foreach ($Item in Get-ChildItem -LiteralPath (Join-Path $Root "docs") -Force) {
@@ -387,7 +391,7 @@ Set-Content -LiteralPath (Join-Path $Stage "share\llam\cmake\llam-targets.cmake"
 $VersionConfig = @"
 set(PACKAGE_VERSION "$LibraryVersion")
 
-if(PACKAGE_FIND_VERSION_MAJOR STREQUAL "" OR PACKAGE_FIND_VERSION_MAJOR EQUAL $AbiMajor)
+if(PACKAGE_FIND_VERSION_MAJOR STREQUAL "" OR PACKAGE_FIND_VERSION_MAJOR EQUAL $($LibraryVersion.Split('.')[0]))
     if(PACKAGE_FIND_VERSION VERSION_LESS_EQUAL PACKAGE_VERSION)
         set(PACKAGE_VERSION_COMPATIBLE TRUE)
     endif()

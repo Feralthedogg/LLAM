@@ -12,10 +12,13 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+See LICENSES/Apache-2.0.txt.
 -->
 
 # LLAM Mixed-License Transition Design
+
+> Superseded on 2026-09-23. Historical record only; the current first-party
+> license is Apache-2.0. See [current licensing](../../licensing.md).
 
 **Date:** 2026-08-01
 

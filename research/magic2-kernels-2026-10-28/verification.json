@@ -1,0 +1,1517 @@
+{
+  "copyright": "Copyright 2026 Feralthedogg",
+  "spdx_license_identifier": "Apache-2.0",
+  "started_kst": "2026-10-28T03:00:43.479794+09:00",
+  "head": "34dcc74a7e3cbb584967f6bf5f7816673ed5169b",
+  "git_status_before": " M .github/ISSUE_TEMPLATE/config.yml\n M .github/ISSUE_TEMPLATE/defect-report.yml\n M .github/SECURITY.md\n M .github/workflows/benchmarks.yml\n M .github/workflows/bsd.yml\n M .github/workflows/docs.yml\n M .github/workflows/linux.yml\n M .github/workflows/macos.yml\n M .github/workflows/nightly.yml\n M .github/workflows/release.yml\n M .github/workflows/soak.yml\n M .github/workflows/stress.yml\n M .gitignore\n M CHANGELOG.md\n M CMakeLists.txt\n M CONTRIBUTING.md\n M LICENSE\n D LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt\n D LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt\n D LICENSES/OLD-LICENSE/Apache-2.0.txt\n M Makefile\n M README.md\n M cmake/llam-config.cmake.in\n M cmake/llam.pc.in\n M docs/abi.md\n M docs/build.md\n M docs/internals/architecture.md\n M docs/licensing.md\n M docs/operations.md\n M docs/operations/benchmarks.md\n M docs/operations/verification.md\n M docs/reference/api.md\n M docs/reference/cli-tools.md\n M docs/reference/environment.md\n M docs/reference/options.md\n M docs/reference/platform-support.md\n M docs/research/plans/2026-08-01-license-file-layout.md\n M docs/research/plans/2026-08-01-license-transition.md\n M docs/research/specs/2026-08-01-license-transition-design.md\n M docs/security.md\n M docs/superpowers/plans/2026-09-09-gpm-runtime-nonwrapper-phases.md\n M docs/superpowers/specs/2026-09-08-phase1a-legacy-execution-lease-design.md\n M examples/bench.c\n M examples/bench_entry.c\n M examples/bench_internal.h\n M examples/bench_support.c\n M examples/broker.c\n M examples/demo.c\n M examples/demo_entry.c\n M examples/demo_internal.h\n M examples/demo_tasks.c\n M examples/diagnostic_output.c\n M examples/diagnostic_output.h\n M examples/env_compat.h\n M examples/server.c\n M examples/server_flood.c\n M examples/server_flood_stats.c\n M examples/server_flood_stats.h\n M examples/server_flood_stats_internal.h\n M examples/server_flood_stats_open.c\n M examples/server_support.c\n M examples/server_support.h\n M examples/stress.c\n M examples/stress_core_cases.c\n M examples/stress_dynamic_cases.c\n M examples/stress_entry.c\n M examples/stress_internal.h\n M examples/stress_signal_dump.c\n M examples/stress_suite.c\n M examples/stress_support.c\n M examples/stress_tasks.c\n M examples/stress_timeout_cases.c\n M experiments/lcwe/bench_lcwe_model.c\n M experiments/lcwe/lcwe_model.c\n M experiments/lcwe/lcwe_model.h\n M experiments/lcwe/lcwe_model_internal.h\n M experiments/lcwe/lcwe_workloads.c\n M experiments/lcwe/test_lcwe_model.c\n M include/llam/io.h\n M include/llam/platform.h\n M include/llam/runtime.h\n M mkdocs.yml\n M scripts/audit_c_structure.py\n M scripts/audit_production_test_hooks.py\n M scripts/audit_shared_exports.py\n M scripts/bench_go_compare.go\n M scripts/bench_go_windows_compare.go\n M scripts/bench_guard.py\n M scripts/bench_lcwe_model.py\n M scripts/bench_matrix.py\n M scripts/bench_runtime_compare.py\n M scripts/bench_tokio_compare/Cargo.lock.license\n M scripts/bench_tokio_compare/Cargo.toml\n M scripts/bench_tokio_compare/src/bin/tokio_chat_server.rs\n M scripts/bench_tokio_compare/src/main.rs\n M scripts/check_legacy_lease_boundary.py\n M scripts/check_license_policy.py\n M scripts/check_worker_identity_boundary.py\n M scripts/cli_numbers.py\n M scripts/docker_verify_linux.sh\n M scripts/generate_sdk_metadata.sh\n M scripts/install.ps1\n M scripts/install.sh\n M scripts/package_release.sh\n M scripts/package_release_windows.ps1\n M scripts/prepare_ci_artifact_dir.ps1\n M scripts/process_utils.py\n M scripts/run_with_timeout.py\n M scripts/runtime_soak.py\n M scripts/safe_output.py\n M scripts/stress_server.py\n M scripts/stress_server_composite.py\n M scripts/test_bench_lcwe_model.py\n M scripts/test_bench_parsers.py\n M scripts/test_bench_runtime_compare.py\n M scripts/test_broker_cli_parsing.py\n M scripts/test_c_env_helpers.py\n M scripts/test_example_diagnostic_security.py\n M scripts/test_legacy_lease_boundary.py\n M scripts/test_license_policy.py\n M scripts/test_package_license_layout.py\n M scripts/test_package_license_layout_windows.ps1\n M scripts/test_process_utils.py\n M scripts/test_release_fixture.sh\n M scripts/test_safe_output_security.py\n M scripts/test_server_flood_cli.py\n M scripts/test_server_flood_stats_security.py\n M scripts/test_stress_server_logic.py\n M scripts/test_worker_identity_boundary.py\n M scripts/verify_darwin.sh\n M scripts/verify_linux.sh\n M scripts/verify_windows.ps1\n M src/asm/darwin/arm64/darwin_context_arm64.S\n M src/asm/darwin/x86_64/darwin_context_x86_64.S\n M src/asm/linux/arm64/linux_context_arm64.S\n M src/asm/linux/x86_64/linux_context_x86_64.S\n M src/asm/linux/x86_64/wake_syscalls_x86_64.S\n M src/asm/windows/x86_64/context_x86_64.asm\n M src/asm/windows/x86_64/windows_context_x86_64.S\n M src/core/api/blocking_api.c\n M src/core/api/cancel_api.c\n M src/core/api/core_api.c\n M src/core/api/signal_api.c\n M src/core/api/timer_api.c\n M src/core/base/abi.c\n M src/core/base/errno.c\n M src/core/base/io_udata.c\n M src/core/base/names.c\n M src/core/base/util.c\n M src/core/broker/broker.c\n M src/core/broker/broker_buffer.c\n M src/core/broker/broker_channel.c\n M src/core/broker/broker_descriptor.c\n M src/core/broker/broker_lifecycle.c\n M src/core/broker/broker_ops.c\n M src/core/broker/broker_revoke.c\n M src/core/broker/broker_task.c\n M src/core/broker/broker_validate.c\n M src/core/broker/broker_windows_security.c\n M src/core/broker/ring/broker_ring.c\n M src/core/broker/ring/broker_ring_buffer_grant.c\n M src/core/broker/ring/broker_ring_dispatch.c\n M src/core/broker/ring/broker_ring_doorbell.c\n M src/core/broker/ring/broker_ring_ops.c\n M src/core/broker/ring/broker_ring_queue.c\n M src/core/broker/ring/broker_ring_shm.c\n M src/core/broker/ring/broker_ring_shm_posix.c\n M src/core/broker/ring/broker_ring_shm_windows.c\n M src/core/broker/ring/broker_ring_stats.c\n M src/core/broker/transport/broker_transport.c\n M src/core/broker/transport/broker_transport_dispatch.c\n M src/core/broker/transport/broker_transport_ops.c\n M src/core/broker/transport/broker_transport_posix.c\n M src/core/broker/transport/broker_transport_posix_message.c\n M src/core/broker/transport/broker_transport_posix_socket.c\n M src/core/broker/transport/broker_transport_response.c\n M src/core/broker/transport/broker_transport_ring.c\n M src/core/broker/transport/broker_transport_rollback.c\n M src/core/broker/transport/broker_transport_selftest.c\n M src/core/broker/transport/broker_transport_unix.c\n M src/core/broker/transport/broker_transport_windows.c\n M src/core/broker/transport/broker_transport_windows_fd_stubs.c\n M src/core/broker/transport/broker_transport_windows_pipe.c\n M src/core/broker/transport/broker_transport_windows_session.c\n M src/core/context/context_arm64.c\n M src/core/context/context_portable.c\n M src/core/context/fp.c\n M src/core/context/stack_sample.c\n M src/core/debug/debug.c\n M src/core/debug/debug_dump_helpers.c\n M src/core/debug/debug_stats_json.c\n M src/core/debug/fault.c\n M src/core/debug/trace.c\n M src/core/lifecycle/init.c\n M src/core/lifecycle/lifecycle.c\n M src/core/lifecycle/run.c\n M src/core/lifecycle/runtime.c\n M src/core/lifecycle/shutdown.c\n M src/core/memory/alloc.c\n M src/core/memory/allocator_quiescent.c\n M src/core/memory/io_object_alloc.c\n M src/core/platform/platform.c\n M src/core/platform/windows_policy.c\n M src/core/registry/capability.c\n M src/core/registry/handle.c\n M src/core/registry/owner.c\n M src/core/registry/registry.c\n M src/core/sched/core_queue.c\n M src/core/sched/norm_queue.c\n M src/core/sched/norm_queue_depth.c\n M src/core/sched/queue_base.c\n M src/core/sched/reinject.c\n M src/core/sched/safepoint.c\n M src/core/sched/scheduler.c\n M src/core/sched/wake.c\n M src/core/sync/channel.c\n M src/core/sync/channel_cache.c\n M src/core/sync/channel_fast.c\n M src/core/sync/channel_lifecycle.c\n M src/core/sync/channel_select.c\n M src/core/sync/channel_select_fast.c\n M src/core/sync/cond.c\n M src/core/sync/cond_lifecycle.c\n M src/core/sync/mutex.c\n M src/core/sync/mutex_lifecycle.c\n M src/core/sync/sync.c\n M src/core/task/spawn.c\n M src/core/task/task_alloc.c\n M src/core/task/task_group.c\n M src/core/task/task_group_internal.h\n M src/core/task/task_group_registry.c\n M src/core/task/task_handle_claim.c\n M src/core/task/task_handle_registry.c\n M src/core/task/task_handle_registry_internal.h\n M src/core/task/task_local.c\n M src/core/task/task_reclaim.c\n M src/core/task/task_stack.c\n M src/core/task/yield_join_sleep.c\n M src/core/time/time.c\n M src/core/time/timer.c\n M src/core/time/timer_heap.c\n M src/core/wait/wait.c\n M src/core/wait/wait_accounting.c\n M src/core/wait/wait_timer_alloc.c\n M src/core/wait/wait_tracking.c\n M src/engine/runtime_watchdog_internal.h\n M src/engine/scheduler/block.c\n M src/engine/scheduler/scheduler_engine.c\n M src/engine/watchdog/watchdog.c\n M src/engine/watchdog/watchdog_autotune.c\n M src/engine/watchdog/watchdog_merge.c\n M src/engine/watchdog/watchdog_probe.c\n M src/engine/watchdog/watchdog_rehome.c\n M src/engine/watchdog/watchdog_scale.c\n M src/engine/watchdog/watchdog_worker.c\n M src/internal/llam_internal.h\n M src/internal/runtime_broker.h\n M src/internal/runtime_broker_ring.h\n M src/internal/runtime_broker_windows_security.h\n M src/internal/runtime_capability.h\n M src/internal/runtime_debug_dump_helpers.h\n M src/internal/runtime_internal.h\n M src/internal/runtime_platform.h\n M src/internal/runtime_proto_core.h\n M src/internal/runtime_proto_io.h\n M src/internal/runtime_proto_sched.h\n M src/internal/runtime_proto_sync.h\n M src/internal/runtime_protos.h\n M src/internal/runtime_public_active_op.h\n M src/internal/runtime_public_slot.h\n M src/internal/runtime_public_slot_seal.h\n M src/internal/runtime_state.h\n M src/internal/runtime_types.h\n M src/internal/runtime_windows.h\n M src/internal/runtime_windows_compat.h\n M src/internal/runtime_windows_iocp.h\n M src/io/api/blocking_file_ops.c\n M src/io/api/blocking_ops.c\n M src/io/api/blocking_wrappers.c\n M src/io/api/datagram.c\n M src/io/api/direct.c\n M src/io/api/direct_tuning.c\n M src/io/api/handle_positional.c\n M src/io/api/io_api.c\n M src/io/api/issue.c\n M src/io/api/owned.c\n M src/io/api/positional.c\n M src/io/api/positional_util.c\n M src/io/api/public.c\n M src/io/buffer/buffer_registry.c\n M src/io/darwin/runtime_io_watch_darwin_internal.h\n M src/io/darwin/watch/darwin_completion.c\n M src/io/darwin/watch/darwin_control.c\n M src/io/darwin/watch/darwin_migration_live.c\n M src/io/darwin/watch/darwin_migration_rehome.c\n M src/io/darwin/watch/darwin_state.c\n M src/io/darwin/watch/darwin_worker.c\n M src/io/darwin/watch/events.c\n M src/io/engine/io_engine.c\n M src/io/linux/runtime_io_watch_linux_internal.h\n M src/io/linux/watch/cqe.c\n M src/io/linux/watch/linux_control.c\n M src/io/linux/watch/linux_lookup.c\n M src/io/linux/watch/linux_migration_live.c\n M src/io/linux/watch/linux_migration_rehome.c\n M src/io/linux/watch/linux_state.c\n M src/io/linux/watch/linux_submit.c\n M src/io/linux/watch/linux_worker.c\n M src/io/linux/watch/prelude.c\n M src/io/runtime_io_api_internal.h\n M src/io/watch/close.c\n M src/io/watch/migration.c\n M src/io/watch/migration_live_finalize_template.inc\n M src/io/watch/migration_live_forward_template.inc\n M src/io/watch/rehome_accept_template.inc\n M src/io/watch/rehome_recv_template.inc\n M src/io/watch/rehome_template.inc\n M src/io/watch/waiter.c\n M src/io/watch/watch.c\n M src/io/watch/watch_lookup.c\n M src/io/watch/watch_queue.c\n M src/io/windows/runtime_io_watch_windows_internal.h\n M src/io/windows/watch/fallback.c\n M src/io/windows/watch/iocp.c\n M src/io/windows/watch/pool.c\n M src/io/windows/watch/socket.c\n M src/io/windows/watch/windows_completion.c\n M src/io/windows/watch/windows_control.c\n M src/io/windows/watch/windows_state.c\n M src/io/windows/watch/windows_submit.c\n M src/io/windows/watch/windows_watch.c\n M tests/test_abi_compat.c\n M tests/test_abi_contract.c\n M tests/test_connect_io.c\n M tests/test_env.h\n M tests/test_io_buffers.c\n M tests/test_legacy_lease_internal.c\n M tests/test_multi_runtime_core.c\n M tests/test_runtime_api_edges.c\n M tests/test_runtime_core.c\n M tests/test_runtime_fuzz.c\n M tests/test_runtime_group_local_edges.c\n M tests/test_runtime_invariants.c\n M tests/test_runtime_io_dump.c\n M tests/test_runtime_select_edges.c\n M tests/test_runtime_shutdown_internal.c\n M tests/test_runtime_stress.c\n M tests/test_runtime_unmanaged_join.c\n M tests/test_security_capability.c\n M tests/test_shared_load.c\n M tests/test_sync_primitives.c\n M tests/test_windows_handle_io.c\n M tests/test_windows_iocp_dump.c\n M tests/test_windows_iocp_io.c\n M tests/test_windows_policy.c\n M tests/test_windows_runtime_smoke.c\n M tests/test_worker_identity_internal.c\n?? .DS_Store\n?? .codex-async-main-impl-20261028/\n?? AGENTS.md\n?? LICENSES/Apache-2.0.txt\n?? NOTICE\n?? THIRD_PARTY_NOTICES.md\n?? artifacts/\n?? asan-test_execution_lease_internal\n?? bench_handoff\n?? cmake/llam-preempt-tooling.conf.in\n?? docs/internals/magic2.md\n?? docs/research/measurements/\n?? docs/superpowers/specs/2026-09-09-phase1b-processor-resources.md\n?? docs/superpowers/specs/2026-09-09-phase2-foreign-detach.md\n?? docs/superpowers/specs/2026-09-09-phase3-async-context.md\n?? docs/superpowers/specs/2026-09-15-phase7-capability-policy.md\n?? docs/superpowers/specs/2026-10-28-async-preemption-mainline-design.md\n?? docs/tooling/\n?? examples/cpu_spike.c\n?? experiments/async_compare/\n?? experiments/handoff/\n?? experiments/magic2/\n?? experiments/select_prepare/\n?? experiments/watch_index/\n?? experiments/windows/\n?? meson.build\n?? meson_options.txt\n?? research/\n?? scripts/bench_deep_compare.py\n?? scripts/bench_handoff.py\n?? scripts/bench_magic2_cpu.py\n?? scripts/bench_select_prepare.py\n?? scripts/bench_watch_index.py\n?? scripts/build_windows_async_certified_fixture.sh\n?? scripts/cpu_spike_compare.py\n?? scripts/cpu_spike_go.go\n?? scripts/cpu_spike_go_test.go\n?? scripts/test_cpu_spike_compare.py\n?? scripts/test_handoff_model.py\n?? scripts/test_llam_clang.py\n?? scripts/test_preempt_cmake_install.py\n?? scripts/test_preempt_installed_driver.py\n?? scripts/test_preempt_llvm_plugin.py\n?? scripts/test_preempt_package.py\n?? scripts/test_preempt_sdk_metadata.py\n?? scripts/test_sdk_install.py\n?? scripts/test_windows_async_certifier.sh\n?? src/.DS_Store\n?? src/asm/darwin/arm64/async_context_arm64.S\n?? src/asm/linux/arm64/async_context_arm64.S\n?? src/asm/linux/x86_64/async_preempt_trampoline.S\n?? src/asm/windows/x86_64/windows_async_transition.S\n?? src/core/api/magic2_api.c\n?? src/core/context/async_context.c\n?? src/core/context/async_context_darwin.c\n?? src/core/context/async_context_linux_arm64.c\n?? src/core/context/async_context_linux_x86_64.c\n?? src/core/context/async_context_shared.c\n?? src/core/context/async_context_signal_linux_arm64.c\n?? src/core/context/windows_async_lifetime.c\n?? src/core/context/windows_async_pe_metadata.c\n?? src/core/context/windows_async_probe.c\n?? src/core/memory/task_span.c\n?? src/core/preempt/\n?? src/core/sched/execution_lease.c\n?? src/core/sched/worker_registry.c\n?? src/internal/async_context.h\n?? src/internal/async_context_darwin.h\n?? src/internal/async_context_linux_arm64.h\n?? src/internal/async_context_phase.h\n?? src/internal/async_context_shared.h\n?? src/internal/async_context_signal.h\n?? src/internal/async_preempt_abi.h\n?? src/internal/async_signal_registry.h\n?? src/internal/magic2.h\n?? src/internal/runtime_magic2.h\n?? src/internal/runtime_mix.h\n?? src/internal/runtime_test_watchdog.h\n?? src/internal/runtime_watch_index.h\n?? src/internal/windows_async_lifetime.h\n?? src/internal/windows_async_probe.h\n?? src/io/watch/watch_index.c\n?? test_async_context_darwin\n?? test_async_context_linux_arm64\n?? test_async_preempt_multi_linux_x86_64\n?? test_darwin_arm64_async_scheduler_real\n?? test_handoff_protocol\n?? test_io_watch_index\n?? test_large_select\n?? test_linux_arm64_async_scheduler_real\n?? test_runtime_regressions\n?? test_watchdog_liveness_internal\n?? tests/fixtures/\n?? tests/test_async_context_darwin.c\n?? tests/test_async_context_linux_arm64.c\n?? tests/test_async_preempt_linux_x86_64.c\n?? tests/test_async_preempt_multi_linux_x86_64.c\n?? tests/test_darwin_arm64_async_scheduler_real.c\n?? tests/test_default_policy_internal.c\n?? tests/test_execution_lease_internal.c\n?? tests/test_foreign_detach_internal.c\n?? tests/test_io_watch_index.c\n?? tests/test_large_select.c\n?? tests/test_magic2_auto_internal.c\n?? tests/test_magic2_cpu_internal.c\n?? tests/test_magic2_internal.c\n?? tests/test_preempt_capabilities.c\n?? tests/test_preempt_metadata.c\n?? tests/test_preempt_metadata_registration.c\n?? tests/test_processor_allocator_io_internal.c\n?? tests/test_processor_queue_timer_internal.c\n?? tests/test_processor_resource_internal.c\n?? tests/test_relief_worker_internal.c\n?? tests/test_runtime_regressions.c\n?? tests/test_watchdog_liveness_internal.c\n?? third_party/\n?? tools/\n?? tsan-test_legacy_lease_internal\n",
+  "write_paths_before": {
+    "experiments/magic2/bench_magic2_kernels.c": {
+      "existed": false,
+      "sha256": null
+    },
+    "scripts/bench_magic2_kernels.py": {
+      "existed": false,
+      "sha256": null
+    },
+    "Makefile": {
+      "existed": true,
+      "sha256": "b4aa33cf54f6134ad5da23e4a09cc145e184ce84a4339a578332b00d468275fc"
+    },
+    "CMakeLists.txt": {
+      "existed": true,
+      "sha256": "2b073923b5961d80980f6467f8afb33fd0bf554f8d80bb4cba49784f01761027"
+    }
+  },
+  "runtime_source_sha256": {
+    "src/io/runtime_io_api_internal.h": "af4a573164dd986f5525bfe4a792638df05ea7c41628359da6c365f1d591c395",
+    "src/internal/runtime_broker_ring.h": "ee19e98bc9e462bf43b0ef798322eb8126b2d3d987ede24dfe379d07ef892ed5",
+    "src/internal/runtime_broker_windows_security.h": "2c59dc7ffe9880f45335d076ce91a2b35125cfaa9821b4133025c87c9ac0dc45",
+    "src/internal/magic2.h": "b3f8388c6c45fe148ad31390e12e9930b5b448c320471be63bc1edc3a5ea3de5",
+    "src/internal/async_context_linux_arm64.h": "72ae96d400493e57dfd53a3eca1fb19b434eed900863df2dd0ef43d61abfeb23",
+    "src/internal/runtime_platform.h": "9e9ecdad96383aea501da288be7c642840b7fa2432e0a51ce7ef7ad33050742f",
+    "src/internal/runtime_protos.h": "f1ba2f21bbd5a6d81bca6862db376a684ceb58a67f0744f9f8c9acd25f53cd29",
+    "src/internal/llam_internal.h": "fa8f73b8fb1bf783ace7957e1dba67639bb06c75624c78090ec4cf9771b8c939",
+    "src/internal/async_context_shared.h": "4c7fe085b15cfad2dc304e3fc9f3329af4f63ecb7fb3e844ed962cf05a548f7f",
+    "src/internal/runtime_broker.h": "c7841e5c3055f93cdad4075aa8f7e25e5bc66b0720ece81a28337db3bf8d4f2e",
+    "src/internal/runtime_state.h": "26af99b9e99b82ea2c3e34821a98cb3d886115f871e42d2716ee80536f5e6d7b",
+    "src/internal/runtime_windows_compat.h": "9899ba375896262a45cd4196d278b9ea640df3da8bd1b76492345e65ae04ca1d",
+    "src/internal/runtime_proto_sched.h": "c051128f170c5bd9b284432d8f725c695a626aa8104bdd7febe6a6a89676c48c",
+    "src/internal/runtime_windows.h": "964ddbb5ade24aa8df81b8ef7809d82b124baef9cdcf4111cc12620b447f36fc",
+    "src/internal/runtime_public_slot.h": "ccdfed84dd6655299a9e48113ccc8af0d72582bb9b6df838e6cb08b991edbdee",
+    "src/internal/runtime_mix.h": "25d7d7ff0af1077d1c80d280b64ef4d1907a44982fc137206829ed92e3d9f8af",
+    "src/internal/async_context_signal.h": "6b697be7737961009632617f6db1aa4d127a402930f683c19307b3951a7ee95a",
+    "src/internal/async_signal_registry.h": "9fa4f3d12aea693d9c0f6736402522a5effcd1dd3d534f36aa6b2650289717c4",
+    "src/internal/async_preempt_abi.h": "ccf3a1cbbddbd041538d8c5309b76a401eb3b3a2a6ba897fec7c6e2c3b93d12c",
+    "src/internal/runtime_capability.h": "24e1ff7f19969f186cdcd3c2462f8465aebe9944ada23a3d568c91675228ea3a",
+    "src/internal/runtime_magic2.h": "3ba152e3d3df86299079e9acd3c5b3d8fd558e67e716f2ca65a93ef0b757340a",
+    "src/internal/runtime_proto_core.h": "5e62b8012ffaa1418e670d6f5ba48741aec17dbe0cae41d0d035a32a2a0b170f",
+    "src/internal/runtime_public_slot_seal.h": "37855382fefd52d3a8bcc509a31b592a2b100d0cbd8272fbcd4498c39c6f6367",
+    "src/internal/runtime_types.h": "6a6bce155e9cb617219c96489639288e20cfaf882ee7e921854d886552771905",
+    "src/internal/runtime_test_watchdog.h": "167b631bbec04c90d3d7b1c6d4ab0ec6a632fab5ff47e506aeea4300d811f8a9",
+    "src/internal/async_context_phase.h": "2ec253a9f2c81d4cd2573d3aa84131f3a2ca0a4b974c515e2ce0c2630f4da756",
+    "src/internal/async_context.h": "6ca36b82b8bcf5070cbb518a2333340513e62c943cb47ba596f604cdbdb0fd3b",
+    "src/internal/runtime_debug_dump_helpers.h": "8aad68dbb673938a0cb16a77f535832c52710552fc8d6b57ed163311ebbe97ea",
+    "src/internal/runtime_proto_sync.h": "cb0b1c268b7c7d6cd49b5254c6532a6195df9c1ed5c1e28909431231a8bb2fa9",
+    "src/internal/runtime_watch_index.h": "dbc5d66b9dff25b9200342b530617a338a11fab188eaa12f6746416795928975",
+    "src/internal/runtime_public_active_op.h": "dbab91d88b07552b64029b81945aae863fc910e19db9467f55fa05c5835fb017",
+    "src/internal/windows_async_probe.h": "a5b8338e48d9f88b30d979b0b563f12c08cdf1761bd7b1f507b344c27eabc228",
+    "src/internal/windows_async_lifetime.h": "96208caa54234d935bfbf11db2f6e2476c8e26420d6f1fea7423b395c92e35f8",
+    "src/internal/runtime_proto_io.h": "40f95af9be4a594fb51f090411ef53f1f1753ebbe40258313250600cbcd68a7c",
+    "src/internal/runtime_windows_iocp.h": "4b2abdc2459d8322fe75d7069a34af471195f8f5c3e939e9d6ab6316e978dc79",
+    "src/internal/runtime_internal.h": "8bcbc548ebe9e89f834265f6c152e60c5c0281487caa0024e1ce3e63712abf9a",
+    "src/internal/async_context_darwin.h": "6ddaadbd05e12020440cfe19cfa852be3154dec82520303b70ba321cf3c961d8",
+    "src/engine/runtime_watchdog_internal.h": "76025bfb45258c63ccc20519b7e296626af01ce447f054240435dbeb89d27f54",
+    "src/asm/linux/arm64/linux_context_arm64.S": "bdb998ac9d86dd26b6d9a05ad34493f1af2ea214d165cfd641e00ec567af513b",
+    "src/asm/linux/arm64/async_context_arm64.S": "7dda1bf7af8a3bab862e7b385b67fba8bd1afc88a779b98f8971fe0e5bec3967",
+    "src/asm/linux/x86_64/linux_context_x86_64.S": "49322b89b78cebddbd69c361d6ecfe271dcd7437a7064f45116e6cb4b1ade7e1",
+    "src/asm/linux/x86_64/wake_syscalls_x86_64.S": "1c05cf11a32b65464703a0dafec9203bcb8982b0aad878d1464dddf4b6467944",
+    "src/asm/linux/x86_64/async_preempt_trampoline.S": "2222cfb0641210ed4adf407a45409bfba283025941034b5289d358a3ddc85ec9",
+    "src/asm/darwin/arm64/darwin_context_arm64.S": "8c9b39d7cb077dc951165a9ef3e687e25dc69d215e1e8729bed044192976c88c",
+    "src/asm/darwin/arm64/async_context_arm64.S": "b3f2bc1691fba0768f9a571c56320cc5ee258551a693fb2188ee48a454d3c357",
+    "src/asm/darwin/x86_64/darwin_context_x86_64.S": "422cf8e4e7fc8ea82ed90362a550989d8bc3f91e9075ce986eae6de63b5e9f4a",
+    "src/asm/windows/x86_64/context_x86_64.asm": "ab02c1ba42f08f433af0c1c50ba44847b322451cfb7829f3b5413e2fc44cb3a8",
+    "src/asm/windows/x86_64/windows_context_x86_64.S": "fd7f2fac85bf915f449e89bb18d3efeecb05399315e53a92ea87736e19021a82",
+    "src/asm/windows/x86_64/windows_async_transition.S": "2f4913a9688974685effb635ba267387ed0b9e7c42332808028d3b937c399db6",
+    "src/core/wait/wait_timer_alloc.c": "6b59471aef79082ac0a61b648530a9bf1645d0b672000c688307227d59939428",
+    "src/core/wait/wait_accounting.c": "31225643d042cebe51ce1a4c7cb8e1337b0970faaef255b3dbd8f08cb28ad835",
+    "src/core/wait/wait.c": "230c85c465a7f3252110acf11fb6fcb04f29dad8ff63502ef4e02c83435f7683",
+    "src/core/wait/wait_tracking.c": "0f34f3831d169589c2df12d243be3789f0e2b31875be7c6c496565cf89850f3d",
+    "src/core/broker/broker_validate.c": "e18ef12ab60106a31b5f69f5b2cd38ff97a14231e36d3347e7ad8d9c9310205d",
+    "src/core/broker/broker.c": "ddf924954b0014752836bd5e36affa96f45eeb376e10af362cd99c63d9059609",
+    "src/core/broker/broker_windows_security.c": "15858aa7abf9db7ad60d57294c86f00f7c71b1bb7e052678e17a02733deec139",
+    "src/core/broker/broker_ops.c": "0c8f7146d6cfc633928458b179d7ae92db002ee4db8e8ce0e4b8b99d2e017cff",
+    "src/core/broker/broker_revoke.c": "dc011854b9c62dbad7e0143580f56c0e1fba552fccf8aca54d9fc78876280085",
+    "src/core/broker/broker_task.c": "a60d60a8b630f4228b9e2a3dff7a28e257e893556c7920eefa2c16a4ec7b6457",
+    "src/core/broker/broker_buffer.c": "e4d6c2d1c7bd6c53b1570bf7018009bf00e156e746a10757fa01bd28f2e4f355",
+    "src/core/broker/broker_channel.c": "9d4071573c27aa1c0a98a581f20b27e6c32a520f0ffe9182fc52bb2d550c753b",
+    "src/core/broker/broker_descriptor.c": "b89b9ce7226f75b6fc8f0bbcd1f43cebfc26828cacbe9ea9fe57ff8f144e94d9",
+    "src/core/broker/broker_lifecycle.c": "406d57e4139bdcd049487d670880866d43c8eba73e5707ca70566ea9e1a702d9",
+    "src/core/context/async_context_signal_linux_arm64.c": "2445e9fb40b87c48fdc54d62147a97c5fa972bbcbf8e04eae317a99188f71d90",
+    "src/core/context/fp.c": "75d4745596e4b25efefd23d4f79c899a6542b98ac6e72e59b19ae5c41ef90bd4",
+    "src/core/context/stack_sample.c": "dfc930bb6bc9a3a7f316f705d207b58b1b8fd9d6820b11a2347b4c9cfa77a7ab",
+    "src/core/context/async_context.c": "ef6bd6fc604893c815216b0ba9fa6b18ae11ea72582c004270e8e7b1991a267a",
+    "src/core/context/windows_async_lifetime.c": "0274b34d10f8eb38ec3d0b337bc35495875bd9bf6b50b445e2be9df99a06a5bc",
+    "src/core/context/windows_async_probe.c": "b4719248ef0c6128c8dc3d8ac9bd3897aeefe8bde1645192e2a60e6cd4dcb8c4",
+    "src/core/context/async_context_linux_x86_64.c": "bef9914c39346b2e524c295a31904b63414fa943f4e82d79f359cb4a1b4df03c",
+    "src/core/context/async_context_darwin.c": "3d832b06de26ddbeb2b7c6b6ac87d6b8191c0562b1d4dac0a08d321e7d647971",
+    "src/core/context/windows_async_pe_metadata.c": "faf6c32fb2ac5cc44ef8857fa045638b52c218e4de0e680831c5c67851e1ed3e",
+    "src/core/context/async_context_shared.c": "ba1491477f7096e8b47e741bc293e74a6789afb518bfc5efc6b0009debf0f5ca",
+    "src/core/context/async_context_linux_arm64.c": "94c496a405f3d1405737d00e8462942b6bc5ba50f09a8e253eff4b02618cfb4a",
+    "src/core/context/context_portable.c": "56f30f561b3884e1f7cdb7a28fe71ff0549fec252139a94565bc65c6b6421f28",
+    "src/core/context/context_arm64.c": "986aeb88e40020839c09636b88ad25c26deffc34a147da4d3c0f7e3aab872a94",
+    "src/core/memory/task_span.c": "c59627367d985d0c4b682e6d0f3ec409450d8255dc74d4097f06e242cddd92f5",
+    "src/core/memory/allocator_quiescent.c": "644f5a7c650e44cbf8ea6396564322546d4f961f2b6bd5310fe030f8bf50ba5f",
+    "src/core/memory/alloc.c": "09c0271da8d7a82908d701b8f74839f8a782e3153356d9ef61dfe8668784c9b3",
+    "src/core/memory/io_object_alloc.c": "d5aee3c6dc479198332c8e976356397cdda62ccff79319d9d3559695c4096398",
+    "src/core/platform/platform.c": "646030831b8b509549b9990c726121e1925001d3deb2519886b94b748bfabf14",
+    "src/core/platform/windows_policy.c": "1a9cad1035abdba01b8b7cdcaf4dc596277d49bc39a14baa896434d309caf1fc",
+    "src/core/lifecycle/runtime.c": "9a36db706446c91e3e50b0c644767881103d9c58fa855fbb45c424a79214d572",
+    "src/core/lifecycle/init.c": "7003c8ae09b823b04ce0eb8cbb8561f29999fd1afb0a0546513de8b8610b8b61",
+    "src/core/lifecycle/run.c": "611e799a351bf11b8167cd5d82063f68368b45f04b472cd6a005466d5f31bda3",
+    "src/core/lifecycle/shutdown.c": "5562ede5d5b3a5433497fe15e3078566fa0c8f3bdb9f83d59886124e2d79ca9c",
+    "src/core/lifecycle/lifecycle.c": "711c4e6c080c2a7a198dfbbe38d6d3ccc9fde45c68a19c30a78c1682d47e5578",
+    "src/core/sched/norm_queue.c": "093b44f3745edaffc9766ce8a55d5af90af6008dd8a4c5adf7683f9836ef8e39",
+    "src/core/sched/safepoint.c": "01ba6217bea7170f28ed6ef5833038ad1f14a0c2f59f6b6829ded8ab96946e0a",
+    "src/core/sched/wake.c": "0d8f153c3b4868653dc6e1f31537e2a1128cb4df6ad22267e8f6ea1cbef98dde",
+    "src/core/sched/core_queue.c": "cacb9f4a16d2d24c06538be2f53e50465f01836866785c506b70995f01d27fc6",
+    "src/core/sched/reinject.c": "b9d7f00835c1d79961232a9dab921626817391e4de39038c2bda6362ad5a5b01",
+    "src/core/sched/worker_registry.c": "ecea870f07361da602260230ba29cd60ad12ccd7b170e683755e799682ecb23d",
+    "src/core/sched/norm_queue_depth.c": "1c82dd8eb9e0a965fd2db25ddf2fc6d8d2cf58f95e9aaa3f13e16771e5a9db9e",
+    "src/core/sched/queue_base.c": "c054a6bf393c210943e75e722f7d67f3455ef9f9ab717d98b9ba021a1a930f64",
+    "src/core/sched/execution_lease.c": "ac02b14c9580a8d6ce2e70e0684a13a2acf51986ae823de8dfecf052246e56b9",
+    "src/core/sched/scheduler.c": "37cd1985220f42398174240e4f1c9d837d6015d999f738b4745dbd63494e909c",
+    "src/core/preempt/capabilities.c": "5c3e530e577756516efa4fdc747ffc936277301d0cbb7524fabd13096e897c1d",
+    "src/core/time/timer.c": "84e11f89b13866465ed78dc86c80b4ba2deaa96cc05b9d0d6694709f71c8add2",
+    "src/core/time/timer_heap.c": "ef0cced0b968f863baa50d942511cf9caa0b1f5e4b11d1621400adb257ab9305",
+    "src/core/time/time.c": "66053c3a5acba1940d737115ee60a73abb860a66b6e6671d5b3678158906f9b9",
+    "src/core/task/task_group_registry.c": "37cd264179e35a28e1ee3aac6eb4db9abb695e2262013d5eaafa3f11a09e1d9e",
+    "src/core/task/task_group_internal.h": "b55ea93e49a5b66d7c86fdf62295aed0d3b76c9d8c7fcd4cddd34a0b0e304aee",
+    "src/core/task/task_handle_claim.c": "c4c42acdb812383f4a0ffd45969261a1a7e8d2480200dcde0bb1f94d64cfbefa",
+    "src/core/task/task_local.c": "6d084d028529ed05caa28284d1b1ebccfd7931a28fa8a6c277826a4adfeff426",
+    "src/core/task/task_alloc.c": "8580f2a06bd81675ccdf7cbe3c706f55c97c1691fd717b12df94eca83575eea0",
+    "src/core/task/yield_join_sleep.c": "4e24aeda1fe192109bfb621da70a08b1d1379217f7ba284a3255cb37642a9b2d",
+    "src/core/task/task_handle_registry.c": "4b89b78126d3d69f5ca025f844525ceed184578704071a18bbb98a9b18ebd9e9",
+    "src/core/task/task_group.c": "67282f81da83eba7f5d09147771a75112e573bc444bd014a8054ffc628250921",
+    "src/core/task/task_reclaim.c": "bd7155f54f063dbe3513887fc3c10b81a9ae0176dd3093e8c623be630d374d5c",
+    "src/core/task/task_stack.c": "17762b8df02b11f43dcecee7c2b68618d8a2005b29d5835b2100b81e6cb7ee91",
+    "src/core/task/task_handle_registry_internal.h": "16141c022e3a94781b8d22e332dd5aa348a078c5fbbb3d83135d3858880d94c4",
+    "src/core/task/spawn.c": "739f4384bd1abe646eddf04fc8ce1f584c87f2e3295ee64d6c8e431344814e82",
+    "src/core/registry/handle.c": "a67bf56fde1f8c5986e555cbfbec1a1a95ac2e9de50531b28f3c0992bb444c39",
+    "src/core/registry/owner.c": "3b2e662f91fb6daacaaf4d96ce28b21449c5949f36df0fb1792acfb424a61f6b",
+    "src/core/registry/capability.c": "3d7e4989b99daa5da9a7483e365d23f22574c6d77b2cabeb4dadec51a2c9d553",
+    "src/core/registry/registry.c": "d54938c96592c4c0cbc326e5c90613ec6100c7c3b123d7b601c44c1e1c406b10",
+    "src/core/api/timer_api.c": "5e623d0d154440f50f33253cba8e3f07141a6282fc347174208fc10076affd28",
+    "src/core/api/core_api.c": "b664cc3d8f1ab2d9f1687dbf0c16f0cdae8b5d6424a87c9e5b324e81822431ac",
+    "src/core/api/magic2_api.c": "e79493e92f0e21c727299bcf38686404503eb6e711286c859d9263fc4523a681",
+    "src/core/api/signal_api.c": "936ed9c44620d485c485cdf7db44532efc74e7c3fdf2973a3ca6d737499d5447",
+    "src/core/api/blocking_api.c": "cf71ae917a5842669223832e236816859d47740c391f1af6de5361c9a5e24fb8",
+    "src/core/api/cancel_api.c": "84ee18ba26d6c5cd62621666a2c537f2a9885a2fb039b1202b1af56b4ec571ed",
+    "src/core/sync/channel_fast.c": "923c9102214c9941ded8eba4a395a2a19874456e1d79dcb226c6f16b96a49278",
+    "src/core/sync/channel_lifecycle.c": "2cc2984fb7d7602ee179bf382d1584af6c1e288a9ffa976ddeecf9e28c2af699",
+    "src/core/sync/channel_select_fast.c": "c13adda97d76969076d70134b046ba9362a35d0aea0483b31b8e68d06ba926da",
+    "src/core/sync/channel_select.c": "4a7693bc4be50de8b3bf6e3d6b8fb7c9edea01fd5c0ecfef600c499957ffde31",
+    "src/core/sync/mutex.c": "c7610aeb3c8982210f63c45ea4b25cbdc8466dd270cc1d9415fdbbdd61bdfe4f",
+    "src/core/sync/cond.c": "c868d4e0cc39b28c7b333d86f2b8c01429460f4e790ed7dc5e940049398debb5",
+    "src/core/sync/channel.c": "5bed28ed45f1ab421bbd76154f1c16cea1d6f52bfb9bd91742aef3119234588c",
+    "src/core/sync/channel_cache.c": "7eb63d65352ff29125fa522a19336657678b683200c75f25ddb96d1728b7d975",
+    "src/core/sync/sync.c": "f8b2c14b16da3512d148d47d45dcbc9c3c9fae648187c9f6d12e00ecef743065",
+    "src/core/sync/mutex_lifecycle.c": "b0cc992620d55e8bb0382711281496da1111eaca8610f45085809bded5f27e1b",
+    "src/core/sync/cond_lifecycle.c": "156af4858c19246f2dc5b69a41114bd7f9c54d36da8dbe5705211e742a29d2d6",
+    "src/core/base/names.c": "4c18e6ce4f3b85c29f2b8980136799a2b8cc67589673467bf74a3b4acbc3e918",
+    "src/core/base/util.c": "f7c3f8f5738a9fecd7934ba48f6b44cd54d6e38ff75d9cfb3368b01b49285c78",
+    "src/core/base/abi.c": "b226516b806ea13ded7776fdb199c1164a6f75cbffcdbf3448890dc8c41cfb52",
+    "src/core/base/errno.c": "3f4ed7bbdcc5779e8869b4b31592a277ccb2233586083399a99d48e53e3f8bb8",
+    "src/core/base/io_udata.c": "7262f6272c68a2a8c1654c198030a0ab69af9c6d0c334708777409b16b7c2c0f",
+    "src/core/debug/trace.c": "73a5d969920c34705fff4442271dc3db8f6f1cc470c051e1b728cee193d69181",
+    "src/core/debug/debug_dump_helpers.c": "4c3b15977151e58e97e4b409922832f4906cba2d5baa7ef0aa5abf7bf362aff9",
+    "src/core/debug/debug_stats_json.c": "5429f5dbe717c8e6b6d61d4d3d34540f4862e2eb246e94026c55bfc18258dbef",
+    "src/core/debug/debug.c": "0a5b60eb5ae7baad73071061f94efc12d485c5d0e2d7fe34c85a509b21defc73",
+    "src/core/debug/fault.c": "6aa3d9a8444383eb87854e6ea9e6a81d4c03fca32c71dea5e3e987c3a78a7acd",
+    "src/core/broker/transport/broker_transport_ops.c": "7dbc5dad1fea17c54b475ff79df78cc7e5c9653426e247e67c7d93a855749ba0",
+    "src/core/broker/transport/broker_transport_windows.c": "cac699dc44118378be70dfea5a8a7b4c5033621d35ef43bbdd5b3c0d769c1628",
+    "src/core/broker/transport/broker_transport.c": "ae478d6f75bf2b7b3b61c864052660d50e1bad21ca33d88d0a8c66f40d256bab",
+    "src/core/broker/transport/broker_transport_windows_pipe.c": "87ce71bd7ae7cf7124b3924ab42207f3b0dff080a4ec4e2569bdc89f69719882",
+    "src/core/broker/transport/broker_transport_unix.c": "4b045f32a35bb4c5a49c68221465b73b57dfbc55a51e04dc1b501893e566988f",
+    "src/core/broker/transport/broker_transport_response.c": "ed6da12e8235b016b3bd99b544ce16adb7824b4d801cc1d1c43ed79c366dc6d3",
+    "src/core/broker/transport/broker_transport_selftest.c": "f66671b8a6a2573760c6aa56312741770bc271c4ee2d57a721f58c3d6b2e568a",
+    "src/core/broker/transport/broker_transport_posix.c": "56b9dbf09222648483ede324400876ae2a5e33eb61536ffcf43b2267f91e3bb4",
+    "src/core/broker/transport/broker_transport_posix_message.c": "3e7811343695ade592615aede3d08503ea5363484d87744512db17b532efba87",
+    "src/core/broker/transport/broker_transport_ring.c": "2138eda4ab7e343c15cea7c673b556d98bfdfbac16794c06d7662b07699cc338",
+    "src/core/broker/transport/broker_transport_posix_socket.c": "659a749ef855813ea69c3e86f1b9ea99275b0b40fd375ed1804b437a9df950e8",
+    "src/core/broker/transport/broker_transport_rollback.c": "c69d51c2be2d8b6865b735a8f78676aebfd5d45d672a01a412ca184ae92b7bdd",
+    "src/core/broker/transport/broker_transport_windows_fd_stubs.c": "7464327e409514d72917456a2c417a5ce09bd1791023e909da194bcfaf659b90",
+    "src/core/broker/transport/broker_transport_dispatch.c": "b338b5cef1289493bc3d91b8cb2a62002d491654853d9d0dcfbe6c543d81f87d",
+    "src/core/broker/transport/broker_transport_windows_session.c": "ca78b391e6bb77d13a720ac54090bc4e89f96e73a5ead98f5be43cb5c9086a92",
+    "src/core/broker/ring/broker_ring_dispatch.c": "94c1b8725730e19a93201b26744acb987ea66b6fc399205f1ae3a328b85b2190",
+    "src/core/broker/ring/broker_ring_doorbell.c": "681f552b5eebf672f1e5448ee5b2f3b4d24c8e6ef05265601cdfb16e6600c1bf",
+    "src/core/broker/ring/broker_ring_shm_posix.c": "b483d622efeca725f72b6060ad2fe1f9b89601891f8bbf8f85be45fccbd1216e",
+    "src/core/broker/ring/broker_ring_shm_windows.c": "e83d559264fb94fd52d142c453e9da056fe59a49d2fabc33dd0bf2e8137d9b7b",
+    "src/core/broker/ring/broker_ring_buffer_grant.c": "cfb9f0d7b2efec122ea59eaaebc49c7658a32369175b23e8b3bc43262f3e6b28",
+    "src/core/broker/ring/broker_ring.c": "66ea4386b7711e16606e6736083282b219eb4a8bbfa49abef949946e6d815a75",
+    "src/core/broker/ring/broker_ring_shm.c": "883efc28a201011eac190dd3ce0537f44ebe2e3c5c7b014517732cd278b6e597",
+    "src/core/broker/ring/broker_ring_stats.c": "ae0e1047493a1929b98bf00371ba43d3e02df0059d9272676659e241aaf9cd57",
+    "src/core/broker/ring/broker_ring_queue.c": "a650c8a91142eb4cfe04919c7cd14a97ca10f1ecab89bb980191ede3484e3168",
+    "src/core/broker/ring/broker_ring_ops.c": "5550e6ae3d80ddca3275ec7c4b59b98d49602d0da46431150d7fc0a590d2ac62",
+    "src/io/linux/runtime_io_watch_linux_internal.h": "85f6972706e8e779c4e281ce9b4ba4f5212a6992877bb45bab510a976bb432c8",
+    "src/io/api/owned.c": "ea29110e2047e302ced5f7015b7f7317f37865a4d79fc7af332cdaf6876460d7",
+    "src/io/api/direct.c": "a3931d35cf57e055aaa24afe0018ba4cb9e5ee47bd0bf9416c6b0f5099c9b54b",
+    "src/io/api/datagram.c": "9496d8474ea42042f758a2a41e046dc724db33152c05841eaa3639a299009a68",
+    "src/io/api/handle_positional.c": "10aec741f299b964fa34c6329ef261234959c3ebba9d709f44afe3bb59b4992a",
+    "src/io/api/issue.c": "b99d79f266d87ced36c321c1a3bf6e76c89fdce66e1b601d372a543d065f9a18",
+    "src/io/api/io_api.c": "8b09ae63977ccef89055e9ffc9fabb6456c36b34cb81a474fddd1b81514b26d9",
+    "src/io/api/direct_tuning.c": "8c2b95b35c8d1245dd7a99dc5fb36bedc5f6071e8bce25160eb0a4ad32a4d5aa",
+    "src/io/api/positional.c": "c6bf9d0b1701e208c0a0a5a5cce0b0053865414651068c623efdcf3be952527e",
+    "src/io/api/blocking_ops.c": "f1b0f0b3262c9ae122e866e74c86ee96f9de3035362fc6bae22acccece9ff09e",
+    "src/io/api/positional_util.c": "1842a2131611b95ade7453ef9219e881bab2e64ab368bc9048b04a787a31a02f",
+    "src/io/api/public.c": "5f069d4a64e4b01b39042862d12198102d8317b8bc40b17dafbc7ee01f0d9ac1",
+    "src/io/api/blocking_wrappers.c": "2e0f98a20d0e0225e9c9a94b6f2475b35290646c4dac157a1b8d1aadaf5c37c8",
+    "src/io/api/blocking_file_ops.c": "d7a93765a141325c213fcf4e272eded9826f35295c6421ef527eb62d6f8a419b",
+    "src/io/watch/migration_live_finalize_template.inc": "d5295742581a20def65cf25a9897be17dd296bb4a199f1185ba3d78ddbbc6f74",
+    "src/io/watch/migration_live_forward_template.inc": "851d60532ac051ac5b8579e7c6cdfb34725ef1959f62657a93970ba364259934",
+    "src/io/watch/watch.c": "751af9ba97f27a65dab5cce07479fc071872b72cc7f79409722fb5b21a7bb231",
+    "src/io/watch/rehome_accept_template.inc": "2e40cd4a783e721dd94af3439c4e3602476fdba20a364b417e58ab2f279d4737",
+    "src/io/watch/watch_index.c": "1a5097df10b5e4d9cd3c1a79bfd5a991e6e1bd6622a7ece5566dd0c8ac6e112c",
+    "src/io/watch/watch_queue.c": "06b3a7d65e5e655f18fbf603065b3f7b1ce497a0308c07333d068f46138e7ed1",
+    "src/io/watch/rehome_template.inc": "ba0f319e1c4b5aa0eedb1744ba8c62f215b43dd4a1a8f43d3557fd87c06bb9a1",
+    "src/io/watch/watch_lookup.c": "2e3a12e85b6dfd4fab55ef1a05a65edf1312854f9eec99281ad9f8003fe602fc",
+    "src/io/watch/rehome_recv_template.inc": "60111b7e9a7272a31949c6242c9c6f0e0ccc242b4bad26b963875eadffe57668",
+    "src/io/watch/waiter.c": "76fdd83a9d2ec77ca05a04c1c6598188144fb8813b36fc6e8f2988294f8629b4",
+    "src/io/watch/close.c": "7a38a0b2b49dcbcea6713ab5bb79344af1e25f4ae62619602c1e5846c8bdb81a",
+    "src/io/watch/migration.c": "7abe731a333a32186579b1f30637db9817c8de33c77a7345d07754da10dfa465",
+    "src/io/darwin/runtime_io_watch_darwin_internal.h": "59a7eab4c10b32c2df04755b3aa70248f69fe4b6ace2664fcb5c98a4eeba0539",
+    "src/io/windows/runtime_io_watch_windows_internal.h": "2f13b4750c2b1425c5ed851ad4d4e82b5007cb85ac08a85a5f02d02856428587",
+    "src/io/engine/io_engine.c": "6f983d14ea2fd560e00ebabc6dc807e266f8d44b419179e9464006f03e804510",
+    "src/io/buffer/buffer_registry.c": "ee8b43f62f3a5104592eebb9325a6879b9190c158a2777738a0a44a240182c7e",
+    "src/io/linux/watch/linux_migration_rehome.c": "a3ae0bf9b0304c65b5c095d04b092dcd8d3d5e0048c1c1da7141726555405e0a",
+    "src/io/linux/watch/linux_worker.c": "54cda9942579fd2709ca2db77e70e629396141e015c03b4b1ca43032e16cc8b1",
+    "src/io/linux/watch/linux_migration_live.c": "578c0d8588eebbcc46b0ca20034eb3d88e2b8757b57ede714a712499aff2a6de",
+    "src/io/linux/watch/prelude.c": "7b0d23909c78b1926d192c8f50f78f40cd451af1a025c88a99e14a272bff1746",
+    "src/io/linux/watch/linux_lookup.c": "8c592ac11912ea04c69cf4e7d4c176932441103d6a774fe22bf3847dab08e896",
+    "src/io/linux/watch/linux_control.c": "23f95a163e5dfdb36883b04c01757239199d0de0bcb52a46687691c4a6ef206e",
+    "src/io/linux/watch/cqe.c": "b8e5a88bdafe8054683ae307db04a51ccf169da1c85bcabf131a5934c5a82e12",
+    "src/io/linux/watch/linux_submit.c": "82194ef1ac44400ebcc82b1df2f41cbc48a8c76d9fafcab10ed90c8fba61eeda",
+    "src/io/linux/watch/linux_state.c": "f44e3eb467afefce3caa6c1ad1f34d559264287969a3207576f2b0e03e157cb7",
+    "src/io/darwin/watch/darwin_migration_live.c": "2db9f10cda0bf1e9f091ff4053decf82df30ac2b47764eaca271f069d595742c",
+    "src/io/darwin/watch/darwin_worker.c": "22c622124325290e157a29a2440542e462bfdd8da49c6b9dc3678d2838f1b588",
+    "src/io/darwin/watch/darwin_completion.c": "c94b899938b2c4395e619d9613b90e572278ac03e4d98aba1edca3b4ec201ad6",
+    "src/io/darwin/watch/darwin_state.c": "60c8cbfc908da39ccf93051b9bfe24becc97966f993aa56cbd26583b73bc6b1b",
+    "src/io/darwin/watch/events.c": "272fe6b845f78b084db6352fa44e81a9aa1630343e2a5021f6b4b6ef22397bcc",
+    "src/io/darwin/watch/darwin_control.c": "beb5d2e258873d8b5730e3f87b9f47b1d53a69d238c34023cf2b457cac5f3165",
+    "src/io/darwin/watch/darwin_migration_rehome.c": "b9446864353514342cc0c15ffaae758b393f109c951179e147dacbb92e92782f",
+    "src/io/windows/watch/iocp.c": "bcabfa21007de2a3bd40d12ea998d67710a433f61ff3a0a471173a4fb6ee80ac",
+    "src/io/windows/watch/windows_control.c": "8df1c4c321a2c93ece4688d95102e463ca960d167e959eae966cba89fc8016d4",
+    "src/io/windows/watch/socket.c": "8cf159be5b8aab1c79a38a5a6d7495be71a2eb72d33c110e91386052f83ba5b9",
+    "src/io/windows/watch/windows_state.c": "bab4b45fad6bd2c1475e91744ca10106e8ebd21a92e0b6cdf517b93240f211fd",
+    "src/io/windows/watch/windows_completion.c": "c4216f52fcfebe381949c4605e144576dfb7637439ecc88e0ce07a894fec33ef",
+    "src/io/windows/watch/windows_submit.c": "3fe072dbe9e69bf6f66177f90be6bfd149db0fdaa859c26c0b34442c89c2bcc3",
+    "src/io/windows/watch/windows_watch.c": "0cc1ac89f3e38a47d51b8659495416e1381d72bc5b0b71b9e6c349bf33e86a12",
+    "src/io/windows/watch/fallback.c": "85ff097e8325cf06a3ea629111b49045a93823c1ab1301610813170640a7c52e",
+    "src/io/windows/watch/pool.c": "17dc6bf00b9052911139eec3c3accb1ce2cd65606b49b4e06081d2ecf01fb28b",
+    "src/engine/scheduler/block.c": "f59e07b63196abcb14880c5283d93c2490880158f9aef2e9db0ccc410aaedb75",
+    "src/engine/scheduler/scheduler_engine.c": "0f00dd09d3eef47d10dc6242e4b1836f7d71cf3d5cae96cf2731de9ca2cc2c45",
+    "src/engine/watchdog/watchdog_scale.c": "4f7f72f8aa5af0fd262403580dee046bd4ec1223b80d106998d2ae2414958c80",
+    "src/engine/watchdog/watchdog_worker.c": "74cb0a03133803952b8bb06151d3b3a496b67f2f9d81bc0a21f4ed2b6251f3bf",
+    "src/engine/watchdog/watchdog_autotune.c": "53ec40335738d412e609b66f40d3d6d76405283d1a2ce242155854eda0436a7a",
+    "src/engine/watchdog/watchdog_probe.c": "73ba17be6ccf7f6998efa1811d451cc4e31637ea17e9a3917e6d62aeaf786f1f",
+    "src/engine/watchdog/watchdog_merge.c": "6d89ad32e5a2d512a40e188b28bcf263323a78d441efdbcbeb24f668029d107e",
+    "src/engine/watchdog/watchdog.c": "493d4847aa3199f15561c84d659ed9f58be266fc248d604cbb7c0984a48a1d8c",
+    "src/engine/watchdog/watchdog_rehome.c": "be5ac57cf63a4be034a738c110a93e6457881a3176642886f0d2de6bef09c27b",
+    "include/llam/runtime.h": "2b7c35a07a64eb8c77d395d6fdc521ae059dfe29b37f97c0dfa80d374789ffd7",
+    "include/llam/io.h": "85b5519992720286623e580c912d081ce5cd1be9c8632efaa14e0f318e96f416",
+    "include/llam/platform.h": "1d0d7a71e97098336a6f1ef7b09092fa210b4e391b95e82eccd770533d216356"
+  },
+  "commands": [
+    {
+      "command": [
+        "make",
+        "-j4",
+        "CC=clang",
+        "bench_magic2_kernels",
+        "test_magic2_internal",
+        "static"
+      ],
+      "exit_code": 0,
+      "seconds": 0.8566486669587903,
+      "stdout": "clang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/src/core/sched/worker_registry.o src/core/sched/worker_registry.c\nclang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/experiments/magic2/bench_magic2_kernels.o experiments/magic2/bench_magic2_kernels.c\nclang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/tests/test_magic2_internal.o tests/test_magic2_internal.c\nclang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/tests/test_magic2_cpu_internal.o tests/test_magic2_cpu_internal.c\nrm -f libllam_runtime.a\nclang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/tests/test_magic2_auto_internal.o tests/test_magic2_auto_internal.c\nar rcs libllam_runtime.a object/src/core/sched/worker_registry.o object/src/core/sched/execution_lease.o object/src/core/lifecycle/runtime.o object/src/core/base/abi.o object/src/core/base/errno.o object/src/core/base/util.o object/src/core/base/io_udata.o object/src/core/registry/capability.o object/src/core/broker/broker.o object/src/core/broker/broker_lifecycle.o object/src/core/broker/broker_ops.o object/src/core/broker/broker_validate.o object/src/core/broker/broker_buffer.o object/src/core/broker/broker_descriptor.o object/src/core/broker/broker_channel.o object/src/core/broker/broker_revoke.o object/src/core/broker/broker_task.o object/src/core/broker/broker_windows_security.o object/src/core/broker/transport/broker_transport_dispatch.o object/src/core/broker/transport/broker_transport_ops.o object/src/core/broker/transport/broker_transport_response.o object/src/core/broker/transport/broker_transport_rollback.o object/src/core/broker/transport/broker_transport_ring.o object/src/core/broker/transport/broker_transport.o object/src/core/broker/transport/broker_transport_windows.o object/src/core/broker/transport/broker_transport_windows_fd_stubs.o object/src/core/broker/transport/broker_transport_windows_pipe.o object/src/core/broker/transport/broker_transport_windows_session.o object/src/core/broker/transport/broker_transport_posix.o object/src/core/broker/transport/broker_transport_posix_message.o object/src/core/broker/transport/broker_transport_posix_socket.o object/src/core/broker/transport/broker_transport_unix.o object/src/core/broker/transport/broker_transport_selftest.o object/src/core/broker/ring/broker_ring.o object/src/core/broker/ring/broker_ring_buffer_grant.o object/src/core/broker/ring/broker_ring_doorbell.o object/src/core/broker/ring/broker_ring_dispatch.o object/src/core/broker/ring/broker_ring_ops.o object/src/core/broker/ring/broker_ring_queue.o object/src/core/broker/ring/broker_ring_stats.o object/src/core/broker/ring/broker_ring_shm.o object/src/core/broker/ring/broker_ring_shm_posix.o object/src/core/broker/ring/broker_ring_shm_windows.o object/src/core/debug/fault.o object/src/core/base/names.o object/src/core/time/time.o object/src/core/context/fp.o object/src/core/context/stack_sample.o object/src/core/context/async_context.o object/src/core/context/async_context_shared.o object/src/core/context/context_portable.o object/src/core/sched/queue_base.o object/src/core/sched/norm_queue_depth.o object/src/core/sched/norm_queue.o object/src/core/sched/core_queue.o object/src/core/memory/alloc.o object/src/core/memory/task_span.o object/src/core/memory/allocator_quiescent.o object/src/core/task/task_alloc.o object/src/core/task/task_handle_registry.o object/src/core/task/task_handle_claim.o object/src/core/memory/io_object_alloc.o object/src/core/wait/wait_timer_alloc.o object/src/core/debug/trace.o object/src/core/sched/wake.o object/src/core/platform/platform.o object/src/core/preempt/capabilities.o object/tools/preempt/metadata.o object/src/core/platform/windows_policy.o object/src/core/sched/safepoint.o object/src/core/wait/wait.o object/src/core/task/task_reclaim.o object/src/core/task/task_stack.o object/src/core/sched/reinject.o object/src/core/wait/wait_accounting.o object/src/core/wait/wait_tracking.o object/src/core/time/timer_heap.o object/src/core/time/timer.o object/src/core/api/timer_api.o object/src/core/api/signal_api.o object/src/engine/scheduler/scheduler_engine.o object/src/engine/scheduler/block.o object/src/io/engine/io_engine.o object/src/engine/watchdog/watchdog.o object/src/engine/watchdog/watchdog_probe.o object/src/engine/watchdog/watchdog_merge.o object/src/engine/watchdog/watchdog_rehome.o object/src/engine/watchdog/watchdog_scale.o object/src/engine/watchdog/watchdog_worker.o object/src/engine/watchdog/watchdog_autotune.o object/src/core/api/core_api.o object/src/core/task/spawn.o object/src/core/task/yield_join_sleep.o object/src/core/api/blocking_api.o object/src/core/api/magic2_api.o object/src/core/api/cancel_api.o object/src/core/lifecycle/lifecycle.o object/src/core/sched/scheduler.o object/src/core/lifecycle/init.o object/src/core/lifecycle/shutdown.o object/src/core/lifecycle/run.o object/src/core/sync/sync.o object/src/core/sync/mutex_lifecycle.o object/src/core/sync/mutex.o object/src/core/sync/cond_lifecycle.o object/src/core/sync/cond.o object/src/core/sync/channel_cache.o object/src/core/sync/channel_lifecycle.o object/src/core/sync/channel_fast.o object/src/core/sync/channel.o object/src/core/sync/channel_select_fast.o object/src/core/sync/channel_select.o object/src/core/registry/handle.o object/src/core/registry/owner.o object/src/core/registry/registry.o object/src/core/task/task_group.o object/src/core/task/task_group_registry.o object/src/core/task/task_local.o object/src/io/api/io_api.o object/src/io/api/direct.o object/src/io/api/direct_tuning.o object/src/io/api/issue.o object/src/io/api/blocking_ops.o object/src/io/api/blocking_file_ops.o object/src/io/api/blocking_wrappers.o object/src/io/buffer/buffer_registry.o object/src/io/api/owned.o object/src/io/api/datagram.o object/src/io/api/handle_positional.o object/src/io/api/positional.o object/src/io/api/positional_util.o object/src/io/api/public.o object/src/io/windows/watch/iocp.o object/src/core/debug/debug_dump_helpers.o object/src/core/debug/debug_stats_json.o object/src/core/debug/debug.o object/src/io/watch/watch.o object/src/io/watch/watch_index.o object/src/io/watch/close.o object/src/io/watch/watch_lookup.o object/src/io/watch/migration.o object/src/io/watch/watch_queue.o object/src/io/watch/waiter.o object/src/io/darwin/watch/darwin_state.o object/src/io/darwin/watch/darwin_migration_live.o object/src/io/darwin/watch/darwin_migration_rehome.o object/src/io/darwin/watch/darwin_control.o object/src/io/darwin/watch/darwin_completion.o object/src/io/darwin/watch/events.o object/src/io/darwin/watch/darwin_worker.o object/src/core/context/context_arm64.o object/src/asm/darwin/arm64/darwin_context_arm64.o\nclang -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -o bench_magic2_kernels object/src/core/sched/worker_registry.o object/src/core/sched/execution_lease.o object/src/core/lifecycle/runtime.o object/src/core/base/abi.o object/src/core/base/errno.o object/src/core/base/util.o object/src/core/base/io_udata.o object/src/core/registry/capability.o object/src/core/broker/broker.o object/src/core/broker/broker_lifecycle.o object/src/core/broker/broker_ops.o object/src/core/broker/broker_validate.o object/src/core/broker/broker_buffer.o object/src/core/broker/broker_descriptor.o object/src/core/broker/broker_channel.o object/src/core/broker/broker_revoke.o object/src/core/broker/broker_task.o object/src/core/broker/broker_windows_security.o object/src/core/broker/transport/broker_transport_dispatch.o object/src/core/broker/transport/broker_transport_ops.o object/src/core/broker/transport/broker_transport_response.o object/src/core/broker/transport/broker_transport_rollback.o object/src/core/broker/transport/broker_transport_ring.o object/src/core/broker/transport/broker_transport.o object/src/core/broker/transport/broker_transport_windows.o object/src/core/broker/transport/broker_transport_windows_fd_stubs.o object/src/core/broker/transport/broker_transport_windows_pipe.o object/src/core/broker/transport/broker_transport_windows_session.o object/src/core/broker/transport/broker_transport_posix.o object/src/core/broker/transport/broker_transport_posix_message.o object/src/core/broker/transport/broker_transport_posix_socket.o object/src/core/broker/transport/broker_transport_unix.o object/src/core/broker/transport/broker_transport_selftest.o object/src/core/broker/ring/broker_ring.o object/src/core/broker/ring/broker_ring_buffer_grant.o object/src/core/broker/ring/broker_ring_doorbell.o object/src/core/broker/ring/broker_ring_dispatch.o object/src/core/broker/ring/broker_ring_ops.o object/src/core/broker/ring/broker_ring_queue.o object/src/core/broker/ring/broker_ring_stats.o object/src/core/broker/ring/broker_ring_shm.o object/src/core/broker/ring/broker_ring_shm_posix.o object/src/core/broker/ring/broker_ring_shm_windows.o object/src/core/debug/fault.o object/src/core/base/names.o object/src/core/time/time.o object/src/core/context/fp.o object/src/core/context/stack_sample.o object/src/core/context/async_context.o object/src/core/context/async_context_shared.o object/src/core/context/context_portable.o object/src/core/sched/queue_base.o object/src/core/sched/norm_queue_depth.o object/src/core/sched/norm_queue.o object/src/core/sched/core_queue.o object/src/core/memory/alloc.o object/src/core/memory/task_span.o object/src/core/memory/allocator_quiescent.o object/src/core/task/task_alloc.o object/src/core/task/task_handle_registry.o object/src/core/task/task_handle_claim.o object/src/core/memory/io_object_alloc.o object/src/core/wait/wait_timer_alloc.o object/src/core/debug/trace.o object/src/core/sched/wake.o object/src/core/platform/platform.o object/src/core/preempt/capabilities.o object/tools/preempt/metadata.o object/src/core/platform/windows_policy.o object/src/core/sched/safepoint.o object/src/core/wait/wait.o object/src/core/task/task_reclaim.o object/src/core/task/task_stack.o object/src/core/sched/reinject.o object/src/core/wait/wait_accounting.o object/src/core/wait/wait_tracking.o object/src/core/time/timer_heap.o object/src/core/time/timer.o object/src/core/api/timer_api.o object/src/core/api/signal_api.o object/src/engine/scheduler/scheduler_engine.o object/src/engine/scheduler/block.o object/src/io/engine/io_engine.o object/src/engine/watchdog/watchdog.o object/src/engine/watchdog/watchdog_probe.o object/src/engine/watchdog/watchdog_merge.o object/src/engine/watchdog/watchdog_rehome.o object/src/engine/watchdog/watchdog_scale.o object/src/engine/watchdog/watchdog_worker.o object/src/engine/watchdog/watchdog_autotune.o object/src/core/api/core_api.o object/src/core/task/spawn.o object/src/core/task/yield_join_sleep.o object/src/core/api/blocking_api.o object/src/core/api/magic2_api.o object/src/core/api/cancel_api.o object/src/core/lifecycle/lifecycle.o object/src/core/sched/scheduler.o object/src/core/lifecycle/init.o object/src/core/lifecycle/shutdown.o object/src/core/lifecycle/run.o object/src/core/sync/sync.o object/src/core/sync/mutex_lifecycle.o object/src/core/sync/mutex.o object/src/core/sync/cond_lifecycle.o object/src/core/sync/cond.o object/src/core/sync/channel_cache.o object/src/core/sync/channel_lifecycle.o object/src/core/sync/channel_fast.o object/src/core/sync/channel.o object/src/core/sync/channel_select_fast.o object/src/core/sync/channel_select.o object/src/core/registry/handle.o object/src/core/registry/owner.o object/src/core/registry/registry.o object/src/core/task/task_group.o object/src/core/task/task_group_registry.o object/src/core/task/task_local.o object/src/io/api/io_api.o object/src/io/api/direct.o object/src/io/api/direct_tuning.o object/src/io/api/issue.o object/src/io/api/blocking_ops.o object/src/io/api/blocking_file_ops.o object/src/io/api/blocking_wrappers.o object/src/io/buffer/buffer_registry.o object/src/io/api/owned.o object/src/io/api/datagram.o object/src/io/api/handle_positional.o object/src/io/api/positional.o object/src/io/api/positional_util.o object/src/io/api/public.o object/src/io/windows/watch/iocp.o object/src/core/debug/debug_dump_helpers.o object/src/core/debug/debug_stats_json.o object/src/core/debug/debug.o object/src/io/watch/watch.o object/src/io/watch/watch_index.o object/src/io/watch/close.o object/src/io/watch/watch_lookup.o object/src/io/watch/migration.o object/src/io/watch/watch_queue.o object/src/io/watch/waiter.o object/src/io/darwin/watch/darwin_state.o object/src/io/darwin/watch/darwin_migration_live.o object/src/io/darwin/watch/darwin_migration_rehome.o object/src/io/darwin/watch/darwin_control.o object/src/io/darwin/watch/darwin_completion.o object/src/io/darwin/watch/events.o object/src/io/darwin/watch/darwin_worker.o object/src/core/context/context_arm64.o object/src/asm/darwin/arm64/darwin_context_arm64.o object/experiments/magic2/bench_magic2_kernels.o -pthread\nclang -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -o test_magic2_internal object/src/core/sched/worker_registry.o object/src/core/sched/execution_lease.o object/src/core/lifecycle/runtime.o object/src/core/base/abi.o object/src/core/base/errno.o object/src/core/base/util.o object/src/core/base/io_udata.o object/src/core/registry/capability.o object/src/core/broker/broker.o object/src/core/broker/broker_lifecycle.o object/src/core/broker/broker_ops.o object/src/core/broker/broker_validate.o object/src/core/broker/broker_buffer.o object/src/core/broker/broker_descriptor.o object/src/core/broker/broker_channel.o object/src/core/broker/broker_revoke.o object/src/core/broker/broker_task.o object/src/core/broker/broker_windows_security.o object/src/core/broker/transport/broker_transport_dispatch.o object/src/core/broker/transport/broker_transport_ops.o object/src/core/broker/transport/broker_transport_response.o object/src/core/broker/transport/broker_transport_rollback.o object/src/core/broker/transport/broker_transport_ring.o object/src/core/broker/transport/broker_transport.o object/src/core/broker/transport/broker_transport_windows.o object/src/core/broker/transport/broker_transport_windows_fd_stubs.o object/src/core/broker/transport/broker_transport_windows_pipe.o object/src/core/broker/transport/broker_transport_windows_session.o object/src/core/broker/transport/broker_transport_posix.o object/src/core/broker/transport/broker_transport_posix_message.o object/src/core/broker/transport/broker_transport_posix_socket.o object/src/core/broker/transport/broker_transport_unix.o object/src/core/broker/transport/broker_transport_selftest.o object/src/core/broker/ring/broker_ring.o object/src/core/broker/ring/broker_ring_buffer_grant.o object/src/core/broker/ring/broker_ring_doorbell.o object/src/core/broker/ring/broker_ring_dispatch.o object/src/core/broker/ring/broker_ring_ops.o object/src/core/broker/ring/broker_ring_queue.o object/src/core/broker/ring/broker_ring_stats.o object/src/core/broker/ring/broker_ring_shm.o object/src/core/broker/ring/broker_ring_shm_posix.o object/src/core/broker/ring/broker_ring_shm_windows.o object/src/core/debug/fault.o object/src/core/base/names.o object/src/core/time/time.o object/src/core/context/fp.o object/src/core/context/stack_sample.o object/src/core/context/async_context.o object/src/core/context/async_context_shared.o object/src/core/context/context_portable.o object/src/core/sched/queue_base.o object/src/core/sched/norm_queue_depth.o object/src/core/sched/norm_queue.o object/src/core/sched/core_queue.o object/src/core/memory/alloc.o object/src/core/memory/task_span.o object/src/core/memory/allocator_quiescent.o object/src/core/task/task_alloc.o object/src/core/task/task_handle_registry.o object/src/core/task/task_handle_claim.o object/src/core/memory/io_object_alloc.o object/src/core/wait/wait_timer_alloc.o object/src/core/debug/trace.o object/src/core/sched/wake.o object/src/core/platform/platform.o object/src/core/preempt/capabilities.o object/tools/preempt/metadata.o object/src/core/platform/windows_policy.o object/src/core/sched/safepoint.o object/src/core/wait/wait.o object/src/core/task/task_reclaim.o object/src/core/task/task_stack.o object/src/core/sched/reinject.o object/src/core/wait/wait_accounting.o object/src/core/wait/wait_tracking.o object/src/core/time/timer_heap.o object/src/core/time/timer.o object/src/core/api/timer_api.o object/src/core/api/signal_api.o object/src/engine/scheduler/scheduler_engine.o object/src/engine/scheduler/block.o object/src/io/engine/io_engine.o object/src/engine/watchdog/watchdog.o object/src/engine/watchdog/watchdog_probe.o object/src/engine/watchdog/watchdog_merge.o object/src/engine/watchdog/watchdog_rehome.o object/src/engine/watchdog/watchdog_scale.o object/src/engine/watchdog/watchdog_worker.o object/src/engine/watchdog/watchdog_autotune.o object/src/core/api/core_api.o object/src/core/task/spawn.o object/src/core/task/yield_join_sleep.o object/src/core/api/blocking_api.o object/src/core/api/magic2_api.o object/src/core/api/cancel_api.o object/src/core/lifecycle/lifecycle.o object/src/core/sched/scheduler.o object/src/core/lifecycle/init.o object/src/core/lifecycle/shutdown.o object/src/core/lifecycle/run.o object/src/core/sync/sync.o object/src/core/sync/mutex_lifecycle.o object/src/core/sync/mutex.o object/src/core/sync/cond_lifecycle.o object/src/core/sync/cond.o object/src/core/sync/channel_cache.o object/src/core/sync/channel_lifecycle.o object/src/core/sync/channel_fast.o object/src/core/sync/channel.o object/src/core/sync/channel_select_fast.o object/src/core/sync/channel_select.o object/src/core/registry/handle.o object/src/core/registry/owner.o object/src/core/registry/registry.o object/src/core/task/task_group.o object/src/core/task/task_group_registry.o object/src/core/task/task_local.o object/src/io/api/io_api.o object/src/io/api/direct.o object/src/io/api/direct_tuning.o object/src/io/api/issue.o object/src/io/api/blocking_ops.o object/src/io/api/blocking_file_ops.o object/src/io/api/blocking_wrappers.o object/src/io/buffer/buffer_registry.o object/src/io/api/owned.o object/src/io/api/datagram.o object/src/io/api/handle_positional.o object/src/io/api/positional.o object/src/io/api/positional_util.o object/src/io/api/public.o object/src/io/windows/watch/iocp.o object/src/core/debug/debug_dump_helpers.o object/src/core/debug/debug_stats_json.o object/src/core/debug/debug.o object/src/io/watch/watch.o object/src/io/watch/watch_index.o object/src/io/watch/close.o object/src/io/watch/watch_lookup.o object/src/io/watch/migration.o object/src/io/watch/watch_queue.o object/src/io/watch/waiter.o object/src/io/darwin/watch/darwin_state.o object/src/io/darwin/watch/darwin_migration_live.o object/src/io/darwin/watch/darwin_migration_rehome.o object/src/io/darwin/watch/darwin_control.o object/src/io/darwin/watch/darwin_completion.o object/src/io/darwin/watch/events.o object/src/io/darwin/watch/darwin_worker.o object/src/core/context/context_arm64.o object/src/asm/darwin/arm64/darwin_context_arm64.o object/tests/test_magic2_internal.o object/tests/test_magic2_cpu_internal.o object/tests/test_magic2_auto_internal.o -pthread\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "./bench_magic2_kernels",
+        "--self-test"
+      ],
+      "exit_code": 0,
+      "seconds": 0.010555999993812293,
+      "stdout": "{\"self_test\":\"passed\",\"checks\":2400,\"kernels\":4}\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "./bench_magic2_kernels",
+        "--list"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0029530830215662718,
+      "stdout": "{\"kernels\":[\"scalar\",\"unroll4\",\"neon4\",\"neon16\"]}\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "./test_magic2_internal"
+      ],
+      "exit_code": 0,
+      "seconds": 0.038283083005808294,
+      "stdout": "test_magic2_internal: dispatch, one-P progress, failure, and cancellation passed\ntest_magic2_cpu_internal: managed tiles, budget, cancellation, ownership, and shutdown passed\ntest_magic2_auto_internal: threshold, pressure, family, fallback, cancellation, and lifetime passed\n",
+      "stderr": ""
+    }
+  ],
+  "build_paths_before": {
+    "bench_magic2_kernels": null,
+    "object/experiments/magic2/bench_magic2_kernels.o": null,
+    "test_magic2_internal": {
+      "bytes": 779416,
+      "sha256": "c7d48a5e44c787e0c671da38dfc5cf39fb504e0fb98ae14ed82ea5acb6998af3"
+    },
+    "libllam_runtime.a": {
+      "bytes": 7965568,
+      "sha256": "e14f8e61842ff38a892f0c4c9b5f7370310a4f3bf149e0d6c7fd97350d268228"
+    }
+  },
+  "initial_experiment_source_sha256": {
+    "experiments/magic2/bench_magic2_kernels.c": "e74f074b0bc9d6826a03332ecf38afbafa885dea7c1e0618c11f34d9ddc5fda9",
+    "scripts/bench_magic2_kernels.py": "b7db055bf40374f2e14d09da895bb2fdaa24932a79f588514bdf7c0f90cc17df",
+    "Makefile": "41ac34e1f28d2000402dd72d9d3b34b45c45e0875c704cb780f7ddf9990afda9",
+    "CMakeLists.txt": "0f2333bc430a6ce181b94bcb94fcee6645b16b75261bbe9ef6be86a459879787"
+  },
+  "initial_smoke_note": "Functional smoke ran concurrently with sanitizer/configuration checks; exploratory timings are not the final performance comparison. Source then gained the same valid nonalias contract on all kernel implementations.",
+  "final_experiment_source_sha256": {
+    "experiments/magic2/bench_magic2_kernels.c": "df08ca5cd5fdfe1c3b778462d1018ab563cc74a362b497c6969810be2c71c131",
+    "scripts/bench_magic2_kernels.py": "b7db055bf40374f2e14d09da895bb2fdaa24932a79f588514bdf7c0f90cc17df",
+    "Makefile": "41ac34e1f28d2000402dd72d9d3b34b45c45e0875c704cb780f7ddf9990afda9",
+    "CMakeLists.txt": "0f2333bc430a6ce181b94bcb94fcee6645b16b75261bbe9ef6be86a459879787"
+  },
+  "benchmark_binary_sha256": "cc9dda3419d2a8d865293f7a866c8a5b0807b32a85dc8f03b18ba864c2030bdd",
+  "build_signature": "CC=clang\nCPPFLAGS=-Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE\nSHARED_CPPFLAGS=-Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -DLLAM_BUILD_SHARED\nCFLAGS=-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer\nLDLIBS=-pthread\nOBJDIR=object\nHOST_PLATFORM=darwin\nUNAME_M=arm64\n",
+  "environment": {
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+    "cpu": "Apple M4\n10\n25769803776",
+    "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "uptime_before": "3:07  up 5 days, 18:13, 1 user, load averages: 8.70 8.21 8.18"
+  },
+  "pre_cleanup_fix_measurements": {
+    "comparison_sha256": "571cd6db1d371b79c90d9d5d1ff1784c989c3360213713ce48da1db89eb75d2c",
+    "binary_sha256": "17065d1ae620318dd53edf01571e8a66340f0af8b2f6d9fdb39ef14275658b47",
+    "compressed_comparison": "comparison-initial.json.gz",
+    "shared_confirmation": "shared-confirmation.json",
+    "note": "Preserved development measurements. Final experiment adds failure-path resource cleanup; kernels, selector and timed worker/controller path stay otherwise unchanged.",
+    "source_sha256": "df626d49a828a7e39683276132f84aa78d4c254fa71d61bbe8211326f29137ce"
+  },
+  "final_measurement": {
+    "command": [
+      "python3",
+      "-B",
+      "scripts/bench_magic2_kernels.py",
+      "--binary",
+      "./bench_magic2_kernels",
+      "--samples",
+      "9",
+      "--process-warmup",
+      "2",
+      "--training",
+      "16",
+      "--output",
+      "research/magic2-kernels-2026-10-28/comparison.json"
+    ],
+    "exit_code": 0,
+    "seconds": 16.196354208979756,
+    "stdout": "{\"case\": \"tiny\", \"mode\": \"scalar\", \"median_ms\": 9.509792, \"paired_speedup_vs_scalar\": 1.0, \"paired_speedup_range\": [1.0, 1.0], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 73.59574671990873, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 0.005541, \"selected\": {\"scalar\": 1800000, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"tiny\", \"mode\": \"unroll4\", \"median_ms\": 6.274, \"paired_speedup_vs_scalar\": 1.5101890917131047, \"paired_speedup_range\": [1.4798310754363984, 1.590216918942479], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 14.611756340408078, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 0.00575, \"selected\": {\"scalar\": 0, \"unroll4\": 1800000, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 144, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"tiny\", \"mode\": \"neon4\", \"median_ms\": 6.289959, \"paired_speedup_vs_scalar\": 1.5164421357423434, \"paired_speedup_range\": [1.487711613805052, 1.5696731644634472], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 14.528624240059385, \"median_setup_us\": 0.042, \"median_warmup_readiness_ms\": 0.005417, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 1800000, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 144, \"neon16\": 0}}\n{\"case\": \"tiny\", \"mode\": \"neon16\", \"median_ms\": 5.477042, \"paired_speedup_vs_scalar\": 1.7359574671990874, \"paired_speedup_range\": [1.7234439684778755, 1.7963039605858733], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 0.0, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 0.004916, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 1800000}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 144}}\n{\"case\": \"tiny\", \"mode\": \"auto-cold\", \"median_ms\": 11.279208, \"paired_speedup_vs_scalar\": 0.842900016470553, \"paired_speedup_range\": [0.8200457292639576, 0.8700097031669045], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 106.49221974951173, \"median_setup_us\": 3.333, \"median_warmup_readiness_ms\": 0.005875, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [1800000, 0, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"tiny\", \"mode\": \"auto-warm\", \"median_ms\": 11.295292, \"paired_speedup_vs_scalar\": 0.8417076434301904, \"paired_speedup_range\": [0.8099166450004549, 0.8701673839911087], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 106.23233174711082, \"median_setup_us\": 3.417, \"median_warmup_readiness_ms\": 0.006, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [1800000, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_256k\", \"mode\": \"scalar\", \"median_ms\": 30.362291, \"paired_speedup_vs_scalar\": 1.0, \"paired_speedup_range\": [1.0, 1.0], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 309.6661898839877, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 14.891208, \"selected\": {\"scalar\": 288, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_256k\", \"mode\": \"unroll4\", \"median_ms\": 11.140542, \"paired_speedup_vs_scalar\": 2.7379900235541608, \"paired_speedup_range\": [2.5498286483190715, 2.842247613371993], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 53.372896164665626, \"median_setup_us\": 0.042, \"median_warmup_readiness_ms\": 5.459708, \"selected\": {\"scalar\": 0, \"unroll4\": 288, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 144, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_256k\", \"mode\": \"neon4\", \"median_ms\": 11.082084, \"paired_speedup_vs_scalar\": 2.7195352406902815, \"paired_speedup_range\": [2.5444879146081796, 2.872634188152987], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 52.58798664417748, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 5.498208, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 288, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 144, \"neon16\": 0}}\n{\"case\": \"compute_256k\", \"mode\": \"neon16\", \"median_ms\": 7.324875, \"paired_speedup_vs_scalar\": 4.096661898839877, \"paired_speedup_range\": [4.024271444461292, 4.318179443873731], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 0.0, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 3.559084, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 288}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 144}}\n{\"case\": \"compute_256k\", \"mode\": \"auto-cold\", \"median_ms\": 10.014, \"paired_speedup_vs_scalar\": 2.981247054124226, \"paired_speedup_range\": [2.8444758703875026, 3.1253512784645823], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 38.16621106332596, \"median_setup_us\": 3.375, \"median_warmup_readiness_ms\": 14.937458, \"selected\": {\"scalar\": 27, \"unroll4\": 27, \"neon4\": 27, \"neon16\": 207}, \"routes\": [0, 288, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_256k\", \"mode\": \"auto-warm\", \"median_ms\": 7.319, \"paired_speedup_vs_scalar\": 4.093377923878353, \"paired_speedup_range\": [3.9021819710873538, 4.255519652955669], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 1.4724357076941752, \"median_setup_us\": 3.417, \"median_warmup_readiness_ms\": 6.39025, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 288}, \"routes\": [0, 288, 0, 0], \"training_selected\": {\"scalar\": 27, \"unroll4\": 27, \"neon4\": 27, \"neon16\": 63}}\n{\"case\": \"compute_2m\", \"mode\": \"scalar\", \"median_ms\": 60.813083, \"paired_speedup_vs_scalar\": 1.0, \"paired_speedup_range\": [1.0, 1.0], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 308.15264529092656, \"median_setup_us\": 0.041, \"median_warmup_readiness_ms\": 123.415584, \"selected\": {\"scalar\": 72, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_2m\", \"mode\": \"unroll4\", \"median_ms\": 22.595334, \"paired_speedup_vs_scalar\": 2.6674523213695887, \"paired_speedup_range\": [1.211130926466087, 2.7873831749774602], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 53.483875957002546, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 45.526833, \"selected\": {\"scalar\": 0, \"unroll4\": 72, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 144, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_2m\", \"mode\": \"neon4\", \"median_ms\": 22.538458, \"paired_speedup_vs_scalar\": 2.6649855726606235, \"paired_speedup_range\": [2.558162097348361, 2.7434365426514797], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 53.62594282473643, \"median_setup_us\": 0.042, \"median_warmup_readiness_ms\": 44.996208, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 72, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 144, \"neon16\": 0}}\n{\"case\": \"compute_2m\", \"mode\": \"neon16\", \"median_ms\": 14.88825, \"paired_speedup_vs_scalar\": 4.081526452909266, \"paired_speedup_range\": [3.9818749705257495, 4.256239061416945], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 0.0, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 30.3945, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 72}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 144}}\n{\"case\": \"compute_2m\", \"mode\": \"auto-cold\", \"median_ms\": 31.011291, \"paired_speedup_vs_scalar\": 1.9545788134414452, \"paired_speedup_range\": [1.3837902233953592, 2.0703562080449807], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 107.86721746032816, \"median_setup_us\": 3.833, \"median_warmup_readiness_ms\": 120.803834, \"selected\": {\"scalar\": 18, \"unroll4\": 18, \"neon4\": 18, \"neon16\": 18}, \"routes\": [0, 72, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"compute_2m\", \"mode\": \"auto-warm\", \"median_ms\": 14.956208, \"paired_speedup_vs_scalar\": 4.048275382755842, \"paired_speedup_range\": [2.6269425167161664, 4.156896988862417], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 2.389813190480683, \"median_setup_us\": 3.791, \"median_warmup_readiness_ms\": 54.054833, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 8, \"neon16\": 64}, \"routes\": [0, 72, 0, 0], \"training_selected\": {\"scalar\": 27, \"unroll4\": 27, \"neon4\": 31, \"neon16\": 59}}\n{\"case\": \"tail_unaligned\", \"mode\": \"scalar\", \"median_ms\": 31.294167, \"paired_speedup_vs_scalar\": 1.0, \"paired_speedup_range\": [1.0, 1.0], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 315.6627509381093, \"median_setup_us\": 0.041, \"median_warmup_readiness_ms\": 15.732166, \"selected\": {\"scalar\": 288, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"tail_unaligned\", \"mode\": \"unroll4\", \"median_ms\": 11.449292, \"paired_speedup_vs_scalar\": 2.6839002607127522, \"paired_speedup_range\": [2.445661720630957, 5.345364496017006], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 54.474066945533515, \"median_setup_us\": 0.083, \"median_warmup_readiness_ms\": 5.8555, \"selected\": {\"scalar\": 0, \"unroll4\": 288, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 144, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"tail_unaligned\", \"mode\": \"neon4\", \"median_ms\": 11.465292, \"paired_speedup_vs_scalar\": 2.6941730446386294, \"paired_speedup_range\": [2.620099688695238, 5.1931119650583915], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 53.88506294111708, \"median_setup_us\": 0.083, \"median_warmup_readiness_ms\": 5.7135, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 288, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 144, \"neon16\": 0}}\n{\"case\": \"tail_unaligned\", \"mode\": \"neon16\", \"median_ms\": 7.46125, \"paired_speedup_vs_scalar\": 4.156627509381093, \"paired_speedup_range\": [4.095509405429666, 8.208916948108453], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 0.0, \"median_setup_us\": 0.041, \"median_warmup_readiness_ms\": 3.732791, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 288}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 144}}\n{\"case\": \"tail_unaligned\", \"mode\": \"auto-cold\", \"median_ms\": 10.501625, \"paired_speedup_vs_scalar\": 2.966873002228734, \"paired_speedup_range\": [2.8442226984442285, 5.849304971625054], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 40.748869157312775, \"median_setup_us\": 3.75, \"median_warmup_readiness_ms\": 15.272917, \"selected\": {\"scalar\": 27, \"unroll4\": 27, \"neon4\": 27, \"neon16\": 207}, \"routes\": [0, 288, 0, 0], \"training_selected\": {\"scalar\": 144, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"tail_unaligned\", \"mode\": \"auto-warm\", \"median_ms\": 7.61025, \"paired_speedup_vs_scalar\": 4.1335053628551055, \"paired_speedup_range\": [3.9143100398751285, 7.450425289141268], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 1.996984419500758, \"median_setup_us\": 4.042, \"median_warmup_readiness_ms\": 6.820917, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 288}, \"routes\": [0, 288, 0, 0], \"training_selected\": {\"scalar\": 27, \"unroll4\": 27, \"neon4\": 27, \"neon16\": 63}}\n{\"case\": \"shared_family_4_tasks\", \"mode\": \"scalar\", \"median_ms\": 29.832125, \"paired_speedup_vs_scalar\": 1.0, \"paired_speedup_range\": [1.0, 1.0], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 310.8424521098969, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 59.774417, \"selected\": {\"scalar\": 288, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 576, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"shared_family_4_tasks\", \"mode\": \"unroll4\", \"median_ms\": 11.150542, \"paired_speedup_vs_scalar\": 2.675846786190125, \"paired_speedup_range\": [2.584275836027004, 2.842328874901652], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 53.44263964630392, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 22.29425, \"selected\": {\"scalar\": 0, \"unroll4\": 288, \"neon4\": 0, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 576, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"shared_family_4_tasks\", \"mode\": \"neon4\", \"median_ms\": 11.129542, \"paired_speedup_vs_scalar\": 2.6937828147732614, \"paired_speedup_range\": [2.6746577765868143, 2.836897795574636], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 53.15882783675101, \"median_setup_us\": 0.041, \"median_warmup_readiness_ms\": 22.004292, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 288, \"neon16\": 0}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 576, \"neon16\": 0}}\n{\"case\": \"shared_family_4_tasks\", \"mode\": \"neon16\", \"median_ms\": 7.266125, \"paired_speedup_vs_scalar\": 4.108424521098969, \"paired_speedup_range\": [4.090878818579892, 4.352404867109504], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 0.0, \"median_setup_us\": 0.0, \"median_warmup_readiness_ms\": 14.515833, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 288}, \"routes\": [0, 0, 0, 0], \"training_selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 576}}\n{\"case\": \"shared_family_4_tasks\", \"mode\": \"auto-cold\", \"median_ms\": 26.080333, \"paired_speedup_vs_scalar\": 1.1440460264000387, \"paired_speedup_range\": [1.1284586462803938, 1.21203398744947], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 258.8542921616326, \"median_setup_us\": 3.416, \"median_warmup_readiness_ms\": 59.552958, \"selected\": {\"scalar\": 18, \"unroll4\": 18, \"neon4\": 18, \"neon16\": 18}, \"routes\": [0, 72, 216, 0], \"training_selected\": {\"scalar\": 576, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 0}}\n{\"case\": \"shared_family_4_tasks\", \"mode\": \"auto-warm\", \"median_ms\": 24.195042, \"paired_speedup_vs_scalar\": 1.2349500669800377, \"paired_speedup_range\": [1.1881934821403848, 1.2997301672962762], \"best_fixed_kernel_by_median\": \"neon16\", \"paired_overhead_vs_best_fixed_percent\": 233.0452589757916, \"median_setup_us\": 3.458, \"median_warmup_readiness_ms\": 51.111125, \"selected\": {\"scalar\": 0, \"unroll4\": 0, \"neon4\": 0, \"neon16\": 72}, \"routes\": [0, 72, 216, 0], \"training_selected\": {\"scalar\": 27, \"unroll4\": 27, \"neon4\": 27, \"neon16\": 63}}\n"
+  },
+  "measured_executable": {
+    "path": "research/magic2-kernels-2026-10-28/bench_magic2_kernels.measured",
+    "sha256": "cc9dda3419d2a8d865293f7a866c8a5b0807b32a85dc8f03b18ba864c2030bdd",
+    "bytes": 761320,
+    "reason": "Exact measured executable retained while unrelated concurrent runtime development prevents a latest-tree rebuild."
+  },
+  "latest_tree_refresh_build": {
+    "command": [
+      "make",
+      "-j4",
+      "CC=clang",
+      "bench_magic2_kernels",
+      "test_magic2_internal"
+    ],
+    "exit_code": 2,
+    "diagnostic": "src/engine/watchdog/watchdog_worker.c:344:17: error: static declaration of 'llam_watchdog_metrics_progress_sum' follows non-static declaration; previous declaration src/engine/runtime_watchdog_internal.h:44:10",
+    "note": "No runtime code was changed or reverted by this task; the failed build did not replace the measured executable."
+  },
+  "concurrent_runtime_source_changes": {
+    "src/internal/async_context_shared.h": {
+      "before": "4c7fe085b15cfad2dc304e3fc9f3329af4f63ecb7fb3e844ed962cf05a548f7f",
+      "after": "575446a6a6c4cd47fb468e9d7e9ed0763467e82bf2e0bb15f9a4324bc861ba58"
+    },
+    "src/engine/runtime_watchdog_internal.h": {
+      "before": "76025bfb45258c63ccc20519b7e296626af01ce447f054240435dbeb89d27f54",
+      "after": "6917c826788fa463e4ee4a441c006dc63b58ab8b10ebf568f51bb06edea8bffd"
+    },
+    "src/core/context/async_context_shared.c": {
+      "before": "ba1491477f7096e8b47e741bc293e74a6789afb518bfc5efc6b0009debf0f5ca",
+      "after": "afbbe6a2eff4d8946509cbef483b2755c30f222bbaa85f503e784eb4927d6fab"
+    },
+    "src/core/sched/worker_registry.c": {
+      "before": "ecea870f07361da602260230ba29cd60ad12ccd7b170e683755e799682ecb23d",
+      "after": "d9b4b99f46976a580711eed56daefc91ccd3dbc74d957a43df0fdf7ee55ea1f3"
+    },
+    "src/engine/watchdog/watchdog_worker.c": {
+      "before": "74cb0a03133803952b8bb06151d3b3a496b67f2f9d81bc0a21f4ed2b6251f3bf",
+      "after": "9738d69f061524c30d2a26bb7adae5ed26eaaa1ef9c9985c15f4f1d7f05a2ad9"
+    }
+  },
+  "concurrent_build_file_changes": {
+    "Makefile": {
+      "measured_setup_hash": "41ac34e1f28d2000402dd72d9d3b34b45c45e0875c704cb780f7ddf9990afda9",
+      "current_hash": "73a1c53157e6c5fef954918c9186d3f43111671f53b1fec3200ddc8c545a33b5"
+    },
+    "CMakeLists.txt": {
+      "measured_setup_hash": "0f2333bc430a6ce181b94bcb94fcee6645b16b75261bbe9ef6be86a459879787",
+      "current_hash": "c9c6083b16f8e83001283819d7b267a4a5fbbe2afd732471ba0abf6d962193bc"
+    }
+  },
+  "task_patch_reverse_check": {
+    "command": [
+      "git",
+      "apply",
+      "--reverse",
+      "--check",
+      "/Users/feral/Desktop/Programming/LLAM/research/magic2-kernels-2026-10-28/task.patch"
+    ],
+    "exit_code": 0,
+    "stderr": "",
+    "base": "Current build files minus only this task's known insertions; concurrent user edits are excluded from the patch."
+  },
+  "scoped_notice_and_whitespace_check": "passed; whole-repository license policy not run",
+  "final_raw_sample_validation": {
+    "raw_processes": 330,
+    "measured_processes": 270,
+    "discarded_process_warmups": 60,
+    "exact_checksums_yields_worker_budget_match": true,
+    "family_observations_match_executions": true,
+    "kernel_and_driver_source_unchanged": true,
+    "immutable_measured_executable_sha256_matches": true,
+    "runtime_sources_changed_concurrently": true
+  },
+  "final_summary": {
+    "tiny": {
+      "scalar": {
+        "case": "tiny",
+        "mode": "scalar",
+        "median_ms": 9.509792,
+        "paired_speedup_vs_scalar": 1.0,
+        "paired_speedup_range": [
+          1.0,
+          1.0
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 73.59574671990873,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 0.005541,
+        "selected": {
+          "scalar": 1800000,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "unroll4": {
+        "case": "tiny",
+        "mode": "unroll4",
+        "median_ms": 6.274,
+        "paired_speedup_vs_scalar": 1.5101890917131047,
+        "paired_speedup_range": [
+          1.4798310754363984,
+          1.590216918942479
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 14.611756340408078,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 0.00575,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 1800000,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 144,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "neon4": {
+        "case": "tiny",
+        "mode": "neon4",
+        "median_ms": 6.289959,
+        "paired_speedup_vs_scalar": 1.5164421357423434,
+        "paired_speedup_range": [
+          1.487711613805052,
+          1.5696731644634472
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 14.528624240059385,
+        "median_setup_us": 0.042,
+        "median_warmup_readiness_ms": 0.005417,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 1800000,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 144,
+          "neon16": 0
+        }
+      },
+      "neon16": {
+        "case": "tiny",
+        "mode": "neon16",
+        "median_ms": 5.477042,
+        "paired_speedup_vs_scalar": 1.7359574671990874,
+        "paired_speedup_range": [
+          1.7234439684778755,
+          1.7963039605858733
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 0.0,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 0.004916,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 1800000
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 144
+        }
+      },
+      "auto-cold": {
+        "case": "tiny",
+        "mode": "auto-cold",
+        "median_ms": 11.279208,
+        "paired_speedup_vs_scalar": 0.842900016470553,
+        "paired_speedup_range": [
+          0.8200457292639576,
+          0.8700097031669045
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 106.49221974951173,
+        "median_setup_us": 3.333,
+        "median_warmup_readiness_ms": 0.005875,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          1800000,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "auto-warm": {
+        "case": "tiny",
+        "mode": "auto-warm",
+        "median_ms": 11.295292,
+        "paired_speedup_vs_scalar": 0.8417076434301904,
+        "paired_speedup_range": [
+          0.8099166450004549,
+          0.8701673839911087
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 106.23233174711082,
+        "median_setup_us": 3.417,
+        "median_warmup_readiness_ms": 0.006,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          1800000,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      }
+    },
+    "compute_256k": {
+      "scalar": {
+        "case": "compute_256k",
+        "mode": "scalar",
+        "median_ms": 30.362291,
+        "paired_speedup_vs_scalar": 1.0,
+        "paired_speedup_range": [
+          1.0,
+          1.0
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 309.6661898839877,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 14.891208,
+        "selected": {
+          "scalar": 288,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "unroll4": {
+        "case": "compute_256k",
+        "mode": "unroll4",
+        "median_ms": 11.140542,
+        "paired_speedup_vs_scalar": 2.7379900235541608,
+        "paired_speedup_range": [
+          2.5498286483190715,
+          2.842247613371993
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 53.372896164665626,
+        "median_setup_us": 0.042,
+        "median_warmup_readiness_ms": 5.459708,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 288,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 144,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "neon4": {
+        "case": "compute_256k",
+        "mode": "neon4",
+        "median_ms": 11.082084,
+        "paired_speedup_vs_scalar": 2.7195352406902815,
+        "paired_speedup_range": [
+          2.5444879146081796,
+          2.872634188152987
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 52.58798664417748,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 5.498208,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 288,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 144,
+          "neon16": 0
+        }
+      },
+      "neon16": {
+        "case": "compute_256k",
+        "mode": "neon16",
+        "median_ms": 7.324875,
+        "paired_speedup_vs_scalar": 4.096661898839877,
+        "paired_speedup_range": [
+          4.024271444461292,
+          4.318179443873731
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 0.0,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 3.559084,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 288
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 144
+        }
+      },
+      "auto-cold": {
+        "case": "compute_256k",
+        "mode": "auto-cold",
+        "median_ms": 10.014,
+        "paired_speedup_vs_scalar": 2.981247054124226,
+        "paired_speedup_range": [
+          2.8444758703875026,
+          3.1253512784645823
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 38.16621106332596,
+        "median_setup_us": 3.375,
+        "median_warmup_readiness_ms": 14.937458,
+        "selected": {
+          "scalar": 27,
+          "unroll4": 27,
+          "neon4": 27,
+          "neon16": 207
+        },
+        "routes": [
+          0,
+          288,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "auto-warm": {
+        "case": "compute_256k",
+        "mode": "auto-warm",
+        "median_ms": 7.319,
+        "paired_speedup_vs_scalar": 4.093377923878353,
+        "paired_speedup_range": [
+          3.9021819710873538,
+          4.255519652955669
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 1.4724357076941752,
+        "median_setup_us": 3.417,
+        "median_warmup_readiness_ms": 6.39025,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 288
+        },
+        "routes": [
+          0,
+          288,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 27,
+          "unroll4": 27,
+          "neon4": 27,
+          "neon16": 63
+        }
+      }
+    },
+    "compute_2m": {
+      "scalar": {
+        "case": "compute_2m",
+        "mode": "scalar",
+        "median_ms": 60.813083,
+        "paired_speedup_vs_scalar": 1.0,
+        "paired_speedup_range": [
+          1.0,
+          1.0
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 308.15264529092656,
+        "median_setup_us": 0.041,
+        "median_warmup_readiness_ms": 123.415584,
+        "selected": {
+          "scalar": 72,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "unroll4": {
+        "case": "compute_2m",
+        "mode": "unroll4",
+        "median_ms": 22.595334,
+        "paired_speedup_vs_scalar": 2.6674523213695887,
+        "paired_speedup_range": [
+          1.211130926466087,
+          2.7873831749774602
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 53.483875957002546,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 45.526833,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 72,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 144,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "neon4": {
+        "case": "compute_2m",
+        "mode": "neon4",
+        "median_ms": 22.538458,
+        "paired_speedup_vs_scalar": 2.6649855726606235,
+        "paired_speedup_range": [
+          2.558162097348361,
+          2.7434365426514797
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 53.62594282473643,
+        "median_setup_us": 0.042,
+        "median_warmup_readiness_ms": 44.996208,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 72,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 144,
+          "neon16": 0
+        }
+      },
+      "neon16": {
+        "case": "compute_2m",
+        "mode": "neon16",
+        "median_ms": 14.88825,
+        "paired_speedup_vs_scalar": 4.081526452909266,
+        "paired_speedup_range": [
+          3.9818749705257495,
+          4.256239061416945
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 0.0,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 30.3945,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 72
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 144
+        }
+      },
+      "auto-cold": {
+        "case": "compute_2m",
+        "mode": "auto-cold",
+        "median_ms": 31.011291,
+        "paired_speedup_vs_scalar": 1.9545788134414452,
+        "paired_speedup_range": [
+          1.3837902233953592,
+          2.0703562080449807
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 107.86721746032816,
+        "median_setup_us": 3.833,
+        "median_warmup_readiness_ms": 120.803834,
+        "selected": {
+          "scalar": 18,
+          "unroll4": 18,
+          "neon4": 18,
+          "neon16": 18
+        },
+        "routes": [
+          0,
+          72,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "auto-warm": {
+        "case": "compute_2m",
+        "mode": "auto-warm",
+        "median_ms": 14.956208,
+        "paired_speedup_vs_scalar": 4.048275382755842,
+        "paired_speedup_range": [
+          2.6269425167161664,
+          4.156896988862417
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 2.389813190480683,
+        "median_setup_us": 3.791,
+        "median_warmup_readiness_ms": 54.054833,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 8,
+          "neon16": 64
+        },
+        "routes": [
+          0,
+          72,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 27,
+          "unroll4": 27,
+          "neon4": 31,
+          "neon16": 59
+        }
+      }
+    },
+    "tail_unaligned": {
+      "scalar": {
+        "case": "tail_unaligned",
+        "mode": "scalar",
+        "median_ms": 31.294167,
+        "paired_speedup_vs_scalar": 1.0,
+        "paired_speedup_range": [
+          1.0,
+          1.0
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 315.6627509381093,
+        "median_setup_us": 0.041,
+        "median_warmup_readiness_ms": 15.732166,
+        "selected": {
+          "scalar": 288,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "unroll4": {
+        "case": "tail_unaligned",
+        "mode": "unroll4",
+        "median_ms": 11.449292,
+        "paired_speedup_vs_scalar": 2.6839002607127522,
+        "paired_speedup_range": [
+          2.445661720630957,
+          5.345364496017006
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 54.474066945533515,
+        "median_setup_us": 0.083,
+        "median_warmup_readiness_ms": 5.8555,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 288,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 144,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "neon4": {
+        "case": "tail_unaligned",
+        "mode": "neon4",
+        "median_ms": 11.465292,
+        "paired_speedup_vs_scalar": 2.6941730446386294,
+        "paired_speedup_range": [
+          2.620099688695238,
+          5.1931119650583915
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 53.88506294111708,
+        "median_setup_us": 0.083,
+        "median_warmup_readiness_ms": 5.7135,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 288,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 144,
+          "neon16": 0
+        }
+      },
+      "neon16": {
+        "case": "tail_unaligned",
+        "mode": "neon16",
+        "median_ms": 7.46125,
+        "paired_speedup_vs_scalar": 4.156627509381093,
+        "paired_speedup_range": [
+          4.095509405429666,
+          8.208916948108453
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 0.0,
+        "median_setup_us": 0.041,
+        "median_warmup_readiness_ms": 3.732791,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 288
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 144
+        }
+      },
+      "auto-cold": {
+        "case": "tail_unaligned",
+        "mode": "auto-cold",
+        "median_ms": 10.501625,
+        "paired_speedup_vs_scalar": 2.966873002228734,
+        "paired_speedup_range": [
+          2.8442226984442285,
+          5.849304971625054
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 40.748869157312775,
+        "median_setup_us": 3.75,
+        "median_warmup_readiness_ms": 15.272917,
+        "selected": {
+          "scalar": 27,
+          "unroll4": 27,
+          "neon4": 27,
+          "neon16": 207
+        },
+        "routes": [
+          0,
+          288,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 144,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "auto-warm": {
+        "case": "tail_unaligned",
+        "mode": "auto-warm",
+        "median_ms": 7.61025,
+        "paired_speedup_vs_scalar": 4.1335053628551055,
+        "paired_speedup_range": [
+          3.9143100398751285,
+          7.450425289141268
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 1.996984419500758,
+        "median_setup_us": 4.042,
+        "median_warmup_readiness_ms": 6.820917,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 288
+        },
+        "routes": [
+          0,
+          288,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 27,
+          "unroll4": 27,
+          "neon4": 27,
+          "neon16": 63
+        }
+      }
+    },
+    "shared_family_4_tasks": {
+      "scalar": {
+        "case": "shared_family_4_tasks",
+        "mode": "scalar",
+        "median_ms": 29.832125,
+        "paired_speedup_vs_scalar": 1.0,
+        "paired_speedup_range": [
+          1.0,
+          1.0
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 310.8424521098969,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 59.774417,
+        "selected": {
+          "scalar": 288,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 576,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "unroll4": {
+        "case": "shared_family_4_tasks",
+        "mode": "unroll4",
+        "median_ms": 11.150542,
+        "paired_speedup_vs_scalar": 2.675846786190125,
+        "paired_speedup_range": [
+          2.584275836027004,
+          2.842328874901652
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 53.44263964630392,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 22.29425,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 288,
+          "neon4": 0,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 576,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "neon4": {
+        "case": "shared_family_4_tasks",
+        "mode": "neon4",
+        "median_ms": 11.129542,
+        "paired_speedup_vs_scalar": 2.6937828147732614,
+        "paired_speedup_range": [
+          2.6746577765868143,
+          2.836897795574636
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 53.15882783675101,
+        "median_setup_us": 0.041,
+        "median_warmup_readiness_ms": 22.004292,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 288,
+          "neon16": 0
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 576,
+          "neon16": 0
+        }
+      },
+      "neon16": {
+        "case": "shared_family_4_tasks",
+        "mode": "neon16",
+        "median_ms": 7.266125,
+        "paired_speedup_vs_scalar": 4.108424521098969,
+        "paired_speedup_range": [
+          4.090878818579892,
+          4.352404867109504
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 0.0,
+        "median_setup_us": 0.0,
+        "median_warmup_readiness_ms": 14.515833,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 288
+        },
+        "routes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "training_selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 576
+        }
+      },
+      "auto-cold": {
+        "case": "shared_family_4_tasks",
+        "mode": "auto-cold",
+        "median_ms": 26.080333,
+        "paired_speedup_vs_scalar": 1.1440460264000387,
+        "paired_speedup_range": [
+          1.1284586462803938,
+          1.21203398744947
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 258.8542921616326,
+        "median_setup_us": 3.416,
+        "median_warmup_readiness_ms": 59.552958,
+        "selected": {
+          "scalar": 18,
+          "unroll4": 18,
+          "neon4": 18,
+          "neon16": 18
+        },
+        "routes": [
+          0,
+          72,
+          216,
+          0
+        ],
+        "training_selected": {
+          "scalar": 576,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 0
+        }
+      },
+      "auto-warm": {
+        "case": "shared_family_4_tasks",
+        "mode": "auto-warm",
+        "median_ms": 24.195042,
+        "paired_speedup_vs_scalar": 1.2349500669800377,
+        "paired_speedup_range": [
+          1.1881934821403848,
+          1.2997301672962762
+        ],
+        "best_fixed_kernel_by_median": "neon16",
+        "paired_overhead_vs_best_fixed_percent": 233.0452589757916,
+        "median_setup_us": 3.458,
+        "median_warmup_readiness_ms": 51.111125,
+        "selected": {
+          "scalar": 0,
+          "unroll4": 0,
+          "neon4": 0,
+          "neon16": 72
+        },
+        "routes": [
+          0,
+          72,
+          216,
+          0
+        ],
+        "training_selected": {
+          "scalar": 27,
+          "unroll4": 27,
+          "neon4": 27,
+          "neon16": 63
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Synthetic uint32 mixing transform; no claim for arbitrary tasks or server throughput.",
+    "One P, RELEASE_FAST, automatic preemption OFF, M4/macOS only.",
+    "Auto-warm timing excludes 16 real warmup/training activations per G; cold family still has warm buffers. Plan setup and warmup/readiness times are separate.",
+    "Best fixed kernel is post-hoc from medians, not information supplied to Magic2.",
+    "All samples retained, including desktop outliers and one 2 MiB warm process selecting neon4.",
+    "Four Gs sharing one descriptor have 75% busy fallback; this is not multi-core scaling.",
+    "Other ongoing work changed runtime sources and build files; last latest-tree refresh failed on a watchdog static/non-static declaration conflict. Comparisons bind to the preserved immutable measured executable, not a claim that the latest tree builds.",
+    "ASan/UBSan checks instrument benchmark kernels only; CMake configuration/target registration passed, not a duplicate full CMake build."
+  ],
+  "measurement_review_completed_kst": "2026-10-28T03:27:44.025396+09:00",
+  "cleanup": {
+    "deleted": [
+      {
+        "path": "object/experiments/magic2/bench_magic2_kernels.o",
+        "logical_bytes": 88944
+      },
+      {
+        "path": "research/magic2-kernels-2026-10-28/kernel-asan",
+        "logical_bytes": 698312
+      },
+      {
+        "path": "research/magic2-kernels-2026-10-28/Makefile.before",
+        "logical_bytes": 156974
+      },
+      {
+        "path": "research/magic2-kernels-2026-10-28/CMakeLists.txt.before",
+        "logical_bytes": 96175
+      },
+      {
+        "path": "research/magic2-kernels-2026-10-28/bench-before-cleanup-fix.c",
+        "logical_bytes": 22008
+      },
+      {
+        "path": "research/magic2-kernels-2026-10-28/cmake-check",
+        "generated_file_count": 604,
+        "logical_bytes": 2701675
+      }
+    ],
+    "failures": [],
+    "preserved_uncertain": [],
+    "retained_measured_executable": "research/magic2-kernels-2026-10-28/bench_magic2_kernels.measured"
+  },
+  "final_task_paths_status": " M CMakeLists.txt\n M Makefile\n?? experiments/magic2/bench_magic2_kernels.c\n?? scripts/bench_magic2_kernels.py\n",
+  "completed_kst": "2026-10-28T03:29:30.138990+09:00",
+  "artifacts": {
+    "sanitizer-check.json": {
+      "bytes": 984,
+      "sha256": "a20781ea037131f096328335f047854642114d4c1357124ae8fd7c757764cb3c"
+    },
+    "contract.lock.json": {
+      "bytes": 1936,
+      "sha256": "1b35c8c3789ad7e27feb8568809a630358978b853f0d75561b6e353910cdc8a0"
+    },
+    "functional-smoke.json": {
+      "bytes": 17434,
+      "sha256": "a71eddc5352c67c8e81447dd6407e5ab84c367c5d274d0b60010360bfd1c2dfc"
+    },
+    "comparison-initial.json.gz": {
+      "bytes": 12526,
+      "sha256": "85fdb29e4d2b71ae38b5727092ddfe5d84fa38d457c6d137678074c10b58835a"
+    },
+    "cmake-check.json": {
+      "bytes": 29118,
+      "sha256": "32afdcfaf0c9a47bf357edc7deb8a970856ad6263dac1168c01ea585aa024c1f"
+    },
+    "comparison.json": {
+      "bytes": 435610,
+      "sha256": "0f1370769a75a9bed9d0debbb6065cca69b592bd7cd0e8192717a15fd5c0d349"
+    },
+    "codegen.json": {
+      "bytes": 8090,
+      "sha256": "2f3b2c269c1d3c539860ec1cbb5608c39eafda64809978b990bbde21d3f227f1"
+    },
+    "shared-confirmation.json": {
+      "bytes": 89330,
+      "sha256": "054ef51f07d49fefdad1f0d2e90a7d50b0a54a1f5fca2f901decb1a98d7076c0"
+    },
+    "smoke.json": {
+      "bytes": 28421,
+      "sha256": "a7a3397492bc4c33b95fe26202a00e22fce0e01f816b8898e15633a809d8cca0"
+    },
+    "bench_magic2_kernels.measured": {
+      "bytes": 761320,
+      "sha256": "cc9dda3419d2a8d865293f7a866c8a5b0807b32a85dc8f03b18ba864c2030bdd"
+    },
+    "failure-cleanup.patch": {
+      "bytes": 1557,
+      "sha256": "8da982daa2dad2b058de6e9e8bbc267d262a98b0b73753ad636970c7ffad3325"
+    },
+    "final-checks.json": {
+      "bytes": 20588,
+      "sha256": "131cda81e4cb7004aea397e94f0ad0b502c31e5287ddea98f99178acd97b0719"
+    },
+    "task.patch": {
+      "bytes": 33073,
+      "sha256": "d0f207abf1f5effed4c090a50a7d97e20f61644922569308c355e96632019086"
+    },
+    "final-build-checks.json": {
+      "bytes": 8261,
+      "sha256": "c3620c9e879dc0ca81b35ddf09959cfedf134d361f42578ae11f8a0009b0bd1c"
+    }
+  }
+}

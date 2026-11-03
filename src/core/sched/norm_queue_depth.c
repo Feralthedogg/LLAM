@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -34,9 +34,9 @@ bool llam_norm_queue_note_enqueue(llam_shard_t *shard) {
     if (shard == NULL) {
         return false;
     }
-    current = atomic_load_explicit(&shard->norm_depth, memory_order_acquire);
+    current = atomic_load_explicit(&shard->processor.norm_depth, memory_order_acquire);
     while (current != UINT_MAX) {
-        if (atomic_compare_exchange_weak_explicit(&shard->norm_depth,
+        if (atomic_compare_exchange_weak_explicit(&shard->processor.norm_depth,
                                                   &current,
                                                   current + 1U,
                                                   memory_order_release,
@@ -57,9 +57,9 @@ bool llam_norm_queue_note_dequeue(llam_shard_t *shard) {
     if (shard == NULL) {
         return false;
     }
-    current = atomic_load_explicit(&shard->norm_depth, memory_order_acquire);
+    current = atomic_load_explicit(&shard->processor.norm_depth, memory_order_acquire);
     while (current != 0U) {
-        if (atomic_compare_exchange_weak_explicit(&shard->norm_depth,
+        if (atomic_compare_exchange_weak_explicit(&shard->processor.norm_depth,
                                                   &current,
                                                   current - 1U,
                                                   memory_order_release,

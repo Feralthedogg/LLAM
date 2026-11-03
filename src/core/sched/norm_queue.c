@@ -23,12 +23,31 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#include "managed_scheduler.h"
 
 #define LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST 8U
+#define LLAM_CLDEQUE_DISTANCE_SIGN_BIT ((SIZE_MAX / 2U) + 1U)
+
+_Static_assert(LLAM_NORM_QUEUE_CAP > 0U,
+               "LLAM_NORM_QUEUE_CAP must be nonzero");
+_Static_assert((LLAM_NORM_QUEUE_CAP & (LLAM_NORM_QUEUE_CAP - 1U)) == 0U,
+               "LLAM_NORM_QUEUE_CAP must be a power of two");
+_Static_assert(LLAM_NORM_QUEUE_CAP < LLAM_CLDEQUE_DISTANCE_SIGN_BIT,
+               "LLAM_NORM_QUEUE_CAP must fit in the modular distance range");
+
+/*
+ * Chase-Lev indices are monotonic modulo size_t. Queue occupancy stays below
+ * half the index space, so the high bit of bottom-top is a portable negative
+ * distance test without implementation-defined signed conversions. See
+ * THIRD_PARTY_NOTICES.md for the algorithm papers.
+ */
+static bool llam_cldeque_distance_is_negative(size_t distance) {
+    return (distance & LLAM_CLDEQUE_DISTANCE_SIGN_BIT) != 0U;
+}
 
 /**
  * @brief Return the best-effort normal queue depth for a shard.
@@ -37,7 +56,10 @@
  * @return Current normal-lane depth, or 0 for NULL.
  */
 unsigned llam_norm_queue_depth(const llam_shard_t *shard) {
-    return shard != NULL ? atomic_load_explicit(&((llam_shard_t *)shard)->norm_depth, memory_order_acquire) : 0U;
+    return shard != NULL
+               ? atomic_load_explicit(&((llam_shard_t *)shard)->processor.norm_depth,
+                                      memory_order_acquire)
+               : 0U;
 }
 
 /**
@@ -70,6 +92,7 @@ void llam_cldeque_init(llam_cldeque_t *deque) {
 bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
     size_t bottom;
     size_t top;
+    size_t distance;
 
     if (deque == NULL || task == NULL) {
         return false;
@@ -77,7 +100,9 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
-    if (bottom - top >= LLAM_NORM_QUEUE_CAP) {
+    distance = bottom - top;
+    if (llam_cldeque_distance_is_negative(distance) ||
+        distance >= LLAM_NORM_QUEUE_CAP) {
         return false;
     }
 
@@ -99,6 +124,7 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
 static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     size_t bottom;
     size_t top;
+    size_t distance;
     llam_task_t *task;
 
     if (deque == NULL) {
@@ -106,21 +132,18 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     }
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
-    if (bottom == 0U) {
-        return NULL;
-    }
-
     bottom -= 1U;
     atomic_store_explicit(&deque->bottom, bottom, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     top = atomic_load_explicit(&deque->top, memory_order_relaxed);
-    if (top > bottom) {
+    distance = bottom - top;
+    if (llam_cldeque_distance_is_negative(distance)) {
         atomic_store_explicit(&deque->bottom, top, memory_order_relaxed);
         return NULL;
     }
 
     task = atomic_load_explicit(&deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)], memory_order_acquire);
-    if (top == bottom) {
+    if (distance == 0U) {
         size_t expected = top;
 
         // Last item race: owner and thief contend on top. The CAS winner owns
@@ -135,11 +158,11 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
         atomic_store_explicit(&deque->bottom, top + 1U, memory_order_relaxed);
     }
 
-    if (task != NULL) {
-        atomic_store_explicit(&deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)],
-                              NULL,
-                              memory_order_release);
-    }
+    /*
+     * Do not clear consumed slots. A delayed consumer could otherwise erase a
+     * newer producer value after the circular buffer reuses this position.
+     * The logical [top,bottom) range, not NULL, owns slot validity.
+     */
     return task;
 }
 
@@ -152,6 +175,7 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
 static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
     size_t top;
     size_t bottom;
+    size_t distance;
     llam_task_t *task;
 
     if (deque == NULL) {
@@ -161,7 +185,8 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
     atomic_thread_fence(memory_order_seq_cst);
     bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
-    if (top >= bottom) {
+    distance = bottom - top;
+    if (distance == 0U || llam_cldeque_distance_is_negative(distance)) {
         return NULL;
     }
 
@@ -182,9 +207,18 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
         }
     }
 
-    atomic_store_explicit(&deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)], NULL, memory_order_release);
     return task;
 }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+llam_task_t *llam_cldeque_test_pop_bottom(llam_cldeque_t *deque) {
+    return llam_cldeque_pop_bottom(deque);
+}
+
+llam_task_t *llam_cldeque_test_steal_top(llam_cldeque_t *deque) {
+    return llam_cldeque_steal_top(deque);
+}
+#endif
 
 /**
  * @brief Return whether the owner-side deque has runnable work.
@@ -195,13 +229,15 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
 static bool llam_cldeque_has_work(llam_cldeque_t *deque) {
     size_t top;
     size_t bottom;
+    size_t distance;
 
     if (deque == NULL) {
         return false;
     }
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
     bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
-    return top < bottom;
+    distance = bottom - top;
+    return distance != 0U && !llam_cldeque_distance_is_negative(distance);
 }
 
 /**
@@ -211,10 +247,13 @@ static bool llam_cldeque_has_work(llam_cldeque_t *deque) {
  * @param task  Task to enqueue.
  * @return true on queue success, false if overflow handling was needed.
  */
-bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
+bool llam_norm_queue_push_owner_locked(llam_shard_t *shard,
+                                       const llam_processor_queue_access_t *access,
+                                       llam_task_t *task) {
     bool pushed;
 
-    if (shard == NULL || task == NULL) {
+    if (shard == NULL || task == NULL ||
+        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
         return false;
     }
     if (!llam_norm_queue_note_enqueue(shard)) {
@@ -222,9 +261,13 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
     }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        pushed = llam_cldeque_push_bottom(&shard->norm_cldeque, task);
+        pushed = llam_cldeque_push_bottom(&shard->processor.norm_cldeque, task);
     } else {
-        pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
+        pushed = llam_queue_push_bounded_locked(shard,
+                                                &shard->processor.norm_q,
+                                                LLAM_NORM_QUEUE_CAP,
+                                                task,
+                                                access);
     }
 
     if (pushed) {
@@ -256,14 +299,21 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
  * @return true when the task was accepted by the normal lane or overflow queue.
  */
 bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task) {
+    llam_processor_queue_access_t access;
+
     if (shard == NULL || task == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
+        return false;
+    }
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &access) ||
+        (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
         return false;
     }
     if (!llam_norm_queue_note_enqueue(shard)) {
         return false;
     }
 
-    if (llam_cldeque_push_bottom(&shard->norm_cldeque, task)) {
+    if (llam_cldeque_push_bottom(&shard->processor.norm_cldeque, task)) {
         shard->metrics.norm_enqueues += 1U;
         return true;
     }
@@ -286,14 +336,20 @@ bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task)
  */
 llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
     llam_task_t *task;
+    llam_processor_queue_access_t access;
 
     if (shard == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
         return NULL;
     }
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &access) ||
+        (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
+        return NULL;
+    }
 
-    task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+    task = llam_cldeque_pop_bottom(&shard->processor.norm_cldeque);
     if (task == NULL) {
-        task = llam_queue_pop_head(&shard->norm_q);
+        task = llam_queue_pop_head(&shard->processor.norm_q);
     }
     if (task != NULL) {
         (void)llam_norm_queue_note_dequeue(shard);
@@ -308,14 +364,17 @@ llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
  * @param task  Yielding task.
  * @return true on success.
  */
-bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
+bool llam_norm_queue_push_yield_locked(llam_shard_t *shard,
+                                       const llam_processor_queue_access_t *access,
+                                       llam_task_t *task) {
     bool pushed;
 
-    if (shard == NULL || task == NULL) {
+    if (shard == NULL || task == NULL ||
+        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
         return false;
     }
     if (!llam_lockfree_normq_enabled(shard->runtime)) {
-        return llam_norm_queue_push_owner_locked(shard, task);
+        return llam_norm_queue_push_owner_locked(shard, access, task);
     }
     if (!llam_norm_queue_note_enqueue(shard)) {
         return false;
@@ -325,7 +384,11 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
      * Owner pops the Chase-Lev deque LIFO. Yielded tasks need FIFO behavior so
      * a cooperative handoff can run older peer work before resuming itself.
      */
-    pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
+    pushed = llam_queue_push_bounded_locked(shard,
+                                            &shard->processor.norm_q,
+                                            LLAM_NORM_QUEUE_CAP,
+                                            task,
+                                            access);
     if (pushed) {
         shard->metrics.norm_enqueues += 1U;
     } else {
@@ -347,17 +410,24 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
  * @return true on success.
  */
 bool llam_norm_queue_push_yield_unlocked(llam_shard_t *shard, llam_task_t *task) {
+    llam_processor_queue_access_t access;
+
     if (shard == NULL || task == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
         return false;
     }
-    if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &access) ||
+        (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
+        return false;
+    }
+    if (shard->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         return false;
     }
     if (!llam_norm_queue_note_enqueue(shard)) {
         return false;
     }
 
-    llam_queue_push_tail(&shard->norm_q, task);
+    llam_queue_push_tail(&shard->processor.norm_q, task);
     shard->metrics.norm_enqueues += 1U;
     return true;
 }
@@ -383,6 +453,7 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
                                              bool *out_push_failed) {
     llam_task_t *next = NULL;
     bool prefer_owner_deque;
+    llam_processor_queue_access_t access;
 
     if (out_next != NULL) {
         *out_next = NULL;
@@ -391,6 +462,11 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
         *out_push_failed = false;
     }
     if (shard == NULL || current == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
+        return false;
+    }
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &access) ||
+        (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
         return false;
     }
 
@@ -405,25 +481,25 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
      * to keep direct handoff fair without forcing a scheduler round trip.
      */
     prefer_owner_deque =
-        shard->direct_handoff_streak >= LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
-        llam_cldeque_has_work(&shard->norm_cldeque);
+        shard->processor.direct_handoff_streak >= LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
+        llam_cldeque_has_work(&shard->processor.norm_cldeque);
     if (!prefer_owner_deque) {
-        next = llam_queue_pop_head(&shard->norm_q);
+        next = llam_queue_pop_head(&shard->processor.norm_q);
     }
     if (next == NULL) {
-        if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+        if (shard->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
             if (out_push_failed != NULL) {
                 *out_push_failed = true;
             }
             return false;
         }
-        next = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+        next = llam_cldeque_pop_bottom(&shard->processor.norm_cldeque);
         if (next == NULL) {
             return false;
         }
     }
     if (prefer_owner_deque) {
-        shard->direct_handoff_streak = 0U;
+        shard->processor.direct_handoff_streak = 0U;
     }
     if (next == current) {
         /*
@@ -437,12 +513,27 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
         return false;
     }
 
-    llam_queue_push_tail(&shard->norm_q, current);
+    llam_queue_push_tail(&shard->processor.norm_q, current);
     shard->metrics.norm_enqueues += 1U;
     if (out_next != NULL) {
         *out_next = next;
     }
     return true;
+}
+
+/* Dereferencing a Chase-Lev payload before winning its index CAS would race
+ * a faster consumer's reclamation. Inspect only the exclusively removed G.
+ * Reserved Gs are restored to the same normal lane's locked FIFO without
+ * changing depth, shard identity, or exposing them to a second executor. */
+static llam_task_t *llam_norm_queue_defer_reserved_locked(llam_shard_t *shard,
+                                                         llam_task_t *task) {
+    if (task != NULL &&
+        (atomic_load_explicit(&task->managed_dispatch_owner, memory_order_acquire) != NULL ||
+         !llam_managed_task_matches_worker(task, g_llam_tls_worker))) {
+        llam_queue_push_tail(&shard->processor.norm_q, task);
+        return NULL;
+    }
+    return task;
 }
 
 /**
@@ -451,22 +542,49 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
  * @param shard Owner shard.
  * @return Runnable task, or NULL when the normal lane is empty.
  */
-llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard) {
+llam_task_t *llam_norm_queue_pop_owner_locked(
+    llam_shard_t *shard,
+    const llam_processor_queue_access_t *access) {
     llam_task_t *task;
 
-    if (shard == NULL) {
+    if (shard == NULL ||
+        !llam_processor_queue_access_validate_locked(shard, access)) {
         return NULL;
     }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+        task = llam_norm_queue_defer_reserved_locked(
+            shard, llam_cldeque_pop_bottom(&shard->processor.norm_cldeque));
         if (task == NULL) {
-            task = llam_queue_pop_head(&shard->norm_q);
+            task = llam_queue_pop_head(&shard->processor.norm_q);
         }
     } else {
-        task = llam_queue_pop_head(&shard->norm_q);
+        task = llam_queue_pop_head(&shard->processor.norm_q);
     }
 
+    if (task != NULL) {
+        (void)llam_norm_queue_note_dequeue(shard);
+    }
+    return task;
+}
+
+/** @brief Remove normal work for a controller that holds an acknowledged merge pause. */
+llam_task_t *llam_norm_queue_pop_merge_locked(llam_shard_t *shard) {
+    llam_task_t *task;
+
+    if (shard == NULL ||
+        atomic_load_explicit(&shard->merge_pause_requested, memory_order_acquire) == 0U) {
+        return NULL;
+    }
+    if (llam_lockfree_normq_enabled(shard->runtime)) {
+        task = llam_norm_queue_defer_reserved_locked(
+            shard, llam_cldeque_pop_bottom(&shard->processor.norm_cldeque));
+        if (task == NULL) {
+            task = llam_queue_pop_head(&shard->processor.norm_q);
+        }
+    } else {
+        task = llam_queue_pop_head(&shard->processor.norm_q);
+    }
     if (task != NULL) {
         (void)llam_norm_queue_note_dequeue(shard);
     }
@@ -486,7 +604,17 @@ llam_task_t *llam_norm_queue_steal(llam_shard_t *victim) {
         return NULL;
     }
 
-    task = llam_cldeque_steal_top(&victim->norm_cldeque);
+    task = llam_cldeque_steal_top(&victim->processor.norm_cldeque);
+    if (task != NULL &&
+        (atomic_load_explicit(&task->managed_dispatch_owner, memory_order_acquire) != NULL ||
+         !llam_managed_task_matches_worker(task, g_llam_tls_worker))) {
+        pthread_mutex_lock(&victim->lock);
+        /* Another M cannot restore this G until the source releases its
+         * reservation. Return it to the victim before any migration writes. */
+        llam_queue_push_tail(&victim->processor.norm_q, task);
+        pthread_mutex_unlock(&victim->lock);
+        return NULL;
+    }
     if (task != NULL) {
         (void)llam_norm_queue_note_dequeue(victim);
     }

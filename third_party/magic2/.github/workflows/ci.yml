@@ -1,0 +1,229 @@
+name: magic2 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux-sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: clang
+            cxx: clang++
+          - compiler: gcc
+            cxx: g++
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build and run example
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -pthread -I. \
+            -fsanitize=address,undefined examples/example.c -o example
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 ./example
+      - name: Build and run CPU and graph tests
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          for source in tests/test_cpu_runtime.c tests/test_parallel_graph.c tests/test_random_graph.c tests/test_security_lifetimes.c tests/test_parallel_fairness.c tests/test_ordinary_graph.c tests/test_graph_async_overlap.c tests/test_metadata_aliases.c tests/test_isolation_v2.c; do
+            name=$(basename "$source" .c)
+            "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function \
+              -pthread -fsanitize=address,undefined "$source" -o "$name"
+            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+              UBSAN_OPTIONS=halt_on_error=1 ./"$name"
+          done
+      - name: Build and run C++17 CPU and graph tests
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: |
+          for source in tests/test_cpu_runtime.c tests/test_parallel_graph.c tests/test_random_graph.c tests/test_security_lifetimes.c tests/test_parallel_fairness.c tests/test_ordinary_graph.c tests/test_graph_async_overlap.c tests/test_metadata_aliases.c tests/test_isolation_v2.c; do
+            name=$(basename "$source" .c)-cxx
+            "$CXX" -x c++ -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-function \
+              -pthread -fsanitize=address,undefined "$source" -o "$name"
+            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+              UBSAN_OPTIONS=halt_on_error=1 ./"$name"
+          done
+      - name: Separate implementation linkage
+        env:
+          CC: ${{ matrix.compiler }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined -c magic2_impl.c -o magic2_impl.o
+          "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined tests/test_public_client.c magic2_impl.o \
+            -o public-client-c
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./public-client-c
+          "$CXX" -x c++ -std=c++17 -O1 -g -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined tests/test_public_client.c -x none magic2_impl.o \
+            -o public-client-cxx
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./public-client-cxx
+
+  linux-sanitizer-variants:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubsan-only
+            compiler: clang
+            cxx: clang++
+            flags: -fsanitize=undefined -fno-omit-frame-pointer
+            runtime: UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          - name: tsan
+            compiler: clang
+            cxx: clang++
+            flags: -fsanitize=thread -fno-omit-frame-pointer
+            runtime: TSAN_OPTIONS=halt_on_error=1:exitcode=1
+          - name: msan
+            compiler: clang
+            cxx: clang++
+            flags: -fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -fPIE -pie -Wno-unused-command-line-argument
+            runtime: MSAN_OPTIONS=halt_on_error=1:exit_code=1:print_stacktrace=1
+          - name: lsan
+            compiler: clang
+            cxx: clang++
+            flags: -fsanitize=leak -fno-omit-frame-pointer
+            runtime: LSAN_OPTIONS=detect_leaks=1:halt_on_error=1:exitcode=23
+    name: sanitizer-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Build and run C11 tests
+        env:
+          CC: ${{ matrix.compiler }}
+          SANITIZER_FLAGS: ${{ matrix.flags }}
+          SANITIZER_RUNTIME: ${{ matrix.runtime }}
+        run: |
+          set -e
+          # shellcheck disable=SC2086
+          for source in tests/test_cpu_runtime.c tests/test_parallel_graph.c tests/test_random_graph.c tests/test_security_lifetimes.c tests/test_parallel_fairness.c tests/test_ordinary_graph.c tests/test_graph_async_overlap.c tests/test_metadata_aliases.c tests/test_isolation_v2.c; do
+            name=$(basename "$source" .c)
+            "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function \
+              -pthread $SANITIZER_FLAGS "$source" -o "$name"
+            env "$SANITIZER_RUNTIME" "./$name"
+          done
+      - name: Build and run C++17 tests
+        env:
+          CXX: ${{ matrix.cxx }}
+          SANITIZER_FLAGS: ${{ matrix.flags }}
+          SANITIZER_RUNTIME: ${{ matrix.runtime }}
+        run: |
+          set -e
+          # shellcheck disable=SC2086
+          for source in tests/test_cpu_runtime.c tests/test_parallel_graph.c tests/test_random_graph.c tests/test_security_lifetimes.c tests/test_parallel_fairness.c tests/test_ordinary_graph.c tests/test_graph_async_overlap.c tests/test_metadata_aliases.c tests/test_isolation_v2.c; do
+            name=$(basename "$source" .c)-cxx
+            "$CXX" -x c++ -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-function \
+              -pthread $SANITIZER_FLAGS "$source" -o "$name"
+            env "$SANITIZER_RUNTIME" "./$name"
+          done
+      - name: Separate implementation linkage
+        env:
+          CC: ${{ matrix.compiler }}
+          CXX: ${{ matrix.cxx }}
+          SANITIZER_FLAGS: ${{ matrix.flags }}
+          SANITIZER_RUNTIME: ${{ matrix.runtime }}
+        run: |
+          set -e
+          # shellcheck disable=SC2086
+          "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -pthread \
+            $SANITIZER_FLAGS -c magic2_impl.c -o magic2_impl.o
+          # shellcheck disable=SC2086
+          "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -pthread \
+            $SANITIZER_FLAGS tests/test_public_client.c magic2_impl.o \
+            -o public-client-c
+          env "$SANITIZER_RUNTIME" ./public-client-c
+          # shellcheck disable=SC2086
+          "$CXX" -x c++ -std=c++17 -O1 -g -Wall -Wextra -Werror -pthread \
+            $SANITIZER_FLAGS tests/test_public_client.c -x none magic2_impl.o \
+            -o public-client-cxx
+          env "$SANITIZER_RUNTIME" ./public-client-cxx
+
+  mingw-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+      - name: Cross-build x86-64 Windows example and client
+        run: |
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            examples/example.c -static -static-libgcc -o example.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror \
+            -c magic2_impl.c -o magic2_impl.o
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror \
+            tests/test_public_client.c magic2_impl.o -static -static-libgcc \
+            -o public-client.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            tests/test_security_lifetimes.c -static -static-libgcc \
+            -o security-lifetimes.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            tests/test_parallel_fairness.c -static -static-libgcc \
+            -o parallel-fairness.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            tests/test_ordinary_graph.c -static -static-libgcc \
+            -o ordinary-graph.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            tests/test_graph_async_overlap.c -static -static-libgcc \
+            -o graph-async-overlap.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            tests/test_metadata_aliases.c -static -static-libgcc \
+            -o metadata-aliases.exe
+          x86_64-w64-mingw32-gcc -std=c11 -O2 -Wall -Wextra -Werror -I. \
+            tests/test_isolation_v2.c -static -static-libgcc \
+            -o isolation-v2.exe
+
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build and run MSVC example
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. examples\example.c /Fe:example-msvc.exe
+          example-msvc.exe
+      - name: Build and run MSVC public client
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. magic2_impl.c tests\test_public_client.c /Fe:public-client-msvc.exe
+          public-client-msvc.exe
+      - name: Build and run MSVC security regressions
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. tests\test_security_lifetimes.c /Fe:security-lifetimes-msvc.exe
+          security-lifetimes-msvc.exe
+      - name: Build and run MSVC fairness regression
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. tests\test_parallel_fairness.c /Fe:parallel-fairness-msvc.exe
+          parallel-fairness-msvc.exe
+      - name: Build and run MSVC ordinary graph regressions
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. tests\test_ordinary_graph.c /Fe:ordinary-graph-msvc.exe
+          ordinary-graph-msvc.exe
+      - name: Build and run MSVC graph async overlap regressions
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. tests\test_graph_async_overlap.c /Fe:graph-async-overlap-msvc.exe
+          graph-async-overlap-msvc.exe
+      - name: Build and run MSVC metadata alias regressions
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. tests\test_metadata_aliases.c /Fe:metadata-aliases-msvc.exe
+          metadata-aliases-msvc.exe
+      - name: Build and run MSVC transitive isolation regressions
+        shell: cmd
+        run: |
+          cl /nologo /std:c11 /TC /W4 /WX /O2 /I. tests\test_isolation_v2.c /Fe:isolation-v2-msvc.exe
+          isolation-v2-msvc.exe

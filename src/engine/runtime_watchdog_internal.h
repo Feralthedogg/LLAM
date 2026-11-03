@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_WATCHDOG_INTERNAL_H
@@ -41,6 +41,8 @@
 bool llam_dynamic_trace_enabled(void);
 void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns);
 void llam_watchdog_pause_briefly(void);
+uint64_t llam_watchdog_metrics_progress_sum(const llam_metrics_t *metrics);
+bool llam_watchdog_confirm_deadlock(llam_runtime_t *runtime, uint64_t expected_progress);
 unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard);
 void llam_watchdog_autotune_tick(llam_runtime_t *rt, uint64_t now_ns);
 
@@ -53,6 +55,7 @@ unsigned llam_runtime_active_io_waiters(llam_runtime_t *rt);
 bool llam_runtime_has_opaque_blocking(llam_runtime_t *rt);
 void llam_runtime_nudge_marked_watch_migrations(llam_runtime_t *rt);
 void llam_runtime_adjust_online_shards(llam_runtime_t *rt);
+bool llam_managed_offline_empty_processor(llam_runtime_t *rt);
 
 /*
  * Shard merge/offline helpers.
@@ -68,8 +71,9 @@ bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns)
 // Per-shard pause handshake used before moving queues out of a source shard.
 // ACKs are request/lease/worker-incarnation tuples; a boolean ACK is not enough
 // to authorize merge mutation after a handoff.
-void llam_shard_request_merge_pause(llam_shard_t *shard);
+uint64_t llam_shard_request_merge_pause(llam_shard_t *shard);
 void llam_shard_release_merge_pause(llam_shard_t *shard);
+bool llam_shard_release_merge_pause_if_sequence(llam_shard_t *shard, uint64_t sequence);
 bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns);
 
 // Locked-state predicates and migration helpers used by the offlining path.

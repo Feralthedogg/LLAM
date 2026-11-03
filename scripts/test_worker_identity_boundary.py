@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 """Behavior tests for the Phase 0 worker identity source-boundary scanner."""
 
@@ -24,7 +24,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_worker_identity_boundary import scan_source
+from check_worker_identity_boundary import (
+    PROVIDED_MAGIC2_BRIDGE_PATH,
+    PROVIDED_MAGIC2_PATH,
+    _tokens,
+    scan_repository,
+    scan_source,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +41,45 @@ class WorkerIdentityBoundaryTest(unittest.TestCase):
     def assert_error(self, relative_path: str, source: str, message: str) -> None:
         errors = scan_source(relative_path, source)
         self.assertTrue(any(message in error for error in errors), errors)
+
+    def test_token_lines_without_repeated_prefix_scans(self) -> None:
+        class CountedSource(str):
+            inspected = 0
+
+            def count(self, substring, start=0, end=None):
+                stop = len(self) if end is None else end
+                self.inspected += max(0, stop - start)
+                return super().count(substring, start, stop)
+
+        source = CountedSource("\n  int item = 0;\n" * 1000)
+        tokens = _tokens(source)
+        self.assertEqual(5000, len(tokens))
+        self.assertEqual(("int", 2), (tokens[0].value, tokens[0].line))
+        self.assertEqual((";", 2000), (tokens[-1].value, tokens[-1].line))
+        # Work accounting avoids a wall-clock threshold on slow CI hosts.
+        self.assertLessEqual(source.inspected, len(source) * 2)
+
+    def test_accepts_exact_supplied_magic2_snapshot(self) -> None:
+        source = (ROOT / PROVIDED_MAGIC2_PATH).read_text(encoding="utf-8")
+        self.assertEqual([], scan_source(PROVIDED_MAGIC2_PATH, source))
+
+    def test_rejects_modified_supplied_magic2_snapshot(self) -> None:
+        self.assert_error(PROVIDED_MAGIC2_PATH, "", "snapshot hash mismatch")
+
+    def test_magic2_exception_is_path_specific(self) -> None:
+        self.assert_error(
+            "src/internal/other_magic2.h", "worker->executor;",
+            "Phase 0 execution authority",
+        )
+
+    def test_rejects_missing_magic2_snapshot_when_bridge_exists(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="llam-worker-magic2-") as raw_root:
+            root = Path(raw_root)
+            bridge = root / PROVIDED_MAGIC2_BRIDGE_PATH
+            bridge.parent.mkdir(parents=True)
+            bridge.write_text("/* bridge fixture */\n", encoding="utf-8")
+            errors = scan_repository(root)
+        self.assertTrue(any("snapshot is missing" in error for error in errors), errors)
 
     def test_rejects_raw_context_role_check(self) -> None:
         self.assert_error(

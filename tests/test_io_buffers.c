@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "llam/runtime.h"
@@ -1879,12 +1879,14 @@ static llam_io_buffer_t *allocate_internal_test_buffer(const char *payload, llam
     size_t len = strlen(payload);
 
     *out_handle = NULL;
-    buffer = calloc(1U, sizeof(*buffer));
+    buffer = calloc(1U, sizeof(*buffer) + LLAM_IO_BUFFER_INLINE_BYTES);
     if (buffer == NULL) {
         return NULL;
     }
     buffer->detached_wrapper = true;
-    buffer->capacity = sizeof(buffer->inline_data);
+    buffer->inline_capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    buffer->inline_data = (unsigned char *)(buffer + 1);
+    buffer->capacity = buffer->inline_capacity;
     buffer->size = len <= buffer->capacity ? len : buffer->capacity;
     buffer->data = buffer->inline_data;
     memcpy(buffer->inline_data, payload, buffer->size);
@@ -2487,6 +2489,60 @@ cleanup:
     return rc;
 }
 
+static int test_owned_buffer_compact_storage(void) {
+    const size_t capacities[] = {0U, 1U, 15U, 16U, 17U, 64U, 255U,
+                                 256U, 4095U, 4096U, 4097U, 8192U};
+    const size_t alignments[] = {0U, sizeof(void *), 64U};
+
+    for (unsigned a = 0U; a < sizeof(alignments) / sizeof(alignments[0]); ++a) {
+        for (unsigned i = 0U; i < sizeof(capacities) / sizeof(capacities[0]); ++i) {
+            llam_io_buffer_opts_t opts = {
+                .capacity = capacities[i],
+                .alignment = alignments[a],
+                .flags = LLAM_IO_BUFFER_F_ZERO_FILL,
+            };
+            llam_io_buffer_t *handle = NULL;
+            llam_io_buffer_t *raw;
+            bool external = opts.capacity > LLAM_IO_BUFFER_INLINE_BYTES ||
+                            opts.alignment > sizeof(void *);
+            bool valid;
+
+            if (llam_io_buffer_alloc_ex(&opts, sizeof(opts), &handle) != 0) {
+                return test_fail_errno("compact owned-buffer allocation failed");
+            }
+            raw = llam_io_buffer_public_begin_op(handle);
+            if (raw == NULL) {
+                llam_io_buffer_release(handle);
+                return test_fail("compact owned-buffer handle did not resolve");
+            }
+            valid = raw->capacity >= opts.capacity && raw->data != NULL &&
+                    ((uintptr_t)raw->data % (opts.alignment != 0U ? opts.alignment : sizeof(void *))) == 0U;
+            if (external) {
+                valid = valid && raw->inline_capacity == 0U && raw->external_storage;
+            } else {
+                /* Bound unused storage while checking the actual borrowed range. */
+                valid = valid && raw->inline_capacity <= opts.capacity + 16U &&
+                        raw->capacity == raw->inline_capacity &&
+                        raw->data == raw->inline_data && !raw->external_storage;
+            }
+            for (size_t j = 0U; valid && j < raw->capacity; ++j) {
+                if (raw->data[j] != 0U) {
+                    valid = false;
+                }
+            }
+            if (valid) {
+                memset(raw->data, 0x5a, raw->capacity);
+            }
+            llam_io_buffer_public_end_op(raw);
+            llam_io_buffer_release(handle);
+            if (!valid) {
+                return test_fail("compact buffer capacity/alignment/zero-fill contract failed");
+            }
+        }
+    }
+    return 0;
+}
+
 static int test_public_owned_buffer_alloc_and_positional_io(void) {
     llam_io_buffer_opts_t opts;
     llam_io_buffer_t *buffer = NULL;
@@ -2655,6 +2711,7 @@ int main(void) {
 #if LLAM_PLATFORM_POSIX
         test_owned_buffer_release_active_op_sentinel_does_not_hang() != 0 ||
 #endif
+        test_owned_buffer_compact_storage() != 0 ||
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
         test_provided_owned_buffer_detaches_on_runtime_destroy() != 0 ||
         test_provided_owned_buffer_data_accessor_detaches_storage() != 0 ||

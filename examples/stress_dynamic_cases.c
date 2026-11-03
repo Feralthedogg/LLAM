@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "stress_internal.h"
@@ -232,7 +232,7 @@ void dynamic_foreign_poll_watch_setup_task(void *arg) {
     }
 
     source_shard = g_llam_tls_shard->id;
-    source_node = g_llam_tls_shard->io_node_index;
+    source_node = llam_processor_io_node_index(&g_llam_tls_shard->processor);
     atomic_store(&state->source_shard, source_shard);
     atomic_store(&state->source_node, source_node);
 

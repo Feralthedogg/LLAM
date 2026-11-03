@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -122,6 +122,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         errno = EPERM;
         return -1;
     }
+    llam_task_merge_wait_deadline(g_llam_tls_task, &has_deadline, &deadline_ns);
     if (has_deadline && llam_deadline_passed(deadline_ns)) {
         llam_cond_end_public_op(cond);
         llam_mutex_end_public_op(mutex);
@@ -226,7 +227,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         llam_mutex_end_public_op(mutex);
         return -1;
     }
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+    if (llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -291,6 +292,8 @@ wait_ready:
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_cond_wait_impl(cond, mutex, false, 0U);
 }
 
@@ -305,6 +308,8 @@ int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex) {
  *         propagated wait error.
  */
 int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_cond_wait_impl(cond, mutex, true, deadline_ns);
 }
 
@@ -317,6 +322,8 @@ int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadli
  *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_cond_signal(llam_cond_t *cond) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_wait_node_t *node;
     llam_runtime_t *pinned_runtime = NULL;
 
@@ -356,6 +363,8 @@ int llam_cond_signal(llam_cond_t *cond) {
  *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_cond_broadcast(llam_cond_t *cond) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_wait_node_t *node;
     llam_wait_node_t *wake_head = NULL;
     llam_wait_node_t *wake_tail = NULL;

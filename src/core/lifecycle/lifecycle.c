@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -271,7 +271,9 @@ bool llam_runtime_note_task_dead(llam_runtime_t *rt, llam_task_t *task) {
     }
     return previous == 1U;
 #else
-    shard_id = task->live_shard < rt->active_shards ? task->live_shard : task->home_shard;
+    shard_id = task->live_shard < rt->active_shards
+                   ? task->live_shard
+                   : atomic_load_explicit(&task->home_shard, memory_order_acquire);
     if (shard_id >= rt->active_shards) {
         shard_id = 0U;
     }

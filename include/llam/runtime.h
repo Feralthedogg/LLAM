@@ -40,7 +40,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_H
@@ -60,7 +60,7 @@ extern "C" {
 #define LLAM_VERSION_PATCH 0U
 
 #define LLAM_ABI_VERSION_MAJOR 2U
-#define LLAM_ABI_VERSION_MINOR 0U
+#define LLAM_ABI_VERSION_MINOR 3U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 
@@ -215,6 +215,7 @@ enum {
     LLAM_SPAWN_F_NO_PREEMPT = 1U << 1,       /**< Restrict cooperative preemption checks. */
     LLAM_SPAWN_F_SYS_TASK = 1U << 2,         /**< Mark runtime-owned helper work. */
     LLAM_SPAWN_F_LATENCY_CRITICAL = 1U << 3, /**< Promote wakeup and dispatch priority. */
+    LLAM_SPAWN_F_NATIVE_AFFINE = 1U << 4,    /**< Reserve a dedicated native M for a qualified managed entry. */
 };
 
 /** @brief Give workers their own I/O rings/queues where supported. */
@@ -243,6 +244,24 @@ typedef struct llam_spawn_opts {
 /** @brief Current size to pass to ::llam_spawn_ex and ::llam_spawn_opts_init. */
 #define LLAM_SPAWN_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_spawn_opts_t))
 
+/** @brief Opt-in cancellation composition for task groups. */
+#define LLAM_TASK_GROUP_F_LINK_CANCEL UINT32_C(1)
+typedef struct llam_task_group_opts {
+    uint32_t flags;     /**< LINK_CANCEL observes group OR explicit child token. */
+    uint32_t reserved0; /**< Must be zero. */
+} llam_task_group_opts_t;
+#define LLAM_TASK_GROUP_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_task_group_opts_t))
+
+/** @brief Per-operation wait policy. Zero deadline inherits the task budget. */
+typedef struct llam_wait_opts {
+    uint64_t deadline_ns;              /**< Absolute llam_now_ns deadline; 0 adds no limit. */
+    llam_cancel_token_t *cancel_token; /**< Additional token, ORed with task/group cancellation. */
+    uint32_t flags;                    /**< Reserved; must be zero. */
+    uint32_t reserved0;                /**< Must be zero. */
+} llam_wait_opts_t;
+#define LLAM_WAIT_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_wait_opts_t))
+LLAM_API int llam_wait_opts_init(llam_wait_opts_t *opts, size_t opts_size);
+
 /** @brief Runtime initialization options. */
 typedef struct llam_runtime_opts {
     uint32_t deterministic;                         /**< Prefer repeatable scheduling decisions. */
@@ -256,10 +275,35 @@ typedef struct llam_runtime_opts {
     uint32_t preempt_mode;                          /**< Cooperative preemption policy; one of ::llam_preempt_mode_t. */
     uint32_t preempt_poll_period;                   /**< Safepoint flag-poll period; 0 selects a profile default. */
     uint64_t preempt_quantum_ns;                    /**< Global preempt slice override; 0 uses task-class budgets. */
+    uint32_t worker_count;                          /**< Portable/legacy processors; 0 selects CPU/profile defaults. */
+    uint32_t blocking_worker_count;                 /**< Blocking pool threads, 1..1024; 0 selects platform defaults. */
+    uint64_t max_tasks;                             /**< Admitted task objects including unjoined completions; 0 unlimited. */
+    uint64_t max_blocking_jobs;                     /**< Queued plus running blocking callbacks; 0 unlimited. */
 } llam_runtime_opts_t;
 
 /** @brief Current size to pass to ::llam_runtime_init_ex and ::llam_runtime_opts_init. */
 #define LLAM_RUNTIME_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_opts_t))
+
+/** @brief One caller-certified Windows asynchronous-capture PC interval. */
+typedef struct llam_windows_async_preempt_range {
+    uint64_t begin_pc; /**< Inclusive first instruction address. */
+    uint64_t end_pc;   /**< Exclusive end address; the interval is [begin_pc, end_pc). */
+    uint32_t flags;    /**< Reserved for future use; must be zero. */
+    uint32_t reserved0; /**< Must be zero. */
+} llam_windows_async_preempt_range_t;
+
+/** @brief Explicit opt-in for the experimental fixed-primary Windows backend. */
+typedef struct llam_windows_async_preempt_opts {
+    uint32_t flags;    /**< Must equal LLAM_WINDOWS_ASYNC_PREEMPT_ACK_PROCESS_FAILFAST. */
+    uint32_t reserved0; /**< Must be zero. */
+    const llam_windows_async_preempt_range_t *ranges; /**< Copied during the call. */
+    uint64_t range_count; /**< Number of nonoverlapping certified intervals; 1..128. */
+} llam_windows_async_preempt_opts_t;
+
+/** @brief Explicitly acknowledge process-wide fail-fast on uncertain committed context state. */
+#define LLAM_WINDOWS_ASYNC_PREEMPT_ACK_PROCESS_FAILFAST UINT32_C(1)
+/** @brief Current size for ::llam_runtime_enable_experimental_windows_async_preempt_ex. */
+#define LLAM_WINDOWS_ASYNC_PREEMPT_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_windows_async_preempt_opts_t))
 
 /** @brief Cumulative runtime statistics snapshot. */
 typedef struct llam_runtime_stats {
@@ -497,6 +541,55 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
 LLAM_API int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out);
 
 /**
+ * @brief Atomically enable the experimental fixed-primary Windows async backend.
+ *
+ * @details Host threads only, before the first worker run and before any task
+ * is live. The options and range array must remain valid and unchanged until
+ * this function returns. The runtime retains neither caller-owned pointer.
+ * The caller certifies that every possible interrupted PC in each supplied
+ * interval is safe for LLAM's asynchronous context capture and later restore.
+ * LLAM checks address bounds, committed executable PE-image backing, module
+ * lifetime, supported machine state, and runtime ownership; it cannot prove
+ * code semantics, instruction boundaries, exception/unwind safety, or absence
+ * of hidden foreign/thread-affine state. The caller must not mutate certified
+ * code while enabled. The range array is copied and the image is pinned until
+ * runtime shutdown/destroy. Enablement is one-way; there is no public disable.
+ *
+ * On uncertainty after committed remote context/suspension mutation, LLAM
+ * terminates the entire hosting process via Windows fail-fast. This is not a
+ * recoverable runtime-local error. The required acknowledgement flag makes
+ * that consequence explicit; it does not certify the supplied code. Only
+ * Win64 x86-64 experimental builds support this call; other builds return
+ * ENOTSUP. Successful enablement still honors the existing AUTO/STRICT
+ * preemption mode; code outside certified intervals remains cooperative.
+ * Qualified fixed primary workers each own native binding/operation state;
+ * all must register before any task dispatch. Full asynchronous continuations
+ * restore only on their capture worker. An eligible explicit user yield may
+ * release affinity only after a fresh completed cooperative save and retirement
+ * of all prior asynchronous ownership. Runtime-internal/park/offload waits
+ * remain origin-bound. Native TLS references must not be retained across a
+ * migratable yield; use task-local state or pin the task. Dynamic scaling,
+ * helper/relief execution and inline foreign detach remain unsupported here.
+ * A success racing another host's destroy means enablement linearized first;
+ * it does not keep the runtime handle alive after this call returns.
+ *
+ * @param runtime Live runtime handle, not NULL.
+ * @param opts Non-NULL v1 options with a nonempty certified range array.
+ * @param opts_size Size of the caller's options struct; must contain all v1
+ * fields. As with other `_ex` inputs, a larger future tail is ignored by an
+ * older library; callers requiring future fields must check the ABI minor.
+ * @return 0 if the complete configuration was enabled; -1 with errno set to
+ * EINVAL for malformed inputs, EBUSY for a racing/live/closing runtime,
+ * EALREADY if already enabled, ENOTSUP for unavailable backend or unsupported
+ * machine/image configuration, or ENOMEM/EOVERFLOW for resource limits. On
+ * failure no part of this call's configuration remains installed.
+ */
+LLAM_API int llam_runtime_enable_experimental_windows_async_preempt_ex(
+    llam_runtime_t *runtime,
+    const llam_windows_async_preempt_opts_t *opts,
+    size_t opts_size);
+
+/**
  * @brief Spawn a task on an explicit runtime handle.
  *
  * @details
@@ -529,6 +622,70 @@ LLAM_API llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
  * backend/runtime error is recorded. Passing NULL fails with @c EINVAL.
  */
 LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
+
+/**
+ * @brief Create objects for an explicit, initialized runtime from host code.
+ *
+ * These constructors pin the runtime until the new handle is published.
+ * A task of another runtime gets EXDEV; invalid/stale runtimes get EINVAL.
+ * Existing constructors retain their current-task/default-runtime behavior.
+ */
+LLAM_API llam_channel_t *llam_runtime_channel_create(llam_runtime_t *runtime, size_t capacity);
+LLAM_API llam_mutex_t *llam_runtime_mutex_create(llam_runtime_t *runtime);
+LLAM_API llam_cond_t *llam_runtime_cond_create(llam_runtime_t *runtime);
+LLAM_API llam_cancel_token_t *llam_runtime_cancel_token_create(llam_runtime_t *runtime);
+LLAM_API llam_task_group_t *llam_runtime_task_group_create(llam_runtime_t *runtime);
+LLAM_API llam_task_group_t *llam_task_group_create_ex(const llam_task_group_opts_t *opts, size_t opts_size);
+LLAM_API llam_task_group_t *llam_runtime_task_group_create_ex(llam_runtime_t *runtime,
+                                                            const llam_task_group_opts_t *opts,
+                                                            size_t opts_size);
+LLAM_API int llam_runtime_timer_create_ex(llam_runtime_t *runtime, const llam_timer_opts_t *opts,
+                                          size_t opts_size, llam_timer_t **out);
+LLAM_API int llam_runtime_signal_set_create_ex(llam_runtime_t *runtime, const int *signos,
+                                               size_t signo_count, const llam_signal_opts_t *opts,
+                                               size_t opts_size, llam_signal_set_t **out);
+
+/** @brief Request stop for this handle; a task cannot stop a peer runtime. */
+LLAM_API int llam_runtime_request_stop_handle(llam_runtime_t *runtime);
+
+#define LLAM_RUNTIME_RESOURCE_F_RUNNING UINT32_C(1)
+#define LLAM_RUNTIME_RESOURCE_F_DRAINING UINT32_C(2)
+#define LLAM_RUNTIME_RESOURCE_F_NEEDS_RUNNER UINT32_C(4)
+#define LLAM_RUNTIME_RESOURCE_F_QUIESCENT UINT32_C(8)
+
+/** @brief Advisory resource snapshot. Counts can change immediately after a query. */
+typedef struct llam_runtime_resources {
+    uint32_t worker_count;          /**< Portable plus compatibility processors. */
+    uint32_t blocking_worker_count;
+    uint64_t admitted_tasks;        /**< Released only after task object reclamation. */
+    uint64_t live_tasks;
+    uint64_t blocking_jobs;         /**< Includes callbacks still using caller memory. */
+    uint64_t max_tasks;
+    uint64_t max_blocking_jobs;
+    uint64_t public_operations;     /**< Excludes this query/drain operation. */
+    uint32_t bound_native_workers;
+    uint32_t flags;
+} llam_runtime_resources_t;
+#define LLAM_RUNTIME_RESOURCES_CURRENT_SIZE ((size_t)sizeof(llam_runtime_resources_t))
+LLAM_API int llam_runtime_get_resources_ex(llam_runtime_t *runtime,
+                                           llam_runtime_resources_t *out, size_t out_size);
+/**
+ * @brief Close admission, request stop and wait until the active driver returns.
+ *
+ * Host only. The absolute monotonic deadline bounds waiting, not native callback
+ * execution or OS scheduling. ETIMEDOUT preserves runtime, handles and buffers;
+ * retry after callbacks finish, then join/destroy normally. Success never consumes
+ * resources. With pending tasks and no driver, returns EBUSY/NEEDS_RUNNER before
+ * closing admission: start the driver before retrying. Output is optional.
+ */
+LLAM_API int llam_runtime_drain_until(llam_runtime_t *runtime, uint64_t deadline_ns,
+                                      llam_runtime_resources_t *out, size_t out_size);
+
+/** @brief Write JSON statistics for an explicit runtime. */
+LLAM_API int llam_runtime_write_stats_json_handle(llam_runtime_t *runtime, int fd);
+
+/** @brief Write the same best-effort diagnostic dump for an explicit runtime. */
+LLAM_API void llam_dump_runtime_state_handle(llam_runtime_t *runtime, int fd);
 
 /**
  * @brief Destroy a runtime handle.
@@ -701,7 +858,8 @@ LLAM_API int llam_detach(llam_task_t *task);
  * ::llam_task_group_join to consume all child handles, or
  * ::llam_task_group_cancel to request cooperative cancellation first. Group
  * cancellation is delivered through the group's own token; children spawned
- * with an explicit caller-owned token remain controlled by that token.
+ * with an explicit caller-owned token remain controlled by that token. The
+ * create_ex forms can opt in to LLAM_TASK_GROUP_F_LINK_CANCEL (group OR external).
  */
 LLAM_API llam_task_group_t *llam_task_group_create(void);
 
@@ -864,7 +1022,8 @@ LLAM_API int llam_timer_destroy(llam_timer_t *timer);
  * @details
  * This is an opt-in process-level subscription. On Linux, LLAM blocks the
  * requested signals for the calling thread and waits with @c sigtimedwait on a
- * blocking helper using bounded slices so runtime stop can be observed. Call
+ * blocking helper using bounded slices so runtime stop and task cancellation
+ * can be observed. Call
  * this before starting worker threads when possible so they inherit the signal
  * mask. Duplicate or unsupported signal sets may fail with @c EBUSY or
  * @c ENOTSUP. Other platforms currently return @c ENOTSUP.
@@ -887,6 +1046,10 @@ LLAM_API int llam_signal_wait_until(llam_signal_set_t *set, uint64_t deadline_ns
 
 /**
  * @brief Destroy a signal wait set.
+ *
+ * On the creating thread, only signals newly blocked by creation are unblocked.
+ * Destruction on another thread leaves both threads' signal masks unchanged;
+ * the creating thread remains responsible for restoring its mask.
  */
 LLAM_API int llam_signal_set_destroy(llam_signal_set_t *set);
 
@@ -994,6 +1157,40 @@ LLAM_API void *llam_task_local_get(llam_task_local_key_t key);
  * from a managed LLAM task.
  */
 LLAM_API int llam_task_local_set(llam_task_local_key_t key, void *value);
+
+/** @brief A task-owned value is cleaned on exit unless explicitly taken. */
+typedef void (*llam_task_cleanup_fn)(void *value);
+/**
+ * @brief Install ownership at an empty key (EBUSY if populated).
+ *
+ * cleanup must be non-NULL for a non-NULL value, must return normally, must not
+ * block or call LLAM task/wait APIs. It runs once before completion is published,
+ * including after cancellation. Managed imports require NATIVE_AFFINE and retain
+ * native-M identity; compatibility tasks use their exit worker without affinity.
+ * Portable/expert asynchronous tasks fail ENOTSUP. Plain set cannot
+ * overwrite an owned entry; take first to transfer ownership. Key deletion never
+ * suppresses an already registered cleanup.
+ */
+LLAM_API int llam_task_local_set_owned(llam_task_local_key_t key, void *value,
+                                       llam_task_cleanup_fn cleanup);
+/** @brief Remove a current-task value without cleanup; a missing active key succeeds with NULL. */
+LLAM_API int llam_task_local_take_result(llam_task_local_key_t key, void **out);
+
+#define LLAM_TASK_RESULT_F_SET UINT32_C(1)
+typedef struct llam_task_result {
+    void *value;          /**< Application-owned value; NULL can be a successful result. */
+    int32_t error;        /**< Application error, independent of runtime errno. */
+    uint32_t flags;       /**< SET if the task called set_result; otherwise all fields zero. */
+} llam_task_result_t;
+#define LLAM_TASK_RESULT_CURRENT_SIZE ((size_t)sizeof(llam_task_result_t))
+/** @brief Set the current task's result. The runtime does not destroy the value. */
+LLAM_API int llam_task_set_result(void *value, int32_t application_error);
+/** @brief Peek at a completed task, including a borrowed group child; EAGAIN until completed. */
+LLAM_API int llam_task_get_result(llam_task_t *task, llam_task_result_t *out, size_t out_size);
+/** @brief Consume a normal joinable handle and copy its result; runtime failure leaves output untouched. */
+LLAM_API int llam_join_result(llam_task_t *task, llam_task_result_t *out, size_t out_size);
+LLAM_API int llam_join_result_until(llam_task_t *task, uint64_t deadline_ns,
+                                    llam_task_result_t *out, size_t out_size);
 
 /* ============================================================================
  * Cancellation tokens

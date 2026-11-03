@@ -1,0 +1,34 @@
+--- a/experiments/magic2/bench_magic2_kernels.c
++++ b/experiments/magic2/bench_magic2_kernels.c
+@@ -350,7 +350,10 @@
+         if (llam_cancel_token_destroy(s->jobs[i].token) != 0) goto failed;
+         s->jobs[i].token = NULL;
+     }
+-    if (llam_channel_destroy(s->ready) != 0 || llam_channel_destroy(s->start) != 0) goto failed;
++    if (llam_channel_destroy(s->ready) != 0) goto failed;
++    s->ready = NULL;
++    if (llam_channel_destroy(s->start) != 0) goto failed;
++    s->start = NULL;
+     return;
+ failed:
+     s->failed = 1;
+@@ -493,8 +496,19 @@
+     if (result != 0) fprintf(stderr, "bench_magic2_kernels: setup, execution or exact-result check failed (errno=%d)\n", errno);
+     if (s.runtime != NULL) llam_runtime_destroy(s.runtime);
+     llam_magic2_cpu_work_release(&s.work);
++    /* Failed setup/run may leave caller-owned handles after runtime drain. */
++    llam_channel_t *channels[] = {s.ready, s.start};
++    for (unsigned i = 0U; i < 2U; ++i) {
++        if (channels[i] != NULL) {
++            void *ignored;
++            (void)llam_channel_close(channels[i]);
++            while (llam_channel_try_recv_result(channels[i], &ignored) == 0) { }
++            if (llam_channel_destroy(channels[i]) != 0) result = 1;
++        }
++    }
+     if (s.jobs != NULL) {
+         for (unsigned j = 0U; j < s.tasks; ++j) {
++            if (s.jobs[j].token != NULL && llam_cancel_token_destroy(s.jobs[j].token) != 0) result = 1;
+             free(s.jobs[j].input_storage); free(s.jobs[j].output_storage); free(s.jobs[j].workspace);
+         }
+     }

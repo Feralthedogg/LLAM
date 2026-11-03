@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -67,10 +67,11 @@ static bool llam_safepoint_should_auto_preempt(llam_runtime_t *rt,
         return true;
     }
 
-    if (atomic_load_explicit(&shard->inject_depth, memory_order_acquire) != 0U ||
+    if (atomic_load_explicit(&shard->processor.inject_depth, memory_order_acquire) != 0U ||
         llam_norm_queue_depth(shard) != 0U ||
-        atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&shard->event_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U ||
+        atomic_load_explicit(llam_processor_event_pending_const(&shard->processor),
+                             memory_order_acquire) != 0U ||
         llam_runtime_overflow_depth(rt) != 0U ||
         atomic_load_explicit(&rt->block_pending, memory_order_acquire) != 0U) {
         return true;
@@ -86,8 +87,11 @@ static bool llam_safepoint_should_auto_preempt(llam_runtime_t *rt,
  * Safe points are no-ops outside managed task context.
  */
 void llam_task_safepoint(void) {
+    LLAM_NATIVE_API_GUARD();
+
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
+    llam_worker_t *worker = g_llam_tls_worker;
     llam_runtime_t *rt;
     uint64_t now_ns = 0U;
 
@@ -96,6 +100,19 @@ void llam_task_safepoint(void) {
     }
     rt = shard->runtime;
     if (rt == NULL) {
+        return;
+    }
+    if (!llam_worker_has_safe_managed_g(worker, &shard->processor, task)) {
+        if (worker != NULL &&
+            (atomic_load_explicit(&worker->runtime_critical_depth,
+                                  memory_order_acquire) != 0U ||
+             atomic_load_explicit(&worker->preempt_disable_depth,
+                                  memory_order_acquire) != 0U ||
+             atomic_load_explicit(&worker->execution_state,
+                                  memory_order_acquire) ==
+                 LLAM_WORKER_EXEC_RUNTIME_UNSAFE)) {
+            shard->metrics.preempt_suppressed += 1U;
+        }
         return;
     }
 
@@ -135,7 +152,7 @@ void llam_task_safepoint(void) {
         task->forced_yield_budget -= 1U;
         if (task->forced_yield_budget == 0U) {
             task->forced_yield_budget = rt->forced_yield_every;
-            llam_yield();
+            llam_yield_internal();
             return;
         }
     }
@@ -143,7 +160,7 @@ void llam_task_safepoint(void) {
     if (llam_safepoint_should_auto_preempt(rt, shard, task, now_ns)) {
         shard->metrics.preempt_requests += 1U;
         shard->metrics.preempt_yields += 1U;
-        llam_yield();
+        llam_yield_internal();
         return;
     }
 
@@ -167,6 +184,6 @@ void llam_task_safepoint(void) {
         atomic_exchange_explicit(&task->preempt_requested, 0U, memory_order_acq_rel) != 0U) {
         // Consume one preempt request and yield exactly once for this safepoint.
         shard->metrics.preempt_yields += 1U;
-        llam_yield();
+        llam_yield_internal();
     }
 }

@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -52,7 +52,7 @@ static void llam_wake_handoff_record_attempt(llam_shard_t *shard) {
     if (current != NULL) {
         current->handoff_sample_current = sample;
     } else {
-        shard->autotune_handoff_sample_current = sample;
+        shard->processor.autotune_handoff_sample_current = sample;
     }
     if (sample) {
         shard->metrics.wake_handoff_attempts += 1U;
@@ -66,12 +66,12 @@ static void llam_wake_handoff_record_hit(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
-    sample = current != NULL ? current->handoff_sample_current : shard->autotune_handoff_sample_current;
+    sample = current != NULL ? current->handoff_sample_current : shard->processor.autotune_handoff_sample_current;
     if (sample) {
         if (current != NULL) {
             current->handoff_sample_current = false;
         } else {
-            shard->autotune_handoff_sample_current = false;
+            shard->processor.autotune_handoff_sample_current = false;
         }
         shard->metrics.wake_handoff_hits += 1U;
     }
@@ -84,14 +84,14 @@ static void llam_wake_handoff_record_fail(llam_shard_t *shard, llam_wake_handoff
     if (shard == NULL) {
         return;
     }
-    sample = current != NULL ? current->handoff_sample_current : shard->autotune_handoff_sample_current;
+    sample = current != NULL ? current->handoff_sample_current : shard->processor.autotune_handoff_sample_current;
     if (!sample) {
         return;
     }
     if (current != NULL) {
         current->handoff_sample_current = false;
     } else {
-        shard->autotune_handoff_sample_current = false;
+        shard->processor.autotune_handoff_sample_current = false;
     }
 
     switch (reason) {
@@ -136,19 +136,19 @@ static llam_wake_handoff_fail_t llam_wake_handoff_precheck(llam_runtime_t *rt,
         shard->opaque_redirect_active ||
         llam_task_wait_deadline_active(task) ||
         (rt->direct_handoff_allow_timers == 0U &&
-         atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U)) {
+         atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U)) {
         return LLAM_WAKE_HANDOFF_FAIL_POLICY;
     }
     if (rt->direct_handoff_live_limit != 0U &&
         llam_runtime_live_tasks(rt) > rt->direct_handoff_live_limit) {
-        shard->direct_handoff_streak = 0U;
+        shard->processor.direct_handoff_streak = 0U;
         return LLAM_WAKE_HANDOFF_FAIL_POLICY;
     }
     {
         unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
 
-        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
-            shard->direct_handoff_streak = 0U;
+        if (handoff_budget != 0U && shard->processor.direct_handoff_streak >= handoff_budget) {
+            shard->processor.direct_handoff_streak = 0U;
             return LLAM_WAKE_HANDOFF_FAIL_BUDGET;
         }
     }
@@ -285,28 +285,128 @@ void llam_task_wait_resolver_end(llam_task_t *task) {
     if (task == NULL) {
         return;
     }
-    state = atomic_load_explicit(&task->wait_resolver_state,
-                                 memory_order_acquire);
-    for (;;) {
-        if (LLAM_UNLIKELY((state & LLAM_WAIT_RESOLVER_REF_MASK) ==
-                          LLAM_WAIT_RESOLVER_REF_MASK)) {
-            errno = EOVERFLOW;
-            abort();
-        }
-        if (LLAM_UNLIKELY((state & LLAM_WAIT_RESOLVER_REF_MASK) == 0U)) {
-            errno = EINVAL;
-            /* Continuing would permit a raw owner to be recycled unpinned. */
-            abort();
-        }
-        if (atomic_compare_exchange_weak_explicit(&task->wait_resolver_state,
-                                                  &state,
-                                                  state - 1U,
-                                                  memory_order_acq_rel,
-                                                  memory_order_acquire)) {
-            return;
-        }
+    state = atomic_load_explicit(&task->wait_resolver_state, memory_order_acquire);
+    if ((state & LLAM_WAIT_RESOLVER_REF_MASK) == LLAM_WAIT_RESOLVER_REF_MASK ||
+        (state & LLAM_WAIT_RESOLVER_REF_MASK) == 0U) {
+        errno = (state & LLAM_WAIT_RESOLVER_REF_MASK) == 0U ? EINVAL : EOVERFLOW;
+        abort();
+    }
+    /* Our owned low-bit reference cannot disappear concurrently. One RMW
+     * decrements the latest count and preserves any newly set CLOSED bit.
+     * Release publishes resolver work to an acquiring closer; acquire retains
+     * the previous ordering when close/other resolvers publish concurrently. */
+    state = atomic_fetch_sub_explicit(&task->wait_resolver_state, 1U, memory_order_acq_rel);
+    if ((state & LLAM_WAIT_RESOLVER_REF_MASK) == 0U ||
+        (state & LLAM_WAIT_RESOLVER_REF_MASK) == LLAM_WAIT_RESOLVER_REF_MASK) {
+        abort();
     }
 }
+
+/* Resolver references keep node/object storage alive; they do not wake a G. */
+bool llam_task_wait_dependency_read_locked(llam_runtime_t *runtime, llam_task_t *task,
+                                            size_t limit, llam_wait_dependency_t *wait) {
+    unsigned expected = 0U;
+    unsigned reason;
+
+    if (wait == NULL) {
+        return false;
+    }
+    *wait = (llam_wait_dependency_t){.task = task};
+    if (runtime == NULL || task == NULL || limit == 0U ||
+        !atomic_compare_exchange_strong_explicit(&task->wait_resolver_state, &expected, 1U,
+                                                 memory_order_acq_rel, memory_order_acquire)) {
+        return false;
+    }
+    /* One bounded CAS: existing resolvers/closing publishers make this inconclusive. */
+    wait->pinned = true;
+    if (atomic_load_explicit(&task->state, memory_order_acquire) != LLAM_TASK_STATE_PARKED) {
+        goto invalid;
+    }
+    wait->generation = atomic_load_explicit(&task->wait_generation, memory_order_acquire);
+    reason = atomic_load_explicit(&task->wait_reason, memory_order_acquire);
+    if (reason == LLAM_WAIT_MUTEX) {
+        void *ops = atomic_load_explicit(&task->active_wait_lifetime_ops, memory_order_acquire);
+        uintptr_t address = (uintptr_t)ops;
+        if (address < offsetof(llam_mutex_t, active_ops)) {
+            goto invalid;
+        }
+        /* The claimed wait publication owns this exact object's active_ops. */
+        llam_mutex_t *mutex = (llam_mutex_t *)(address - offsetof(llam_mutex_t, active_ops));
+        wait->node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
+        if (wait->node == NULL || mutex->owner_runtime != runtime ||
+            atomic_load_explicit(&task->active_wait_queue, memory_order_acquire) != &mutex->waiters ||
+            atomic_load_explicit(&task->active_wait_queue_lock, memory_order_acquire) != &mutex->lock ||
+            pthread_mutex_trylock(&mutex->lock) != 0) {
+            goto invalid;
+        }
+        bool linked = false;
+        size_t remaining = limit;
+        for (llam_wait_node_t *node = mutex->waiters.head;
+             node != NULL && remaining != 0U; node = node->next, --remaining) {
+            if (node == wait->node) {
+                linked = node->task == task && !llam_wait_node_completed(node);
+                break;
+            }
+        }
+        wait->owner = atomic_load_explicit(&mutex->owner, memory_order_acquire);
+        pthread_mutex_unlock(&mutex->lock);
+        if (!linked) {
+            goto invalid;
+        }
+        wait->mutex = mutex;
+        return true;
+    }
+    if (reason == LLAM_WAIT_JOIN) {
+        llam_task_t *joined_task = atomic_load_explicit(&task->join_target, memory_order_acquire);
+        /* The parked join activation retains its target until the G resumes. */
+        if (joined_task == NULL || pthread_mutex_trylock(&joined_task->lock) != 0) {
+            goto invalid;
+        }
+        bool linked = false;
+        size_t remaining = limit;
+        for (llam_task_t *waiter = joined_task->join_waiters;
+             waiter != NULL && remaining != 0U; waiter = waiter->wait_next, --remaining) {
+            if (waiter == task) {
+                linked = true;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&joined_task->lock);
+        wait->join_target = joined_task;
+        wait->owner = (uintptr_t)joined_task;
+        if (!linked) {
+            goto invalid;
+        }
+        return true;
+    }
+    /* Channels/conditions and other host-wakeable or unknown waits are not proof. */
+invalid:
+    llam_task_wait_resolver_end(task);
+    *wait = (llam_wait_dependency_t){.task = task};
+    return false;
+}
+
+bool llam_task_wait_dependency_matches(const llam_wait_dependency_t *wait) {
+    if (wait == NULL || !wait->pinned || wait->task == NULL) {
+        return false;
+    }
+    const llam_task_t *task = wait->task;
+    if (atomic_load_explicit(&task->state, memory_order_acquire) != LLAM_TASK_STATE_PARKED ||
+        atomic_load_explicit(&task->wait_resolver_state, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&task->wait_generation, memory_order_acquire) != wait->generation) {
+        return false;
+    }
+    if (wait->mutex != NULL) {
+        return atomic_load_explicit(&task->wait_reason, memory_order_acquire) == LLAM_WAIT_MUTEX &&
+               atomic_load_explicit(&task->active_wait_node, memory_order_acquire) == wait->node &&
+               !llam_wait_node_completed(wait->node) &&
+               atomic_load_explicit(&wait->mutex->owner, memory_order_acquire) == wait->owner;
+    }
+    return wait->join_target != NULL &&
+           atomic_load_explicit(&task->wait_reason, memory_order_acquire) == LLAM_WAIT_JOIN &&
+           atomic_load_explicit(&task->join_target, memory_order_acquire) == wait->join_target;
+}
+
 
 /**
  * @brief Close wait-owner publication and drain every resolver that entered first.
@@ -692,23 +792,10 @@ bool llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsi
     return true;
 }
 
-static llam_shard_t *llam_task_deadline_shard(llam_task_t *task) {
+static llam_runtime_t *llam_task_deadline_runtime(llam_task_t *task) {
     llam_runtime_t *rt = llam_wait_task_runtime(task);
 
-    if (task == NULL || rt == NULL || rt->active_shards == 0U) {
-        return NULL;
-    }
-
-    if (task->parked_shard < rt->active_shards) {
-        return &rt->shards[task->parked_shard];
-    }
-
-    /*
-     * Teardown, rehome, and partially failed setup paths can leave parked_shard
-     * defensive rather than authoritative.  last_shard still maps the task to a
-     * valid shard for timer cleanup.
-     */
-    return &rt->shards[atomic_load_explicit(&task->last_shard, memory_order_relaxed) % rt->active_shards];
+    return task != NULL && rt != NULL && rt->active_shards > 0U ? rt : NULL;
 }
 
 /**
@@ -764,17 +851,34 @@ int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t
  * @return true if the task currently has an active timer node.
  */
 bool llam_task_wait_deadline_active(llam_task_t *task) {
-    llam_shard_t *shard = llam_task_deadline_shard(task);
-    bool active = false;
+    llam_runtime_t *rt = llam_task_deadline_runtime(task);
 
-    if (shard == NULL) {
+    if (rt == NULL) {
         return false;
     }
+    for (;;) {
+        unsigned owner_id = atomic_load_explicit(&task->active_timer_heap_shard,
+                                                 memory_order_acquire);
+        llam_shard_t *shard;
+        bool active;
 
-    pthread_mutex_lock(&shard->lock);
-    active = task->active_timer != NULL;
-    pthread_mutex_unlock(&shard->lock);
-    return active;
+        if (owner_id >= rt->active_shards) {
+            return false;
+        }
+        shard = &rt->shards[owner_id];
+        pthread_mutex_lock(&shard->lock);
+        if (atomic_load_explicit(&task->active_timer_heap_shard,
+                                 memory_order_acquire) != owner_id) {
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+        active = task->active_timer != NULL &&
+                 task->active_timer->heap_index < shard->processor.timer_heap_len &&
+                 shard->processor.timer_heap[task->active_timer->heap_index] ==
+                     task->active_timer;
+        pthread_mutex_unlock(&shard->lock);
+        return active;
+    }
 }
 
 /**
@@ -783,16 +887,32 @@ bool llam_task_wait_deadline_active(llam_task_t *task) {
  * @param task Task whose timer should be removed.
  */
 void llam_disarm_task_wait_deadline(llam_task_t *task) {
-    llam_shard_t *shard = llam_task_deadline_shard(task);
+    llam_runtime_t *rt = llam_task_deadline_runtime(task);
 
-    if (shard == NULL) {
+    if (rt == NULL) {
         return;
     }
-    pthread_mutex_lock(&shard->lock);
-    if (task->active_timer != NULL) {
-        (void)llam_timer_remove_locked(shard, task);
+    for (;;) {
+        unsigned owner_id = atomic_load_explicit(&task->active_timer_heap_shard,
+                                                 memory_order_acquire);
+        llam_shard_t *shard;
+
+        if (owner_id >= rt->active_shards) {
+            return;
+        }
+        shard = &rt->shards[owner_id];
+        pthread_mutex_lock(&shard->lock);
+        if (atomic_load_explicit(&task->active_timer_heap_shard,
+                                 memory_order_acquire) != owner_id) {
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+        if (task->active_timer != NULL) {
+            (void)llam_timer_remove_locked(shard, task);
+        }
+        pthread_mutex_unlock(&shard->lock);
+        return;
     }
-    pthread_mutex_unlock(&shard->lock);
 }
 
 /**
@@ -801,73 +921,101 @@ void llam_disarm_task_wait_deadline(llam_task_t *task) {
  * @param task Task with an optional cancel token.
  * @return 0 on success/no token, -1 with ECANCELED if already canceled.
  */
-int llam_cancel_token_register_task(llam_task_t *task) {
-    llam_cancel_token_t *token;
-
-    if (task == NULL || task->cancel_token == NULL) {
-        return 0;
+static void llam_cancel_token_collect_locks(llam_task_t *task, llam_cancel_lock_set_t *set) {
+    set->count = 0U;
+    if (task == NULL) return;
+    /* Fixed-size insertion sort makes every multi-source lock order identical.
+     * Duplicate sources use one lock and one registration. */
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        llam_cancel_token_t *token = llam_task_cancel_source(task, i);
+        if (token == NULL) continue;
+        unsigned at = 0U;
+        while (at < set->count && (uintptr_t)set->tokens[at] < (uintptr_t)token) ++at;
+        if (at < set->count && set->tokens[at] == token) continue;
+        for (unsigned j = set->count; j > at; --j) set->tokens[j] = set->tokens[j - 1U];
+        set->tokens[at] = token;
+        ++set->count;
     }
+}
 
-    token = task->cancel_token;
-    pthread_mutex_lock(&token->lock);
-    if (token->cancelled) {
-        pthread_mutex_unlock(&token->lock);
-        errno = ECANCELED;
-        return -1;
-    }
-
-    if (!task->cancel_registered) {
-        // Intrusive task links avoid allocating separate cancel wait nodes.
-        task->cancel_prev = NULL;
-        task->cancel_next = token->waiters;
-        if (token->waiters != NULL) {
-            token->waiters->cancel_prev = task;
+int llam_cancel_token_lock_task(llam_task_t *task, llam_cancel_lock_set_t *set) {
+    llam_cancel_token_collect_locks(task, set);
+    if (task == NULL) return 0;
+    for (unsigned i = 0U; i < set->count; ++i) pthread_mutex_lock(&set->tokens[i]->lock);
+    for (unsigned i = 0U; i < set->count; ++i) {
+        if (atomic_load_explicit(&set->tokens[i]->cancelled, memory_order_relaxed)) {
+            llam_cancel_token_unlock_task(set);
+            errno = ECANCELED;
+            return -1;
         }
-        token->waiters = task;
-        task->cancel_registered = true;
     }
-    pthread_mutex_unlock(&token->lock);
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        if (atomic_load_explicit(&task->cancel_links[i].delivering, memory_order_acquire)) {
+            llam_cancel_token_unlock_task(set);
+            errno = EAGAIN;
+            return -1;
+        }
+    }
     return 0;
 }
 
-/**
- * @brief Remove a task from its cancellation-token waiter list.
- *
- * @param task Task to unregister.
- */
+void llam_cancel_token_unlock_task(const llam_cancel_lock_set_t *set) {
+    for (unsigned i = set->count; i != 0U; --i) pthread_mutex_unlock(&set->tokens[i - 1U]->lock);
+}
+
+void llam_cancel_token_register_task_locked(llam_task_t *task) {
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        llam_cancel_token_t *token = llam_task_cancel_source(task, i);
+        if (token == NULL) continue;
+        bool duplicate = false;
+        for (unsigned j = 0U; j < i; ++j) duplicate |= llam_task_cancel_source(task, j) == token;
+        if (duplicate) continue;
+        llam_cancel_registration_t *link = &task->cancel_links[i];
+        if (!link->registered) {
+            link->task = task;
+            link->wait_generation = atomic_load_explicit(&task->wait_generation, memory_order_acquire);
+            link->prev = NULL;
+            link->next = token->waiters;
+            if (token->waiters != NULL) token->waiters->prev = link;
+            token->waiters = link;
+            link->registered = true;
+        }
+    }
+}
+
+void llam_cancel_token_unregister_task_locked(llam_task_t *task) {
+    for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
+        llam_cancel_registration_t *link = &task->cancel_links[i];
+        if (!link->registered) continue; /* Detached links belong to delivery. */
+        llam_cancel_token_t *token = llam_task_cancel_source(task, i);
+        if (token == NULL) abort();
+        if (link->prev != NULL) link->prev->next = link->next;
+        else token->waiters = link->next;
+        if (link->next != NULL) link->next->prev = link->prev;
+        link->prev = NULL;
+        link->next = NULL;
+        link->registered = false;
+    }
+}
+
+int llam_cancel_token_register_task(llam_task_t *task) {
+    if (!llam_task_has_cancel_tokens(task)) return 0;
+    llam_cancel_lock_set_t locks;
+    if (llam_cancel_token_lock_task(task, &locks) != 0) return -1;
+    llam_cancel_token_register_task_locked(task);
+    llam_cancel_token_unlock_task(&locks);
+    return 0;
+}
+
 void llam_cancel_token_unregister_task(llam_task_t *task) {
-    llam_cancel_token_t *token;
-    llam_task_t *cur;
-    bool linked = false;
-
-    if (task == NULL || task->cancel_token == NULL) {
-        return;
-    }
-
-    token = task->cancel_token;
-    pthread_mutex_lock(&token->lock);
-    if (task->cancel_registered) {
-        for (cur = token->waiters; cur != NULL; cur = cur->cancel_next) {
-            if (cur == task) {
-                linked = true;
-                break;
-            }
-        }
-        if (linked) {
-            if (task->cancel_prev != NULL) {
-                task->cancel_prev->cancel_next = task->cancel_next;
-            } else {
-                token->waiters = task->cancel_next;
-            }
-            if (task->cancel_next != NULL) {
-                task->cancel_next->cancel_prev = task->cancel_prev;
-            }
-        }
-        task->cancel_prev = NULL;
-        task->cancel_next = NULL;
-        task->cancel_registered = false;
-    }
-    pthread_mutex_unlock(&token->lock);
+    if (!llam_task_has_cancel_tokens(task)) return;
+    /* Unregister also runs after cancellation, so it must not reject a set
+     * source. Sources remain retained while their registration can be visited. */
+    llam_cancel_lock_set_t locks;
+    llam_cancel_token_collect_locks(task, &locks);
+    for (unsigned i = 0U; i < locks.count; ++i) pthread_mutex_lock(&locks.tokens[i]->lock);
+    llam_cancel_token_unregister_task_locked(task);
+    llam_cancel_token_unlock_task(&locks);
 }
 
 /**
@@ -982,7 +1130,7 @@ int llam_io_req_node_index(const llam_io_req_t *req) {
     shard_id = shard_id < rt->active_shards
                    ? shard_id
                    : (shard_id % rt->active_shards);
-    return (int)rt->shards[shard_id].io_node_index;
+    return (int)llam_processor_io_node_index(&rt->shards[shard_id].processor);
 }
 
 /** @brief Revalidate the exact task wait and recyclable request activation. */
@@ -1302,6 +1450,20 @@ void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
     task->wait_reason = reason;
     shard->metrics.parks += 1U;
     llam_trace_shard(shard, task, kind, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, reason);
+    /*
+     * Stop's parked-task scan can pass just before this task publishes PARKED.
+     * Recheck after publication so a wait that races with stop resolves itself
+     * instead of sleeping past the one-shot scan. The task is still running on
+     * its owner M; cancellation may queue it, then this switch yields to the
+     * scheduler before it can execute again.
+     */
+    if (shard->runtime != NULL &&
+        (atomic_load_explicit(&shard->runtime->stop_requested,
+                              memory_order_acquire) ||
+         atomic_load_explicit(&shard->runtime->shutdown_requested,
+                              memory_order_acquire))) {
+        llam_cancel_task_wait(task);
+    }
     /* Retire the worker publication before the task enters a wait. */
     pthread_mutex_lock(&shard->lock);
     llam_worker_clear_active_g(g_llam_tls_worker);
@@ -1328,6 +1490,7 @@ void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
 static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task_t *waiter) {
     llam_shard_t *target;
     llam_task_state_id_t from;
+    llam_processor_queue_access_t access;
 
     if (rt == NULL || waiter == NULL || waiter->wait_next != NULL || waiter->parked_shard >= rt->active_shards) {
         return false;
@@ -1336,12 +1499,14 @@ static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task
     if (g_llam_tls_shard != target ||
         g_llam_tls_task == NULL ||
         !llam_shard_accepts_new_work(target) ||
-        llam_task_wait_deadline_active(waiter)) {
+        llam_task_wait_deadline_active(waiter) ||
+        !llam_processor_queue_access_snapshot(&target->processor, &access)) {
         return false;
     }
 
     pthread_mutex_lock(&target->lock);
-    if (target->opaque_redirect_active) {
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(target, &access) ||
+        target->opaque_redirect_active) {
         pthread_mutex_unlock(&target->lock);
         return false;
     }
@@ -1356,7 +1521,11 @@ static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task
     waiter->wait_reason = LLAM_WAIT_NONE;
     waiter->enqueue_hot = 0U;
     waiter->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
-    if (llam_queue_push_bounded_locked(target, &target->hot_q, LLAM_HOT_QUEUE_CAP, waiter)) {
+    if (llam_queue_push_bounded_locked(target,
+                                      &target->processor.hot_q,
+                                      LLAM_HOT_QUEUE_CAP,
+                                      waiter,
+                                      &access)) {
         target->metrics.hot_enqueues += 1U;
     }
     target->metrics.wakes += 1U;

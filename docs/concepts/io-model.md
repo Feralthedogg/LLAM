@@ -9,7 +9,6 @@ cooperatively while the platform backend waits.
 | --- | --- |
 | Linux | io_uring/liburing |
 | macOS | kqueue |
-| FreeBSD, OpenBSD, NetBSD, DragonFly BSD | kqueue |
 | Windows | IOCP for Winsock and overlapped HANDLE operations |
 
 Unsupported descriptors or policies fall back to the blocking-helper path so a

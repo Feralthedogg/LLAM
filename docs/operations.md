@@ -57,9 +57,11 @@ have stopped or have observed cancellation.
 ## 4. CPU-Bound Tasks
 
 LLAM remains stackful and cooperative at the actual context-switch boundary.
-Automatic preemption is request-based: watchdog/runtime policy can ask an
-over-budget task to give up the worker, but the task must still hit a LLAM
-boundary such as `llam_task_safepoint()`, `LLAM_PREEMPT_POLL`,
+AUTO remains conservative: watchdog/runtime policy requests a switch at LLAM
+boundaries. Only an explicitly enabled experimental backend with registered
+safe ranges can use signal-context capture; unknown code remains cooperative.
+Watchdog/runtime policy can ask an over-budget task to give up the worker, but
+the task must still hit a LLAM boundary such as `llam_task_safepoint()`, `LLAM_PREEMPT_POLL`,
 `LLAM_PREEMPT_POLL_EVERY`, `llam_yield()`, a wait, or an I/O call. Long C loops
 that never reach one of those boundaries can delay cancellation, watchdog
 progress, allocator quiescence, and runnable task handoff.
@@ -109,7 +111,7 @@ disable it for release benchmarking unless diagnostics are required.
 ## 6. Platform Differences
 
 Linux, kqueue platforms, and Windows have different kernel contracts. Linux
-uses io_uring/liburing where available. macOS and the BSD family use kqueue for
+uses io_uring/liburing where available. macOS use kqueue for
 readiness and runtime wakeups; Darwin-specific Mach scheduler/wake hints stay
 behind Darwin-only guards. Windows native support covers scheduler/core, Windows
 event wake handles, x86_64 context switching, IOCP-backed Winsock requests, and
@@ -138,14 +140,7 @@ Production rollout is gated by native Windows CMake/CTest, Windows 2022/2025
 stress, forced Windows 10/11 policy checks, IOCP smoke coverage, HANDLE I/O
 coverage, public handle/lifetime edge tests, shutdown and owned-buffer tests,
 shared-library export checks, and benchmark smoke coverage.
-BSD rollout is gated by the `.github/workflows/bsd.yml` VM matrix for FreeBSD,
-OpenBSD, and NetBSD. That gate currently builds the runtime, runs
-core/API/select/I/O-buffer/shared-load smoke tests, and validates release
-archive shape for each hard-gated target. DragonFly BSD is kept in the same
-workflow as an experimental allowed-failure smoke path because public
-DragonFlyBSD VM/package infrastructure has been unstable; release artifact
-publication still requires the release workflow's DragonFlyBSD artifact build to
-pass. FreeBSD, OpenBSD, and NetBSD package or test failures are not skipped.
+BSD support ended in 3.0.0; no BSD VM or artifact gate remains active.
 The top-level Makefile does not maintain a separate Windows compiler pipeline:
 when `HOST_PLATFORM=windows` it delegates build, test, shared/static, package,
 and explicit executable/test targets to the native CMake backend. This keeps the
@@ -460,9 +455,7 @@ Before tagging a release build, require:
 
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.
-- BSD VM smoke through `.github/workflows/bsd.yml` for FreeBSD, OpenBSD, and
-  NetBSD, plus a successful DragonFly BSD artifact build in the release
-  workflow before publishing DragonFly BSD artifacts.
+- Verify BSD targets are rejected with `make test-platform-support`.
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
   the Windows 2022/2025 stress jobs, including forced Windows 10/11 policies and
   opt-in TCP `POLLIN` IOCP smoke.

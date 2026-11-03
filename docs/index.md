@@ -9,7 +9,7 @@ hide:
     <h1>Write blocking C. Run it concurrently.</h1>
     <p>
       LLAM gives every task its own stack and parks waits on native I/O
-      backends, so straightforward C code can scale across Linux, macOS, BSD,
+      backends, so straightforward C code can scale across Linux, macOS,
       and Windows.
     </p>
   </div>
@@ -21,7 +21,7 @@ hide:
     </div>
     <div class="llam-install-section">
       <div class="llam-install-label">
-        <span>Linux, macOS, BSD</span>
+        <span>Linux, macOS</span>
         <span>POSIX shell</span>
       </div>
       <div class="llam-command-box">
@@ -31,7 +31,7 @@ hide:
       <div class="llam-platform-row">
         <span>Linux</span>
         <span>macOS</span>
-        <span>BSD</span>
+        <span>Windows</span>
       </div>
     </div>
     <div class="llam-install-section llam-install-section-border">
@@ -76,19 +76,27 @@ hide:
 
 ```c
 #include <llam/runtime.h>
+#include <errno.h>
 
-static void worker(void *arg) {
+static void child(void *arg) {
     (void)arg;
-    llam_sleep_ns(1000000);
+    int error = llam_sleep_ns(1000000) == 0 ? 0 : errno;
+    (void)llam_task_set_result(NULL, error);
 }
 
 int main(void) {
-    llam_runtime_init(NULL);
-    llam_task_t *task = llam_spawn(worker, NULL, NULL);
-    llam_run();
-    llam_join(task);
-    llam_runtime_shutdown();
-    return 0;
+    llam_runtime_t *runtime = NULL;
+    if (llam_runtime_create(NULL, 0, &runtime) != 0) return 1;
+    llam_task_t *task = llam_runtime_spawn_ex(runtime, child, NULL, NULL, 0);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return 1;
+    }
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
+    llam_runtime_destroy(runtime);
+    return failed;
 }
 ```
 
@@ -145,16 +153,6 @@ int main(void) {
     <strong>macOS arm64 / x86_64</strong>
     <span>Supported</span>
     <p>kqueue readiness, Darwin-specific wake tuning, and native verification paths.</p>
-  </div>
-  <div class="llam-status">
-    <strong>FreeBSD / OpenBSD / NetBSD</strong>
-    <span>Smoke gated</span>
-    <p>Shared kqueue backend with BSD VM build, package, and core runtime smoke gates.</p>
-  </div>
-  <div class="llam-status">
-    <strong>DragonFly BSD</strong>
-    <span class="llam-experimental">Experimental</span>
-    <p>Visible allowed-failure CI until public VM and package infrastructure stabilizes.</p>
   </div>
   <div class="llam-status">
     <strong>Windows 10 / 11</strong>

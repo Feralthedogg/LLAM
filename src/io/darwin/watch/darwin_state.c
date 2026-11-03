@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
@@ -159,6 +159,7 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
                 watch->destroy_pending = true;
                 return;
             }
+            llam_watch_index_remove(&node->recv_watch_index, &watch->index_entry);
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
                 llam_recv_ready_t *next = watch->ready_head->next;

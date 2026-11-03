@@ -24,10 +24,17 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#include "managed_scheduler.h"
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "windows_async_lifetime.h"
+#endif
+#if defined(__linux__) && defined(__x86_64__) && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "async_preempt_abi.h"
+#endif
 
 /**
  * @brief Run the initialized runtime until all scheduled work completes.
@@ -55,6 +62,11 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
         return -1;
     }
     rt = pinned_runtime;
+    if (g_llam_tls_worker != NULL) {
+        llam_runtime_end_public_op(pinned_runtime);
+        errno = EBUSY;
+        return -1;
+    }
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         llam_runtime_end_public_op(pinned_runtime);
         errno = EINVAL;
@@ -80,6 +92,19 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
      * run token instead of being blocked for the full scheduler lifetime.
     */
     llam_runtime_end_public_op(pinned_runtime);
+    if (rt->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        rc = llam_managed_runtime_run(rt);
+        if (rc == 0 && !atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
+            !atomic_load_explicit(&rt->draining, memory_order_acquire))
+            atomic_store_explicit(&rt->stop_requested, false, memory_order_release);
+        /* No runtime access after completion: destroy may now free storage. */
+        atomic_store_explicit(&rt->exec_started, false, memory_order_release);
+        return rc;
+    }
+    if (llam_async_context_run_begin(rt) != 0) {
+        atomic_store_explicit(&rt->exec_started, false, memory_order_release);
+        return -1;
+    }
     /*
      * Shard zero is driven by this borrowed caller thread. Publish its worker
      * binding before auxiliary shards start so no producer or watchdog can
@@ -90,12 +115,42 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
     llam_scheduler_bind_identity(&rt->shards[0],
                                  &rt->shards[0].primary_worker,
                                  &rt->shards[0].scheduler_ctx);
+    if (atomic_load_explicit(&rt->fatal_errno, memory_order_acquire) != 0) {
+        rc = atomic_load_explicit(&rt->fatal_errno, memory_order_acquire);
+        i = 1U;
+        goto start_failed;
+    }
+    if (llam_async_context_driver_ready(rt) != 0) {
+        rc = errno;
+        i = 1U;
+        goto start_failed;
+    }
     for (i = 1; i < rt->active_shards; ++i) {
-        rc = pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]);
+        rc = 0;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && \
+    defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && defined(LLAM_ENABLE_TEST_HOOKS)
+        if (llam_windows_async_lifetime_test_take_worker_failure(
+                LLAM_WINDOWS_ASYNC_TEST_FAIL_THREAD_START, i)) {
+            rc = EAGAIN;
+        }
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && defined(__linux__) && defined(__x86_64__) && \
+    defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U &&
+            llam_async_preempt_test_take_worker_failure(LLAM_ASYNC_TEST_FAIL_THREAD_START, i)) {
+            rc = EAGAIN;
+        }
+#endif
+        if (rc == 0) {
+            rc = pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]);
+        }
         if (rc != 0) {
+start_failed:
             // pthread_create returns the error code directly; errno may be
             // stale.  Stop and join any shards already started in this run
             // before exposing the failure to the caller.
+            /* Release pre-dispatch waiters; live NEW Gs cannot drain themselves. */
+            llam_async_context_run_abort(rt, rc);
             llam_record_fatal(rt, rc);
             llam_request_stop(rt);
             while (i > 1U) {
@@ -105,9 +160,13 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
                     rt->shards[i].thread_started = false;
                 }
             }
+            if (!llam_async_context_driver_close(rt)) {
+                abort();
+            }
             llam_scheduler_unbind_identity(&rt->shards[0],
                                            &rt->shards[0].primary_worker);
             llam_scheduler_clear_identity();
+            llam_async_context_run_end(rt);
             atomic_store_explicit(&rt->exec_started, false, memory_order_release);
             errno = rc;
             return -1;
@@ -115,6 +174,11 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
         rt->shards[i].thread_started = true;
     }
 
+    if (llam_async_context_run_commit(rt) != 0) {
+        rc = errno;
+        i = rt->active_shards;
+        goto start_failed;
+    }
     llam_scheduler_loop(&rt->shards[0]);
 
     for (i = 1; i < rt->active_shards; ++i) {
@@ -123,6 +187,7 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
             rt->shards[i].thread_started = false;
         }
     }
+    llam_async_context_run_end(rt);
 
     if (atomic_load(&rt->fatal_errno) != 0) {
         errno = atomic_load(&rt->fatal_errno);
@@ -136,7 +201,8 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
      * completed cleanly, clear that internal drain signal so embedders can
      * spawn more work and call llam_run() again on the same initialized runtime.
      */
-    atomic_store_explicit(&rt->stop_requested, false, memory_order_release);
+    if (!atomic_load_explicit(&rt->draining, memory_order_acquire))
+        atomic_store_explicit(&rt->stop_requested, false, memory_order_release);
     /*
      * Publish run completion only after the final runtime-state access above.
      * Host-side destroy waits on this flag before freeing explicit runtime
@@ -147,6 +213,8 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
 }
 
 int llam_run(void) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_runtime_run_rt(llam_runtime_default_storage());
 }
 
@@ -173,6 +241,8 @@ int llam_runtime_request_stop_rt(llam_runtime_t *rt) {
 }
 
 int llam_runtime_request_stop(void) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     /*
      * The no-handle API remains the default-runtime entry point for unmanaged
      * host threads, but from a managed task it must target that task's owner

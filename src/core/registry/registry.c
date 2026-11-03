@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -116,14 +116,23 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
     bool heap_allocated;
     size_t active_ops;
 
+    if (llam_native_domain_blocked()) {
+        if (out_heap_allocated != NULL) *out_heap_allocated = false;
+        errno = ENOTSUP;
+        return -1;
+    }
+
     if (rt == NULL || out_heap_allocated == NULL) {
         errno = EINVAL;
         return -1;
     }
     *out_heap_allocated = false;
+    /* Protect partial construction only through the exclusive destroy claim. */
+    llam_runtime_lifecycle_lock();
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
     if (!llam_runtime_is_registered_locked(rt)) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        llam_runtime_lifecycle_unlock();
         errno = EINVAL;
         return -1;
     }
@@ -135,17 +144,25 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
          * would spin forever waiting for the permanent sentinel to become zero.
          */
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        llam_runtime_lifecycle_unlock();
         errno = EBUSY;
         return -1;
     }
     already_claimed = atomic_exchange_explicit(&rt->destroy_claimed, true, memory_order_acq_rel);
     if (already_claimed) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        llam_runtime_lifecycle_unlock();
         errno = EINVAL;
         return -1;
     }
     heap_allocated = rt->heap_allocated;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    /*
+     * The claim prevents new operations and a second teardown. Release the
+     * process construction gate before waiting: a running task may create a
+     * peer runtime before releasing its run driver's public pin.
+     */
+    llam_runtime_lifecycle_unlock();
     /*
      * Existing host-side public operations may be parked in a no-deadline
      * runtime-owned wait while holding active_ops. Publish stop before waiting
@@ -225,6 +242,12 @@ int llam_runtime_check_handle(const llam_runtime_t *runtime) {
 
 int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime) {
     llam_runtime_t *registered;
+
+    if (llam_native_domain_blocked()) {
+        if (out_runtime != NULL) *out_runtime = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
 
     if (out_runtime == NULL) {
         errno = EINVAL;

@@ -25,10 +25,11 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#include "async_signal_registry.h"
 
 #if LLAM_PLATFORM_POSIX
 #include <signal.h>
@@ -38,11 +39,15 @@
 #define LLAM_SIGNAL_WAIT_SLICE_NS 50000000ULL
 #define LLAM_SIGNAL_NO_DEADLINE UINT64_MAX
 
-#if LLAM_PLATFORM_LINUX
+#if LLAM_PLATFORM_LINUX || LLAM_ASYNC_CONTEXT_SIGNAL
+#if defined(__FreeBSD__)
+#define LLAM_SIGNAL_MAX_SIGNO 129
+#else
 #ifndef NSIG
 #define LLAM_SIGNAL_MAX_SIGNO 128
 #else
 #define LLAM_SIGNAL_MAX_SIGNO NSIG
+#endif
 #endif
 #define LLAM_SIGNAL_INLINE_SIGNOS 16U
 #endif
@@ -55,17 +60,50 @@ struct llam_signal_set {
     struct llam_signal_set *registry_next;
 #if LLAM_PLATFORM_LINUX
     sigset_t mask;
+    sigset_t newly_blocked;
+    uint64_t mask_thread_cookie;
     int signos[LLAM_SIGNAL_INLINE_SIGNOS];
     size_t signo_count;
     atomic_uint_fast64_t sequence;
 #endif
 };
 
-#if LLAM_PLATFORM_LINUX
+#if LLAM_PLATFORM_LINUX || LLAM_ASYNC_CONTEXT_SIGNAL
 static pthread_mutex_t g_llam_signal_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+#if LLAM_PLATFORM_LINUX
 static llam_signal_set_t *g_llam_signal_registry;
 static llam_public_slot_table_t g_llam_signal_public_slots;
+#endif
 static unsigned g_llam_signal_refs[LLAM_SIGNAL_MAX_SIGNO];
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+static bool g_llam_signal_handler_claim[LLAM_SIGNAL_MAX_SIGNO];
+
+int llam_async_signal_claim_number(int signal_number) {
+    int error = 0;
+    if (signal_number <= 0 || signal_number >= LLAM_SIGNAL_MAX_SIGNO) return EINVAL;
+    pthread_mutex_lock(&g_llam_signal_registry_lock);
+    if (g_llam_signal_refs[signal_number] != 0U || g_llam_signal_handler_claim[signal_number]) {
+        error = EBUSY;
+    } else {
+        g_llam_signal_handler_claim[signal_number] = true;
+    }
+    pthread_mutex_unlock(&g_llam_signal_registry_lock);
+    return error;
+}
+
+void llam_async_signal_release_number(int signal_number) {
+    pthread_mutex_lock(&g_llam_signal_registry_lock);
+    if (signal_number <= 0 || signal_number >= LLAM_SIGNAL_MAX_SIGNO ||
+        !g_llam_signal_handler_claim[signal_number]) abort();
+    g_llam_signal_handler_claim[signal_number] = false;
+    pthread_mutex_unlock(&g_llam_signal_registry_lock);
+}
+#endif
+#endif
+#if LLAM_PLATFORM_LINUX
+/* Protected by the registry lock; TLS cookies survive native thread-id reuse. */
+static uint64_t g_llam_signal_next_thread_cookie = 1U;
+static _Thread_local uint64_t g_llam_signal_thread_cookie;
 
 static llam_signal_set_t *llam_signal_public_handle(llam_signal_set_t *set) {
     if (set == NULL) {
@@ -165,6 +203,12 @@ static int llam_signal_reserve_signos_locked(const int *signos, size_t signo_cou
     size_t i;
 
     for (i = 0U; i < signo_count; ++i) {
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+        if (g_llam_signal_handler_claim[signos[i]]) {
+            errno = EBUSY;
+            return -1;
+        }
+#endif
         if (g_llam_signal_refs[signos[i]] != 0U) {
             errno = EBUSY;
             return -1;
@@ -205,6 +249,7 @@ static void llam_signal_slice_timespec(uint64_t now_ns, uint64_t deadline_ns, st
 
 typedef struct llam_signal_wait_call {
     llam_signal_set_t *set;
+    llam_task_t *task;
     uint64_t deadline_ns;
     int signo;
     int error_code;
@@ -213,6 +258,8 @@ typedef struct llam_signal_wait_call {
 static void *llam_signal_blocking_wait_call(void *arg) {
     llam_signal_wait_call_t *call = arg;
     llam_signal_set_t *set;
+    sigset_t previous_mask;
+    int rc;
 
     if (call == NULL || call->set == NULL) {
         return call;
@@ -225,49 +272,56 @@ static void *llam_signal_blocking_wait_call(void *arg) {
      * the worker before sigtimedwait so they are consumed by this explicit wait
      * instead of being delivered through the process default path.
      */
-    (void)pthread_sigmask(SIG_BLOCK, &set->mask, NULL);
+    rc = pthread_sigmask(SIG_BLOCK, &set->mask, &previous_mask);
+    if (rc != 0) {
+        call->error_code = rc;
+        return call;
+    }
     for (;;) {
         struct timespec timeout;
         siginfo_t info;
         uint64_t now_ns = llam_now_ns();
         int signo;
 
-        if (set->owner_runtime != NULL &&
+        if (llam_task_cancel_token_is_cancelled(call->task) ||
+            (set->owner_runtime != NULL &&
             (atomic_load_explicit(&set->owner_runtime->stop_requested, memory_order_acquire) ||
-             !atomic_load_explicit(&set->owner_runtime->initialized, memory_order_acquire))) {
+             !atomic_load_explicit(&set->owner_runtime->initialized, memory_order_acquire)))) {
             call->error_code = ECANCELED;
-            return call;
+            break;
         }
         if (call->deadline_ns != LLAM_SIGNAL_NO_DEADLINE && call->deadline_ns <= now_ns) {
             call->error_code = ETIMEDOUT;
-            return call;
+            break;
         }
         llam_signal_slice_timespec(now_ns, call->deadline_ns, &timeout);
         memset(&info, 0, sizeof(info));
         signo = sigtimedwait(&set->mask, &info, &timeout);
         if (signo > 0) {
             call->signo = signo;
-            return call;
+            break;
         }
         if (errno == EAGAIN || errno == EINTR) {
             continue;
         }
         call->error_code = errno != 0 ? errno : EINVAL;
-        return call;
+        break;
     }
+    /* A pooled worker must not retain this subscription's mask. */
+    (void)pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
+    return call;
 }
 #endif
 
-int llam_signal_set_create_ex(const int *signos,
-                              size_t signo_count,
-                              const llam_signal_opts_t *opts,
-                              size_t opts_size,
-                              llam_signal_set_t **out) {
+static int llam_signal_set_create_owned(llam_runtime_t *owner_runtime, const int *signos,
+                                        size_t signo_count, const llam_signal_opts_t *opts,
+                                        size_t opts_size, llam_signal_set_t **out) {
     if (out == NULL) {
         errno = EINVAL;
         return -1;
     }
     *out = NULL;
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return -1;
     if (opts != NULL && opts_size == 0U) {
         errno = EINVAL;
         return -1;
@@ -278,6 +332,7 @@ int llam_signal_set_create_ex(const int *signos,
     size_t copy_size;
     size_t slot = 0U;
     size_t i;
+    sigset_t previous_mask;
     int rc;
 
     memset(&normalized, 0, sizeof(normalized));
@@ -295,7 +350,8 @@ int llam_signal_set_create_ex(const int *signos,
     if (set == NULL) {
         return -1;
     }
-    set->owner_runtime = llam_runtime_owner_for_new_object();
+    set->owner_runtime = owner_runtime;
+    sigemptyset(&set->newly_blocked);
     set->signo_count = signo_count;
     llam_public_active_op_init(&set->active_ops);
     atomic_init(&set->sequence, 0U);
@@ -305,6 +361,16 @@ int llam_signal_set_create_ex(const int *signos,
         sigaddset(&set->mask, signos[i]);
     }
     pthread_mutex_lock(&g_llam_signal_registry_lock);
+    if (g_llam_signal_thread_cookie == 0U) {
+        if (g_llam_signal_next_thread_cookie == UINT64_MAX) {
+            pthread_mutex_unlock(&g_llam_signal_registry_lock);
+            free(set);
+            errno = EOVERFLOW;
+            return -1;
+        }
+        g_llam_signal_thread_cookie = g_llam_signal_next_thread_cookie++;
+    }
+    set->mask_thread_cookie = g_llam_signal_thread_cookie;
     if (llam_signal_reserve_signos_locked(signos, signo_count) != 0) {
         pthread_mutex_unlock(&g_llam_signal_registry_lock);
         free(set);
@@ -330,16 +396,24 @@ int llam_signal_set_create_ex(const int *signos,
         return -1;
     }
     pthread_mutex_unlock(&g_llam_signal_registry_lock);
-    rc = pthread_sigmask(SIG_BLOCK, &set->mask, NULL);
+    rc = pthread_sigmask(SIG_BLOCK, &set->mask, &previous_mask);
     if (rc != 0) {
         int saved_errno = rc;
 
         (void)llam_signal_set_destroy(*out);
+        *out = NULL;
         errno = saved_errno;
         return -1;
     }
+    sigemptyset(&set->newly_blocked);
+    for (i = 0U; i < signo_count; ++i) {
+        if (sigismember(&previous_mask, signos[i]) == 0) {
+            sigaddset(&set->newly_blocked, signos[i]);
+        }
+    }
     return 0;
 #else
+    (void)owner_runtime;
     (void)signos;
     (void)signo_count;
     (void)opts;
@@ -347,6 +421,36 @@ int llam_signal_set_create_ex(const int *signos,
     errno = ENOTSUP;
     return -1;
 #endif
+}
+
+int llam_signal_set_create_ex(const int *signos, size_t signo_count, const llam_signal_opts_t *opts,
+                              size_t opts_size, llam_signal_set_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+    return llam_signal_set_create_owned(llam_runtime_owner_for_new_object(), signos, signo_count,
+                                         opts, opts_size, out);
+}
+
+int llam_runtime_signal_set_create_ex(llam_runtime_t *runtime, const int *signos, size_t signo_count,
+                                      const llam_signal_opts_t *opts, size_t opts_size,
+                                      llam_signal_set_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (out == NULL) { errno = EINVAL; return -1; }
+    *out = NULL;
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return -1;
+    int result = llam_signal_set_create_owned(pinned, signos, signo_count, opts, opts_size, out);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
 }
 
 static int llam_signal_wait_impl(llam_signal_set_t *handle,
@@ -374,7 +478,11 @@ static int llam_signal_wait_impl(llam_signal_set_t *handle,
     }
     memset(&call, 0, sizeof(call));
     call.set = set;
-    call.deadline_ns = deadline_ns;
+    /* The blocking job retains the task until this callback has returned. */
+    call.task = g_llam_tls_task;
+    bool has_deadline = deadline_ns != LLAM_SIGNAL_NO_DEADLINE;
+    llam_task_merge_wait_deadline(call.task, &has_deadline, &deadline_ns);
+    call.deadline_ns = has_deadline ? deadline_ns : LLAM_SIGNAL_NO_DEADLINE;
     if (llam_call_blocking_result(llam_signal_blocking_wait_call, &call, &ignored) != 0) {
         saved_errno = errno;
         if (pinned_runtime != NULL) {
@@ -408,14 +516,20 @@ static int llam_signal_wait_impl(llam_signal_set_t *handle,
 }
 
 int llam_signal_wait(llam_signal_set_t *set, llam_signal_event_t *out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_signal_wait_impl(set, LLAM_SIGNAL_NO_DEADLINE, out);
 }
 
 int llam_signal_wait_until(llam_signal_set_t *set, uint64_t deadline_ns, llam_signal_event_t *out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_signal_wait_impl(set, deadline_ns, out);
 }
 
 int llam_signal_set_destroy(llam_signal_set_t *handle) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     if (handle == NULL) {
         errno = EINVAL;
         return -1;
@@ -449,11 +563,13 @@ int llam_signal_set_destroy(llam_signal_set_t *handle) {
         errno = EBUSY;
         return -1;
     }
-    mask = set->mask;
+    mask = set->newly_blocked;
     llam_signal_unregister_live_locked(set);
     llam_signal_release_signos_locked(set);
     pthread_mutex_unlock(&g_llam_signal_registry_lock);
-    (void)pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+    if (g_llam_signal_thread_cookie == set->mask_thread_cookie) {
+        (void)pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+    }
     free(set);
     return 0;
 #else

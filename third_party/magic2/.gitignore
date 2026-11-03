@@ -1,0 +1,12 @@
+# Local compiler output
+build/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.dSYM/

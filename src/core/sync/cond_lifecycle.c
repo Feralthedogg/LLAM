@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -117,7 +117,10 @@ void llam_cond_end_public_op(llam_cond_t *cond) {
     llam_public_active_op_end(&cond->active_ops);
 }
 
-llam_cond_t *llam_cond_create(void) {
+static llam_cond_t *llam_cond_create_owned(llam_runtime_t *owner_runtime) {
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
+
+
     llam_cond_t *cond = calloc(1, sizeof(*cond));
     int rc;
 
@@ -125,7 +128,7 @@ llam_cond_t *llam_cond_create(void) {
         return NULL;
     }
 
-    cond->owner_runtime = llam_runtime_owner_for_new_object();
+    cond->owner_runtime = owner_runtime;
     llam_public_active_op_init(&cond->active_ops);
     atomic_init(&cond->inflight_waiters, 0U);
     rc = pthread_mutex_init(&cond->lock, NULL);
@@ -143,6 +146,22 @@ llam_cond_t *llam_cond_create(void) {
     return llam_cond_public_handle(cond);
 }
 
+llam_cond_t *llam_cond_create(void) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    return llam_cond_create_owned(llam_runtime_owner_for_new_object());
+}
+
+llam_cond_t *llam_runtime_cond_create(llam_runtime_t *runtime) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return NULL;
+    llam_cond_t *result = llam_cond_create_owned(pinned);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
+}
+
 /**
  * @brief Destroy an idle condition variable public handle.
  *
@@ -153,6 +172,8 @@ llam_cond_t *llam_cond_create(void) {
  * @return 0 on success, or -1 with errno set to EINVAL, EBUSY, or EXDEV.
  */
 int llam_cond_destroy(llam_cond_t *cond) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t handle = (uintptr_t)cond;
     size_t slot;
     uint32_t generation;

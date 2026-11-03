@@ -1,0 +1,70 @@
+[
+  {
+    "command": [
+      "make",
+      "-j4",
+      "CC=clang",
+      "bench_magic2_kernels"
+    ],
+    "exit_code": 0,
+    "output": "clang -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE -Itools/preempt -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -c -o object/experiments/magic2/bench_magic2_kernels.o experiments/magic2/bench_magic2_kernels.c\nclang -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer -o bench_magic2_kernels object/src/core/sched/worker_registry.o object/src/core/sched/execution_lease.o object/src/core/lifecycle/runtime.o object/src/core/base/abi.o object/src/core/base/errno.o object/src/core/base/util.o object/src/core/base/io_udata.o object/src/core/registry/capability.o object/src/core/broker/broker.o object/src/core/broker/broker_lifecycle.o object/src/core/broker/broker_ops.o object/src/core/broker/broker_validate.o object/src/core/broker/broker_buffer.o object/src/core/broker/broker_descriptor.o object/src/core/broker/broker_channel.o object/src/core/broker/broker_revoke.o object/src/core/broker/broker_task.o object/src/core/broker/broker_windows_security.o object/src/core/broker/transport/broker_transport_dispatch.o object/src/core/broker/transport/broker_transport_ops.o object/src/core/broker/transport/broker_transport_response.o object/src/core/broker/transport/broker_transport_rollback.o object/src/core/broker/transport/broker_transport_ring.o object/src/core/broker/transport/broker_transport.o object/src/core/broker/transport/broker_transport_windows.o object/src/core/broker/transport/broker_transport_windows_fd_stubs.o object/src/core/broker/transport/broker_transport_windows_pipe.o object/src/core/broker/transport/broker_transport_windows_session.o object/src/core/broker/transport/broker_transport_posix.o object/src/core/broker/transport/broker_transport_posix_message.o object/src/core/broker/transport/broker_transport_posix_socket.o object/src/core/broker/transport/broker_transport_unix.o object/src/core/broker/transport/broker_transport_selftest.o object/src/core/broker/ring/broker_ring.o object/src/core/broker/ring/broker_ring_buffer_grant.o object/src/core/broker/ring/broker_ring_doorbell.o object/src/core/broker/ring/broker_ring_dispatch.o object/src/core/broker/ring/broker_ring_ops.o object/src/core/broker/ring/broker_ring_queue.o object/src/core/broker/ring/broker_ring_stats.o object/src/core/broker/ring/broker_ring_shm.o object/src/core/broker/ring/broker_ring_shm_posix.o object/src/core/broker/ring/broker_ring_shm_windows.o object/src/core/debug/fault.o object/src/core/base/names.o object/src/core/time/time.o object/src/core/context/fp.o object/src/core/context/stack_sample.o object/src/core/context/async_context.o object/src/core/context/async_context_shared.o object/src/core/context/context_portable.o object/src/core/sched/queue_base.o object/src/core/sched/norm_queue_depth.o object/src/core/sched/norm_queue.o object/src/core/sched/core_queue.o object/src/core/memory/alloc.o object/src/core/memory/task_span.o object/src/core/memory/allocator_quiescent.o object/src/core/task/task_alloc.o object/src/core/task/task_handle_registry.o object/src/core/task/task_handle_claim.o object/src/core/memory/io_object_alloc.o object/src/core/wait/wait_timer_alloc.o object/src/core/debug/trace.o object/src/core/sched/wake.o object/src/core/platform/platform.o object/src/core/preempt/capabilities.o object/tools/preempt/metadata.o object/src/core/platform/windows_policy.o object/src/core/sched/safepoint.o object/src/core/wait/wait.o object/src/core/task/task_reclaim.o object/src/core/task/task_stack.o object/src/core/sched/reinject.o object/src/core/wait/wait_accounting.o object/src/core/wait/wait_tracking.o object/src/core/time/timer_heap.o object/src/core/time/timer.o object/src/core/api/timer_api.o object/src/core/api/signal_api.o object/src/engine/scheduler/scheduler_engine.o object/src/engine/scheduler/block.o object/src/io/engine/io_engine.o object/src/engine/watchdog/watchdog.o object/src/engine/watchdog/watchdog_probe.o object/src/engine/watchdog/watchdog_merge.o object/src/engine/watchdog/watchdog_rehome.o object/src/engine/watchdog/watchdog_scale.o object/src/engine/watchdog/watchdog_worker.o object/src/engine/watchdog/watchdog_autotune.o object/src/core/api/core_api.o object/src/core/task/spawn.o object/src/core/task/yield_join_sleep.o object/src/core/api/blocking_api.o object/src/core/api/magic2_api.o object/src/core/api/cancel_api.o object/src/core/lifecycle/lifecycle.o object/src/core/sched/scheduler.o object/src/core/lifecycle/init.o object/src/core/lifecycle/shutdown.o object/src/core/lifecycle/run.o object/src/core/sync/sync.o object/src/core/sync/mutex_lifecycle.o object/src/core/sync/mutex.o object/src/core/sync/cond_lifecycle.o object/src/core/sync/cond.o object/src/core/sync/channel_cache.o object/src/core/sync/channel_lifecycle.o object/src/core/sync/channel_fast.o object/src/core/sync/channel.o object/src/core/sync/channel_select_fast.o object/src/core/sync/channel_select.o object/src/core/registry/handle.o object/src/core/registry/owner.o object/src/core/registry/registry.o object/src/core/task/task_group.o object/src/core/task/task_group_registry.o object/src/core/task/task_local.o object/src/io/api/io_api.o object/src/io/api/direct.o object/src/io/api/direct_tuning.o object/src/io/api/issue.o object/src/io/api/blocking_ops.o object/src/io/api/blocking_file_ops.o object/src/io/api/blocking_wrappers.o object/src/io/buffer/buffer_registry.o object/src/io/api/owned.o object/src/io/api/datagram.o object/src/io/api/handle_positional.o object/src/io/api/positional.o object/src/io/api/positional_util.o object/src/io/api/public.o object/src/io/windows/watch/iocp.o object/src/core/debug/debug_dump_helpers.o object/src/core/debug/debug_stats_json.o object/src/core/debug/debug.o object/src/io/watch/watch.o object/src/io/watch/watch_index.o object/src/io/watch/close.o object/src/io/watch/watch_lookup.o object/src/io/watch/migration.o object/src/io/watch/watch_queue.o object/src/io/watch/waiter.o object/src/io/darwin/watch/darwin_state.o object/src/io/darwin/watch/darwin_migration_live.o object/src/io/darwin/watch/darwin_migration_rehome.o object/src/io/darwin/watch/darwin_control.o object/src/io/darwin/watch/darwin_completion.o object/src/io/darwin/watch/events.o object/src/io/darwin/watch/darwin_worker.o object/src/core/context/context_arm64.o object/src/asm/darwin/arm64/darwin_context_arm64.o object/experiments/magic2/bench_magic2_kernels.o -pthread\n"
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "--self-test"
+    ],
+    "exit_code": 0,
+    "output": "{\"self_test\":\"passed\",\"checks\":2400,\"kernels\":4}\n"
+  },
+  {
+    "command": [
+      "clang",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Werror",
+      "-O1",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fsanitize=address,undefined",
+      "-Iinclude",
+      "-Isrc/internal",
+      "-Isrc",
+      "-Itools/preempt",
+      "-D_GNU_SOURCE",
+      "-D_XOPEN_SOURCE=700",
+      "-D_DARWIN_C_SOURCE",
+      "experiments/magic2/bench_magic2_kernels.c",
+      "libllam_runtime.a",
+      "-pthread",
+      "-o",
+      "research/magic2-kernels-2026-10-28/kernel-asan"
+    ],
+    "exit_code": 0,
+    "output": ""
+  },
+  {
+    "command": [
+      "research/magic2-kernels-2026-10-28/kernel-asan",
+      "--self-test"
+    ],
+    "exit_code": 0,
+    "output": "{\"self_test\":\"passed\",\"checks\":2400,\"kernels\":4}\n"
+  },
+  {
+    "command": [
+      "./bench_magic2_kernels",
+      "auto-warm",
+      "65536",
+      "4096",
+      "32",
+      "1",
+      "16",
+      "16"
+    ],
+    "exit_code": 0,
+    "output": "{\"mode\":\"auto-warm\",\"elements\":65536,\"grain\":4096,\"iterations\":32,\"tasks\":1,\"rounds\":16,\"warmup\":16,\"elapsed_ns\":7524542,\"plan_setup_ns\":28625,\"warmup_wall_ns\":6625458,\"workers\":1,\"blocking_calls\":0,\"yields\":721,\"checksum\":\"00000013a5b10889\",\"training\":{\"routes\":[0,16,0,0],\"selected\":[3,3,3,7],\"buckets\":[16,0,0],\"observations\":16},\"measured\":{\"routes\":[0,32,0,0],\"selected\":[0,0,0,32],\"buckets\":[32,0,0],\"observations\":32}}\n"
+  }
+]

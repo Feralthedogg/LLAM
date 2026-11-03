@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+// See LICENSES/Apache-2.0.txt.
 
 #ifndef LLAM_EXPERIMENTS_LCWE_MODEL_INTERNAL_H
 #define LLAM_EXPERIMENTS_LCWE_MODEL_INTERNAL_H
@@ -126,6 +126,7 @@ struct lcwe_model_batch {
 };
 
 uint64_t lcwe_model_mix64(uint64_t value);
+uint64_t lcwe_model_splitmix64_next(uint64_t *state);
 void lcwe_model_derive_event(uint64_t seed,
                              uint32_t frame_index,
                              const lcwe_model_frame_t *frame,

@@ -24,10 +24,13 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "windows_async_lifetime.h"
+#endif
 
 #include <assert.h>
 
@@ -59,9 +62,9 @@ static void llam_runtime_close_ready_fd(llam_fd_t fd) {
  * The function tolerates partial initialization so failed init paths can reuse
  * normal shutdown cleanup.
  */
-static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
-    llam_task_t *task;
+static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     unsigned i;
+    llam_managed_catalog_t *retired_catalog = NULL;
 
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
@@ -71,7 +74,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 #endif
     ) {
         llam_runtime_unregister_handle(rt);
-        return;
+        return NULL;
     }
 
     /*
@@ -208,6 +211,10 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                     llam_io_control_op_destroy(&rt->nodes[i], op);
                     rt->nodes[i].control_head = next;
                 }
+                /* Workers and controls are drained; no index reader remains. */
+                llam_watch_index_reset(&rt->nodes[i].poll_watch_index);
+                llam_watch_index_reset(&rt->nodes[i].accept_watch_index);
+                llam_watch_index_reset(&rt->nodes[i].recv_watch_index);
                 // Watch tables own their watch objects and any buffered readiness
                 // data that has not yet been consumed by a task.
                 while (rt->nodes[i].poll_watches != NULL) {
@@ -408,9 +415,9 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                        sizeof(rt->shards[i].opaque_helper_worker.native_thread));
                 pthread_mutex_unlock(&rt->shards[i].opaque_lock);
             }
-            if (rt->shards[i].event_fd >= 0) {
-                llam_wake_handle_close(rt->shards[i].event_fd);
-                rt->shards[i].event_fd = -1;
+            if (rt->shards[i].processor.event_fd >= 0) {
+                llam_wake_handle_close(rt->shards[i].processor.event_fd);
+                rt->shards[i].processor.event_fd = -1;
             }
             if (rt->shards[i].signal_stack_mapping != NULL) {
                 (void)munmap(rt->shards[i].signal_stack_mapping,
@@ -420,20 +427,22 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
             }
             llam_ctx_destroy_fp_state(&rt->shards[i].scheduler_ctx);
             llam_ctx_destroy_fp_state(&rt->shards[i].opaque_scheduler_ctx);
-            free(rt->shards[i].timer_heap);
-            rt->shards[i].timer_heap = NULL;
-            rt->shards[i].timer_heap_len = 0U;
-            rt->shards[i].timer_heap_cap = 0U;
-            rt->shards[i].timers = NULL;
-            atomic_store_explicit(&rt->shards[i].timer_callbacks_active, 0U, memory_order_release);
-            llam_shard_drain_stack_cache(&rt->shards[i]);
+            free(rt->shards[i].processor.timer_heap);
+            rt->shards[i].processor.timer_heap = NULL;
+            rt->shards[i].processor.timer_heap_len = 0U;
+            rt->shards[i].processor.timer_heap_cap = 0U;
+            rt->shards[i].processor.timers = NULL;
+            atomic_store_explicit(&rt->shards[i].processor.timer_callbacks_active,
+                                  0U,
+                                  memory_order_release);
+            llam_processor_drain_stack_cache(&rt->shards[i].processor);
             if (rt->shards[i].lock_initialized) {
                 pthread_mutex_destroy(&rt->shards[i].lock);
                 rt->shards[i].lock_initialized = false;
             }
-            if (rt->shards[i].stack_cache_lock_initialized) {
-                pthread_mutex_destroy(&rt->shards[i].stack_cache_lock);
-                rt->shards[i].stack_cache_lock_initialized = false;
+            if (rt->shards[i].processor.stack_cache_lock_initialized) {
+                pthread_mutex_destroy(&rt->shards[i].processor.stack_cache_lock);
+                rt->shards[i].processor.stack_cache_lock_initialized = false;
             }
             llam_opaque_wake_destroy(&rt->shards[i]);
             if (rt->shards[i].opaque_cv_initialized) {
@@ -453,27 +462,19 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 
     if (rt->shards != NULL) {
         for (i = 0; i < rt->active_shards; ++i) {
-            task = rt->shards[i].all_tasks;
             rt->shards[i].all_tasks = NULL;
-            while (task != NULL) {
-                llam_task_t *next = task->all_next;
-
-                task->all_next = NULL;
-                task->all_prev = NULL;
-                llam_free_task(task);
-                task = next;
-            }
         }
     }
 
     if (rt->shards != NULL) {
         for (i = 0; i < rt->active_shards; ++i) {
-            // Allocators are destroyed after tasks are freed because task slabs
-            // own the task objects and embedded mutexes.
-            llam_allocator_destroy(&rt->shards[i].allocator);
+            // Walk allocation slabs rather than the optional diagnostic lists.
+            // This releases resources for never-run and unjoined tasks too.
+            llam_allocator_destroy(&rt->shards[i].processor.allocator);
         }
     }
 
+    llam_async_context_shutdown(rt);
     llam_restore_process_signal_handlers(rt);
     llam_restore_init_thread_affinity(rt);
 
@@ -512,10 +513,22 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
         pthread_mutex_destroy(&rt->overflow_lock);
         rt->overflow_lock_initialized = false;
     }
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (rt->windows_async_config_lock_initialized) {
+        if (rt->windows_async_host_spawn_admits != 0U) {
+            abort();
+        }
+        pthread_mutex_destroy(&rt->windows_async_config_lock);
+        rt->windows_async_config_lock_initialized = false;
+    }
+#endif
 
+    retired_catalog = llam_managed_catalog_detach(rt);
+    if (retired_catalog == NULL && errno != 0) abort();
     free(rt->block_threads);
     free(rt->kernel_node_ids);
     free(rt->nodes);
+    llam_worker_registry_destroy(rt);
     free(rt->shards);
     free(rt->allowed_cpus);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
@@ -533,6 +546,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     llam_runtime_unregister_handle(rt);
     // Clear the runtime last so accidental post-shutdown reads fail closed.
     memset(rt, 0, sizeof(*rt));
+    return retired_catalog;
 }
 
 /**
@@ -559,6 +573,10 @@ static void llam_runtime_request_destroy_stop(llam_runtime_t *rt) {
         pthread_mutex_lock(&rt->shards[i].opaque_lock);
         llam_legacy_lease_begin_stop_locked(&rt->shards[i]);
         pthread_mutex_unlock(&rt->shards[i].opaque_lock);
+        if (atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U) {
+            /* The earlier stop wake may precede this P's drain projection. */
+            llam_kick_shard(&rt->shards[i]);
+        }
     }
 }
 
@@ -600,6 +618,7 @@ static void llam_runtime_wait_exec_stopped(llam_runtime_t *rt) {
 }
 
 void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
+    LLAM_NATIVE_API_GUARD();
     llam_runtime_t *current_runtime;
 
     if (rt == NULL) {
@@ -643,7 +662,6 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
      * for failure cleanup; tearing those down from another host thread while
      * init still consumes them can corrupt the runtime object.
      */
-    llam_runtime_lifecycle_lock();
     {
         bool heap_runtime = false;
 
@@ -653,13 +671,16 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
                 llam_runtime_request_destroy_stop(rt);
                 llam_runtime_wait_exec_stopped(rt);
             }
-            llam_runtime_shutdown_unlocked(rt);
+            llam_runtime_lifecycle_lock();
+            llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt);
+            llam_runtime_lifecycle_unlock();
+            llam_managed_catalog_retire(retired);
         }
     }
-    llam_runtime_lifecycle_unlock();
 }
 
 void llam_runtime_shutdown(void) {
+    LLAM_NATIVE_API_GUARD();
     /*
      * Match llam_runtime_request_stop(): unmanaged callers operate on the
      * process-default runtime, while managed tasks request cooperative stop on
@@ -685,15 +706,16 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt) {
         return;
     }
 
-    llam_runtime_lifecycle_lock();
     if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
         if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
             llam_runtime_request_destroy_stop(rt);
             llam_runtime_wait_exec_stopped(rt);
         }
-        llam_runtime_shutdown_unlocked(rt);
+        llam_runtime_lifecycle_lock();
+        llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt);
+        llam_runtime_lifecycle_unlock();
+        llam_managed_catalog_retire(retired);
     }
-    llam_runtime_lifecycle_unlock();
 
     if (heap_runtime) {
         llam_runtime_retire_heap_handle(rt);

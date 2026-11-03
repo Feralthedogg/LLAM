@@ -15,10 +15,11 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#include "task_handle_registry_internal.h"
 #include "task_group_internal.h"
 
 #include <stdlib.h>
@@ -137,6 +138,8 @@ static void llam_task_group_unregister_live_locked(llam_task_group_t *group) {
 }
 
 int llam_task_group_destroy(llam_task_group_t *group) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     uintptr_t raw = (uintptr_t)group;
     size_t slot;
     uint32_t generation;
@@ -159,6 +162,23 @@ int llam_task_group_destroy(llam_task_group_t *group) {
         return -1;
     }
     pthread_mutex_lock(&group->lock);
+    /* Runtime destruction invalidates every task handle but deliberately keeps
+     * caller-owned sync/group handles available for host cleanup. A group with
+     * only reclaimed children must not remain permanently busy after teardown.
+     * Test raw slot liveness under its registry lock: pin saturation is not a
+     * stale-handle indication. No child can be consumed outside its group. */
+    if (group->count != 0U && group->active_spawns == 0U && !group->joining) {
+        bool all_reclaimed = true;
+        pthread_mutex_lock(&g_llam_task_registry_lock);
+        for (size_t i = 0U; i < group->count; ++i) {
+            if (llam_task_resolve_public_handle_locked(group->tasks[i]) != NULL) {
+                all_reclaimed = false;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_llam_task_registry_lock);
+        if (all_reclaimed) group->count = 0U;
+    }
     if (group->count != 0U ||
         group->active_spawns != 0U ||
         llam_public_active_op_count(&group->active_ops) != 0U ||

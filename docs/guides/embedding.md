@@ -47,7 +47,8 @@ if (root_task == NULL || llam_runtime_run_handle(rt) != 0) {
     return 1;
 }
 
-if (llam_join(root_task) != 0) {
+llam_task_result_t result;
+if (llam_join_result(root_task, &result, sizeof(result)) != 0) {
     llam_runtime_destroy(rt);
     return 1;
 }
@@ -58,6 +59,123 @@ Use one explicit runtime per independent embedding boundary. The legacy
 process-default lifecycle remains a convenience path for simple LLAM-owned
 programs, but hosts should not repeatedly initialize and shut it down from
 concurrent embedding threads.
+
+## Create Objects For The Same Runtime
+
+A host should use `llam_runtime_channel_create(rt, capacity)`,
+`llam_runtime_mutex_create(rt)`, `llam_runtime_cond_create(rt)`,
+`llam_runtime_cancel_token_create(rt)` and
+`llam_runtime_task_group_create_ex(rt, &options, sizeof(options))`.
+Timer and signal creation have handle-scoped `llam_runtime_*_create_ex` forms;
+signal sets retain their Linux-only support. Creation pins `rt` through handle
+publication. A task of a peer runtime gets `EXDEV`. Old constructors still
+choose the current task runtime or the process default from host code.
+Detached I/O buffers are owner-neutral and can be transferred between runtimes.
+
+Use `llam_runtime_request_stop_handle`, `llam_runtime_write_stats_json_handle`
+and `llam_dump_runtime_state_handle` to target the same runtime for control and
+diagnostics. Dump writes remain best effort. The preemption query in
+`<llam/managed.h>` exposes requested and effective policy separately; constructor
+success does not make an unqualified C function asynchronously interruptible.
+
+## Compose Cancellation And Request Budgets
+
+Create groups with `LLAM_TASK_GROUP_F_LINK_CANCEL` to make each child observe
+group cancellation OR its explicit token. Cancelling a group never cancels that
+external token, so tasks outside the group remain unaffected. Legacy groups
+retain their override contract: an explicit child token replaces the group token.
+
+A child's `llam_spawn_opts_t.deadline_ns` is a persistent request budget, rather
+than an active wait timer. Earlier sleeps and shorter I/O calls do not erase it.
+Managed waits use the earlier task/call deadline. This is a waiting budget, not a
+CPU-loop timeout or an instruction to unwind arbitrary native callbacks. A ready
+operation/completion can win a timeout race.
+
+For stream I/O, initialize `llam_wait_opts_t`, set an absolute `deadline_ns` and
+an optional additional token, then use `llam_read_ex`, `llam_write_ex`,
+`llam_connect_ex` or `llam_poll_fd_ex`. All token sources are ORed. In the options,
+zero deadline adds no limit; `*_until(..., 0)` means already expired. Poll returns
+zero on timeout, while read/write/connect fail with `ETIMEDOUT`. The older
+`llam_read_when_ready` keeps its relative millisecond timeout.
+
+```c
+llam_wait_opts_t wait;
+if (llam_wait_opts_init(&wait, sizeof(wait)) != 0) return -1;
+wait.deadline_ns = llam_now_ns() + UINT64_C(100000000);
+wait.cancel_token = request_cancel;
+size_t sent = 0;
+if (llam_write_all_ex(socket_fd, bytes, length, &wait, sizeof(wait), &sent) != 0) {
+    /* sent bytes are confirmed; resending that prefix duplicates application data. */
+    return -1;
+}
+```
+
+`llam_read_exact[_ex]` and `llam_write_all[_ex]` return 0/-1 and always report
+confirmed progress, including on cancellation or timeout. Early EOF is `EPIPE`;
+a zero-length write before completion is `EIO`. Progress is not a transaction
+rollback. Per-call bounded byte I/O requires a managed task and a supported
+cancelable endpoint: sockets, POSIX nonblocking FIFOs/character devices, or
+Windows overlapped HANDLEs. Unsupported bounded regular/block-file and synchronous
+HANDLE operations fail `ENOTSUP` before the native operation. Host bounded
+read/write/connect also return `ENOTSUP`; host poll supports deadlines/tokens.
+Queued/running blocking callbacks retain their argument/buffer lifetime until
+callback completion; cancellation never permits the caller to free memory early.
+
+## Bound Resources And Shutdown Waiting
+
+The ABI 2.3 runtime-options tail supplies `worker_count`,
+`blocking_worker_count`, `max_tasks` and `max_blocking_jobs`. Zero retains prior
+automatic/unlimited defaults. Worker count selects portable/legacy processors;
+managed compatibility processors reserved by preemption policy are additional.
+Explicit values take precedence over automatic pool sizing. `worker_count` must
+fit available CPUs after an SQPOLL reservation; deterministic mode permits at
+most one. Blocking pool size accepts 1..1024. `max_tasks` includes completed,
+unjoined objects until reclamation; join/detach releases capacity after all
+lifetime pins drain. Blocking admission counts queued and running callbacks.
+Rejected admissions return `EAGAIN` without invoking a callback.
+
+Call `llam_runtime_get_resources_ex` for an advisory snapshot. To stop accepting
+new tasks/objects and wait for the active driver, use
+`llam_runtime_drain_until(rt, deadline, &resources, sizeof(resources))` from a
+host thread. Success consumes no handle: join completed work, destroy caller-owned
+objects and finally call `llam_runtime_destroy`. Ordinary request-stop remains
+reusable; entering drain permanently closes this runtime's admission.
+
+On `ETIMEDOUT`, preserve the runtime, callback arguments, buffers and handles;
+inspect live tasks/blocking jobs/public operations and retry after accepted work
+finishes. An arbitrary foreign callback cannot be forcibly unwound. This deadline
+bounds waiting and does not promise hard real-time OS scheduling or timed final
+native-thread destruction. Pending tasks without an active driver yield
+`EBUSY`/`NEEDS_RUNNER` before admission closes: start the driver and retry.
+Host joins and drain do not implicitly drive the scheduler.
+
+## Results And Local Ownership
+
+A task can call `llam_task_set_result(value, application_error)`. A successful
+`llam_join_result` consumes a normal handle and copies the result before
+reclamation. Runtime errors use -1/errno; application errors use `result.error`,
+and a successful NULL value remains distinct. A timeout preserves handle and
+output. For group children, use `llam_task_get_result` after completion and before
+group join, because child handles are borrowed. Unset results have all-zero fields.
+The application owns the result pointer's lifetime.
+
+Plain task-local set remains borrowed. `llam_task_local_set_owned` installs a
+non-NULL value/callback at an empty key. Exit invokes it once, including after
+cancellation and key deletion. Callbacks return normally, do not block and do not
+call LLAM task/wait APIs. Compiler-qualified tasks retain the same dedicated
+native M, and their imports require the native-affine execution class.
+Compatibility tasks invoke cleanup on their exit worker and provide no native
+thread affinity: keep thread-affine resources out of that path. Portable/expert
+asynchronous tasks reject registration with `ENOTSUP`. Take a value with `llam_task_local_take_result` to
+transfer ownership without cleanup; plain set cannot overwrite an owned entry.
+Cleanup runs before task completion/result publication and outside runtime locks.
+
+The complete explicit-runtime example linked from
+[Getting Started](../getting-started.md#minimal-program) shows the recommended
+group/result flow. Close a channel and drain all queued values before destroying
+it. After a fatal runtime failure, destroy the runtime to retire accepted tasks;
+caller-owned handles still require cleanup. A group containing only invalidated
+children can then be destroyed without attempting a stale join.
 
 ## Dynamic Loading
 

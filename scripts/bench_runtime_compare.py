@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 import argparse
 import csv
@@ -435,7 +435,8 @@ def grouped_bars(ax, cases: list[str], runtimes: list[str], values: dict[tuple[s
         ax.set_yscale("log")
 
 
-def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> None:
+def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str],
+               title: str = "LLAM vs Goroutine vs Tokio Runtime Benchmarks") -> None:
     if plt is None:
         print("[bench-runtime-compare] matplotlib not available; skipping graph", file=sys.stderr)
         return
@@ -452,7 +453,7 @@ def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> No
 
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, axes = plt.subplots(2, 2, figsize=(18, 11), constrained_layout=True)
-    fig.suptitle("LLAM vs Goroutine vs Tokio Runtime Benchmarks", fontsize=18, fontweight="bold")
+    fig.suptitle(title, fontsize=18, fontweight="bold")
 
     grouped_bars(axes[0][0], complete_cases, runtimes, ops, "ops/sec (log)", "Throughput", log=True)
     grouped_bars(axes[0][1], complete_cases, runtimes, p50, "p50 us (log)", "Median Latency", log=True)
@@ -475,6 +476,12 @@ def main() -> int:
     parser.add_argument("--out-dir", default="object/bench_compare")
     parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--llam-binary", type=pathlib.Path,
+                        help="use an already built LLAM benchmark executable (requires --no-build)")
+    parser.add_argument("--go-binary", type=pathlib.Path,
+                        help="use an already built Go benchmark executable (requires --no-build)")
+    parser.add_argument("--tokio-binary", type=pathlib.Path,
+                        help="use an already built Tokio benchmark executable (requires --no-build)")
     parser.add_argument(
         "--cases",
         nargs="+",
@@ -511,6 +518,20 @@ def main() -> int:
         help="warn when max/min ops/s across samples for one runtime/case exceeds this ratio; use 0 to disable",
     )
     args = parser.parse_args()
+    prebuilt = {}
+    for name in ("llam", "go", "tokio"):
+        path = getattr(args, name + "_binary")
+        if path is None:
+            continue
+        if not args.no_build:
+            parser.error(f"--{name}-binary requires --no-build")
+        try:
+            binary = path.resolve(strict=True)
+        except OSError as exc:
+            parser.error(f"invalid --{name}-binary: {exc}")
+        if not binary.is_file():
+            parser.error(f"--{name}-binary must name an executable file")
+        prebuilt[name] = [str(binary)]
     try:
         cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
     except argparse.ArgumentTypeError as exc:
@@ -543,7 +564,7 @@ def main() -> int:
 
     llam_command: list[str] | None = None
     if "LLAM" in selected_runtimes:
-        llam_command = llam_bench_command(root, args.no_build)
+        llam_command = prebuilt.get("llam") or llam_bench_command(root, args.no_build)
     if not args.no_build and "Tokio" in selected_runtimes:
         subprocess.run(
             ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
@@ -584,12 +605,13 @@ def main() -> int:
             )
     if "Goroutine" in selected_runtimes:
         go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
+        go_command = prebuilt.get("go") or ["go", "run", go_script]
         if args.isolate_cases:
             rows.extend(
                 run_isolated_cases(
                     root,
                     "Goroutine",
-                    ["go", "run", go_script],
+                    go_command,
                     env,
                     args.timeout,
                     args.samples,
@@ -603,7 +625,7 @@ def main() -> int:
                 run_command_samples(
                     root,
                     "Goroutine",
-                    ["go", "run", go_script],
+                    go_command,
                     env,
                     args.timeout,
                     args.samples,
@@ -612,7 +634,7 @@ def main() -> int:
                 )
             )
     if "Tokio" in selected_runtimes:
-        tokio_command = [
+        tokio_command = prebuilt.get("tokio") or [
             "cargo",
             "run",
             "--release",

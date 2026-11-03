@@ -1,0 +1,648 @@
+--- a/Makefile
++++ b/Makefile
+@@ -63,6 +63,7 @@
+ 	test_io_watch_index \
+ 	asan-test_io_watch_index \
+ 	bench_select_prepare \
++	bench_async_compare \
+ 	test_large_select \
+ 	asan-test_large_select \
+ 	llam_broker \
+@@ -2597,6 +2598,23 @@
+ bench_select_prepare: $(RUNTIME_OBJS) $(OBJDIR)/experiments/select_prepare/bench_select_prepare.o
+ 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+ 
++ifeq ($(HOST_PLATFORM)-$(UNAME_M)-$(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),darwin-arm64-1)
++bench_async_compare: $(RUNTIME_OBJS) $(filter-out $(OBJDIR)/examples/bench_entry.o,$(BENCH_OBJS)) $(OBJDIR)/experiments/async_compare/bench_entry.o $(OBJDIR)/experiments/async_compare/bench_async.o $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
++	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
++
++$(OBJDIR)/experiments/async_compare/bench_entry.o: examples/bench_entry.c experiments/async_compare/bench_async.h examples/bench_internal.h $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
++	@mkdir -p $(dir $@)
++	$(CC) $(CPPFLAGS) $(CFLAGS) -DLLAM_BENCH_ASYNC_COMPARE=1 -c -o $@ $<
++
++$(OBJDIR)/experiments/async_compare/bench_async.o: experiments/async_compare/bench_async.c experiments/async_compare/bench_async.h tests/fixtures/async_darwin_leaf.h $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
++	@mkdir -p $(dir $@)
++	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
++else
++bench_async_compare:
++	@echo "bench_async_compare requires Darwin arm64 and LLAM_EXPERIMENTAL_ASYNC_PREEMPT=1" >&2
++	@exit 2
++endif
++
+ test_large_select: $(RUNTIME_OBJS) $(OBJDIR)/tests/test_large_select.o
+ 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+ 
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -629,6 +629,19 @@
+ endif()
+ target_link_libraries(bench PRIVATE llam_runtime)
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND
++   CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
++    add_executable(bench_async_compare EXCLUDE_FROM_ALL
++        examples/bench.c examples/bench_support.c examples/bench_entry.c
++        experiments/async_compare/bench_async.c tests/fixtures/async_darwin_leaf.S)
++    target_include_directories(bench_async_compare PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
++        ${CMAKE_CURRENT_SOURCE_DIR}/tools/preempt)
++    target_compile_definitions(bench_async_compare PRIVATE
++        LLAM_BENCH_ASYNC_COMPARE=1 _GNU_SOURCE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
++    target_link_libraries(bench_async_compare PRIVATE llam_runtime)
++endif()
++
+ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+     add_executable(cpu_spike
+         examples/cpu_spike.c
+--- a/examples/bench_entry.c
++++ b/examples/bench_entry.c
+@@ -21,6 +21,9 @@
+  */
+ 
+ #include "bench_internal.h"
++#if defined(LLAM_BENCH_ASYNC_COMPARE)
++#include "../experiments/async_compare/bench_async.h"
++#endif
+ 
+ static int bench_run_case(const char *name,
+                           llam_task_fn entry,
+@@ -32,11 +35,22 @@
+                           const llam_runtime_opts_t *opts) {
+     llam_runtime_t *runtime = NULL;
+     llam_runtime_stats_t stats;
++#if defined(LLAM_BENCH_ASYNC_COMPARE)
++    bool async_requested = bench_env_flag_default("LLAM_BENCH_ASYNC", 0U) != 0U;
++    bench_async_evidence_t async_evidence = {0};
++#endif
+ 
+     if (llam_runtime_create(opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+         perror("llam_runtime_create");
+         return -1;
+     }
++#if defined(LLAM_BENCH_ASYNC_COMPARE)
++    if (async_requested && bench_async_prepare(runtime, &async_evidence) != 0) {
++        perror("bench_async_prepare");
++        llam_runtime_destroy(runtime);
++        return -1;
++    }
++#endif
+     if (llam_runtime_spawn_ex(runtime,
+                               entry,
+                               state,
+@@ -65,6 +79,13 @@
+         llam_runtime_destroy(runtime);
+         return -1;
+     }
++#if defined(LLAM_BENCH_ASYNC_COMPARE)
++    if (async_requested && bench_async_report(runtime, name, &async_evidence) != 0) {
++        perror("bench_async_report");
++        llam_runtime_destroy(runtime);
++        return -1;
++    }
++#endif
+     bench_print_report(name, total_rounds, warmup_rounds, ops_per_round, samples_ns, &stats);
+     llam_runtime_destroy(runtime);
+     return 0;
+@@ -129,6 +150,15 @@
+     runtime_opts.idle_spin_ns = idle_spin_ns;
+     runtime_opts.idle_spin_max_iters = idle_spin_iters;
+     runtime_opts.sqpoll_cpu = sqpoll_cpu;
++    if (bench_env_flag_default("LLAM_BENCH_ASYNC", 0U) != 0U) {
++#if defined(LLAM_BENCH_ASYNC_COMPARE)
++        bench_async_options(&runtime_opts);
++#else
++        fputs("LLAM_BENCH_ASYNC requires the qualified bench_async_compare target\n", stderr);
++        free(samples);
++        return 1;
++#endif
++    }
+     if (samples == NULL) {
+         perror("calloc");
+         return 1;
+--- a/scripts/bench_runtime_compare.py
++++ b/scripts/bench_runtime_compare.py
+@@ -435,7 +435,8 @@
+         ax.set_yscale("log")
+ 
+ 
+-def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> None:
++def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str],
++               title: str = "LLAM vs Goroutine vs Tokio Runtime Benchmarks") -> None:
+     if plt is None:
+         print("[bench-runtime-compare] matplotlib not available; skipping graph", file=sys.stderr)
+         return
+@@ -452,7 +453,7 @@
+ 
+     plt.style.use("seaborn-v0_8-whitegrid")
+     fig, axes = plt.subplots(2, 2, figsize=(18, 11), constrained_layout=True)
+-    fig.suptitle("LLAM vs Goroutine vs Tokio Runtime Benchmarks", fontsize=18, fontweight="bold")
++    fig.suptitle(title, fontsize=18, fontweight="bold")
+ 
+     grouped_bars(axes[0][0], complete_cases, runtimes, ops, "ops/sec (log)", "Throughput", log=True)
+     grouped_bars(axes[0][1], complete_cases, runtimes, p50, "p50 us (log)", "Median Latency", log=True)
+@@ -475,6 +476,12 @@
+     parser.add_argument("--out-dir", default="object/bench_compare")
+     parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
+     parser.add_argument("--no-build", action="store_true")
++    parser.add_argument("--llam-binary", type=pathlib.Path,
++                        help="use an already built LLAM benchmark executable (requires --no-build)")
++    parser.add_argument("--go-binary", type=pathlib.Path,
++                        help="use an already built Go benchmark executable (requires --no-build)")
++    parser.add_argument("--tokio-binary", type=pathlib.Path,
++                        help="use an already built Tokio benchmark executable (requires --no-build)")
+     parser.add_argument(
+         "--cases",
+         nargs="+",
+@@ -511,6 +518,20 @@
+         help="warn when max/min ops/s across samples for one runtime/case exceeds this ratio; use 0 to disable",
+     )
+     args = parser.parse_args()
++    prebuilt = {}
++    for name in ("llam", "go", "tokio"):
++        path = getattr(args, name + "_binary")
++        if path is None:
++            continue
++        if not args.no_build:
++            parser.error(f"--{name}-binary requires --no-build")
++        try:
++            binary = path.resolve(strict=True)
++        except OSError as exc:
++            parser.error(f"invalid --{name}-binary: {exc}")
++        if not binary.is_file():
++            parser.error(f"--{name}-binary must name an executable file")
++        prebuilt[name] = [str(binary)]
+     try:
+         cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
+     except argparse.ArgumentTypeError as exc:
+@@ -543,7 +564,7 @@
+ 
+     llam_command: list[str] | None = None
+     if "LLAM" in selected_runtimes:
+-        llam_command = llam_bench_command(root, args.no_build)
++        llam_command = prebuilt.get("llam") or llam_bench_command(root, args.no_build)
+     if not args.no_build and "Tokio" in selected_runtimes:
+         subprocess.run(
+             ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
+@@ -584,12 +605,13 @@
+             )
+     if "Goroutine" in selected_runtimes:
+         go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
++        go_command = prebuilt.get("go") or ["go", "run", go_script]
+         if args.isolate_cases:
+             rows.extend(
+                 run_isolated_cases(
+                     root,
+                     "Goroutine",
+-                    ["go", "run", go_script],
++                    go_command,
+                     env,
+                     args.timeout,
+                     args.samples,
+@@ -603,7 +625,7 @@
+                 run_command_samples(
+                     root,
+                     "Goroutine",
+-                    ["go", "run", go_script],
++                    go_command,
+                     env,
+                     args.timeout,
+                     args.samples,
+@@ -612,7 +634,7 @@
+                 )
+             )
+     if "Tokio" in selected_runtimes:
+-        tokio_command = [
++        tokio_command = prebuilt.get("tokio") or [
+             "cargo",
+             "run",
+             "--release",
+--- a/scripts/test_bench_runtime_compare.py
++++ b/scripts/test_bench_runtime_compare.py
+@@ -261,6 +261,52 @@
+         fail(f"duplicate case diagnostic leaked traceback: {stderr_text!r}")
+ 
+ 
++def test_prebuilt_commands_are_used_without_building() -> None:
++    with tempfile.TemporaryDirectory(prefix="llam-prebuilt-compare-") as tmp:
++        directory = Path(tmp)
++        binaries = {runtime: directory / name for runtime, name in
++                    (("LLAM", "llam"), ("Goroutine", "go"), ("Tokio", "tokio"))}
++        for path in binaries.values():
++            path.write_text("test executable placeholder", encoding="utf-8")
++        seen = []
++
++        def fake_run(_root, runtime, command, _env, _timeout, _sample, _samples, case=None):
++            if command != [str(binaries[runtime].resolve())] or case != "channel_pingpong":
++                fail(f"prebuilt executable was not used: {runtime} {command} {case}")
++            seen.append(runtime)
++            return [bench.BenchRow(runtime, case, 1000.0, 1.0, 2.0)]
++
++        with patched_main(fake_run):
++            sys.argv = ["bench_runtime_compare.py", "--runtime", "all", "--no-build",
++                        "--llam-binary", str(binaries["LLAM"]),
++                        "--go-binary", str(binaries["Goroutine"]),
++                        "--tokio-binary", str(binaries["Tokio"]),
++                        "--cases", "channel_pingpong", "--isolate-cases", "--samples", "1",
++                        "--out-dir", str(directory / "results")]
++            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
++                if bench.main() != 0:
++                    fail("prebuilt comparison failed")
++        if seen != ["LLAM", "Goroutine", "Tokio"]:
++            fail(f"prebuilt runtimes were not all executed: {seen}")
++
++
++def test_prebuilt_options_require_no_build() -> None:
++    original = sys.argv
++    try:
++        for option in ("--llam-binary", "--go-binary", "--tokio-binary"):
++            sys.argv = ["bench_runtime_compare.py", option, "unused"]
++            with contextlib.redirect_stderr(io.StringIO()):
++                try:
++                    bench.main()
++                except SystemExit as exc:
++                    if exc.code != 2:
++                        fail(f"unexpected prebuilt argument exit: {exc.code}")
++                else:
++                    fail("prebuilt path accepted without --no-build")
++    finally:
++        sys.argv = original
++
++
+ def main() -> int:
+     test_sample_csv_filters_requested_cases_and_warns()
+     test_isolated_warning_omits_isolation_hint()
+@@ -270,6 +316,8 @@
+     test_parse_output_rejects_duplicate_metric_fields()
+     test_parse_cases_rejects_duplicate_requests()
+     test_main_rejects_duplicate_case_args_without_traceback()
++    test_prebuilt_commands_are_used_without_building()
++    test_prebuilt_options_require_no_build()
+     print("[test_bench_runtime_compare] ok")
+     return 0
+ 
+--- /dev/null
++++ b/experiments/async_compare/bench_async.h
+@@ -0,0 +1,30 @@
++/*
++ * Copyright 2026 Feralthedogg
++ * SPDX-License-Identifier: Apache-2.0
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ * See LICENSES/Apache-2.0.txt.
++ */
++
++#ifndef LLAM_BENCH_ASYNC_COMPARE_H
++#define LLAM_BENCH_ASYNC_COMPARE_H
++#include "llam/runtime.h"
++
++typedef struct bench_async_evidence {
++    uint64_t qualification_captures;
++    uint64_t qualification_restores;
++} bench_async_evidence_t;
++
++void bench_async_options(llam_runtime_opts_t *options);
++int bench_async_prepare(llam_runtime_t *runtime, bench_async_evidence_t *evidence);
++int bench_async_report(llam_runtime_t *runtime, const char *name, const bench_async_evidence_t *evidence);
++#endif
+--- /dev/null
++++ b/experiments/async_compare/bench_async.c
+@@ -0,0 +1,120 @@
++/*
++ * Copyright 2026 Feralthedogg
++ * SPDX-License-Identifier: Apache-2.0
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ * See LICENSES/Apache-2.0.txt.
++ */
++
++#include "runtime_internal.h"
++#include "bench_async.h"
++#include <inttypes.h>
++
++#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_AARCH64 && LLAM_ASYNC_CONTEXT_SHARED
++#include "../../tests/fixtures/async_darwin_leaf.h"
++#define QUALIFICATION_ITERATIONS UINT64_C(300000000)
++
++typedef struct qualification_item {
++    llam_async_darwin_snapshot_t snapshot;
++    bool valid;
++} qualification_item_t;
++
++static void qualification_task(void *arg) {
++    qualification_item_t *item = arg;
++    llam_task_t *task = g_llam_tls_task;
++    uintptr_t low = (uintptr_t)task->stack_base;
++    uintptr_t high = low + task->stack_size;
++    int error = 121;
++    errno = error;
++    uint64_t result = llam_async_darwin_leaf(QUALIFICATION_ITERATIONS, &item->snapshot);
++    item->valid = errno == error &&
++                  result == QUALIFICATION_ITERATIONS * (QUALIFICATION_ITERATIONS + 1U) / 2U &&
++                  llam_async_darwin_snapshot_valid(&item->snapshot, result, low, high);
++}
++#endif
++
++void bench_async_options(llam_runtime_opts_t *options) {
++    options->deterministic = 1U;
++    options->experimental_flags = 0U;
++    options->preempt_mode = LLAM_PREEMPT_AUTO;
++    options->preempt_quantum_ns = UINT64_C(1000000);
++}
++
++int bench_async_prepare(llam_runtime_t *runtime, bench_async_evidence_t *evidence) {
++#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_AARCH64 && LLAM_ASYNC_CONTEXT_SHARED
++    const llam_async_preempt_range_t range = {(uintptr_t)llam_async_darwin_leaf_begin,
++                                              (uintptr_t)llam_async_darwin_leaf_end};
++    qualification_item_t items[2] = {0};
++    llam_task_t *tasks[2];
++    llam_async_shared_stats_t stats;
++
++    /* Controlled standalone benchmark process, default native ISA profile.
++     * Only the existing audited no-call leaf is certified. Never claim that
++     * arbitrary benchmark or runtime C instructions are async-safe. */
++    if (llam_async_shared_enable(runtime, &range, 1U, true) != 0)
++        return -1;
++    for (unsigned i = 0U; i < 2U; ++i) {
++        tasks[i] = llam_runtime_spawn_ex(runtime, qualification_task, &items[i], NULL, 0U);
++        if (tasks[i] == NULL)
++            return -1;
++    }
++    if (llam_runtime_run_handle(runtime) != 0)
++        return -1;
++    for (unsigned i = 0U; i < 2U; ++i) {
++        if (llam_join(tasks[i]) != 0 || !items[i].valid) {
++            errno = EPROTO;
++            return -1;
++        }
++    }
++    if (!llam_async_shared_stats(runtime, &stats) || stats.captures == 0U ||
++        stats.captures != stats.restores || stats.execution_debt != 0U || stats.binding_ops != 0U ||
++        stats.bindings_created != stats.bindings_closed) {
++        errno = EPROTO;
++        return -1;
++    }
++    evidence->qualification_captures = stats.captures;
++    evidence->qualification_restores = stats.restores;
++    return 0;
++#else
++    (void)runtime;
++    (void)evidence;
++    errno = ENOTSUP;
++    return -1;
++#endif
++}
++
++int bench_async_report(llam_runtime_t *runtime, const char *name, const bench_async_evidence_t *evidence) {
++#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_AARCH64 && LLAM_ASYNC_CONTEXT_SHARED
++    llam_async_shared_stats_t stats;
++    if (atomic_load_explicit(&runtime->async_preempt_enabled, memory_order_acquire) == 0U ||
++        !llam_async_shared_stats(runtime, &stats) || stats.captures < evidence->qualification_captures ||
++        stats.restores < evidence->qualification_restores || stats.captures != stats.restores ||
++        stats.execution_debt != 0U || stats.binding_ops != 0U ||
++        stats.bindings_created != stats.bindings_closed) {
++        errno = EPROTO;
++        return -1;
++    }
++    printf("[bench-async] case=%s enabled=1 workers=%u safe_ranges=%zu "
++           "qualification_captures=%" PRIu64 " qualification_restores=%" PRIu64 " workload_captures=%" PRIu64
++           " workload_restores=%" PRIu64 " execution_debt=%" PRIu64 " binding_ops=%" PRIu64 "\n",
++           name, runtime->active_shards, runtime->async_preempt_range_count, evidence->qualification_captures,
++           evidence->qualification_restores, stats.captures - evidence->qualification_captures,
++           stats.restores - evidence->qualification_restores, stats.execution_debt, stats.binding_ops);
++    return 0;
++#else
++    (void)runtime;
++    (void)name;
++    (void)evidence;
++    errno = ENOTSUP;
++    return -1;
++#endif
++}
+--- /dev/null
++++ b/experiments/async_compare/run_compare.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python3
++# Copyright 2026 Feralthedogg
++# SPDX-License-Identifier: Apache-2.0
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     https://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# See LICENSES/Apache-2.0.txt.
++
++"""Run the existing comparator with prebuilt binaries and retain actual child output."""
++
++import argparse
++import datetime
++import hashlib
++import json
++import os
++from pathlib import Path
++import sys
++
++sys.dont_write_bytecode = True
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT / "scripts"))
++import bench_runtime_compare as compare
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--llam", type=Path, required=True)
++    parser.add_argument("--go", type=Path, required=True)
++    parser.add_argument("--tokio", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++    output = args.output.resolve()
++    output.mkdir(parents=True, exist_ok=False)
++    raw = output / "raw"
++    raw.mkdir()
++    binaries = {"llam": args.llam.resolve(strict=True), "go": args.go.resolve(strict=True),
++                "tokio": args.tokio.resolve(strict=True)}
++    cases = [case for case in compare.DEFAULT_CASES if case not in ("opaque_block", "select_timeout")]
++    # The qualification profile supports one primary, full SIMD preservation,
++    # no dynamic workers and no lock-free normal queue. Match scheduler width.
++    for key in list(os.environ):
++        if key.startswith("LLAM_"):
++            del os.environ[key]
++    os.environ.update(LLAM_BENCH_ASYNC="1", LLAM_RUNTIME_PROFILE="release-fast",
++                      LLAM_EXPERIMENTAL_DYNAMIC_WORKERS="0", LLAM_EXPERIMENTAL_LOCKFREE_NORMQ="0",
++                      LLAM_PREEMPT_MODE="auto", LLAM_PREEMPT_QUANTUM_NS="1000000",
++                      GO_BENCH_GOMAXPROCS="1", GOMAXPROCS="1", GODEBUG="asyncpreemptoff=0",
++                      TOKIO_BENCH_WORKER_THREADS="1")
++    metadata = {"time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
++                "cases": cases, "rounds": 127, "warmup_rounds": 8, "samples": 5,
++                "environment": {key: value for key, value in os.environ.items()
++                                if key.startswith("LLAM_") or key in
++                                ("GO_BENCH_GOMAXPROCS", "GOMAXPROCS", "GODEBUG", "TOKIO_BENCH_WORKER_THREADS")},
++                "binaries": {name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
++                             for name, path in binaries.items()},
++                "unsupported": {
++                    "opaque_block": "native async profile rejects opaque enter; no LLAM score",
++                    "select_timeout": "different API semantics; Tokio zero-duration timeout exceeded 180s at these sizes"},
++                "coverage": "certified assembly leaf qualification before timing; ordinary C benchmark bodies outside certified ranges"}
++    (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
++    real_capture = compare.run_capture
++    index = 0
++
++    def record_capture(command, **kwargs):
++        nonlocal index
++        process = real_capture(command, **kwargs)
++        index += 1
++        record = {"command": command, "case": kwargs.get("env", {}).get("LLAM_BENCH_ONLY"),
++                  "returncode": process.returncode, "stdout": process.stdout, "stderr": process.stderr}
++        # Read-through recording only: execute the actual process and return its
++        # result unchanged to the existing parser and median-selection policy.
++        (raw / f"process-{index:03d}.json").write_text(json.dumps(record, indent=2) + "\n")
++        return process
++
++    old_argv = sys.argv
++    compare.run_capture = record_capture
++    sys.argv = ["bench_runtime_compare.py", "--runtime", "all", "--no-build", "--isolate-cases",
++                "--llam-binary", str(binaries["llam"]), "--go-binary", str(binaries["go"]),
++                "--tokio-binary", str(binaries["tokio"]), "--rounds", "127", "--warmup", "8",
++                "--samples", "5", "--sample-policy", "median", "--out-dir", str(output),
++                "--cases", *cases]
++    try:
++        result = compare.main()
++    finally:
++        compare.run_capture = real_capture
++        sys.argv = old_argv
++    if result == 0 and index != len(cases) * 3 * 5:
++        raise RuntimeError("missing process records")
++    return result
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- /dev/null
++++ b/experiments/async_compare/README.md
+@@ -0,0 +1,103 @@
++<!--
++Copyright 2026 Feralthedogg
++SPDX-License-Identifier: Apache-2.0
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    https://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++See LICENSES/Apache-2.0.txt.
++-->
++
++# Qualified native async runtime comparison
++
++This benchmark opts into LLAM's current Darwin arm64 native asynchronous context
++profile. It enables the backend before spawning work, verifies real capture and
++restore using the existing audited no-call assembly leaf, and then runs the
++existing comparison workloads with that runtime mode active.
++
++**The ordinary C benchmark bodies are outside the certified range. Their measured
++native capture count is zero.** This measures the standard workloads under the
++enabled profile and its configuration constraints. It is not qualification of
++arbitrary C instructions for asynchronous interruption or a CPU-spike latency test.
++
++## Build and run
++
++```sh
++make -j4 CC=clang LLAM_EXPERIMENTAL_ASYNC_PREEMPT=1 \
++  OBJDIR=object/async-compare bench_async_compare
++go build -o object/async-compare/go_compare scripts/bench_go_compare.go
++cargo build --release --locked --offline \
++  --manifest-path scripts/bench_tokio_compare/Cargo.toml --bin bench_tokio_compare
++python3 -B experiments/async_compare/run_compare.py \
++  --llam ./bench_async_compare --go object/async-compare/go_compare \
++  --tokio scripts/bench_tokio_compare/target/release/bench_tokio_compare \
++  --output research/async-compare-new-run
++```
++
++The offline Cargo command assumes the existing dependencies are cached. No new
++crate or toolchain is required. Select a new output directory for every run.
++The runner invokes the existing `scripts/bench_runtime_compare.py` parser,
++workloads, sample policy and plotting code with prebuilt executable overrides.
++Its recording wrapper executes the real process and returns that result
++unchanged; it retains stdout/stderr for activation and worker-count checks.
++
++CMake also exposes `bench_async_compare` when configured for Darwin arm64 with
++`LLAM_EXPERIMENTAL_ASYNC_PREEMPT=ON`. Normal `bench` defaults are retained. An
++async request on the unqualified normal target fails explicitly instead of
++silently producing an off-mode result.
++
++## Qualification and timing boundaries
++
++The supported profile requires deterministic one-primary scheduling, ordinary
++locked normal queues, full SIMD preservation and no dynamic-worker or worker-ring
++mode. The comparison uses RELEASE_FAST and a requested 1 ms preemption quantum.
++The private qualification entry acknowledges fail-fast behavior only in this
++controlled standalone benchmark process. The registered immutable executable
++range is the existing `async_darwin_leaf_begin` to `async_darwin_leaf_end` interval.
++No runtime, libc or arbitrary C function range is certified.
++
++Before timing, two finite no-yield leaves generate genuine peer pressure. The
++benchmark checks their exact arithmetic, GPR/NEON/FP snapshot and errno, requires
++positive balanced capture/restore counts, and drains execution debt and native
++binding operations. After the workload, a second check requires the mode still
++to be enabled and records qualification versus workload capture counts.
++Qualification execution time is excluded from the benchmark round samples.
++Aggregate diagnostic context-switch counts include qualification activity.
++
++The runner forces Go asynchronous preemption on with
++`GODEBUG=asyncpreemptoff=0` and `GOMAXPROCS=1`. Tokio uses its existing multi-thread
++builder with one worker. Its block_on caller is an additional executor context;
++matching these settings does not imply identical OS-thread topology.
++
++## Sample interpretation and exclusions
++
++Each supported case runs in fresh processes, with five process samples,
++127 measured rounds and eight warmup rounds. The existing median policy selects
++the middle throughput sample and retains that same sample's p50/p99. Latencies
++are **per-round workload-batch durations**, not individual operation or wake
++latencies. Work sizes are the existing comparison defaults: 512 spawn/join tasks,
++4,096 channel/select operations, 512 I/O/poll operations and 1,024 sleepers.
++Select cases use two channel operands; SELECT_OPS is an iteration count, not a
++wide-select channel count.
++
++The common table excludes:
++
++- `opaque_block`: native async profile rejects the benchmark's opaque enter.
++- `select_timeout`: LLAM/Go immediate polling and Tokio zero-duration async
++  timeout have different semantics. A first Tokio attempt exceeded the 180 s
++  limit. This is already excluded from general speed conclusions in the deep
++  comparison script.
++
++Case isolation is required for this comparison. An initial multi-case LLAM smoke
++failed at io_echo with EPERM, while all isolated measured I/O samples passed;
++that same-process limitation was not repaired by this benchmark task.
++
++See [the recorded comparison](../../research/async-runtime-compare-2026-10-27/REPORT.md)
++for exact versions, results, p99 values, activation proofs, raw records and limits.

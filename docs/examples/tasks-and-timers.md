@@ -37,11 +37,12 @@ int main(void) {
     }
 
     llam_task_t *task = llam_spawn(root, NULL, NULL);
-    int rc = llam_run();
-
-    if (task != NULL) {
-        (void)llam_join(task);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return 1;
     }
+    int rc = llam_run();
+    if (rc == 0 && llam_join(task) != 0) rc = -1;
     llam_runtime_shutdown();
     return rc;
 }

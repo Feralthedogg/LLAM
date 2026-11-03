@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -30,7 +30,17 @@
 
 #include <string.h>
 
-#define LLAM_CAPABILITY_CANONICAL_BYTES 72U
+/*
+ * SipHash-2-4 is derived from the authors' CC0 reference algorithm. The
+ * fixed-word feeder below is LLAM-specific and preserves capability token v1.
+ * See THIRD_PARTY_NOTICES.md for provenance.
+ */
+typedef struct llam_cap_siphash_state {
+    uint64_t v0;
+    uint64_t v1;
+    uint64_t v2;
+    uint64_t v3;
+} llam_cap_siphash_state_t;
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_bool g_llam_capability_force_entropy_failure;
@@ -57,13 +67,6 @@ static uint64_t llam_cap_read64_le(const uint8_t *bytes) {
            ((uint64_t)bytes[5] << 40U) |
            ((uint64_t)bytes[6] << 48U) |
            ((uint64_t)bytes[7] << 56U);
-}
-
-static void llam_cap_write32_le(uint8_t *bytes, uint32_t value) {
-    bytes[0] = (uint8_t)value;
-    bytes[1] = (uint8_t)(value >> 8U);
-    bytes[2] = (uint8_t)(value >> 16U);
-    bytes[3] = (uint8_t)(value >> 24U);
 }
 
 static void llam_cap_write64_le(uint8_t *bytes, uint64_t value) {
@@ -97,105 +100,98 @@ static uint64_t llam_cap_rotl64(uint64_t value, unsigned bits) {
     return (value << bits) | (value >> (64U - bits));
 }
 
-static uint64_t llam_cap_sipround(uint64_t *v0, uint64_t *v1, uint64_t *v2, uint64_t *v3) {
-    *v0 += *v1;
-    *v1 = llam_cap_rotl64(*v1, 13U);
-    *v1 ^= *v0;
-    *v0 = llam_cap_rotl64(*v0, 32U);
-    *v2 += *v3;
-    *v3 = llam_cap_rotl64(*v3, 16U);
-    *v3 ^= *v2;
-    *v0 += *v3;
-    *v3 = llam_cap_rotl64(*v3, 21U);
-    *v3 ^= *v0;
-    *v2 += *v1;
-    *v1 = llam_cap_rotl64(*v1, 17U);
-    *v1 ^= *v2;
-    *v2 = llam_cap_rotl64(*v2, 32U);
-    return *v0 ^ *v1 ^ *v2 ^ *v3;
+static void llam_cap_siphash_init(llam_cap_siphash_state_t *state,
+                                  uint64_t k0,
+                                  uint64_t k1) {
+    state->v0 = UINT64_C(0x736f6d6570736575) ^ k0;
+    state->v1 = UINT64_C(0x646f72616e646f6d) ^ k1;
+    state->v2 = UINT64_C(0x6c7967656e657261) ^ k0;
+    state->v3 = UINT64_C(0x7465646279746573) ^ k1;
 }
 
-static uint64_t llam_cap_siphash24(const uint8_t *data, size_t len, uint64_t k0, uint64_t k1) {
-    uint64_t v0 = UINT64_C(0x736f6d6570736575) ^ k0;
-    uint64_t v1 = UINT64_C(0x646f72616e646f6d) ^ k1;
-    uint64_t v2 = UINT64_C(0x6c7967656e657261) ^ k0;
-    uint64_t v3 = UINT64_C(0x7465646279746573) ^ k1;
-    uint64_t b = (uint64_t)len << 56U;
-    uint64_t result;
-    size_t off = 0U;
-    unsigned i;
-
-    while (off + 8U <= len) {
-        uint64_t m = llam_cap_read64_le(data + off);
-
-        v3 ^= m;
-        for (i = 0U; i < 2U; ++i) {
-            (void)llam_cap_sipround(&v0, &v1, &v2, &v3);
-        }
-        v0 ^= m;
-        off += 8U;
-    }
-
-    for (i = 0U; off + (size_t)i < len; ++i) {
-        b |= (uint64_t)data[off + (size_t)i] << (8U * i);
-    }
-    v3 ^= b;
-    for (i = 0U; i < 2U; ++i) {
-        (void)llam_cap_sipround(&v0, &v1, &v2, &v3);
-    }
-    v0 ^= b;
-    v2 ^= UINT64_C(0xff);
-    for (i = 0U; i < 4U; ++i) {
-        (void)llam_cap_sipround(&v0, &v1, &v2, &v3);
-    }
-    result = v0 ^ v1 ^ v2 ^ v3;
-    llam_cap_wipe_u64(&v0);
-    llam_cap_wipe_u64(&v1);
-    llam_cap_wipe_u64(&v2);
-    llam_cap_wipe_u64(&v3);
-    llam_cap_wipe_u64(&b);
-    return result;
+static void llam_cap_sipround(llam_cap_siphash_state_t *state) {
+    state->v0 += state->v1;
+    state->v1 = llam_cap_rotl64(state->v1, 13U);
+    state->v1 ^= state->v0;
+    state->v0 = llam_cap_rotl64(state->v0, 32U);
+    state->v2 += state->v3;
+    state->v3 = llam_cap_rotl64(state->v3, 16U);
+    state->v3 ^= state->v2;
+    state->v0 += state->v3;
+    state->v3 = llam_cap_rotl64(state->v3, 21U);
+    state->v3 ^= state->v0;
+    state->v2 += state->v1;
+    state->v1 = llam_cap_rotl64(state->v1, 17U);
+    state->v1 ^= state->v2;
+    state->v2 = llam_cap_rotl64(state->v2, 32U);
 }
 
-static void llam_cap_canonicalize(const llam_capability_token_t *token,
-                                  uint8_t bytes[LLAM_CAPABILITY_CANONICAL_BYTES]) {
-    size_t off = 0U;
+static void llam_cap_siphash_compress(llam_cap_siphash_state_t *state, uint64_t word) {
+    state->v3 ^= word;
+    llam_cap_sipround(state);
+    llam_cap_sipround(state);
+    state->v0 ^= word;
+}
 
-    llam_cap_write32_le(bytes + off, token->version);
-    off += 4U;
-    llam_cap_write32_le(bytes + off, token->family);
-    off += 4U;
-    llam_cap_write64_le(bytes + off, token->runtime_id);
-    off += 8U;
-    llam_cap_write64_le(bytes + off, token->slot);
-    off += 8U;
-    llam_cap_write64_le(bytes + off, token->generation);
-    off += 8U;
-    llam_cap_write64_le(bytes + off, token->rights);
-    off += 8U;
-    llam_cap_write64_le(bytes + off, token->revocation_epoch);
-    off += 8U;
-    llam_cap_write64_le(bytes + off, token->subject_id);
-    off += 8U;
-    memcpy(bytes + off, token->nonce, LLAM_CAPABILITY_NONCE_BYTES);
+static void llam_cap_siphash_compress_pair(llam_cap_siphash_state_t *first,
+                                           llam_cap_siphash_state_t *second,
+                                           uint64_t word) {
+    llam_cap_siphash_compress(first, word);
+    llam_cap_siphash_compress(second, word);
+}
+
+static uint64_t llam_cap_siphash_finish(llam_cap_siphash_state_t *state) {
+    unsigned round;
+
+    /* Capability token v1 has exactly nine 64-bit canonical words. */
+    llam_cap_siphash_compress(state, UINT64_C(72) << 56U);
+    state->v2 ^= UINT64_C(0xff);
+    for (round = 0U; round < 4U; ++round) {
+        llam_cap_sipround(state);
+    }
+    return state->v0 ^ state->v1 ^ state->v2 ^ state->v3;
 }
 
 static void llam_cap_mac(const llam_capability_key_t *key,
                          const llam_capability_token_t *token,
                          uint8_t out_mac[LLAM_CAPABILITY_MAC_BYTES]) {
-    uint8_t canonical[LLAM_CAPABILITY_CANONICAL_BYTES];
+    llam_cap_siphash_state_t first;
+    llam_cap_siphash_state_t second;
     uint64_t h0;
     uint64_t h1;
 
-    llam_cap_canonicalize(token, canonical);
-    h0 = llam_cap_siphash24(canonical, sizeof(canonical), key->words[0], key->words[1]);
-    h1 = llam_cap_siphash24(canonical, sizeof(canonical), key->words[2], key->words[3]);
+    llam_cap_siphash_init(&first, key->words[0], key->words[1]);
+    llam_cap_siphash_init(&second, key->words[2], key->words[3]);
+    llam_cap_siphash_compress_pair(&first,
+                                   &second,
+                                   ((uint64_t)token->family << 32U) | token->version);
+    llam_cap_siphash_compress_pair(&first, &second, token->runtime_id);
+    llam_cap_siphash_compress_pair(&first, &second, token->slot);
+    llam_cap_siphash_compress_pair(&first, &second, token->generation);
+    llam_cap_siphash_compress_pair(&first, &second, token->rights);
+    llam_cap_siphash_compress_pair(&first, &second, token->revocation_epoch);
+    llam_cap_siphash_compress_pair(&first, &second, token->subject_id);
+    llam_cap_siphash_compress_pair(&first, &second, llam_cap_read64_le(token->nonce));
+    llam_cap_siphash_compress_pair(&first,
+                                   &second,
+                                   llam_cap_read64_le(token->nonce + 8U));
+    h0 = llam_cap_siphash_finish(&first);
+    h1 = llam_cap_siphash_finish(&second);
     llam_cap_write64_le(out_mac, h0);
     llam_cap_write64_le(out_mac + 8U, h1);
-    llam_cap_wipe_bytes(canonical, sizeof(canonical));
+    llam_cap_wipe_bytes(&first, sizeof(first));
+    llam_cap_wipe_bytes(&second, sizeof(second));
     llam_cap_wipe_u64(&h0);
     llam_cap_wipe_u64(&h1);
 }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_capability_test_compute_mac(const llam_capability_key_t *key,
+                                      const llam_capability_token_t *token,
+                                      uint8_t out_mac[LLAM_CAPABILITY_MAC_BYTES]) {
+    llam_cap_mac(key, token, out_mac);
+}
+#endif
 
 static bool llam_cap_mac_equal(const uint8_t a[LLAM_CAPABILITY_MAC_BYTES],
                                const uint8_t b[LLAM_CAPABILITY_MAC_BYTES]) {

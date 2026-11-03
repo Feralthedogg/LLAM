@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-# Licensed under the LLAM Commercial Reciprocity License 1.0.
-# See the LICENSE file distributed with this Software.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSES/Apache-2.0.txt.
 
 from __future__ import annotations
 
@@ -10,6 +20,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -17,16 +28,14 @@ from pathlib import Path
 
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
-ACTIVE_LICENSE_RELATIVE = Path(
-    "LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-)
-APACHE_LICENSE_RELATIVE = Path("LICENSES/OLD-LICENSE/Apache-2.0.txt")
-APACHE_MANIFEST_RELATIVE = Path(
-    "LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"
-)
-CURRENT_LICENSE_BYTES = b"current license\n"
+NOTICE_RELATIVE = Path("NOTICE")
+APACHE_LICENSE_RELATIVE = Path("LICENSES/Apache-2.0.txt")
+THIRD_PARTY_NOTICES_RELATIVE = Path("THIRD_PARTY_NOTICES.md")
+THIRD_PARTY_MAGIC2_LICENSE_RELATIVE = Path("LICENSES/THIRD_PARTY/magic2/LICENSE")
+NOTICE_BYTES = b"LLAM attribution\n"
 APACHE_LICENSE_BYTES = b"Apache license\n"
-APACHE_MANIFEST_BYTES = b"include/llam/runtime.h\n"
+THIRD_PARTY_NOTICES_BYTES = b"third-party attributions\n"
+THIRD_PARTY_MAGIC2_LICENSE_BYTES = b"MIT license\n"
 
 
 class PackageLicenseLayoutTest(unittest.TestCase):
@@ -46,10 +55,6 @@ class PackageLicenseLayoutTest(unittest.TestCase):
         system_names = {
             "Darwin": "macos",
             "Linux": "linux",
-            "FreeBSD": "freebsd",
-            "OpenBSD": "openbsd",
-            "NetBSD": "netbsd",
-            "DragonFly": "dragonflybsd",
         }
         machine_names = {
             "amd64": "x86_64",
@@ -90,14 +95,16 @@ class PackageLicenseLayoutTest(unittest.TestCase):
         self._copy_script("install.sh")
         self._copy_script("install.ps1")
 
-        self._write("LICENSE", CURRENT_LICENSE_BYTES)
-        self._write(ACTIVE_LICENSE_RELATIVE, CURRENT_LICENSE_BYTES)
+        self._write("LICENSE", APACHE_LICENSE_BYTES)
+        self._write(NOTICE_RELATIVE, NOTICE_BYTES)
         self._write(APACHE_LICENSE_RELATIVE, APACHE_LICENSE_BYTES)
-        self._write(APACHE_MANIFEST_RELATIVE, APACHE_MANIFEST_BYTES)
+        self._write(THIRD_PARTY_NOTICES_RELATIVE, THIRD_PARTY_NOTICES_BYTES)
+        self._write("third_party/magic2/LICENSE", THIRD_PARTY_MAGIC2_LICENSE_BYTES)
         self._write("README.md", b"fixture\n")
         self._write("CHANGELOG.md", b"fixture\n")
-        self._write("scripts/stress_server.py", b"# fixture\n")
-        self._write("scripts/stress_server_composite.py", b"# fixture\n")
+        for name in ("stress_server.py", "stress_server_composite.py", "cli_numbers.py",
+                     "process_utils.py", "safe_output.py"):
+            self._copy_script(name)
         self._write("docs/fixture.md", b"fixture\n")
         self._write("include/llam/runtime.h", b"/* fixture */\n")
         self._write("examples/smoke.c", b"/* fixture */\n")
@@ -128,7 +135,7 @@ class PackageLicenseLayoutTest(unittest.TestCase):
                 "libllam_runtime.so.2"
             )
 
-    def _package_archive(self) -> None:
+    def _package_archive(self, *, expect_failure: bool = False) -> None:
         env = os.environ.copy()
         env.update(
             {
@@ -146,40 +153,75 @@ class PackageLicenseLayoutTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
+        if expect_failure:
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(self.archive.exists())
+            return
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertTrue(self.archive.is_file())
 
-    def test_archive_contains_mixed_license_metadata(self) -> None:
+    def test_missing_notices_fail_before_packaging(self) -> None:
+        for relative in (NOTICE_RELATIVE, THIRD_PARTY_NOTICES_RELATIVE, APACHE_LICENSE_RELATIVE):
+            with self.subTest(path=relative):
+                path = self.repo / relative
+                original = path.read_bytes()
+                path.unlink()
+                self._package_archive(expect_failure=True)
+                path.write_bytes(original)
+
+    def test_packaged_stress_help_outside_repository(self) -> None:
+        self._package_archive()
+        extracted = self.root / "extracted"
+        extracted.mkdir()
+        subprocess.run(["tar", "-xJf", str(self.archive), "-C", str(extracted)], check=True)
+        for name in ("stress_server.py", "stress_server_composite.py"):
+            with self.subTest(script=name):
+                result = subprocess.run(
+                    [sys.executable, "-E", str(extracted / self.package / "scripts" / name), "--help"],
+                    cwd=self.root, text=True, capture_output=True, check=False, timeout=10,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("usage:", result.stdout)
+
+    def test_archive_contains_apache_and_third_party_metadata(self) -> None:
         self._package_archive()
 
         with tarfile.open(self.archive, mode="r:xz") as archive:
             names = archive.getnames()
-            active_name = (
-                f"{self.package}/{ACTIVE_LICENSE_RELATIVE.as_posix()}"
+            notice_name = (
+                f"{self.package}/{NOTICE_RELATIVE.as_posix()}"
             )
             apache_name = (
                 f"{self.package}/{APACHE_LICENSE_RELATIVE.as_posix()}"
             )
-            manifest_name = (
-                f"{self.package}/{APACHE_MANIFEST_RELATIVE.as_posix()}"
+            attributions_name = (
+                f"{self.package}/{THIRD_PARTY_NOTICES_RELATIVE.as_posix()}"
             )
-            self.assertIn(active_name, names)
+            third_party_name = (
+                f"{self.package}/{THIRD_PARTY_MAGIC2_LICENSE_RELATIVE.as_posix()}"
+            )
+            self.assertIn(notice_name, names)
             self.assertIn(apache_name, names)
-            self.assertIn(manifest_name, names)
+            self.assertIn(attributions_name, names)
+            self.assertIn(third_party_name, names)
             root_license = archive.extractfile(f"{self.package}/LICENSE")
-            active_license = archive.extractfile(active_name)
+            notice = archive.extractfile(notice_name)
             apache_license = archive.extractfile(apache_name)
-            apache_manifest = archive.extractfile(manifest_name)
+            attributions = archive.extractfile(attributions_name)
+            third_party_license = archive.extractfile(third_party_name)
 
             self.assertIsNotNone(root_license)
-            self.assertIsNotNone(active_license)
+            self.assertIsNotNone(notice)
             self.assertIsNotNone(apache_license)
-            self.assertIsNotNone(apache_manifest)
-            self.assertEqual(CURRENT_LICENSE_BYTES, root_license.read())
-            self.assertEqual(CURRENT_LICENSE_BYTES, active_license.read())
+            self.assertIsNotNone(attributions)
+            self.assertIsNotNone(third_party_license)
+            self.assertEqual(APACHE_LICENSE_BYTES, root_license.read())
+            self.assertEqual(NOTICE_BYTES, notice.read())
             self.assertEqual(APACHE_LICENSE_BYTES, apache_license.read())
-            self.assertEqual(APACHE_MANIFEST_BYTES, apache_manifest.read())
+            self.assertEqual(THIRD_PARTY_NOTICES_BYTES, attributions.read())
+            self.assertEqual(THIRD_PARTY_MAGIC2_LICENSE_BYTES, third_party_license.read())
             self.assertFalse(any("/OLD-LICENSES/" in name for name in names))
+            self.assertFalse(any("/OLD-LICENSE/" in name or "LicenseRef-LLAM" in name for name in names))
 
     def test_archive_installer_preserves_active_license_metadata(self) -> None:
         self._package_archive()
@@ -212,22 +254,25 @@ class PackageLicenseLayoutTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(
-            CURRENT_LICENSE_BYTES,
+            APACHE_LICENSE_BYTES,
             (prefix / "share/llam/LICENSE").read_bytes(),
         )
-        installed_active = prefix / "share/llam" / ACTIVE_LICENSE_RELATIVE
-        self.assertTrue(installed_active.is_file())
+        installed_notice = prefix / "share/llam" / NOTICE_RELATIVE
+        self.assertTrue(installed_notice.is_file())
         self.assertEqual(
-            CURRENT_LICENSE_BYTES,
-            installed_active.read_bytes(),
+            NOTICE_BYTES,
+            installed_notice.read_bytes(),
         )
         installed_apache = prefix / "share/llam" / APACHE_LICENSE_RELATIVE
-        installed_manifest = prefix / "share/llam" / APACHE_MANIFEST_RELATIVE
+        installed_attributions = prefix / "share/llam" / THIRD_PARTY_NOTICES_RELATIVE
         self.assertTrue(installed_apache.is_file())
-        self.assertTrue(installed_manifest.is_file())
+        self.assertTrue(installed_attributions.is_file())
         self.assertEqual(APACHE_LICENSE_BYTES, installed_apache.read_bytes())
-        self.assertEqual(APACHE_MANIFEST_BYTES, installed_manifest.read_bytes())
+        self.assertEqual(THIRD_PARTY_NOTICES_BYTES, installed_attributions.read_bytes())
+        self.assertEqual(THIRD_PARTY_MAGIC2_LICENSE_BYTES,
+                         (prefix / "share/llam" / THIRD_PARTY_MAGIC2_LICENSE_RELATIVE).read_bytes())
         self.assertFalse((prefix / "share/llam/OLD-LICENSES").exists())
+        self.assertFalse((prefix / "share/llam/LICENSES/OLD-LICENSE").exists())
 
 
 if __name__ == "__main__":

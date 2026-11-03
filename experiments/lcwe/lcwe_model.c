@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-// See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+// See LICENSES/Apache-2.0.txt.
 
 #include "lcwe_model_internal.h"
 
@@ -72,12 +72,14 @@ static bool lane_width_valid(unsigned lane_width) {
 }
 
 uint64_t lcwe_model_mix64(uint64_t value) {
+    /* SplitMix64 public-domain finalizer; see THIRD_PARTY_NOTICES.md. */
     value = (value ^ (value >> 30U)) * UINT64_C(0xBF58476D1CE4E5B9);
     value = (value ^ (value >> 27U)) * UINT64_C(0x94D049BB133111EB);
     return value ^ (value >> 31U);
 }
 
-static uint64_t splitmix64_next(uint64_t *state) {
+uint64_t lcwe_model_splitmix64_next(uint64_t *state) {
+    /* Preserve this published stream exactly so LCWE runs remain comparable. */
     *state += UINT64_C(0x9E3779B97F4A7C15);
     return lcwe_model_mix64(*state);
 }
@@ -143,7 +145,8 @@ static void shuffle_ready(lcwe_model_batch_t *batch) {
     size_t i;
 
     for (i = batch->instance_count; i > 1U; --i) {
-        const size_t j = (size_t)(splitmix64_next(&state) % (uint64_t)i);
+        const size_t j =
+            (size_t)(lcwe_model_splitmix64_next(&state) % (uint64_t)i);
         lcwe_model_ticket_t *const tmp = batch->ready[i - 1U];
 
         batch->ready[i - 1U] = batch->ready[j];

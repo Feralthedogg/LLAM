@@ -1,7 +1,17 @@
 # Copyright 2026 Feralthedogg
-# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-# Licensed under the LLAM Commercial Reciprocity License 1.0.
-# See the LICENSE file distributed with this Software.
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSES/Apache-2.0.txt.
 
 $ErrorActionPreference = "Stop"
 
@@ -9,12 +19,14 @@ $SourceRoot = Split-Path -Parent $PSScriptRoot
 $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("llam-license-layout-" + [guid]::NewGuid().ToString("N"))
 $Repo = Join-Path $TempRoot "repo"
 $Build = Join-Path $Repo "build\Release"
-$ActiveLicense = "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
-$ApacheLicense = "LICENSES\OLD-LICENSE\Apache-2.0.txt"
-$ApacheManifest = "LICENSES\OLD-LICENSE\APACHE-2.0-FILES.txt"
-$CurrentText = "current license`n"
+$Notice = "NOTICE"
+$ApacheLicense = "LICENSES\Apache-2.0.txt"
+$ThirdPartyNotices = "THIRD_PARTY_NOTICES.md"
+$ThirdPartyMagic2License = "LICENSES\THIRD_PARTY\magic2\LICENSE"
+$NoticeText = "LLAM attribution`n"
 $ApacheText = "Apache license`n"
-$ManifestText = "include/llam/runtime.h`n"
+$ThirdPartyNoticesText = "third-party attributions`n"
+$ThirdPartyMagic2Text = "MIT license`n"
 
 if (-not $IsWindows -and -not ("LlamWin32FileInfo" -as [type])) {
     Add-Type -TypeDefinition @"
@@ -101,10 +113,11 @@ try {
         Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\$Script") -Destination (Join-Path $Repo "scripts\$Script")
     }
 
-    Write-Utf8File (Join-Path $Repo "LICENSE") $CurrentText
-    Write-Utf8File (Join-Path $Repo $ActiveLicense) $CurrentText
+    Write-Utf8File (Join-Path $Repo "LICENSE") $ApacheText
+    Write-Utf8File (Join-Path $Repo $Notice) $NoticeText
     Write-Utf8File (Join-Path $Repo $ApacheLicense) $ApacheText
-    Write-Utf8File (Join-Path $Repo $ApacheManifest) $ManifestText
+    Write-Utf8File (Join-Path $Repo $ThirdPartyNotices) $ThirdPartyNoticesText
+    Write-Utf8File (Join-Path $Repo "third_party\magic2\LICENSE") $ThirdPartyMagic2Text
     Write-Utf8File (Join-Path $Repo "README.md") "fixture`n"
     Write-Utf8File (Join-Path $Repo "CHANGELOG.md") "fixture`n"
     Write-Utf8File (Join-Path $Repo "docs\fixture.md") "fixture`n"
@@ -138,15 +151,15 @@ try {
     Expand-Archive -LiteralPath $Archive -DestinationPath $Expanded -Force
     $PackageRoot = Join-Path $Expanded "llam-3.0.0-windows-x86_64"
     $RootText = [System.IO.File]::ReadAllText((Join-Path $PackageRoot "LICENSE"))
-    if ($RootText -cne $CurrentText) {
+    if ($RootText -cne $ApacheText) {
         throw "root LICENSE content changed in Windows archive"
     }
-    $ActivePath = Join-Path $PackageRoot $ActiveLicense
-    if (-not (Test-Path -LiteralPath $ActivePath -PathType Leaf)) {
-        throw "active LicenseRef text is missing from Windows archive"
+    $NoticePath = Join-Path $PackageRoot $Notice
+    if (-not (Test-Path -LiteralPath $NoticePath -PathType Leaf)) {
+        throw "NOTICE attribution is missing from Windows archive"
     }
-    if ([System.IO.File]::ReadAllText($ActivePath) -cne $CurrentText) {
-        throw "active LicenseRef content changed in Windows archive"
+    if ([System.IO.File]::ReadAllText($NoticePath) -cne $NoticeText) {
+        throw "NOTICE attribution changed in Windows archive"
     }
     $ApachePath = Join-Path $PackageRoot $ApacheLicense
     if (-not (Test-Path -LiteralPath $ApachePath -PathType Leaf)) {
@@ -155,18 +168,53 @@ try {
     if ([System.IO.File]::ReadAllText($ApachePath) -cne $ApacheText) {
         throw "Apache 2.0 text changed in Windows archive"
     }
-    $ManifestPath = Join-Path $PackageRoot $ApacheManifest
-    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
-        throw "Apache 2.0 file manifest is missing from Windows archive"
+    $AttributionsPath = Join-Path $PackageRoot $ThirdPartyNotices
+    if (-not (Test-Path -LiteralPath $AttributionsPath -PathType Leaf)) {
+        throw "third-party attributions are missing from Windows archive"
     }
-    if ([System.IO.File]::ReadAllText($ManifestPath) -cne $ManifestText) {
-        throw "Apache 2.0 file manifest changed in Windows archive"
+    if ([System.IO.File]::ReadAllText($AttributionsPath) -cne $ThirdPartyNoticesText) {
+        throw "third-party attributions changed in Windows archive"
+    }
+    $ThirdPartyMagic2Path = Join-Path $PackageRoot $ThirdPartyMagic2License
+    if (-not (Test-Path -LiteralPath $ThirdPartyMagic2Path -PathType Leaf)) {
+        throw "magic2 MIT license is missing from Windows archive"
+    }
+    if ([System.IO.File]::ReadAllText($ThirdPartyMagic2Path) -cne $ThirdPartyMagic2Text) {
+        throw "magic2 MIT license changed in Windows archive"
     }
     if (Test-Path -LiteralPath (Join-Path $PackageRoot "OLD-LICENSES")) {
         throw "obsolete top-level OLD-LICENSES directory was packaged"
     }
+    if ((Test-Path -LiteralPath (Join-Path $PackageRoot "LICENSES\OLD-LICENSE")) -or
+        (Get-ChildItem -LiteralPath (Join-Path $PackageRoot "LICENSES") -Recurse -Filter "LicenseRef-LLAM*")) {
+        throw "retired LLAM license metadata was packaged"
+    }
 
-    Write-Host "Windows package license layout ok"
+    $VersionCheck = @'
+set(PACKAGE_FIND_VERSION "3.0.0")
+set(PACKAGE_FIND_VERSION_MAJOR 3)
+include("__VERSION_FILE__")
+if(NOT PACKAGE_VERSION_COMPATIBLE OR NOT PACKAGE_VERSION_EXACT)
+    message(FATAL_ERROR "SDK 3.0.0 must accept exact package version 3.0.0 independently of ABI 2")
+endif()
+unset(PACKAGE_VERSION_COMPATIBLE)
+unset(PACKAGE_VERSION_EXACT)
+set(PACKAGE_FIND_VERSION "2")
+set(PACKAGE_FIND_VERSION_MAJOR 2)
+include("__VERSION_FILE__")
+if(PACKAGE_VERSION_COMPATIBLE OR PACKAGE_VERSION_EXACT)
+    message(FATAL_ERROR "SDK 3.0.0 must reject package major 2")
+endif()
+'@
+    $VersionFile = (Join-Path $PackageRoot "share\llam\cmake\llam-config-version.cmake").Replace('\', '/')
+    $VersionScript = Join-Path $TempRoot "version-check.cmake"
+    Write-Utf8File $VersionScript ($VersionCheck.Replace("__VERSION_FILE__", $VersionFile))
+    & cmake -P $VersionScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows SDK package version check failed"
+    }
+
+    Write-Host "Windows package license layout and SDK version checks ok"
 } finally {
     Remove-Item -Recurse -Force -LiteralPath $TempRoot -ErrorAction SilentlyContinue
 }

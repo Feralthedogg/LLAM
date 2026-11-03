@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "stress_internal.h"
@@ -201,6 +201,9 @@ llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg
     llam_stack_class_t stack_class = LLAM_STACK_CLASS_DEFAULT;
     llam_task_class_t task_class = LLAM_TASK_CLASS_DEFAULT;
     llam_shard_t *target;
+    llam_processor_queue_access_t queue_access;
+    bool local_spawn;
+    bool queue_access_valid = false;
 
     llam_task_safepoint();
 
@@ -215,6 +218,13 @@ llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg
     }
 
     target = &rt->shards[shard_id];
+    local_spawn = g_llam_tls_shard == target && g_llam_tls_task != NULL;
+    if (local_spawn) {
+        queue_access_valid =
+            llam_processor_queue_access_snapshot(&target->processor, &queue_access) &&
+            (queue_access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
+             queue_access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN);
+    }
     task = llam_task_alloc(target);
     if (task == NULL) {
         return NULL;
@@ -255,7 +265,7 @@ llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg
         return NULL;
     }
 
-    task->home_shard = shard_id;
+    atomic_store_explicit(&task->home_shard, shard_id, memory_order_relaxed);
     task->live_shard = shard_id;
     task->last_shard = shard_id;
     task->last_runnable_ns = llam_now_ns();
@@ -265,8 +275,8 @@ llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg
 
     pthread_mutex_lock(&target->lock);
     if (rt->experimental_dynamic_shards != 0U &&
-        atomic_load_explicit(&target->online, memory_order_relaxed) == 0U) {
-        atomic_store_explicit(&target->online, 1U, memory_order_release);
+        !llam_processor_online(&target->processor)) {
+        llam_processor_set_online(&target->processor, true);
         llam_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
     }
     task->state = LLAM_TASK_STATE_RUNNABLE;
@@ -276,13 +286,17 @@ llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg
         if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {
             llam_enqueue_overflow_task(rt, task);
         }
-    } else if (llam_lockfree_normq_enabled(rt) && (g_llam_tls_shard != target || g_llam_tls_task == NULL)) {
+    } else if (!local_spawn || !queue_access_valid) {
         task->enqueue_hot = 0U;
-        if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
+        if (llam_queue_push_bounded_locked(target,
+                                           &target->processor.inject_q,
+                                           LLAM_INJECT_QUEUE_CAP,
+                                           task,
+                                           NULL)) {
             target->metrics.inject_enqueues += 1U;
         }
     } else {
-        (void)llam_norm_queue_push_owner_locked(target, task);
+        (void)llam_norm_queue_push_owner_locked(target, &queue_access, task);
     }
     llam_trace_shard(target, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_NEW, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_NONE);
     pthread_mutex_unlock(&target->lock);

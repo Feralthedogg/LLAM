@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
-"""Behavior tests for the Phase 1A legacy execution-lease boundary scanner."""
+"""Behavior tests for the Phase 1A lease and Phase 1B P-resource audit."""
 
 from __future__ import annotations
 
@@ -26,7 +26,8 @@ import unittest
 from pathlib import Path
 
 from audit_production_test_hooks import HOOK_RE, SAFE_SELF_TEST_RE, _symbols
-from check_legacy_lease_boundary import scan_source
+from check_legacy_lease_boundary import scan_repository, scan_source
+from check_worker_identity_boundary import PROVIDED_MAGIC2_BRIDGE_PATH, PROVIDED_MAGIC2_PATH
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,327 @@ CHECKER = Path(__file__).with_name("check_legacy_lease_boundary.py")
 
 
 class LegacyLeaseBoundaryTest(unittest.TestCase):
+    def test_preprocessor_predicate_cannot_hide_function_lock_order(self) -> None:
+        source = (
+            "#if defined(PLATFORM)\n"
+            "#define HELPER(x) \\\n"
+            "    ((x) + 1)\n"
+            "void sample(llam_shard_t *shard) {\n"
+            "    pthread_mutex_lock(&shard->lock);\n"
+            "    pthread_mutex_lock(&shard->opaque_lock);\n"
+            "}\n#endif\n"
+        )
+        self.assert_error("src/core/sched/sample.c", source,
+                          "opaque_lock must precede")
+
+    def test_registered_native_service_preserves_all_processor_lock_order(self) -> None:
+        path = "src/core/context/async_context_shared.c"
+        source = (ROOT / path).read_text()
+        self.assert_clean(path, source)
+        start = source.index("static void llam_shared_lock(")
+        end = source.index("static LLAM_NORETURN", start)
+        body = source[start:end]
+        for before, after in (
+            ("&runtime->shards[i].opaque_lock", "&runtime->shards[i].lock"),
+            ("i < runtime->active_shards", "i + 1U < runtime->active_shards"),
+            ("&runtime->shards[i - 1U].lock", "&runtime->shards[i - 1U].opaque_lock"),
+            ("control->worker->compat_shard->opaque_lock", "other->opaque_lock"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, body)
+                self.assert_error(path, source[:start] + body.replace(before, after, 1) + source[end:],
+                                  "unverified wait/aggregate ownership contract")
+
+    def test_windows_registered_service_preserves_all_processor_lock_order(self) -> None:
+        path = "src/core/context/windows_async_lifetime.c"
+        source = (ROOT / path).read_text()
+        self.assert_clean(path, source)
+        for before, after in (
+            ("&rt->shards[i].opaque_lock", "&rt->shards[i].lock"),
+            ("i < rt->active_shards", "i + 1U < rt->active_shards"),
+            ("&rt->shards[i - 1U].lock", "&rt->shards[i - 1U].opaque_lock"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, source)
+                self.assert_error(path, source.replace(before, after, 1),
+                                  "unverified wait/aggregate ownership contract")
+
+    def test_dispatch_reservation_cannot_publish_unfinished_context(self) -> None:
+        path = "src/core/sched/managed_scheduler.c"
+        source = (ROOT / path).read_text()
+        start = source.index("static bool llam_managed_reserve_task(")
+        end = source.index("static void llam_managed_release_task(", start)
+        body = source[start:end]
+        for before, after in (
+            ("memory_order_acq_rel", "memory_order_relaxed"),
+            ("&expected, worker", "&expected, NULL"),
+            ("task->last_shard", "task->home_shard"),
+            ("pthread_mutex_lock(&target->lock)", "unprotected(target)"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, body)
+                self.assert_error(path, source[:start] + body.replace(before, after, 1) + source[end:],
+                                  "unverified wait/aggregate ownership contract")
+
+    def test_cold_confirmation_keeps_the_bounded_trylock_protocol(self) -> None:
+        path = "src/engine/watchdog/watchdog_deadlock.c"
+        source = (ROOT / path).read_text()
+        self.assert_clean(path, source)
+        for before, after in (
+            ("pthread_mutex_trylock(&shard->lock)", "pthread_mutex_lock(&shard->lock)"),
+            ("pthread_mutex_trylock(&shard->opaque_lock)", "pthread_mutex_lock(&shard->opaque_lock)"),
+            ("llam_task_wait_resolver_end(waits[i].task)", "ignore_reference(waits[i].task)"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, source)
+                self.assert_error(path, source.replace(before, after, 1),
+                                  "unverified wait/aggregate ownership contract")
+        self.assert_error(path, source.replace("4096U", "SIZE_MAX", 1),
+                          "unverified cold-scan bound or macro")
+        self.assert_error(
+            path, source + "\nvoid rogue(llam_shard_t *shard) {\n"
+            "pthread_mutex_lock(&shard->lock); pthread_mutex_lock(&shard->opaque_lock); }\n",
+            "opaque_lock must precede",
+        )
+
+    def test_wait_dependency_snapshot_keeps_the_lifetime_proof(self) -> None:
+        path = "src/core/wait/wait_tracking.c"
+        source = (ROOT / path).read_text()
+        self.assert_clean(path, source)
+        begin = source.index("bool llam_task_wait_dependency_read_locked(")
+        end = source.index("bool llam_task_wait_dependency_matches(", begin)
+        body = source[begin:end]
+        for before, after in (
+            ("&expected, 1U", "&expected, 0U"),
+            ("pthread_mutex_trylock(&mutex->lock)", "pthread_mutex_lock(&mutex->lock)"),
+            ("!llam_wait_node_completed(node)", "true"),
+        ):
+            with self.subTest(before=before):
+                self.assertIn(before, body)
+                self.assert_error(path, source[:begin] + body.replace(before, after, 1) + source[end:],
+                                  "unverified wait/aggregate ownership contract")
+
+    def test_registered_protocols_keep_their_native_ownership_proof(self) -> None:
+        path = "src/core/sched/execution_lease.c"
+        source = (ROOT / path).read_text()
+        self.assert_clean(path, source)
+        mutations = (
+            ("g_llam_tls_worker == worker", "g_llam_tls_worker != worker"),
+            ("llam_worker_registered_for(worker, shard->runtime)", "true"),
+            ("lease->owner = worker;", "lease->owner = NULL;"),
+            ("lease->owner_incarnation = incarnation;", "lease->owner_incarnation = 1U;"),
+            ("lease->state != LLAM_LEASE_REGISTERED_FREE", "false"),
+            ("!llam_processor_owner_ticket_validate_pair_locked(shard, ticket)", "false"),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before):
+                self.assertIn(before, source)
+                self.assert_error(path, source.replace(before, after, 1),
+                                  "registered execution contract changed")
+        self.assert_error(
+            path, source + "\nvoid rogue(llam_legacy_lease_t *lease) { lease->owner = NULL; }\n",
+            "ownerless lease grant",
+        )
+        self.assert_error(
+            "src/core/sched/other.c", source, "ownerless lease grant"
+        )
+
+    def test_registered_worker_initialization_is_closed(self) -> None:
+        path = "src/core/sched/worker_registry.c"
+        source = (ROOT / path).read_text()
+        self.assert_clean(path, source)
+        self.assert_error(
+            path, source.replace("atomic_init(&worker->active_g, NULL)",
+                                 "atomic_init(&worker->active_g, previous)", 1),
+            "registered execution contract changed",
+        )
+        self.assert_error(
+            path, source + "\nvoid rogue(llam_worker_t *worker) { worker->active_g = NULL; }\n",
+            "execution authority member",
+        )
+
+    def test_registered_shutdown_drain_is_not_an_ordinary_grant(self) -> None:
+        path = "src/core/sched/execution_lease.c"
+        source = (ROOT / path).read_text()
+        begin = source.index("bool llam_execution_lease_claim_drain_locked(")
+        end = source.index("bool llam_execution_lease_return_locked(", begin)
+        body = source[begin:end]
+        mutations = (
+            ("!atomic_load_explicit(&shard->runtime->shutdown_requested, memory_order_acquire)", "false"),
+            ("lease->owner != NULL", "false"),
+            ("record.lease_projection_epoch != lease->epoch", "false"),
+            ("lease->epoch >= UINT64_MAX - 1U", "false"),
+            ("record.p_generation >= UINT64_MAX - 1U", "false"),
+            ("&worker->current_p, &expected_p", "&worker->current_p, &other_p"),
+            ("lease->state = LLAM_LEASE_STOPPING", "lease->state = LLAM_LEASE_REGISTERED_OWNED"),
+            ("*lease = before;", "(void)before;"),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before):
+                self.assertIn(before, body)
+                changed = source[:begin] + body.replace(before, after, 1) + source[end:]
+                self.assert_error(path, changed, "registered execution contract changed")
+
+    def test_owner_comparison_after_unrelated_addresses_is_read_only(self) -> None:
+        source = (
+            "int inspect(llam_legacy_lease_t *lease, llam_worker_t *worker) {\n"
+            "    unsigned marker = 0;\n"
+            "    if (sample(&marker) && lease->owner == worker) return 1;\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        self.assert_clean("src/core/context/valid.c", source)
+        self.assert_error(
+            "src/core/context/valid.c",
+            source.replace("lease->owner == worker", "(lease->owner = worker) == worker"),
+            "ownerless lease grant",
+        )
+
+    def test_owner_address_escapes_are_not_hidden_by_other_arguments(self) -> None:
+        for function in ("bad", "llam_processor_queue_access_snapshot_pair_locked"):
+            for address in ("&lease->owner", "&(lease->owner)", "&((lease)->owner)"):
+                with self.subTest(function=function, address=address):
+                    self.assert_error(
+                        "src/core/context/bad.c",
+                        f"void {function}(llam_legacy_lease_t *lease) {{\n"
+                        "    unsigned marker = 0;\n"
+                        f"    sink(&marker, {address});\n"
+                        "}\n",
+                        "ownerless lease grant",
+                    )
+
+    def test_lock_receiver_designated_initializer_is_a_value_copy(self) -> None:
+        source = (
+            "void inspect(llam_shard_t *origin, llam_shard_t *other, operation_t *out) {\n"
+            "    pthread_mutex_lock(&origin->opaque_lock);\n"
+            "    pthread_mutex_lock(&origin->lock);\n"
+            "    *out = (operation_t){.shard = origin, .ready = 1};\n"
+            "    pthread_mutex_unlock(&origin->lock);\n"
+            "    pthread_mutex_unlock(&origin->opaque_lock);\n"
+            "}\n"
+        )
+        path = "src/core/sched/valid.c"
+        self.assert_clean(path, source)
+        for value in ("(origin = other)", "origin++", "(origin) + 1"):
+            with self.subTest(value=value):
+                self.assert_error(
+                    path,
+                    source.replace(".shard = origin", ".shard = " + value),
+                    "opaque_lock must precede shard->lock",
+                )
+
+    def test_call_result_arithmetic_does_not_move_lock_receiver(self) -> None:
+        source = (
+            "unsigned inspect(llam_shard_t *owner, llam_shard_t *other) {\n"
+            "    pthread_mutex_lock(&owner->opaque_lock);\n"
+            "    pthread_mutex_lock(&owner->lock);\n"
+            "    unsigned depth = queue_depth(owner) + ready_depth(owner);\n"
+            "    pthread_mutex_unlock(&owner->lock);\n"
+            "    pthread_mutex_unlock(&owner->opaque_lock);\n"
+            "    return depth;\n"
+            "}\n"
+        )
+        path = "src/engine/watchdog/valid.c"
+        self.assert_clean(path, source)
+        for argument in ("(owner)++", "owner = other", "(owner) + 1"):
+            with self.subTest(argument=argument):
+                self.assert_error(
+                    path,
+                    source.replace("queue_depth(owner)", f"queue_depth({argument})"),
+                    "opaque_lock must precede shard->lock",
+                )
+
+    def test_current_async_and_watchdog_lock_regions_are_auditable(self) -> None:
+        paths = (
+            "src/core/context/async_context_shared.c",
+            "src/core/context/windows_async_lifetime.c",
+            "src/engine/watchdog/watchdog_worker.c",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                source = (ROOT / path).read_text(encoding="utf-8")
+                self.assert_clean(path, source)
+                if path.endswith("async_context_shared.c"):
+                    self.assert_error(
+                        path,
+                        source.replace("lease->owner != worker", "(lease->owner = worker) != worker", 1),
+                        "ownerless lease grant",
+                    )
+                else:
+                    receiver = "shard" if path.endswith("windows_async_lifetime.c") else "owner"
+                    pair = (
+                        f"pthread_mutex_lock(&{receiver}->opaque_lock);\n"
+                        f"        pthread_mutex_lock(&{receiver}->lock);"
+                    )
+                    # The Windows helper uses a four-space function body;
+                    # the watchdog loop uses eight spaces.
+                    if pair not in source:
+                        pair = pair.replace("\n        ", "\n    ")
+                    self.assertTrue(pair in source, f"missing reviewed lock pair in {path}")
+                    reversed_pair = pair.replace("->opaque_lock", "->swap_lock").replace(
+                        "->lock", "->opaque_lock"
+                    ).replace("->swap_lock", "->lock")
+                    self.assert_error(
+                        path,
+                        source.replace(pair, reversed_pair, 1),
+                        "opaque_lock must precede shard->lock",
+                    )
+
+    def test_async_drain_sender_requires_closed_target_and_lock_window(self) -> None:
+        path = "src/core/context/async_context_linux_x86_64.c"
+        source = (ROOT / path).read_text(encoding="utf-8")
+        self.assert_clean(path, source)
+        mutations = (
+            ("*request_worker = worker;", "*request_worker = &shard->primary_worker;"),
+            ("llam_async_preempt_cancel_request(request_worker, request_generation);",
+             "llam_async_preempt_cancel_request(&shard->primary_worker, request_generation);"),
+            ("pthread_kill(native_thread, shard->runtime->async_preempt_signal)",
+             "pthread_kill(attacker, shard->runtime->async_preempt_signal)"),
+            ("int signal_rc = pthread_kill(native_thread, shard->runtime->async_preempt_signal);",
+             "pthread_mutex_unlock(&shard->opaque_lock);\n"
+             "int signal_rc = pthread_kill(native_thread, shard->runtime->async_preempt_signal);"),
+            ("if (llam_async_prepare_drain_locked(shard, now_ns, &request_worker, &native_thread, &request_generation)) {",
+             "if (true) {"),
+            ("if (llam_async_prepare_drain_locked(shard, now_ns, &request_worker, &native_thread, &request_generation)) {",
+             "if (llam_async_prepare_drain_locked(shard, now_ns, &request_worker, &native_thread, &request_generation)) {\n"
+             "unknown_callback(shard);"),
+        )
+        for before, after in mutations:
+            with self.subTest(after=after):
+                self.assertIn(before, source)
+                self.assert_error(path, source.replace(before, after, 1), "async drain sender contract")
+
+    def test_origin_unbind_guard_does_not_allow_unknown_owner_helpers(self) -> None:
+        path = "src/core/sched/scheduler.c"
+        source = (ROOT / path).read_text(encoding="utf-8")
+        self.assert_clean(path, source)
+        start = source.index("void llam_scheduler_unbind_identity(")
+        before = "llam_async_preempt_has_origin_obligations(shard)"
+        index = source.index(before, start)
+        mutated = source[:index] + source[index:].replace(before, "unknown_origin_guard(shard)", 1)
+        self.assert_error(path, mutated, "ownerless lease grant")
+
+    def test_accepts_exact_supplied_magic2_snapshot(self) -> None:
+        source = (ROOT / PROVIDED_MAGIC2_PATH).read_text(encoding="utf-8")
+        self.assertEqual([], scan_source(PROVIDED_MAGIC2_PATH, source))
+
+    def test_rejects_modified_supplied_magic2_snapshot(self) -> None:
+        errors = scan_source(PROVIDED_MAGIC2_PATH, "")
+        self.assertTrue(any("snapshot hash mismatch" in error for error in errors), errors)
+
+    def test_magic2_exception_is_path_specific(self) -> None:
+        errors = scan_source("src/internal/other_magic2.h", "worker->executor;")
+        self.assertTrue(any("Phase 0 execution authority" in error for error in errors), errors)
+
+    def test_rejects_missing_magic2_snapshot_when_bridge_exists(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="llam-lease-magic2-") as raw_root:
+            root = Path(raw_root)
+            bridge = root / PROVIDED_MAGIC2_BRIDGE_PATH
+            bridge.parent.mkdir(parents=True)
+            bridge.write_text("/* bridge fixture */\n", encoding="utf-8")
+            errors = scan_repository(root)
+        self.assertTrue(any("snapshot is missing" in error for error in errors), errors)
+
     def assert_error(self, relative_path: str, source: str, message: str) -> None:
         errors = scan_source(relative_path, source)
         self.assertTrue(any(message in error for error in errors), errors)
@@ -56,9 +378,10 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             self.skipTest("typed boundary fixtures require cc")
         result = subprocess.run(
             [
-                compiler,
-                "-std=c11",
-                "-Wall",
+            compiler,
+            "-std=c11",
+            "-D_GNU_SOURCE",
+            "-Wall",
                 "-Wextra",
                 "-Wpedantic",
                 "-Werror",
@@ -75,7 +398,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
                 "c",
                 "-",
             ],
-            input=prelude + source,
+            input="#include <stddef.h>\n" + prelude + source,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -99,6 +422,11 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "src/core/sched/scheduler.c",
             "void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task) {\n"
             "    atomic_store_explicit(&worker->active_g, task, memory_order_release);\n"
+            "    atomic_store_explicit(&worker->execution_state,\n"
+            "        atomic_load_explicit(&worker->runtime_critical_depth, memory_order_acquire) == 0U &&\n"
+            "        atomic_load_explicit(&worker->preempt_disable_depth, memory_order_acquire) == 0U\n"
+            "            ? LLAM_WORKER_EXEC_MANAGED_SAFE : LLAM_WORKER_EXEC_RUNTIME_UNSAFE,\n"
+            "        memory_order_release);\n"
             "}\n"
             "llam_task_t *llam_worker_load_active_g(const llam_worker_t *worker) {\n"
             "    return atomic_load_explicit(&worker->active_g, memory_order_acquire);\n"
@@ -106,6 +434,11 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "void llam_worker_clear_active_g(llam_worker_t *worker) {\n"
             "    atomic_store_explicit(&worker->active_g, NULL, memory_order_release);\n"
             "    atomic_store_explicit(&worker->last_run_started_ns, 0U, memory_order_release);\n"
+            "    atomic_store_explicit(&worker->execution_state,\n"
+            "        atomic_load_explicit(&worker->runtime_critical_depth, memory_order_acquire) == 0U &&\n"
+            "        atomic_load_explicit(&worker->preempt_disable_depth, memory_order_acquire) == 0U\n"
+            "            ? LLAM_WORKER_EXEC_SCHEDULER : LLAM_WORKER_EXEC_RUNTIME_UNSAFE,\n"
+            "        memory_order_release);\n"
             "}\n",
         )
 
@@ -186,6 +519,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             ("worker->owns_p", "Phase 1A execution authority"),
             ("worker->preempt_target", "Phase 0 execution authority"),
             ("processor->current_g", "Phase 0 execution authority"),
+            ("processor->lease_epoch", "Phase 1A copied P resource"),
         )
         for expression, message in fixtures:
             with self.subTest(expression=expression):
@@ -202,16 +536,156 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "copied P resource",
         )
         for expression in (
-            "processor->norm_q = shard->norm_q;",
-            "shard->processor.timers = shard->timers;",
             "processor->allocator = shard->allocator;",
+            "processor->payload_lock = shard->lock;",
+            "processor->opaque_helper_opaque_wait = shard->opaque_helper_opaque_wait;",
+            "processor->ring = node->ring;",
+            "processor->all_tasks = shard->all_tasks;",
+            "processor->metrics = shard->metrics;",
+            "processor->trace_ring = shard->trace_ring;",
+            "processor->legacy_lease = shard->legacy_lease;",
         ):
             with self.subTest(expression=expression):
                 self.assert_error(
                     "src/core/sched/bad.c",
                     f"void bad(void) {{ {expression} }}\n",
-                    "copied P resource",
+                    "Phase 3 duplicate processor allocator/cache field on shard"
+                    if "shard->allocator" in expression
+                    else "copied P resource",
                 )
+
+    def test_allows_phase1b_processor_topology_and_wake_resources(self) -> None:
+        self.assert_clean(
+            "src/internal/runtime_types.h",
+            "struct llam_processor {\n"
+            "    unsigned cpu_id;\n"
+            "    unsigned node_index;\n"
+            "    unsigned io_node_index;\n"
+            "    atomic_uint online;\n"
+            "    int event_fd;\n"
+            "    atomic_uint event_pending;\n"
+            "    llam_processor_owner_record_t owner_record;\n"
+            "    llam_queue_t inject_q;\n"
+            "    atomic_uint inject_depth;\n"
+            "    llam_queue_t hot_q;\n"
+            "    llam_queue_t norm_q;\n"
+            "    llam_cldeque_t norm_cldeque;\n"
+            "    atomic_uint norm_depth;\n"
+            "    unsigned hot_streak;\n"
+            "    unsigned direct_handoff_streak;\n"
+            "    unsigned autotune_handoff_sample_seq;\n"
+            "    unsigned autotune_wake_latency_sample_countdown;\n"
+            "    bool autotune_handoff_sample_current;\n"
+            "    llam_timer_node_t *timers;\n"
+            "    llam_timer_node_t **timer_heap;\n"
+            "    size_t timer_heap_len;\n"
+            "    size_t timer_heap_cap;\n"
+            "    atomic_uint timer_count;\n"
+            "    atomic_uint timer_callbacks_active;\n"
+            "    llam_allocator_t allocator;\n"
+            "    bool stack_cache_lock_initialized;\n"
+            "    llam_stack_cache_entry_t *stack_cache_default;\n"
+            "    llam_stack_cache_entry_t *stack_cache_large;\n"
+            "    llam_stack_cache_entry_t *stack_cache_huge;\n"
+            "    llam_stack_cache_entry_t *stack_cache_entry_free;\n"
+            "    unsigned stack_cache_default_count;\n"
+            "    unsigned stack_cache_large_count;\n"
+            "    unsigned stack_cache_huge_count;\n"
+            "    pthread_mutex_t stack_cache_lock;\n"
+            "};\n",
+        )
+
+    def test_requires_processor_queue_timer_ownership(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_types.h",
+            "struct llam_processor {\n"
+            "    unsigned cpu_id;\n"
+            "    atomic_uint online;\n"
+            "};\n",
+            "Phase 2 processor queue/timer field missing",
+        )
+
+    def test_requires_processor_allocator_cache_ownership(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_types.h",
+            "struct llam_processor {\n"
+            "    llam_allocator_t allocator;\n"
+            "};\n",
+            "Phase 3 processor allocator/cache field missing",
+        )
+
+    def test_limits_direct_processor_owner_record_access(self) -> None:
+        self.assert_clean(
+            "src/core/lifecycle/init.c",
+            "void llam_runtime_init_ex_rt_unlocked(void) {\n"
+            "    processor->owner_record.owner_m = NULL;\n"
+            "    processor->owner_record.worker_incarnation = 0U;\n"
+            "}\n",
+        )
+        self.assert_clean(
+            "src/internal/runtime_state.h",
+            "bool llam_processor_owner_compose_pair_locked(void) {\n"
+            "    current->owner_record.state = LLAM_PROCESSOR_OWNER_TRANSFERRING;\n"
+            "    current->owner_record.owner_m = desired_owner;\n"
+            "    return true;\n"
+            "}\n"
+            "bool llam_processor_owner_ticket_snapshot_pair_locked(void) {\n"
+            "    return processor->owner_record.state == LLAM_PROCESSOR_OWNER_OWNED;\n"
+            "}\n",
+        )
+        self.assert_error(
+            "src/core/task/bad.c",
+            "bool llam_task_steal_uses_owner(llam_processor_t *processor) {\n"
+            "    return processor->owner_record.owner_m != NULL;\n"
+            "}\n",
+            "direct P-owner record access outside initialization/composition/accessors",
+        )
+        self.assert_error(
+            "src/internal/runtime_state.h",
+            "bool llam_processor_owner_compare_exchange(void) {\n"
+            "    processor->owner_record.owner_m = candidate;\n"
+            "    return true;\n"
+            "}\n",
+            "direct P-owner record access outside initialization/composition/accessors",
+        )
+
+    def test_rejects_duplicate_processor_route_fields_on_shard(self) -> None:
+        self.assert_error(
+            "src/internal/runtime_types.h",
+            "struct llam_shard {\n"
+            "    unsigned cpu_id;\n"
+            "    unsigned node_index;\n"
+            "    unsigned io_node_index;\n"
+            "    atomic_uint online;\n"
+            "    int event_fd;\n"
+            "    atomic_uint event_pending;\n"
+            "};\n",
+            "Phase 1B duplicate P topology/wake field on shard",
+        )
+        self.assert_error(
+            "src/internal/runtime_types.h",
+            "struct llam_shard {\n"
+            "    llam_queue_t hot_q;\n"
+            "    llam_timer_node_t **timer_heap;\n"
+            "    atomic_uint norm_depth;\n"
+            "};\n",
+            "Phase 2 duplicate processor queue/timer field on shard",
+        )
+        self.assert_error(
+            "src/core/sched/bad.c",
+            "void bad(llam_shard_t *shard) { (void)shard->event_fd; }\n",
+            "Phase 1B duplicate P topology/wake field on shard",
+        )
+        self.assert_error(
+            "src/core/sched/bad.c",
+            "void bad(llam_shard_t *shard) { (void)shard->norm_q.depth; }\n",
+            "Phase 2 duplicate processor queue/timer field on shard",
+        )
+        self.assert_error(
+            "src/core/sched/bad.c",
+            "void bad(llam_shard_t *shard) { (void)shard->allocator.task_free; }\n",
+            "Phase 3 duplicate processor allocator/cache field on shard",
+        )
 
     def test_rejects_independent_preempt_target(self) -> None:
         self.assert_error(
@@ -448,22 +922,37 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
                 )
 
     def test_allows_lease_bound_watchdog_signal(self) -> None:
-        self.assert_clean(
-            "src/engine/watchdog/watchdog_probe.c",
+        source = (
             "void llam_watchdog_check_shard(llam_shard_t *shard) {\n"
             "    pthread_mutex_lock(&shard->opaque_lock);\n"
             "    pthread_mutex_lock(&shard->lock);\n"
             "    llam_legacy_lease_snapshot_watchdog_locked(shard, &owner, &owner_incarnation, &epoch, &native_thread);\n"
-            "    llam_legacy_lease_snapshot_watchdog_locked(shard, &validated_owner, &validated_incarnation, &validated_epoch, &validated_native_thread);\n"
-            "    if (validated_owner == owner &&\n"
-            "        validated_incarnation == owner_incarnation &&\n"
-            "        validated_epoch == epoch &&\n"
-            "        pthread_equal(validated_native_thread, native_thread) &&\n"
-            "        llam_worker_load_active_g(validated_owner) == current &&\n"
-            "        llam_worker_binding_live(validated_owner, validated_incarnation)) {\n"
-            "        pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL);\n"
+            "    bool p_ticket_valid = llam_processor_owner_ticket_snapshot_pair_locked(shard, &owner_ticket) &&\n"
+            "        owner_ticket.owner_m == owner &&\n"
+            "        owner_ticket.worker_incarnation == owner_incarnation &&\n"
+            "        owner_ticket.lease_projection_epoch == epoch;\n"
+            "    bool safe_m = p_ticket_valid && llam_worker_has_safe_managed_g(owner, &shard->processor, current);\n"
+            "    ticket_still_matches = llam_processor_owner_ticket_snapshot_pair_locked(shard, &validated_ticket) &&\n"
+            "        llam_processor_owner_ticket_equal(&owner_ticket, &validated_ticket);\n"
+            "    if (!llam_legacy_lease_snapshot_watchdog_locked(shard, &validated_owner, &validated_incarnation, &validated_epoch, &validated_native_thread) ||\n"
+            "        validated_owner != owner || validated_incarnation != owner_incarnation || validated_epoch != epoch ||\n"
+            "        pthread_equal(validated_native_thread, native_thread) == 0 ||\n"
+            "        llam_worker_load_active_g(validated_owner) != current ||\n"
+            "        !llam_worker_binding_live(validated_owner, validated_incarnation) ||\n"
+            "        !ticket_still_matches) {\n"
+            "        pthread_mutex_unlock(&shard->lock);\n"
+            "        pthread_mutex_unlock(&shard->opaque_lock);\n"
+            "        return;\n"
             "    }\n"
-            "}\n",
+            "    safe_m = ticket_still_matches && llam_worker_has_safe_managed_g(validated_owner, &shard->processor, current);\n"
+            "    if (safe_m) pthread_kill(validated_native_thread, LLAM_PREEMPT_SIGNAL);\n"
+            "}\n"
+        )
+        self.assert_clean("src/engine/watchdog/watchdog_probe.c", source)
+        self.assert_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            source.replace("owner_ticket.owner_m == owner", "owner_ticket.owner_m != owner"),
+            "watchdog target outside lease lifetime",
         )
 
     def test_rejects_watchdog_signals_without_target_binding_proof(self) -> None:
@@ -845,6 +1334,24 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
         )
 
     def test_rejects_unproved_transition_and_unbind_owner_clears(self) -> None:
+        self.assert_clean(
+            "src/core/sched/scheduler.c",
+            "void llam_scheduler_unbind_identity(llam_shard_t *shard, llam_worker_t *worker) {\n"
+            "    uint64_t incarnation = atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire);\n"
+            "    pthread_mutex_lock(&shard->opaque_lock);\n"
+            "    pthread_mutex_lock(&shard->lock);\n"
+            "    atomic_store_explicit(&worker->native_thread_live, false, memory_order_release);\n"
+            "    if (shard->legacy_lease.state != LLAM_LEASE_STOPPING &&\n"
+            "        shard->legacy_lease.owner == worker &&\n"
+            "        shard->legacy_lease.owner_incarnation == incarnation) {\n"
+            "        shard->legacy_lease.owner = NULL;\n"
+            "        shard->legacy_lease.owner_incarnation = 0U;\n"
+            "    }\n"
+            "    llam_processor_owner_compose_pair_locked(shard);\n"
+            "    pthread_mutex_unlock(&shard->lock);\n"
+            "    pthread_mutex_unlock(&shard->opaque_lock);\n"
+            "}\n",
+        )
         self.assert_error(
             "src/core/sched/scheduler.c",
             "void llam_legacy_lease_clear_owner_locked(llam_shard_t *shard, llam_worker_t *worker, uint64_t incarnation, uint64_t sequence) {\n"
@@ -1627,6 +2134,27 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "}\n",
             "ownerless lease grant",
         )
+
+    def test_queue_access_owner_projection_is_read_only(self) -> None:
+        self.assert_clean(
+            "src/internal/runtime_state.h",
+            "static bool llam_processor_queue_access_snapshot_pair_locked(\n"
+            "    llam_shard_t *shard, llam_worker_t *actor) {\n"
+            "    llam_legacy_lease_t *lease = llam_shard_legacy_lease_locked(shard);\n"
+            "    if (lease->owner == actor) return true;\n"
+            "    return false;\n"
+            "}\n",
+        )
+        self.assert_error(
+            "src/internal/runtime_state.h",
+            "static bool llam_processor_queue_access_snapshot_pair_locked(\n"
+            "    llam_shard_t *shard, llam_worker_t *actor) {\n"
+            "    llam_legacy_lease_t *lease = llam_shard_legacy_lease_locked(shard);\n"
+            "    if (lease->owner == actor) lease->owner = NULL;\n"
+            "    return false;\n"
+            "}\n",
+            "ownerless lease grant",
+        )
         self.assert_error(
             "src/core/sched/bad.c",
             "void bad(llam_shard_t *shard, llam_worker_t *worker) {\n"
@@ -1883,6 +2411,13 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_rejects_active_g_noncanonical_operations_and_parameter_escapes(self) -> None:
         fixtures = (
+            (
+                "void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task) {\n"
+                "    atomic_store_explicit(&worker->active_g, task, memory_order_release);\n"
+                "    atomic_store_explicit(&worker->execution_state, LLAM_WORKER_EXEC_MANAGED_SAFE, memory_order_release);\n"
+                "}\n",
+                "unconditional managed-state publication",
+            ),
             (
                 "void llam_worker_publish_active_g(llam_worker_t *worker, llam_task_t *task) {\n"
                 "    atomic_store_explicit(&worker->active_g, task, memory_order_release);\n"
@@ -2747,6 +3282,16 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             source.replace(
                 before_first_lock,
                 "    shard = NULL;\n" + before_first_lock,
+                1,
+            ),
+            "",
+            "watchdog target outside lease lifetime",
+        )
+        self.assert_typed_error(
+            "src/engine/watchdog/watchdog_probe.c",
+            source.replace(
+                "if (async_request_prepared && rt->async_preempt_signal > 0)",
+                "if (rt->async_preempt_signal > 0)",
                 1,
             ),
             "",

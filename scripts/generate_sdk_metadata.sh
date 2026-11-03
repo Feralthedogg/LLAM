@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 set -eu
 
@@ -24,28 +24,37 @@ fi
 stage="$1"
 target="${2:-}"
 version="${LLAM_VERSION:-3.0.0}"
-abi_major="${LLAM_ABI_MAJOR:-2}"
+package_major="${version%%.*}"
+preempt_tooling="${LLAM_PREEMPT_TOOLING:-off}"
+
+case "$preempt_tooling" in
+    off|auto|required) ;;
+    *)
+        echo "LLAM_PREEMPT_TOOLING must be off, auto, or required" >&2
+        exit 2
+        ;;
+esac
+
+case "$(uname -s)" in
+    FreeBSD|OpenBSD|NetBSD|DragonFly)
+        echo "BSD support ended in LLAM 3.0.0" >&2; exit 1 ;;
+esac
 
 if [ -z "$target" ]; then
     case "$(uname -s)" in
         Darwin) target="macos-$(uname -m)" ;;
         Linux) target="linux-$(uname -m)" ;;
-        FreeBSD) target="freebsd-$(uname -m)" ;;
-        OpenBSD) target="openbsd-$(uname -m)" ;;
-        NetBSD) target="netbsd-$(uname -m)" ;;
-        DragonFly) target="dragonflybsd-$(uname -m)" ;;
         *) target="$(uname -s)-$(uname -m)" ;;
     esac
 fi
 
 case "$target" in
+    freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*)
+        echo "BSD support ended in LLAM 3.0.0" >&2; exit 1 ;;
     linux-*)
         private_libs="-pthread -luring -lm"
         ;;
-    netbsd-*)
-        private_libs="-pthread -lrt"
-        ;;
-    macos-*|darwin-*|freebsd-*|openbsd-*|dragonflybsd-*)
+    macos-*|darwin-*)
         private_libs="-pthread"
         ;;
     *)
@@ -53,7 +62,45 @@ case "$target" in
         ;;
 esac
 
-mkdir -p "$stage/lib/pkgconfig" "$stage/share/llam/cmake"
+mkdir -p "$stage/lib/pkgconfig" "$stage/share/llam/cmake" "$stage/share/llam/preempt"
+
+preempt_plugin="unavailable"
+preempt_driver="unavailable"
+preempt_plugin_path="$stage/lib/llam/llam_preempt_pass.so"
+if [ "$preempt_tooling" = "required" ] && [ "$target" != "linux-x86_64" ]; then
+    echo "LLAM_PREEMPT_TOOLING=required currently supports linux-x86_64 only" >&2
+    exit 1
+fi
+if [ "$preempt_tooling" != "off" ] && [ -e "$preempt_plugin_path" ]; then
+    if [ -L "$preempt_plugin_path" ] || [ ! -f "$preempt_plugin_path" ]; then
+        echo "refusing non-regular staged preemption plugin: $preempt_plugin_path" >&2
+        exit 1
+    fi
+    preempt_plugin="available"
+fi
+if [ "$preempt_tooling" = "required" ] && [ "$preempt_plugin" != "available" ]; then
+    echo "LLAM_PREEMPT_TOOLING=required plugin is absent from the staged SDK" >&2
+    exit 1
+fi
+if [ -x "$stage/bin/llam-clang" ]; then
+    preempt_driver="bin/llam-clang"
+fi
+if [ "$preempt_tooling" = "required" ] &&
+   { [ "$preempt_driver" = "unavailable" ] ||
+     [ ! -x "$stage/bin/llam_preempt_metadata_inspect" ]; }; then
+    echo "LLAM_PREEMPT_TOOLING=required compiler driver/inspector is absent from the staged SDK" >&2
+    exit 1
+fi
+
+cat > "$stage/share/llam/preempt/tooling.conf" <<EOF
+format_version=1
+section=.llam.preempt
+tooling_mode=$preempt_tooling
+compiler_driver=$preempt_driver
+metadata_inspector=bin/llam_preempt_metadata_inspect
+llvm_plugin=$preempt_plugin
+language_bindings=excluded
+EOF
 
 cat > "$stage/lib/pkgconfig/llam.pc" <<EOF
 prefix=\${pcfiledir}/../..
@@ -84,8 +131,6 @@ cat > "$stage/share/llam/cmake/llam-targets.cmake" <<'EOF'
 set(_LLAM_PLATFORM_LIBS Threads::Threads)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND _LLAM_PLATFORM_LIBS uring m)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
-    list(APPEND _LLAM_PLATFORM_LIBS rt)
 endif()
 
 if(NOT TARGET llam::runtime)
@@ -125,7 +170,7 @@ EOF
 cat > "$stage/share/llam/cmake/llam-config-version.cmake" <<EOF
 set(PACKAGE_VERSION "$version")
 
-if(PACKAGE_FIND_VERSION_MAJOR STREQUAL "" OR PACKAGE_FIND_VERSION_MAJOR EQUAL $abi_major)
+if(PACKAGE_FIND_VERSION_MAJOR STREQUAL "" OR PACKAGE_FIND_VERSION_MAJOR EQUAL $package_major)
     if(PACKAGE_FIND_VERSION VERSION_LESS_EQUAL PACKAGE_VERSION)
         set(PACKAGE_VERSION_COMPATIBLE TRUE)
     endif()

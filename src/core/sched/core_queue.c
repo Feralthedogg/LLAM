@@ -42,7 +42,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 /** @brief Overflow, pressure, and local runnable-selection queue policy. */
@@ -65,6 +65,10 @@
 void llam_enqueue_overflow_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL || !rt->overflow_lock_initialized) {
         return;
+    }
+    if (llam_async_preempt_task_origin_shard(task) != UINT_MAX) {
+        /* Started async-mode Gs own origin queue space, never global overflow. */
+        abort();
     }
 
     task->queue_next = NULL;
@@ -170,7 +174,8 @@ unsigned llam_snapshot_shard_load(llam_shard_t *shard) {
 
     pthread_mutex_lock(&shard->opaque_lock);
     pthread_mutex_lock(&shard->lock);
-    load = shard->inject_q.depth + shard->hot_q.depth + llam_norm_queue_depth(shard);
+    load = shard->processor.inject_q.depth + shard->processor.hot_q.depth + llam_norm_queue_depth(shard);
+    load += llam_async_preempt_ready_depth(shard);
     if (llam_shard_load_lease_current(shard) != NULL) {
         load += 1U;
     }
@@ -210,9 +215,19 @@ unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL || rt->active_shards == 0U) {
         return 0U;
     }
+    {
+        unsigned origin_id = llam_async_preempt_task_origin_shard(task);
 
-    home_id = task->home_shard < rt->active_shards
-                  ? task->home_shard
+        if (origin_id != UINT_MAX) {
+            return origin_id;
+        }
+    }
+
+    unsigned task_home_id;
+
+    task_home_id = atomic_load_explicit(&task->home_shard, memory_order_acquire);
+    home_id = task_home_id < rt->active_shards
+                  ? task_home_id
                   : atomic_load_explicit(&task->last_shard, memory_order_relaxed) % rt->active_shards;
     if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U || rt->active_shards < 2U) {
         return home_id;
@@ -257,7 +272,9 @@ unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
     if (last_id != best_id && llam_shard_accepts_new_work(&rt->shards[last_id])) {
         unsigned load = llam_snapshot_shard_load(&rt->shards[last_id]);
 
-        if (rt->shards[last_id].node_index == rt->shards[home_id].node_index && load + 2U < best_load) {
+        if (llam_processor_node_index(&rt->shards[last_id].processor) ==
+                llam_processor_node_index(&rt->shards[home_id].processor) &&
+            load + 2U < best_load) {
             best_id = last_id;
             best_load = load;
         }
@@ -266,7 +283,9 @@ unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
     if (origin_id != best_id && llam_shard_accepts_new_work(&rt->shards[origin_id])) {
         unsigned load = llam_snapshot_shard_load(&rt->shards[origin_id]);
 
-        if (rt->shards[origin_id].node_index == rt->shards[home_id].node_index && load + 2U < best_load) {
+        if (llam_processor_node_index(&rt->shards[origin_id].processor) ==
+                llam_processor_node_index(&rt->shards[home_id].processor) &&
+            load + 2U < best_load) {
             best_id = origin_id;
             best_load = load;
         }
@@ -283,12 +302,14 @@ unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
             continue;
         }
 
-        if (!pressure && rt->shards[i].node_index != rt->shards[home_id].node_index) {
+        if (!pressure && llam_processor_node_index(&rt->shards[i].processor) !=
+                             llam_processor_node_index(&rt->shards[home_id].processor)) {
             continue;
         }
 
         load = llam_snapshot_shard_load(&rt->shards[i]);
-        if (rt->shards[i].node_index != rt->shards[home_id].node_index) {
+        if (llam_processor_node_index(&rt->shards[i].processor) !=
+            llam_processor_node_index(&rt->shards[home_id].processor)) {
             penalty += pressure ? 2U : 8U;
         }
         if (i != last_id) {
@@ -343,7 +364,7 @@ bool llam_should_enqueue_hot_locked(llam_shard_t *shard,
     }
 
     norm_depth = llam_norm_queue_depth(shard);
-    if (shard->hot_q.depth >= norm_depth + 8U) {
+    if (shard->processor.hot_q.depth >= norm_depth + 8U) {
         return false;
     }
 
@@ -364,7 +385,7 @@ unsigned llam_hot_streak_cap_locked(llam_shard_t *shard, bool pressure) {
     unsigned cap = pressure ? 2U : 8U;
     unsigned norm_depth = llam_norm_queue_depth(shard);
 
-    if (norm_depth > shard->hot_q.depth && norm_depth > 0U) {
+    if (norm_depth > shard->processor.hot_q.depth && norm_depth > 0U) {
         cap = pressure ? 1U : 4U;
     }
 
@@ -386,11 +407,22 @@ unsigned llam_hot_streak_cap_locked(llam_shard_t *shard, bool pressure) {
 bool llam_queue_push_bounded_locked(llam_shard_t *shard,
                                   llam_queue_t *queue,
                                   unsigned capacity,
-                                  llam_task_t *task) {
+                                  llam_task_t *task,
+                                  const llam_processor_queue_access_t *access) {
+    bool owner_lane;
+
+    if (shard == NULL || queue == NULL || task == NULL) {
+        return false;
+    }
+    owner_lane = queue == &shard->processor.hot_q || queue == &shard->processor.norm_q;
+    if (owner_lane &&
+        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
+        return false;
+    }
     if (queue->depth < capacity) {
         llam_queue_push_tail(queue, task);
-        if (queue == &shard->inject_q) {
-            atomic_store_explicit(&shard->inject_depth, queue->depth, memory_order_release);
+        if (queue == &shard->processor.inject_q) {
+            atomic_store_explicit(&shard->processor.inject_depth, queue->depth, memory_order_release);
         }
         return true;
     }
@@ -475,7 +507,11 @@ bool llam_enqueue_opaque_redirect_task_locked(llam_shard_t *blocked, llam_task_t
     }
 
     task->enqueue_hot = hot ? 1U : 0U;
-    queued = llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task);
+    queued = llam_queue_push_bounded_locked(target,
+                                            &target->processor.inject_q,
+                                            LLAM_INJECT_QUEUE_CAP,
+                                            task,
+                                            NULL);
     if (queued) {
         target->metrics.inject_enqueues += 1U;
     }
@@ -498,21 +534,29 @@ bool llam_enqueue_opaque_redirect_task_locked(llam_shard_t *blocked, llam_task_t
 void llam_drain_inject_queue(llam_shard_t *shard) {
     unsigned drained = 0;
     bool pressure;
+    llam_processor_queue_access_t access;
 
-    if (atomic_load_explicit(&shard->inject_depth, memory_order_acquire) == 0U) {
+    if (atomic_load_explicit(&shard->processor.inject_depth, memory_order_acquire) == 0U) {
+        return;
+    }
+    if (!llam_processor_queue_access_snapshot(&shard->processor, &access)) {
         return;
     }
 
     pressure = llam_runtime_pressure_signal(shard->runtime);
 
     pthread_mutex_lock(&shard->lock);
-    if (shard->inject_q.depth == 0U) {
-        atomic_store_explicit(&shard->inject_depth, 0U, memory_order_release);
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &access)) {
+        pthread_mutex_unlock(&shard->lock);
+        return;
+    }
+    if (shard->processor.inject_q.depth == 0U) {
+        atomic_store_explicit(&shard->processor.inject_depth, 0U, memory_order_release);
         pthread_mutex_unlock(&shard->lock);
         return;
     }
     while (drained < LLAM_INJECT_DRAIN_BUDGET) {
-        llam_task_t *task = llam_queue_pop_head(&shard->inject_q);
+        llam_task_t *task = llam_queue_pop_head(&shard->processor.inject_q);
         bool prefer_hot;
 
         if (task == NULL) {
@@ -521,16 +565,20 @@ void llam_drain_inject_queue(llam_shard_t *shard) {
 
         prefer_hot = llam_should_enqueue_hot_locked(shard, task, task->enqueue_hot != 0U, pressure);
         if (prefer_hot) {
-            if (llam_queue_push_bounded_locked(shard, &shard->hot_q, LLAM_HOT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(shard,
+                                               &shard->processor.hot_q,
+                                               LLAM_HOT_QUEUE_CAP,
+                                               task,
+                                               &access)) {
                 shard->metrics.hot_enqueues += 1U;
             }
         } else {
-            (void)llam_norm_queue_push_owner_locked(shard, task);
+            (void)llam_norm_queue_push_owner_locked(shard, &access, task);
         }
         task->enqueue_hot = 0U;
         drained += 1U;
     }
-    atomic_store_explicit(&shard->inject_depth, shard->inject_q.depth, memory_order_release);
+    atomic_store_explicit(&shard->processor.inject_depth, shard->processor.inject_q.depth, memory_order_release);
     pthread_mutex_unlock(&shard->lock);
 }
 
@@ -558,8 +606,8 @@ static void llam_flush_queue_to_redirect_locked(llam_shard_t *shard, llam_queue_
             llam_enqueue_overflow_task(shard->runtime, task);
         }
     }
-    if (queue == &shard->inject_q) {
-        atomic_store_explicit(&shard->inject_depth, 0U, memory_order_release);
+    if (queue == &shard->processor.inject_q) {
+        atomic_store_explicit(&shard->processor.inject_depth, 0U, memory_order_release);
     }
 }
 
@@ -579,17 +627,24 @@ static void llam_flush_queue_to_redirect_locked(llam_shard_t *shard, llam_queue_
  * before this queue-only projection is published.  This function does not
  * infer or grant execution ownership from the redirect flag.
  */
-void llam_activate_opaque_redirect_locked(llam_shard_t *shard, llam_task_t *current_task) {
+void llam_activate_opaque_redirect_locked(
+    llam_shard_t *shard,
+    const llam_processor_queue_access_t *access,
+    llam_task_t *current_task) {
+    if (!llam_processor_queue_access_validate_locked(shard, access) ||
+        access->mode != LLAM_PROCESSOR_QUEUE_ACCESS_REDIRECT_RELEASE) {
+        return;
+    }
     if (shard->opaque_redirect_active) {
         return;
     }
 
     shard->opaque_redirect_active = true;
     shard->opaque_redirect_target_id = llam_pick_opaque_redirect_target_id(shard);
-    llam_flush_queue_to_redirect_locked(shard, &shard->inject_q, false);
-    llam_flush_queue_to_redirect_locked(shard, &shard->hot_q, true);
+    llam_flush_queue_to_redirect_locked(shard, &shard->processor.inject_q, false);
+    llam_flush_queue_to_redirect_locked(shard, &shard->processor.hot_q, true);
     for (;;) {
-        llam_task_t *task = llam_norm_queue_pop_owner_locked(shard);
+        llam_task_t *task = llam_norm_queue_pop_owner_locked(shard, access);
 
         if (task == NULL) {
             break;
@@ -635,34 +690,50 @@ void llam_deactivate_opaque_redirect_locked(llam_shard_t *shard) {
  */
 llam_task_t *llam_take_local_task_with_pressure(llam_shard_t *shard, bool pressure) {
     llam_task_t *task;
+    llam_processor_queue_access_t access;
+
+    if (shard == NULL ||
+        !llam_processor_queue_access_snapshot(&shard->processor, &access)) {
+        return NULL;
+    }
 
     pthread_mutex_lock(&shard->lock);
-    if (shard->hot_q.depth > 0U) {
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &access)) {
+        pthread_mutex_unlock(&shard->lock);
+        return NULL;
+    }
+    if (shard->processor.hot_q.depth > 0U) {
         bool take_norm = false;
 
-        if (shard->hot_streak >= (pressure ? 1U : 4U)) {
+        if (shard->processor.hot_streak >= (pressure ? 1U : 4U)) {
             unsigned norm_depth = llam_norm_queue_depth(shard);
 
             if (norm_depth > 0U) {
                 unsigned hot_cap = pressure ? 2U : 8U;
 
-                if (norm_depth > shard->hot_q.depth) {
+                if (norm_depth > shard->processor.hot_q.depth) {
                     hot_cap = pressure ? 1U : 4U;
                 }
-                take_norm = shard->hot_streak >= hot_cap;
+                take_norm = shard->processor.hot_streak >= hot_cap;
             }
         }
 
         if (take_norm) {
-            shard->hot_streak = 0U;
-            task = llam_norm_queue_pop_owner_locked(shard);
+            shard->processor.hot_streak = 0U;
+            task = llam_norm_queue_pop_owner_locked(shard, &access);
         } else {
-            shard->hot_streak += 1U;
-            task = llam_queue_pop_head(&shard->hot_q);
+            shard->processor.hot_streak += 1U;
+            task = llam_queue_pop_head(&shard->processor.hot_q);
         }
     } else {
-        shard->hot_streak = 0U;
-        task = llam_norm_queue_pop_owner_locked(shard);
+        shard->processor.hot_streak = 0U;
+        task = llam_norm_queue_pop_owner_locked(shard, &access);
+    }
+    if (task == NULL && shard->runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        /* A lane can contain only source-reserved Gs. Service the other lane
+         * without removing or waiting on those pre-context-save publications. */
+        task = llam_norm_queue_pop_owner_locked(shard, &access);
+        if (task == NULL) task = llam_queue_pop_head(&shard->processor.hot_q);
     }
     pthread_mutex_unlock(&shard->lock);
     return task;

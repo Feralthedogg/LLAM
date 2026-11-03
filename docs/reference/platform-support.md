@@ -9,15 +9,11 @@ paths. Do not infer behavior from another operating system's backend.
 | Linux aarch64 | Supported | io_uring/liburing | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue | `CC=clang make verify-darwin` |
-| FreeBSD x86_64 | BSD CI smoke gate | kqueue | `.github/workflows/bsd.yml` |
-| OpenBSD x86_64 | BSD CI smoke gate | kqueue | `.github/workflows/bsd.yml` |
-| NetBSD x86_64 | BSD CI smoke gate | kqueue | `.github/workflows/bsd.yml` |
-| DragonFly BSD x86_64 | Experimental | kqueue | allowed-failure BSD smoke; release artifact build remains hard-gated |
 | Windows 10/11 x86_64 | Supported | IOCP | native CMake/CTest and `scripts/verify_windows.ps1 -Native` |
 
 ## Backend Notes
 
-Linux uses io_uring for the native async path. macOS and BSD use kqueue for
+Linux uses io_uring for the native async path. macOS uses kqueue for
 readiness and runtime wakeups, with Darwin-specific scheduler hints kept behind
 Darwin checks. Windows uses IOCP for overlapped Winsock and HANDLE operations.
 
@@ -25,5 +21,38 @@ Windows TCP `POLLIN` currently defaults to the cooperative/direct fallback path
 unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or
 benchmark runs.
 
-DragonFly BSD remains visible in CI, but its public VM/package infrastructure
-is not yet reliable enough for a hard push gate.
+The managed constructor uses compiler/image admission and a native probe on
+all selected Ms before committing asynchronous execution. Its profile matrix
+is separate from the ordinary runtime/backend matrix above:
+
+| Native managed profile | Evidence and limits |
+| --- | --- |
+| macOS ARM64 | Ordinary compiler C, original-M/fresh-P restore, mixed compatibility lane, affine TLS destruction/refill, dynamic Ps and shutdown tested natively. |
+| Linux ARM64 | Native ARM64 Linux kernel/container execution; signal mailbox, LLPM2 ELF image admission, ordinary C and registered M/P tests. |
+| Linux x86-64 | Full-system Linux 6.8 x86-64 guest with native signal frames, finite register/error/mask checks, affine lifetime and dynamic P tests. The recorded guest uses one virtual CPU and TCG; this does not qualify multicore hardware or wider ISA extensions. |
+| Windows x86-64 / MinGW | Actual Windows 10 x64 tests cover LLPM2 PE admission, ordinary C, registered Ms/Ps, native FLS destruction/refill and shutdown. The LLVM 23.1.2 producer was cross-hosted; native Windows LLVM tooling installation and MSVC runtime qualification remain separate gates. |
+| macOS x86-64 | Explicit experimental Mach adapter and complete runtime cross-build. Intel native execution is still untested; Rosetta is rejected as a native profile. |
+
+Qualified Linux, macOS ARM64 and MinGW builds compile the native backend by
+default. `LLAM_EXPERIMENTAL_ASYNC_PREEMPT=OFF` disables it; explicit `ON` also
+builds the experimental Intel macOS adapter. Compilation is not a
+successful runtime probe or a release/performance qualification. Unknown ISA,
+mitigation, TLS, signal or context state is refused before capture.
+
+Legacy constructors retain boundary/safepoint preemption. The expert Windows
+caller-certified-range API remains available with its separate process-wide
+fail-fast acknowledgement; it does not qualify arbitrary C or JIT mappings.
+See the [managed C guide](managed-runtime.md) and
+[build guide](../build.md) for the distinct contracts and verification commands.
+
+## BSD retirement in 3.0.0
+
+FreeBSD, OpenBSD, NetBSD and DragonFly BSD are unsupported from **3.0.0**.
+CMake, Make, public platform headers, the installer and release packaging reject
+these targets. BSD CI and release artifacts have been retired. The macOS kqueue
+backend remains supported.
+
+Use versioned 2.x sources, headers, documentation and installers for an existing
+BSD deployment; the 3.0 installer does not install legacy BSD archives. This does
+not promise continued 2.x maintenance. Earlier BSD adapters, experiment reports
+and measurement artifacts remain historical material and do not qualify 3.0.

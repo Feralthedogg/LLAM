@@ -1,0 +1,9 @@
+{
+  "command": [
+    "/Users/feral/Desktop/Programming/LLAM/object/async-runtime-compare-work-20261027/go_compare"
+  ],
+  "case": "poll_wake",
+  "returncode": 0,
+  "stdout": "[go-bench] config rounds=127 warmup=8 gomaxprocs=1 spawn_tasks=512 channel_messages=4096 select_ops=4096 io_messages=512 poll_events=512 sleep_tasks=1024 sleep_yields=4 sleep_us=30000 opaque_scopes=64\n[go-bench] name=poll_wake_approx rounds=127 warmup=8 ops=512 ops_per_sec=191869.11 p50_us=2539.38 p99_us=4217.67\n",
+  "stderr": ""
+}

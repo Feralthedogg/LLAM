@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 CC ?= cc
 AR ?= ar
 PYTHON ?= python3
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
+CPPFLAGS += -Itools/preempt
 LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
 OBJDIR ?= object
@@ -28,6 +29,9 @@ PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
 LLAM_VERSION ?= 3.0.0
 SANITIZER_TARGETS_ENABLED ?= 0
+LLAM_EXPERIMENTAL_ASYNC_PREEMPT ?= auto
+LLAM_PREEMPT_TOOLING ?= off
+PREEMPT_TOOLING_BUILD_DIR ?= build-preempt-tools
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
 TESTHOOK_BUILD_SIGNATURE = $(TESTHOOK_OBJDIR)/.build-signature
@@ -44,9 +48,28 @@ CLEAN_DIRS = \
 	build-* \
 	target
 CLEAN_FILES = \
+	example_explicit_runtime \
+	example_explicit_runtime.exe \
+	test_runtime_regressions \
+	test_runtime_regressions.exe \
+	asan-test_runtime_regressions \
 	demo \
 	stress \
 	bench \
+	cpu_spike \
+	bench_magic2_cpu \
+	bench_magic2_cpu.exe \
+	bench_magic2_kernels \
+	bench_magic2_kernels.exe \
+	bench_handoff \
+	test_handoff_protocol \
+	bench_watch_index \
+	test_io_watch_index \
+	asan-test_io_watch_index \
+	bench_select_prepare \
+	bench_async_compare \
+	test_large_select \
+	asan-test_large_select \
 	llam_broker \
 	server \
 	server_lossless \
@@ -58,6 +81,7 @@ CLEAN_FILES = \
 	test_connect_io \
 	test_runtime_core \
 	test_multi_runtime_core \
+	test_api_usability \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -67,8 +91,37 @@ CLEAN_FILES = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_watchdog_liveness_internal \
 	test_worker_identity_internal \
 	test_legacy_lease_internal \
+	test_execution_lease_internal \
+	test_native_domain_internal \
+	test_managed_catalog_internal \
+	test_managed_foreign_internal \
+	test_capsule_pool_internal \
+	test_managed_scheduler_internal \
+	test_managed_async_registered \
+	test_managed_async_linux_x86_64 \
+	test_managed_image_internal \
+	test_managed_async_compiler \
+	test_processor_resource_internal \
+	test_processor_queue_timer_internal \
+	test_processor_allocator_io_internal \
+	test_foreign_detach_internal \
+	test_relief_worker_internal \
+	test_preempt_capabilities \
+	test_default_policy_internal \
+	test_magic2_internal \
+	test_async_preempt_linux_x86_64 \
+	test_async_preempt_multi_linux_x86_64 \
+	test_async_context_linux_arm64 \
+	test_linux_arm64_async_scheduler_real \
+	test_async_context_darwin \
+	test_darwin_arm64_async_scheduler_real \
+	llam_preempt_metadata_inspect \
+	test_preempt_metadata \
+	test_preempt_metadata_v2 \
+	test_preempt_metadata_registration \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -82,23 +135,66 @@ CLEAN_FILES = \
 	asan-test_runtime_core \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
+	asan-test_watchdog_liveness_internal \
 	asan-test_worker_identity_internal \
 	asan-test_legacy_lease_internal \
+	asan-test_execution_lease_internal \
+	asan-test_native_domain_internal \
+	asan-test_managed_catalog_internal \
+	asan-test_managed_foreign_internal \
+	asan-test_capsule_pool_internal \
+	asan-test_managed_scheduler_internal \
+	asan-test_processor_resource_internal \
+	asan-test_processor_queue_timer_internal \
+	asan-test_processor_allocator_io_internal \
+	asan-test_foreign_detach_internal \
+	asan-test_relief_worker_internal \
+	asan-test_async_preempt_linux_x86_64 \
+	asan-test_async_preempt_multi_linux_x86_64 \
+	asan-test_preempt_metadata \
+	asan-test_preempt_metadata_v2 \
+	asan-test_preempt_metadata_registration \
+	asan-test_preempt_capabilities \
+	asan-test_default_policy_internal \
+	asan-test_magic2_internal \
 	asan-test_multi_runtime_core \
+	asan-test_api_usability \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability \
 	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
+	tsan-test_watchdog_liveness_internal \
 	tsan-test_worker_identity_internal \
 	tsan-test_legacy_lease_internal \
+	tsan-test_execution_lease_internal \
+	tsan-test_native_domain_internal \
+	tsan-test_managed_catalog_internal \
+	tsan-test_managed_foreign_internal \
+	tsan-test_capsule_pool_internal \
+	tsan-test_managed_scheduler_internal \
+	tsan-test_processor_resource_internal \
+	tsan-test_processor_queue_timer_internal \
+	tsan-test_processor_allocator_io_internal \
+	tsan-test_foreign_detach_internal \
+	tsan-test_relief_worker_internal \
+	tsan-test_async_preempt_linux_x86_64 \
+	tsan-test_async_preempt_multi_linux_x86_64 \
+	tsan-test_preempt_metadata \
+	tsan-test_preempt_metadata_v2 \
+	tsan-test_preempt_metadata_registration \
+	tsan-test_preempt_capabilities \
+	tsan-test_default_policy_internal \
+	tsan-test_magic2_internal \
 	tsan-test_multi_runtime_core \
+	tsan-test_api_usability \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability \
 	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
 	bench.exe \
+	cpu_spike.exe \
 	llam_broker.exe \
 	server.exe \
 	server_lossless.exe \
@@ -119,8 +215,24 @@ CLEAN_FILES = \
 	test_runtime_fuzz.exe \
 	test_runtime_invariants.exe \
 	test_runtime_shutdown_internal.exe \
+	test_watchdog_liveness_internal.exe \
 	test_worker_identity_internal.exe \
 	test_legacy_lease_internal.exe \
+	test_processor_resource_internal.exe \
+	test_processor_queue_timer_internal.exe \
+	test_processor_allocator_io_internal.exe \
+	test_foreign_detach_internal.exe \
+	test_relief_worker_internal.exe \
+	test_preempt_capabilities.exe \
+	test_default_policy_internal.exe \
+	test_magic2_internal.exe \
+	test_async_preempt_linux_x86_64.exe \
+	test_async_preempt_multi_linux_x86_64.exe \
+	test_async_preempt_multi_linux_x86_64.exe \
+	llam_preempt_metadata_inspect.exe \
+	test_preempt_metadata.exe \
+	test_preempt_metadata_v2.exe \
+	test_preempt_metadata_registration.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -132,8 +244,26 @@ CLEAN_FILES = \
 	test_shared_load.exe \
 	asan-test_worker_identity_internal.exe \
 	asan-test_legacy_lease_internal.exe \
+	asan-test_async_preempt_linux_x86_64.exe \
+	asan-test_async_preempt_multi_linux_x86_64.exe \
+	asan-test_async_preempt_multi_linux_x86_64.exe \
+	asan-test_preempt_metadata.exe \
+	asan-test_preempt_metadata_v2.exe \
+	asan-test_preempt_metadata_registration.exe \
+	asan-test_preempt_capabilities.exe \
+	asan-test_default_policy_internal.exe \
+	asan-test_magic2_internal.exe \
 	tsan-test_worker_identity_internal.exe \
 	tsan-test_legacy_lease_internal.exe \
+	tsan-test_async_preempt_linux_x86_64.exe \
+	tsan-test_async_preempt_multi_linux_x86_64.exe \
+	tsan-test_async_preempt_multi_linux_x86_64.exe \
+	tsan-test_preempt_metadata.exe \
+	tsan-test_preempt_metadata_v2.exe \
+	tsan-test_preempt_metadata_registration.exe \
+	tsan-test_preempt_capabilities.exe \
+	tsan-test_default_policy_internal.exe \
+	tsan-test_magic2_internal.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
 	libllam_runtime.so \
@@ -159,9 +289,21 @@ HOST_PLATFORM := linux
 else ifeq ($(UNAME_S),Darwin)
 HOST_PLATFORM := darwin
 else ifneq ($(filter $(UNAME_S),FreeBSD OpenBSD NetBSD DragonFly),)
-HOST_PLATFORM := bsd
+$(error BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling)
 else
 HOST_PLATFORM := posix
+endif
+endif
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),auto)
+LLAM_EXPERIMENTAL_ASYNC_PREEMPT := 0
+ifeq ($(HOST_PLATFORM),linux)
+ifneq ($(filter x86_64 aarch64 arm64,$(UNAME_M)),)
+LLAM_EXPERIMENTAL_ASYNC_PREEMPT := 1
+endif
+else ifeq ($(HOST_PLATFORM),darwin)
+ifneq ($(filter arm64 aarch64,$(UNAME_M)),)
+LLAM_EXPERIMENTAL_ASYNC_PREEMPT := 1
+endif
 endif
 endif
 
@@ -170,12 +312,7 @@ SHLIB_LINK = libllam_runtime.dylib
 SHLIB_REAL = libllam_runtime.$(LLAM_ABI_MAJOR).dylib
 SHLIB_LDFLAGS = -dynamiclib -Wl,-install_name,@rpath/$(SHLIB_REAL)
 DL_LIBS =
-else ifeq ($(HOST_PLATFORM),bsd)
-SHLIB_LINK = libllam_runtime.so
-SHLIB_SONAME = libllam_runtime.so.$(LLAM_ABI_MAJOR)
-SHLIB_REAL = libllam_runtime.so.$(LLAM_VERSION)
-SHLIB_LDFLAGS = -shared -Wl,-soname,$(SHLIB_SONAME)
-DL_LIBS =
+
 else
 SHLIB_LINK = libllam_runtime.so
 SHLIB_SONAME = libllam_runtime.so.$(LLAM_ABI_MAJOR)
@@ -198,7 +335,9 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_debug_dump_helpers.h \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
+	src/internal/runtime_mix.h \
 	src/internal/runtime_types.h \
+	src/internal/runtime_watch_index.h \
 	src/internal/runtime_public_slot.h \
 	src/internal/runtime_public_active_op.h \
 	src/internal/runtime_public_slot_seal.h \
@@ -209,6 +348,23 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_state.h \
 	src/internal/runtime_protos.h \
 	src/internal/runtime_proto_core.h \
+	src/internal/async_context.h \
+	src/internal/capsule_pool.h \
+	src/internal/managed_catalog.h \
+	src/internal/managed_scheduler.h \
+	src/internal/managed_async_adapter.h \
+	src/internal/managed_domain.h \
+	src/internal/managed_image.h \
+	src/internal/runtime_test_managed_foreign.h \
+	src/internal/async_context_phase.h \
+	src/internal/async_context_darwin.h \
+	src/internal/async_context_shared.h \
+	src/internal/async_context_linux_arm64.h \
+	src/internal/async_context_signal.h \
+	src/internal/async_context_signal_native.h \
+	src/internal/async_context_darwin_x86_64.h \
+	src/internal/async_signal_registry.h \
+	src/internal/runtime_test_watchdog.h \
 	src/internal/runtime_proto_sched.h \
 	src/internal/runtime_proto_io.h \
 	src/internal/runtime_proto_sync.h \
@@ -226,6 +382,9 @@ RUNTIME_PRIV_HDRS = \
 	src/io/windows/runtime_io_watch_windows_internal.h
 
 RUNTIME_COMMON_OBJS = \
+	$(OBJDIR)/src/engine/watchdog/watchdog_deadlock.o \
+	$(OBJDIR)/src/core/sched/worker_registry.o \
+	$(OBJDIR)/src/core/sched/execution_lease.o \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
 	$(OBJDIR)/src/core/base/abi.o \
 	$(OBJDIR)/src/core/base/errno.o \
@@ -272,12 +431,15 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/time/time.o \
 	$(OBJDIR)/src/core/context/fp.o \
 	$(OBJDIR)/src/core/context/stack_sample.o \
+	$(OBJDIR)/src/core/context/async_context.o \
+	$(OBJDIR)/src/core/context/async_context_shared.o \
 	$(OBJDIR)/src/core/context/context_portable.o \
 	$(OBJDIR)/src/core/sched/queue_base.o \
 	$(OBJDIR)/src/core/sched/norm_queue_depth.o \
 	$(OBJDIR)/src/core/sched/norm_queue.o \
 	$(OBJDIR)/src/core/sched/core_queue.o \
 	$(OBJDIR)/src/core/memory/alloc.o \
+	$(OBJDIR)/src/core/memory/task_span.o \
 	$(OBJDIR)/src/core/memory/allocator_quiescent.o \
 	$(OBJDIR)/src/core/task/task_alloc.o \
 	$(OBJDIR)/src/core/task/task_handle_registry.o \
@@ -287,6 +449,20 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/debug/trace.o \
 	$(OBJDIR)/src/core/sched/wake.o \
 	$(OBJDIR)/src/core/platform/platform.o \
+	$(OBJDIR)/src/core/preempt/capabilities.o \
+	$(OBJDIR)/src/core/preempt/native_domain.o \
+	$(OBJDIR)/src/core/preempt/managed_catalog.o \
+	$(OBJDIR)/src/core/api/managed_foreign.o \
+	$(OBJDIR)/src/core/context/capsule_pool.o \
+	$(OBJDIR)/src/core/preempt/managed_image.o \
+	$(OBJDIR)/src/core/preempt/managed_image_darwin.o \
+	$(OBJDIR)/src/core/preempt/managed_image_elf.o \
+	$(OBJDIR)/src/core/preempt/managed_image_windows.o \
+	$(OBJDIR)/src/core/sched/managed_scheduler.o \
+	$(OBJDIR)/src/core/lifecycle/managed_run.o \
+	$(OBJDIR)/src/core/context/managed_async_adapter.o \
+	$(OBJDIR)/tools/preempt/metadata.o \
+	$(OBJDIR)/tools/preempt/metadata_v2.o \
 	$(OBJDIR)/src/core/platform/windows_policy.o \
 	$(OBJDIR)/src/core/sched/safepoint.o \
 	$(OBJDIR)/src/core/wait/wait.o \
@@ -313,6 +489,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/task/spawn.o \
 	$(OBJDIR)/src/core/task/yield_join_sleep.o \
 	$(OBJDIR)/src/core/api/blocking_api.o \
+	$(OBJDIR)/src/core/api/magic2_api.o \
 	$(OBJDIR)/src/core/api/cancel_api.o \
 	$(OBJDIR)/src/core/lifecycle/lifecycle.o \
 	$(OBJDIR)/src/core/sched/scheduler.o \
@@ -350,11 +527,13 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/api/positional.o \
 	$(OBJDIR)/src/io/api/positional_util.o \
 	$(OBJDIR)/src/io/api/public.o \
+	$(OBJDIR)/src/io/api/wait_options.o \
 	$(OBJDIR)/src/io/windows/watch/iocp.o \
 	$(OBJDIR)/src/core/debug/debug_dump_helpers.o \
 	$(OBJDIR)/src/core/debug/debug_stats_json.o \
 	$(OBJDIR)/src/core/debug/debug.o \
 	$(OBJDIR)/src/io/watch/watch.o \
+	$(OBJDIR)/src/io/watch/watch_index.o \
 	$(OBJDIR)/src/io/watch/close.o \
 	$(OBJDIR)/src/io/watch/watch_lookup.o \
 	$(OBJDIR)/src/io/watch/migration.o \
@@ -362,7 +541,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/watch/waiter.o
 
 ifeq ($(HOST_PLATFORM),linux)
-LDLIBS += -lm
+LDLIBS += -lm -ldl
 LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 struct io_uring_buf_ring *\050*p\051\050struct io_uring *, unsigned int, int, unsigned int, int *\051 = io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
 ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
 CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
@@ -426,46 +605,60 @@ endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
-ifeq ($(HOST_PLATFORM),bsd)
-SERVER_FLOOD_LDLIBS += -lm
-ifeq ($(UNAME_S),NetBSD)
-LDLIBS += -lrt
 endif
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/watch/events.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
+ifeq ($(HOST_PLATFORM),linux)
 ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
-else ifeq ($(UNAME_M),amd64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/core/context/async_context_linux_x86_64.o
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+CPPFLAGS += -DLLAM_EXPERIMENTAL_ASYNC_PREEMPT=1
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/async_preempt_trampoline.o
+endif
 else ifeq ($(UNAME_M),aarch64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
-else ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+CPPFLAGS += -DLLAM_EXPERIMENTAL_ASYNC_PREEMPT=1
+RUNTIME_OBJS += $(OBJDIR)/src/core/context/async_context_linux_arm64.o \
+	$(OBJDIR)/src/core/context/async_context_signal.o \
+	$(OBJDIR)/src/asm/linux/arm64/async_context_arm64.o
+endif
+endif
+endif
+ifeq ($(HOST_PLATFORM),darwin)
+ifeq ($(UNAME_M),arm64)
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+CPPFLAGS += -DLLAM_EXPERIMENTAL_ASYNC_PREEMPT=1
+RUNTIME_OBJS += $(OBJDIR)/src/core/context/async_context_darwin.o \
+	$(OBJDIR)/src/asm/darwin/arm64/async_context_arm64.o
+endif
+else ifeq ($(UNAME_M),x86_64)
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+CPPFLAGS += -DLLAM_EXPERIMENTAL_ASYNC_PREEMPT=1
+RUNTIME_OBJS += $(OBJDIR)/src/core/context/async_context_darwin_x86_64.o \
+	$(OBJDIR)/src/asm/darwin/x86_64/async_context_x86_64.o
 endif
 endif
 endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
+	$(TESTHOOK_OBJDIR)/src/core/memory/task_span.o \
+	$(TESTHOOK_OBJDIR)/src/core/context/managed_async_adapter.o \
+	$(TESTHOOK_OBJDIR)/src/core/api/managed_foreign.o \
+	$(TESTHOOK_OBJDIR)/src/core/preempt/managed_catalog.o \
+	$(TESTHOOK_OBJDIR)/src/core/sched/managed_scheduler.o \
+	$(TESTHOOK_OBJDIR)/src/core/lifecycle/init.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
+	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_probe.o \
+	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_worker.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o \
+	$(TESTHOOK_OBJDIR)/src/io/watch/watch_index.o \
 	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
+	$(TESTHOOK_OBJDIR)/src/core/time/timer_heap.o \
 	$(TESTHOOK_OBJDIR)/src/core/time/timer.o \
 	$(TESTHOOK_OBJDIR)/src/core/api/blocking_api.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/scheduler.o \
@@ -473,16 +666,26 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/task/yield_join_sleep.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
+		$(OBJDIR)/src/core/memory/task_span.o \
+		$(OBJDIR)/src/core/context/managed_async_adapter.o \
+		$(OBJDIR)/src/core/api/managed_foreign.o \
+		$(OBJDIR)/src/core/preempt/managed_catalog.o \
+		$(OBJDIR)/src/core/sched/managed_scheduler.o \
+		$(OBJDIR)/src/core/lifecycle/init.o \
 		$(OBJDIR)/src/core/registry/capability.o \
+		$(OBJDIR)/src/core/sched/norm_queue.o \
 		$(OBJDIR)/src/core/broker/broker_buffer.o \
 		$(OBJDIR)/src/core/broker/transport/broker_transport.o \
 		$(OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
 		$(OBJDIR)/src/core/registry/registry.o \
 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 		$(OBJDIR)/src/engine/watchdog/watchdog_probe.o \
+		$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
 		$(OBJDIR)/src/io/api/issue.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o \
+		$(OBJDIR)/src/io/watch/watch_index.o \
 		$(OBJDIR)/src/core/platform/platform.o \
+		$(OBJDIR)/src/core/time/timer_heap.o \
 		$(OBJDIR)/src/core/time/timer.o \
 		$(OBJDIR)/src/core/api/blocking_api.o \
 		$(OBJDIR)/src/core/sched/scheduler.o \
@@ -490,6 +693,27 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/task/yield_join_sleep.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
+ifneq ($(filter $(OBJDIR)/src/core/context/async_context_linux_x86_64.o,$(RUNTIME_OBJS)),)
+TESTHOOK_RUNTIME_OVERRIDE_OBJS += $(TESTHOOK_OBJDIR)/src/core/context/async_context_linux_x86_64.o
+TESTHOOK_RUNTIME_OVERRIDE_OBJS += $(TESTHOOK_OBJDIR)/src/core/lifecycle/run.o
+TESTHOOK_RUNTIME_OVERRIDE_OBJS += $(TESTHOOK_OBJDIR)/src/core/memory/alloc.o
+RUNTIME_TESTHOOK_OBJS := $(filter-out $(OBJDIR)/src/core/context/async_context_linux_x86_64.o $(OBJDIR)/src/core/lifecycle/run.o $(OBJDIR)/src/core/memory/alloc.o,$(RUNTIME_TESTHOOK_OBJS))
+endif
+ifneq ($(filter $(OBJDIR)/src/core/context/async_context_darwin.o $(OBJDIR)/src/core/context/async_context_darwin_x86_64.o,$(RUNTIME_OBJS)),)
+TESTHOOK_RUNTIME_OVERRIDE_OBJS += $(patsubst $(OBJDIR)/%,$(TESTHOOK_OBJDIR)/%,$(filter \
+	$(OBJDIR)/src/core/context/async_context_darwin.o $(OBJDIR)/src/core/context/async_context_darwin_x86_64.o,$(RUNTIME_OBJS)))
+TESTHOOK_RUNTIME_OVERRIDE_OBJS += $(TESTHOOK_OBJDIR)/src/core/context/async_context_shared.o \
+	$(TESTHOOK_OBJDIR)/src/core/base/errno.o
+RUNTIME_TESTHOOK_OBJS := $(filter-out $(OBJDIR)/src/core/context/async_context_darwin.o \
+	$(OBJDIR)/src/core/context/async_context_darwin_x86_64.o \
+	$(OBJDIR)/src/core/context/async_context_shared.o $(OBJDIR)/src/core/base/errno.o,$(RUNTIME_TESTHOOK_OBJS))
+endif
+ifneq ($(filter $(OBJDIR)/src/core/context/async_context_signal.o,$(RUNTIME_OBJS)),)
+TESTHOOK_RUNTIME_OVERRIDE_OBJS += $(TESTHOOK_OBJDIR)/src/core/context/async_context_signal.o \
+	$(TESTHOOK_OBJDIR)/src/core/context/async_context_shared.o $(TESTHOOK_OBJDIR)/src/core/base/errno.o
+RUNTIME_TESTHOOK_OBJS := $(filter-out $(OBJDIR)/src/core/context/async_context_signal.o \
+	$(OBJDIR)/src/core/context/async_context_shared.o $(OBJDIR)/src/core/base/errno.o,$(RUNTIME_TESTHOOK_OBJS))
+endif
 DEMO_OBJS = \
 	$(OBJDIR)/examples/demo.o \
 	$(OBJDIR)/examples/demo_tasks.o \
@@ -505,10 +729,13 @@ STRESS_OBJS = \
 	$(OBJDIR)/examples/stress_suite.o \
 	$(OBJDIR)/examples/stress_entry.o \
 	$(OBJDIR)/examples/stress_signal_dump.o
+$(filter-out $(OBJDIR)/examples/diagnostic_output.o,$(STRESS_OBJS)) $(OBJDIR)/examples/broker.o: $(RUNTIME_PRIV_HDRS)
 BENCH_OBJS = \
 	$(OBJDIR)/examples/bench.o \
 	$(OBJDIR)/examples/bench_support.o \
 	$(OBJDIR)/examples/bench_entry.o
+CPU_SPIKE_OBJS = \
+	$(OBJDIR)/examples/cpu_spike.o
 BROKER_OBJS = \
 	$(OBJDIR)/examples/broker.o
 SERVER_OBJS = \
@@ -531,6 +758,7 @@ TEST_CONNECT_OBJS = \
 	$(OBJDIR)/tests/test_connect_io.o
 TEST_RUNTIME_CORE_OBJS = \
 	$(OBJDIR)/tests/test_runtime_core.o
+TEST_API_USABILITY_OBJS = $(OBJDIR)/tests/test_api_usability.o
 TEST_MULTI_RUNTIME_CORE_OBJS = \
 	$(OBJDIR)/tests/test_multi_runtime_core.o
 TEST_RUNTIME_API_EDGES_OBJS = \
@@ -551,10 +779,118 @@ TEST_RUNTIME_INVARIANTS_OBJS = \
 	$(OBJDIR)/tests/test_runtime_invariants.o
 TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_runtime_shutdown_internal.o
+TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS = $(OBJDIR)/tests/test_watchdog_liveness_internal.o
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+ifeq ($(HOST_PLATFORM)-$(UNAME_M),darwin-arm64)
+TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS += $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
+endif
+ifeq ($(HOST_PLATFORM)-$(UNAME_M),linux-aarch64)
+TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS += $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
+endif
+endif
+TEST_RUNTIME_REGRESSIONS_OBJS = $(OBJDIR)/tests/test_runtime_regressions.o
 TEST_WORKER_IDENTITY_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_worker_identity_internal.o
 TEST_LEGACY_LEASE_INTERNAL_OBJS = \
 	$(OBJDIR)/tests/test_legacy_lease_internal.o
+TEST_EXECUTION_LEASE_INTERNAL_OBJS = $(OBJDIR)/tests/test_execution_lease_internal.o
+TEST_NATIVE_DOMAIN_INTERNAL_OBJS = $(OBJDIR)/tests/test_native_domain_internal.o
+TEST_MANAGED_CATALOG_INTERNAL_OBJS = $(OBJDIR)/tests/test_managed_catalog_internal.o
+TEST_MANAGED_FOREIGN_INTERNAL_OBJS = $(OBJDIR)/tests/test_managed_foreign_internal.o
+TEST_CAPSULE_POOL_INTERNAL_OBJS = $(OBJDIR)/tests/test_capsule_pool_internal.o
+$(TEST_MANAGED_FOREIGN_INTERNAL_OBJS): CPPFLAGS += -DLLAM_ENABLE_TEST_HOOKS=1
+TEST_MANAGED_SCHEDULER_INTERNAL_OBJS = $(OBJDIR)/tests/test_managed_scheduler_internal.o
+TEST_MANAGED_ASYNC_REGISTERED_OBJS = $(OBJDIR)/tests/test_managed_async_registered.o
+TEST_MANAGED_ASYNC_LINUX_X86_64_OBJS = $(OBJDIR)/tests/test_managed_async_linux_x86_64.o
+TEST_MANAGED_IMAGE_INTERNAL_OBJS = $(OBJDIR)/tests/test_managed_image_internal.o
+TEST_MANAGED_ASYNC_COMPILER_OBJS = $(OBJDIR)/tests/test_managed_async_compiler.o
+$(TEST_MANAGED_CATALOG_INTERNAL_OBJS) $(TEST_MANAGED_SCHEDULER_INTERNAL_OBJS) $(TEST_MANAGED_ASYNC_REGISTERED_OBJS) $(TEST_MANAGED_ASYNC_LINUX_X86_64_OBJS) $(TEST_MANAGED_ASYNC_COMPILER_OBJS): CPPFLAGS += -DLLAM_ENABLE_TEST_HOOKS=1
+ifeq ($(HOST_PLATFORM)-$(UNAME_M),linux-x86_64)
+TEST_MANAGED_ASYNC_LINUX_X86_64_OBJS += $(OBJDIR)/tests/fixtures/async_safe_leaf.o
+endif
+ifeq ($(HOST_PLATFORM),darwin)
+MANAGED_CONSUMER_EXPORT_FLAGS = -Wl,-export_dynamic
+else ifneq ($(HOST_PLATFORM),windows)
+MANAGED_CONSUMER_EXPORT_FLAGS = -Wl,--export-dynamic
+endif
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+ifneq ($(filter darwin-arm64 linux-aarch64,$(HOST_PLATFORM)-$(UNAME_M)),)
+TEST_MANAGED_ASYNC_REGISTERED_OBJS += $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
+endif
+endif
+TEST_PROCESSOR_RESOURCE_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_processor_resource_internal.o
+TEST_PROCESSOR_QUEUE_TIMER_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_processor_queue_timer_internal.o
+TEST_PROCESSOR_ALLOCATOR_IO_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_processor_allocator_io_internal.o
+TEST_FOREIGN_DETACH_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_foreign_detach_internal.o
+TEST_RELIEF_WORKER_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_relief_worker_internal.o
+TEST_PREEMPT_CAPABILITIES_OBJS = \
+	$(OBJDIR)/tests/test_preempt_capabilities.o
+TEST_DEFAULT_POLICY_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_default_policy_internal.o
+TEST_MAGIC2_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_magic2_internal.o \
+	$(OBJDIR)/tests/test_magic2_cpu_internal.o \
+	$(OBJDIR)/tests/test_magic2_auto_internal.o
+$(OBJDIR)/src/core/api/magic2_api.o $(SHARED_OBJDIR)/src/core/api/magic2_api.o $(TEST_MAGIC2_INTERNAL_OBJS): src/internal/runtime_magic2.h src/internal/magic2.h
+TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS = \
+	$(OBJDIR)/tests/test_async_preempt_linux_x86_64.o
+TEST_ASYNC_PREEMPT_MULTI_LINUX_X86_64_OBJS = \
+	$(OBJDIR)/tests/test_async_preempt_multi_linux_x86_64.o
+TEST_ASYNC_CONTEXT_DARWIN_OBJS = $(OBJDIR)/tests/test_async_context_darwin.o
+TEST_ASYNC_CONTEXT_LINUX_ARM64_OBJS = $(OBJDIR)/tests/test_async_context_linux_arm64.o
+TEST_LINUX_ARM64_ASYNC_SCHEDULER_REAL_OBJS = $(OBJDIR)/tests/test_linux_arm64_async_scheduler_real.o
+TEST_DARWIN_ARM64_ASYNC_SCHEDULER_REAL_OBJS = $(OBJDIR)/tests/test_darwin_arm64_async_scheduler_real.o
+ifeq ($(HOST_PLATFORM),darwin)
+ifeq ($(UNAME_M),arm64)
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+TEST_ASYNC_CONTEXT_DARWIN_OBJS += $(OBJDIR)/tests/fixtures/async_darwin_leaf.o \
+	$(OBJDIR)/tests/fixtures/async_darwin_entry.o
+TEST_DARWIN_ARM64_ASYNC_SCHEDULER_REAL_OBJS += $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
+endif
+endif
+endif
+ifeq ($(HOST_PLATFORM),linux)
+ifeq ($(UNAME_M),aarch64)
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+TEST_ASYNC_CONTEXT_LINUX_ARM64_OBJS += $(OBJDIR)/src/core/context/async_context_linux_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/async_context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o \
+	$(OBJDIR)/tests/fixtures/async_darwin_leaf.o \
+	$(OBJDIR)/tests/fixtures/async_linux_arm64_entry.o
+TEST_LINUX_ARM64_ASYNC_SCHEDULER_REAL_OBJS += $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
+LINUX_ARM64_ASYNC_CASES = disabled repeat capture-late restore-early-exit ready-drain offload \
+	startup-abort configuration isolation task-reader witness-late pending-signal observed-cooperative \
+	capture-handler-tail restore-handler-tail witness-armed-return capture-armed-cancel ready-destroy \
+	signal-namespace signal-blocked-start signal-owner-isolation
+endif
+endif
+ifeq ($(UNAME_M),x86_64)
+TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS += \
+	$(OBJDIR)/tests/fixtures/async_safe_leaf.o
+ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
+TEST_ASYNC_SIGNAL_WRAP_CPPFLAGS = -DLLAM_TEST_WRAP_SIGACTION=1
+TEST_ASYNC_SIGNAL_WRAP_LDFLAGS = -Wl,--wrap=sigaction
+endif
+TEST_ASYNC_PREEMPT_MULTI_LINUX_X86_64_OBJS += \
+	$(OBJDIR)/tests/fixtures/async_safe_leaf.o
+endif
+endif
+PREEMPT_METADATA_OBJS = \
+	$(OBJDIR)/tools/preempt/metadata.o \
+	$(OBJDIR)/tools/preempt/metadata_v2.o
+PREEMPT_METADATA_INSPECT_OBJS = \
+	$(OBJDIR)/tools/preempt/metadata_inspect.o
+TEST_PREEMPT_METADATA_OBJS = \
+	$(OBJDIR)/tests/test_preempt_metadata.o
+TEST_PREEMPT_METADATA_V2_OBJS = $(OBJDIR)/tests/test_preempt_metadata_v2.o
+TEST_PREEMPT_METADATA_REGISTRATION_OBJS = \
+	$(OBJDIR)/tests/test_preempt_metadata_registration.o
+$(PREEMPT_METADATA_OBJS) $(PREEMPT_METADATA_INSPECT_OBJS) $(TEST_PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_V2_OBJS): CPPFLAGS += -Itools/preempt
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -585,10 +921,13 @@ LCWE_MODEL_BENCH_OBJS = \
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 BUILD_OBJS = \
+	$(OBJDIR)/examples/explicit_runtime.o \
+	$(TEST_RUNTIME_REGRESSIONS_OBJS) \
 	$(RUNTIME_OBJS) \
 	$(DEMO_OBJS) \
 	$(STRESS_OBJS) \
 	$(BENCH_OBJS) \
+	$(CPU_SPIKE_OBJS) \
 	$(BROKER_OBJS) \
 	$(SERVER_OBJS) \
 	$(SERVER_LOSSLESS_OBJS) \
@@ -598,6 +937,7 @@ BUILD_OBJS = \
 	$(TEST_CONNECT_OBJS) \
 	$(TEST_RUNTIME_CORE_OBJS) \
 	$(TEST_MULTI_RUNTIME_CORE_OBJS) \
+	$(TEST_API_USABILITY_OBJS) \
 	$(TEST_RUNTIME_API_EDGES_OBJS) \
 	$(TEST_RUNTIME_SELECT_EDGES_OBJS) \
 	$(TEST_RUNTIME_IO_DUMP_OBJS) \
@@ -607,8 +947,32 @@ BUILD_OBJS = \
 	$(TEST_RUNTIME_FUZZ_OBJS) \
 	$(TEST_RUNTIME_INVARIANTS_OBJS) \
 	$(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) \
+	$(TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS) \
 	$(TEST_WORKER_IDENTITY_INTERNAL_OBJS) \
 	$(TEST_LEGACY_LEASE_INTERNAL_OBJS) \
+	$(TEST_EXECUTION_LEASE_INTERNAL_OBJS) \
+	$(TEST_NATIVE_DOMAIN_INTERNAL_OBJS) \
+	$(TEST_MANAGED_CATALOG_INTERNAL_OBJS) \
+	$(TEST_MANAGED_FOREIGN_INTERNAL_OBJS) \
+	$(TEST_CAPSULE_POOL_INTERNAL_OBJS) \
+	$(TEST_MANAGED_SCHEDULER_INTERNAL_OBJS) \
+	$(TEST_MANAGED_ASYNC_REGISTERED_OBJS) \
+	$(TEST_MANAGED_ASYNC_LINUX_X86_64_OBJS) \
+	$(TEST_MANAGED_IMAGE_INTERNAL_OBJS) \
+	$(TEST_MANAGED_ASYNC_COMPILER_OBJS) \
+	$(TEST_PROCESSOR_RESOURCE_INTERNAL_OBJS) \
+	$(TEST_PROCESSOR_QUEUE_TIMER_INTERNAL_OBJS) \
+	$(TEST_PROCESSOR_ALLOCATOR_IO_INTERNAL_OBJS) \
+	$(TEST_FOREIGN_DETACH_INTERNAL_OBJS) \
+	$(TEST_RELIEF_WORKER_INTERNAL_OBJS) \
+	$(TEST_PREEMPT_CAPABILITIES_OBJS) \
+	$(TEST_DEFAULT_POLICY_INTERNAL_OBJS) \
+	$(TEST_MAGIC2_INTERNAL_OBJS) \
+	$(TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS) \
+	$(PREEMPT_METADATA_OBJS) \
+	$(PREEMPT_METADATA_INSPECT_OBJS) \
+	$(TEST_PREEMPT_METADATA_OBJS) \
+	$(TEST_PREEMPT_METADATA_REGISTRATION_OBJS) \
 	$(TEST_SYNC_OBJS) \
 	$(TEST_IO_BUFFERS_OBJS) \
 	$(TEST_WINDOWS_POLICY_OBJS) \
@@ -620,6 +984,9 @@ BUILD_OBJS = \
 	$(LCWE_MODEL_TEST_OBJS) \
 	$(LCWE_MODEL_BENCH_OBJS)
 LINK_TARGETS = \
+	test_linux_arm64_async_scheduler_real \
+	test_async_context_linux_arm64 \
+	test_runtime_regressions \
 	demo \
 	stress \
 	bench \
@@ -634,6 +1001,7 @@ LINK_TARGETS = \
 	test_connect_io \
 	test_runtime_core \
 	test_multi_runtime_core \
+	test_api_usability \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -643,8 +1011,23 @@ LINK_TARGETS = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_watchdog_liveness_internal \
 	test_worker_identity_internal \
 	test_legacy_lease_internal \
+	test_processor_resource_internal \
+	test_processor_queue_timer_internal \
+	test_processor_allocator_io_internal \
+	test_foreign_detach_internal \
+	test_relief_worker_internal \
+	test_preempt_capabilities \
+	test_default_policy_internal \
+	test_magic2_internal \
+	test_async_preempt_linux_x86_64 \
+	test_async_preempt_multi_linux_x86_64 \
+	llam_preempt_metadata_inspect \
+	test_preempt_metadata \
+	test_preempt_metadata_v2 \
+	test_preempt_metadata_registration \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -656,7 +1039,8 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak test-license-policy check-license-policy test_legacy_lease_boundary check_legacy_lease_boundary check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: cpu-spike-compare
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak test-license-policy check-license-policy test_legacy_lease_boundary test-processor-resource test-processor-queue-timer test-processor-allocator-io test-foreign-detach test-relief-worker test-preempt-metadata test-preempt-sdk-metadata test-preempt-package preempt-tools check_legacy_lease_boundary check package bench-matrix bench_magic2_cpu server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 test-license-policy:
@@ -664,7 +1048,7 @@ test-license-policy:
 	$(PYTHON) scripts/test_package_license_layout.py
 
 check-license-policy: test-license-policy
-	$(PYTHON) scripts/check_license_policy.py
+	$(PYTHON) scripts/check_license_policy.py --include-untracked
 
 test_legacy_lease_boundary:
 	$(PYTHON) scripts/test_legacy_lease_boundary.py
@@ -684,8 +1068,12 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_worker_identity_internal|test_legacy_lease_internal|test_worker_identity_boundary|test_legacy_lease_boundary|check_legacy_lease_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_watchdog_liveness|test_worker_identity_internal|test_legacy_lease_internal|test_execution_lease_internal|test_processor_resource_internal|test_processor_queue_timer_internal|test_processor_allocator_io_internal|test_foreign_detach_internal|test_relief_worker_internal|test_preempt_capabilities|test_default_policy_internal|test_magic2_internal|test_preempt_metadata|test_preempt_metadata_registration|test_preempt_sdk_metadata|test_preempt_cmake_install|test_worker_identity_boundary|test_legacy_lease_boundary|check_legacy_lease_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX := $(WINDOWS_CTEST_REGEX)|test_api_usability|example_explicit_runtime|test_shared_load|test_runtime_regressions|test_sdk_install
 WINDOWS_CMAKE_TARGETS = \
+	example_explicit_runtime \
+	test_windows_async_multim_oracle \
+	test_runtime_regressions \
 	demo \
 	stress \
 	bench \
@@ -697,9 +1085,11 @@ WINDOWS_CMAKE_TARGETS = \
 	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
+	test_shared_load \
 	test_connect_io \
 	test_runtime_core \
 	test_multi_runtime_core \
+	test_api_usability \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -709,8 +1099,24 @@ WINDOWS_CMAKE_TARGETS = \
 	test_runtime_fuzz \
 	test_runtime_invariants \
 	test_runtime_shutdown_internal \
+	test_watchdog_liveness_internal \
 	test_worker_identity_internal \
 	test_legacy_lease_internal \
+	test_processor_resource_internal \
+	test_processor_queue_timer_internal \
+	test_processor_allocator_io_internal \
+	test_foreign_detach_internal \
+	test_relief_worker_internal \
+	test_preempt_capabilities \
+	test_default_policy_internal \
+	test_magic2_internal \
+	test_preempt_metadata \
+	test_preempt_metadata_v2 \
+	test_preempt_cmake_install \
+	test_preempt_sdk_metadata \
+	test_preempt_metadata_registration \
+	test_async_preempt_linux_x86_64 \
+	test_async_preempt_multi_linux_x86_64 \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -742,13 +1148,14 @@ test-lcwe-model: windows-cmake-configure
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
 
-package: windows-cmake-build
+package: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime llam_runtime_shared bench llam_preempt_metadata_inspect
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release_windows.ps1 -BuildDir "$(WINDOWS_CMAKE_BUILD_DIR)" -Configuration "$(WINDOWS_CMAKE_CONFIG)"
 
 bench-matrix: bench
 	python scripts/bench_matrix.py
 
-audit-shared-exports audit-production-test-hooks lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+audit-shared-exports audit-production-test-hooks lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps cpu-spike-compare server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -866,7 +1273,7 @@ $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 		mv "$$tmp" "$@"; \
 	fi
 
-all: demo stress bench llam_broker server server_lossless server_flood static shared
+all: demo stress bench llam_broker server server_lossless server_flood llam_preempt_metadata_inspect static shared
 
 static: libllam_runtime.a
 
@@ -882,17 +1289,46 @@ audit-shared-exports: shared
 audit-production-test-hooks: static shared
 	$(PYTHON) scripts/audit_production_test_hooks.py ./libllam_runtime.a ./$(SHLIB_REAL) || { status=$$?; test "$$status" -eq 77; }
 
-test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_legacy_lease_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_api_usability test_capsule_pool_internal test_managed_catalog_internal test_managed_foreign_internal test_managed_scheduler_internal test_native_domain_internal test_execution_lease_internal test_watchdog_liveness_internal test_handoff_protocol bench_handoff test_io_watch_index test_large_select
+test: test-managed-bookkeeping
+.PHONY: test-managed-bookkeeping
+test-managed-bookkeeping: test_managed_scheduler_internal
+	@./test_managed_scheduler_internal --async-bookkeeping; llam_test_status=$$?; \
+	if [ "$$llam_test_status" -eq 77 ]; then exit 0; else exit "$$llam_test_status"; fi
+test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_worker_identity_internal test_legacy_lease_internal test_processor_resource_internal test_processor_queue_timer_internal test_processor_allocator_io_internal test_foreign_detach_internal test_relief_worker_internal test_preempt_capabilities test_default_policy_internal test_magic2_internal test_async_preempt_linux_x86_64 test_preempt_metadata test_preempt_metadata_v2 test_preempt_metadata_registration test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+	./test_execution_lease_internal
+	./test_native_domain_internal
+	./test_managed_catalog_internal
+	./test_managed_foreign_internal
+	./test_capsule_pool_internal
+	./test_managed_scheduler_internal
+	$(PYTHON) -B scripts/test_native_domain_boundary.py --binary ./test_native_domain_internal
+	./test_handoff_protocol
+	./test_io_watch_index || test $$? -eq 77
+	./test_large_select || test $$? -eq 77
+	HANDOFF_BENCH_BINARY=./bench_handoff $(PYTHON) -B scripts/test_handoff_model.py
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model $(PYTHON) scripts/test_bench_lcwe_model.py
 	$(PYTHON) scripts/test_worker_identity_boundary.py
 	$(PYTHON) scripts/test_legacy_lease_boundary.py
+	@if command -v bash >/dev/null 2>&1; then \
+		$(PYTHON) scripts/test_llam_clang.py; \
+	else \
+		echo "llam-clang wrapper test skipped: bash unavailable"; \
+	fi
+	$(PYTHON) scripts/test_preempt_sdk_metadata.py
+	$(PYTHON) scripts/test_preempt_package.py
+	$(PYTHON) scripts/test_package_license_layout.py
 	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
 	./test_runtime_core
+	./test_runtime_regressions
 	./test_multi_runtime_core
+	./test_api_usability
+	./example_explicit_runtime
+	./example_explicit_runtime --cancel
 	./test_runtime_api_edges
 	./test_runtime_select_edges
 	./test_runtime_io_dump
@@ -902,8 +1338,50 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	./test_runtime_fuzz
 	./test_runtime_invariants
 	./test_runtime_shutdown_internal
+	./test_watchdog_liveness_internal
+	./test_watchdog_liveness_internal --lazy
+	./test_watchdog_liveness_internal --wait-reference
+	./test_watchdog_liveness_internal --async-dequeue || test $$? -eq 77
+	./test_watchdog_liveness_internal --async-return || test $$? -eq 77
+	./test_watchdog_liveness_internal --parked
+	./test_watchdog_liveness_internal --async-parked || test $$? -eq 77
 	./test_worker_identity_internal
 	./test_legacy_lease_internal || test $$? -eq 77
+	./test_processor_resource_internal
+	./test_processor_queue_timer_internal || test $$? -eq 77
+	./test_processor_allocator_io_internal || test $$? -eq 77
+	./test_foreign_detach_internal
+	./test_relief_worker_internal
+	./test_preempt_capabilities
+	./test_default_policy_internal
+	./test_magic2_internal
+	./test_async_preempt_linux_x86_64 || test $$? -eq 77
+	./test_async_preempt_linux_x86_64 --signal-namespace || test $$? -eq 77
+	./test_async_preempt_linux_x86_64 --signal-namespace-faults || test $$? -eq 77
+	./test_async_preempt_multi_linux_x86_64 || test $$? -eq 77
+	./test_async_context_linux_arm64 || test $$? -eq 77
+	./test_linux_arm64_async_scheduler_real || test $$? -eq 77
+	@for llam_case in $(LINUX_ARM64_ASYNC_CASES); do \
+		./test_linux_arm64_async_scheduler_real --$$llam_case || exit $$?; \
+	done
+	./test_async_context_darwin || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --capture-late || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --restore-early-exit || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --ready-drain || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --offload || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --startup-abort || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --configuration || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --isolation || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --task-reader || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --witness-late || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --pending-signal || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --observed-cooperative || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --witness-read-refusal || test $$? -eq 77
+	./test_darwin_arm64_async_scheduler_real --probe-publication || test $$? -eq 77
+	./test_preempt_metadata
+	./test_preempt_metadata_v2
+	./test_preempt_metadata_registration
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -1041,7 +1519,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	case "$$(uname -s)" in \
 		Darwin) ln -s libllam_runtime.2.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib" ;; \
 		Linux) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
-		FreeBSD|OpenBSD|NetBSD|DragonFly) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
 		*) echo "unsupported installer dangling lib-link smoke host" >&2; exit 1 ;; \
 	esac; \
 	if sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
@@ -1069,10 +1546,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.999"; \
 			ln -s libllam_runtime.so.999 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 			;; \
-		FreeBSD|OpenBSD|NetBSD|DragonFly) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.999"; \
-			ln -s libllam_runtime.so.999 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
-			;; \
 		*) echo "unsupported installer wrong lib-link smoke host" >&2; exit 1 ;; \
 	esac; \
 	if sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
@@ -1097,10 +1570,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.3.0.0"; \
-			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
-			;; \
-		FreeBSD|OpenBSD|NetBSD|DragonFly) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.3.0.0"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
@@ -1136,28 +1605,25 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package symlink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES/OLD-LICENSE" "$$tmp_dir/outside"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
-	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/Apache-2.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"; \
+	: > "$$tmp_dir/repo/NOTICE"; \
+	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
+	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
+	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
+	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
 	: > "$$tmp_dir/repo/scripts/stress_server.py"; \
 	: > "$$tmp_dir/repo/scripts/stress_server_composite.py"; \
+	: > "$$tmp_dir/repo/scripts/cli_numbers.py"; \
+	: > "$$tmp_dir/repo/scripts/process_utils.py"; \
+	: > "$$tmp_dir/repo/scripts/safe_output.py"; \
 	: > "$$tmp_dir/repo/examples/smoke.c"; \
 	: > "$$tmp_dir/repo/examples/smoke.h"; \
 	: > "$$tmp_dir/repo/demo"; \
@@ -1169,7 +1635,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	ln -s "$$tmp_dir/outside" "$$tmp_dir/repo/target"; \
 	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=3.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
@@ -1185,14 +1651,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package output file-component smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts"; \
@@ -1211,28 +1669,25 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES/OLD-LICENSE"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
-	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/Apache-2.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"; \
+	: > "$$tmp_dir/repo/NOTICE"; \
+	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
+	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
+	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
+	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
 	: > "$$tmp_dir/repo/scripts/stress_server.py"; \
 	: > "$$tmp_dir/repo/scripts/stress_server_composite.py"; \
+	: > "$$tmp_dir/repo/scripts/cli_numbers.py"; \
+	: > "$$tmp_dir/repo/scripts/process_utils.py"; \
+	: > "$$tmp_dir/repo/scripts/safe_output.py"; \
 	: > "$$tmp_dir/repo/examples/smoke.c"; \
 	: > "$$tmp_dir/repo/examples/smoke.h"; \
 	: > "$$tmp_dir/repo/demo"; \
@@ -1244,7 +1699,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	chmod 666 "$$tmp_dir/repo/README.md"; \
 	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=3.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
@@ -1260,27 +1715,24 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES/OLD-LICENSE" "$$tmp_dir/outside"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
-	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/Apache-2.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"; \
+	: > "$$tmp_dir/repo/NOTICE"; \
+	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
+	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
+	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
+	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
 	: > "$$tmp_dir/repo/scripts/stress_server.py"; \
 	: > "$$tmp_dir/repo/scripts/stress_server_composite.py"; \
+	: > "$$tmp_dir/repo/scripts/cli_numbers.py"; \
+	: > "$$tmp_dir/repo/scripts/process_utils.py"; \
+	: > "$$tmp_dir/repo/scripts/safe_output.py"; \
 	: > "$$tmp_dir/repo/examples/smoke.c"; \
 	: > "$$tmp_dir/repo/examples/smoke.h"; \
 	: > "$$tmp_dir/repo/demo"; \
@@ -1294,7 +1746,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	ln -s "$$tmp_dir/outside/README.md" "$$tmp_dir/repo/README.md"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=3.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release input path" >&2; \
@@ -1309,29 +1761,26 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES/OLD-LICENSE"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
-	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/Apache-2.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"; \
+	: > "$$tmp_dir/repo/NOTICE"; \
+	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
+	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
+	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
+	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
 	: > "$$tmp_dir/repo/scripts/stress_server.py"; \
 	: > "$$tmp_dir/repo/scripts/stress_server_composite.py"; \
+	: > "$$tmp_dir/repo/scripts/cli_numbers.py"; \
+	: > "$$tmp_dir/repo/scripts/process_utils.py"; \
+	: > "$$tmp_dir/repo/scripts/safe_output.py"; \
 	: > "$$tmp_dir/repo/examples/smoke.c"; \
 	: > "$$tmp_dir/repo/examples/smoke.h"; \
 	: > "$$tmp_dir/repo/demo"; \
@@ -1345,7 +1794,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	ln "$$tmp_dir/outside-runtime.h" "$$tmp_dir/repo/include/llam/runtime.h"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=3.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh copied a hard-linked release input file" >&2; \
@@ -1360,28 +1809,25 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package liblink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES/OLD-LICENSE"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
-	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/Apache-2.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"; \
+	: > "$$tmp_dir/repo/NOTICE"; \
+	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
+	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
+	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
+	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
 	: > "$$tmp_dir/repo/scripts/stress_server.py"; \
 	: > "$$tmp_dir/repo/scripts/stress_server_composite.py"; \
+	: > "$$tmp_dir/repo/scripts/cli_numbers.py"; \
+	: > "$$tmp_dir/repo/scripts/process_utils.py"; \
+	: > "$$tmp_dir/repo/scripts/safe_output.py"; \
 	: > "$$tmp_dir/repo/examples/smoke.c"; \
 	: > "$$tmp_dir/repo/examples/smoke.h"; \
 	: > "$$tmp_dir/repo/demo"; \
@@ -1393,7 +1839,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; ln -s libllam_runtime.so.3.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=3.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unexpected library symlink target" >&2; \
@@ -1408,29 +1854,26 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package regular-liblink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES/OLD-LICENSE"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
-	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/Apache-2.0.txt"; \
-	: > "$$tmp_dir/repo/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"; \
+	: > "$$tmp_dir/repo/NOTICE"; \
+	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
+	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
+	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
+	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
 	: > "$$tmp_dir/repo/scripts/stress_server.py"; \
 	: > "$$tmp_dir/repo/scripts/stress_server_composite.py"; \
+	: > "$$tmp_dir/repo/scripts/cli_numbers.py"; \
+	: > "$$tmp_dir/repo/scripts/process_utils.py"; \
+	: > "$$tmp_dir/repo/scripts/safe_output.py"; \
 	: > "$$tmp_dir/repo/examples/smoke.c"; \
 	: > "$$tmp_dir/repo/examples/smoke.h"; \
 	: > "$$tmp_dir/repo/demo"; \
@@ -1442,7 +1885,7 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; : > "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.3.0.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=3.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted non-symlink shared-library link artifacts" >&2; \
@@ -1457,14 +1900,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer checksum smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1490,14 +1925,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer checksum-glob smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1520,14 +1947,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer archive-script smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1550,14 +1969,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1581,14 +1992,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1612,14 +2015,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer duplicate smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1645,14 +2040,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer absolute-member smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1692,14 +2079,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer parent-member smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1738,14 +2117,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer dot-component smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1771,14 +2142,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer double-slash smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1804,14 +2167,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer casefold smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1850,14 +2205,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer type-collision smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1884,14 +2231,6 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
-		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
-		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
-		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
-		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
-		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
-		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
-		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
-		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer symlink-target smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1912,13 +2251,37 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 check: test check-license-policy
 
 ASAN_TEST_TARGETS = \
+	asan-test_execution_lease_internal \
+	asan-test_native_domain_internal \
+	asan-test_managed_catalog_internal \
+	asan-test_managed_foreign_internal \
+	asan-test_capsule_pool_internal \
+	asan-test_managed_scheduler_internal \
+	asan-test_large_select \
+	asan-test_io_watch_index \
+	asan-test_runtime_regressions \
 	asan-test_runtime_api_edges \
 	asan-test_runtime_core \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
+	asan-test_watchdog_liveness_internal \
 	asan-test_worker_identity_internal \
 	asan-test_legacy_lease_internal \
+	asan-test_processor_resource_internal \
+	asan-test_processor_queue_timer_internal \
+	asan-test_processor_allocator_io_internal \
+	asan-test_foreign_detach_internal \
+	asan-test_relief_worker_internal \
+	asan-test_async_preempt_linux_x86_64 \
+	asan-test_async_preempt_multi_linux_x86_64 \
+	asan-test_preempt_metadata \
+	asan-test_preempt_metadata_v2 \
+	asan-test_preempt_metadata_registration \
+	asan-test_preempt_capabilities \
+	asan-test_default_policy_internal \
+	asan-test_magic2_internal \
 	asan-test_multi_runtime_core \
+	asan-test_api_usability \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability
 
@@ -1926,11 +2289,32 @@ NOOWNER_TEST_TARGETS = \
 	noowner-test_runtime_select_edges
 
 TSAN_TEST_TARGETS = \
+	tsan-test_execution_lease_internal \
+	tsan-test_native_domain_internal \
+	tsan-test_managed_catalog_internal \
+	tsan-test_managed_foreign_internal \
+	tsan-test_capsule_pool_internal \
+	tsan-test_managed_scheduler_internal \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
+	tsan-test_watchdog_liveness_internal \
 	tsan-test_worker_identity_internal \
 	tsan-test_legacy_lease_internal \
+	tsan-test_processor_resource_internal \
+	tsan-test_processor_queue_timer_internal \
+	tsan-test_processor_allocator_io_internal \
+	tsan-test_foreign_detach_internal \
+	tsan-test_relief_worker_internal \
+	tsan-test_async_preempt_linux_x86_64 \
+	tsan-test_async_preempt_multi_linux_x86_64 \
+	tsan-test_preempt_metadata \
+	tsan-test_preempt_metadata_v2 \
+	tsan-test_preempt_metadata_registration \
+	tsan-test_preempt_capabilities \
+	tsan-test_default_policy_internal \
+	tsan-test_magic2_internal \
 	tsan-test_multi_runtime_core \
+	tsan-test_api_usability \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
 
@@ -1960,13 +2344,38 @@ test-asan:
 		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_execution_lease_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_native_domain_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_managed_catalog_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_managed_foreign_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_capsule_pool_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_managed_scheduler_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_watch_index || test $$? -eq 77; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_large_select || test $$? -eq 77; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_api_edges; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_core; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_regressions; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_watchdog_liveness_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_watchdog_liveness_internal --wait-reference; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_worker_identity_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_legacy_lease_internal || test $$? -eq 77; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_processor_resource_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_processor_queue_timer_internal || test $$? -eq 77; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_processor_allocator_io_internal || test $$? -eq 77; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_foreign_detach_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_relief_worker_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_async_preempt_linux_x86_64 || test $$? -eq 77; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_async_preempt_multi_linux_x86_64 || test $$? -eq 77; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_preempt_metadata; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_preempt_metadata_v2; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_preempt_metadata_registration; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_preempt_capabilities; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_default_policy_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_magic2_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_api_usability; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
 	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
@@ -2017,18 +2426,42 @@ test-tsan:
 		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_watchdog_liveness_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_worker_identity_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_legacy_lease_internal || test $$? -eq 77; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_processor_resource_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_processor_queue_timer_internal || test $$? -eq 77; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_processor_allocator_io_internal || test $$? -eq 77; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_foreign_detach_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_relief_worker_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_async_preempt_linux_x86_64 || test $$? -eq 77; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_async_preempt_multi_linux_x86_64 || test $$? -eq 77; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_preempt_metadata; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_preempt_metadata_v2; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_preempt_metadata_registration; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_preempt_capabilities; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_default_policy_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_magic2_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_api_usability; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability; \
 	$(PYTHON) scripts/test_legacy_lease_boundary.py; \
 	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 
+
+CPPCHECK_ASYNC_CONTEXT_ARGS :=
+CPPCHECK_MAGIC2_ARGS := --suppress=preprocessorErrorDirective:src/internal/magic2.h
+ifneq ($(HOST_PLATFORM),linux)
+CPPCHECK_ASYNC_CONTEXT_ARGS += --suppress=preprocessorErrorDirective:src/core/context/async_context_linux_x86_64.c
+endif
+
 analyze-cppcheck:
 	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
 		--error-exitcode=1 --inline-suppr \
+		$(CPPCHECK_ASYNC_CONTEXT_ARGS) \
+		$(CPPCHECK_MAGIC2_ARGS) \
 		-DUINTPTR_MAX=18446744073709551615ULL -DUINT32_MAX=4294967295U \
 		-Iinclude -Isrc/internal -Isrc src include tests examples
 
@@ -2054,6 +2487,8 @@ test-process-utils:
 	python3 scripts/test_process_utils.py
 	python3 scripts/test_bench_parsers.py
 	python3 scripts/test_bench_runtime_compare.py
+	python3 scripts/test_cpu_spike_compare.py
+	go test scripts/cpu_spike_go.go scripts/cpu_spike_go_test.go
 	python3 scripts/test_stress_server_logic.py
 	python3 scripts/test_c_env_helpers.py
 
@@ -2065,7 +2500,11 @@ test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress
 		--fuzz-scenarios $(RUNTIME_SOAK_FUZZ_SCENARIOS) \
 		--multi-fuzz-scenarios $(RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS)
 
-test-hardening: analyze-cppcheck audit-deps test-process-utils test-asan test-tsan test-fuzz-heavy
+test-hardening: analyze-cppcheck audit-deps test-process-utils
+	# Sanitizer/soak-style binaries use tight wall-clock bounds; keep them isolated.
+	$(MAKE) test-asan
+	$(MAKE) test-tsan
+	$(MAKE) test-fuzz-heavy
 
 test-quick: test server-stress-composite-quick
 
@@ -2099,6 +2538,9 @@ stress: $(RUNTIME_OBJS) $(STRESS_OBJS)
 bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BENCH_OBJS) $(LDLIBS)
 
+cpu_spike: $(RUNTIME_OBJS) $(CPU_SPIKE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(CPU_SPIKE_OBJS) $(LDLIBS)
+
 llam_broker: $(RUNTIME_OBJS) $(BROKER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BROKER_OBJS) $(LDLIBS)
 
@@ -2117,6 +2559,101 @@ test_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS)
 bench_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
 
+# Private policy experiment; production defaults and ABI are unchanged.
+bench_handoff: $(RUNTIME_OBJS) $(OBJDIR)/experiments/handoff/bench_handoff.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+test_handoff_protocol: $(RUNTIME_OBJS) $(OBJDIR)/experiments/handoff/verify_handoff.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(OBJDIR)/experiments/handoff/%.o: experiments/handoff/%.c $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+.PHONY: test-handoff
+bench_watch_index: $(RUNTIME_OBJS) $(OBJDIR)/experiments/watch_index/bench_watch_index.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+bench_select_prepare: $(RUNTIME_OBJS) $(OBJDIR)/experiments/select_prepare/bench_select_prepare.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+ifeq ($(HOST_PLATFORM),darwin)
+MANAGED_BENCH_IMAGE_SUFFIX = .dylib
+MANAGED_BENCH_IMAGE_FLAGS = -dynamiclib -Wl,-undefined,dynamic_lookup -fno-register-global-dtors-with-atexit
+MANAGED_BENCH_EXPORT_FLAGS = -Wl,-export_dynamic
+else
+MANAGED_BENCH_IMAGE_SUFFIX = .so
+MANAGED_BENCH_IMAGE_FLAGS = -shared
+MANAGED_BENCH_EXPORT_FLAGS = -Wl,--export-dynamic
+endif
+MANAGED_BENCH_IMAGE = $(OBJDIR)/managed-bench-workload$(MANAGED_BENCH_IMAGE_SUFFIX)
+$(MANAGED_BENCH_IMAGE): experiments/async_compare/managed_workload.c experiments/async_compare/managed_bench.h \
+	include/llam/runtime.h include/llam/io.h tools/preempt/managed_driver.py tools/preempt/managed_verify.py tools/preempt/managed_runtime_contracts.def
+	@mkdir -p $(dir $@)
+	$(PYTHON) -B tools/preempt/managed_driver.py --llam-managed=required $(MANAGED_BENCH_IMAGE_FLAGS) -Iinclude $< -o $@
+
+MANAGED_PROFILE_OBJS = $(patsubst $(OBJDIR)/%,$(OBJDIR)/native-profile/%,$(RUNTIME_OBJS))
+$(OBJDIR)/native-profile/%.o: %.c $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLLAM_ENABLE_ASYNC_PROFILE=1 -c -o $@ $<
+
+$(OBJDIR)/native-profile/%.o: %.S src/internal/llam_internal.h src/internal/async_context_phase.h $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLLAM_ENABLE_ASYNC_PROFILE=1 -c -o $@ $<
+
+bench_managed_preempt: $(MANAGED_PROFILE_OBJS) $(OBJDIR)/experiments/async_compare/bench_managed.o $(MANAGED_BENCH_IMAGE)
+	$(CC) $(CFLAGS) $(MANAGED_BENCH_EXPORT_FLAGS) -o $@ $(MANAGED_PROFILE_OBJS) $(OBJDIR)/experiments/async_compare/bench_managed.o $(LDLIBS)
+
+$(OBJDIR)/experiments/async_compare/bench_managed.o: experiments/async_compare/bench_managed.c \
+	experiments/async_compare/managed_bench.h $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLLAM_ENABLE_ASYNC_PROFILE=1 -c -o $@ $<
+
+ifeq ($(HOST_PLATFORM)-$(UNAME_M)-$(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),darwin-arm64-1)
+bench_async_compare: $(RUNTIME_OBJS) $(filter-out $(OBJDIR)/examples/bench_entry.o,$(BENCH_OBJS)) $(OBJDIR)/experiments/async_compare/bench_entry.o $(OBJDIR)/experiments/async_compare/bench_async.o $(OBJDIR)/tests/fixtures/async_darwin_leaf.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(OBJDIR)/experiments/async_compare/bench_entry.o: examples/bench_entry.c experiments/async_compare/bench_async.h examples/bench_internal.h $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLLAM_BENCH_ASYNC_COMPARE=1 -c -o $@ $<
+
+$(OBJDIR)/experiments/async_compare/bench_async.o: experiments/async_compare/bench_async.c experiments/async_compare/bench_async.h tests/fixtures/async_darwin_leaf.h $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+else
+bench_async_compare:
+	@echo "bench_async_compare requires Darwin arm64 and LLAM_EXPERIMENTAL_ASYNC_PREEMPT=1" >&2
+	@exit 2
+endif
+
+test_large_select: $(RUNTIME_OBJS) $(OBJDIR)/tests/test_large_select.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+asan-test_large_select: require-sanitizer-target $(RUNTIME_OBJS) $(OBJDIR)/tests/test_large_select.o
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(OBJDIR)/tests/test_large_select.o $(LDLIBS)
+
+$(OBJDIR)/experiments/select_prepare/%.o: experiments/select_prepare/%.c $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+test_io_watch_index: $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_io_watch_index.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+asan-test_io_watch_index: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_io_watch_index.o
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_io_watch_index.o $(LDLIBS)
+
+$(OBJDIR)/tests/test_io_watch_index.o: tests/test_io_watch_index.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/experiments/watch_index/%.o: experiments/watch_index/%.c $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+test-handoff: bench_handoff test_handoff_protocol
+	./test_handoff_protocol
+	HANDOFF_BENCH_BINARY=./bench_handoff $(PYTHON) -B scripts/test_handoff_model.py
+
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
 
@@ -2128,6 +2665,9 @@ test_connect_io: $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS)
 
 test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
+
+test_runtime_regressions: $(RUNTIME_OBJS) $(TEST_RUNTIME_REGRESSIONS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_REGRESSIONS_OBJS) $(LDLIBS)
 
 test_multi_runtime_core: $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
@@ -2156,6 +2696,9 @@ test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
 test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS) $(LDLIBS)
 
+test_watchdog_liveness_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS) $(LDLIBS)
+
 test_runtime_shutdown_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
@@ -2164,6 +2707,210 @@ test_worker_identity_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_I
 
 test_legacy_lease_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS) $(LDLIBS)
+
+test_execution_lease_internal: $(RUNTIME_OBJS) $(TEST_EXECUTION_LEASE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_EXECUTION_LEASE_INTERNAL_OBJS) $(LDLIBS)
+
+test_native_domain_internal: $(RUNTIME_OBJS) $(TEST_NATIVE_DOMAIN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_NATIVE_DOMAIN_INTERNAL_OBJS) $(LDLIBS)
+
+test_managed_catalog_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_CATALOG_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_CATALOG_INTERNAL_OBJS) $(LDLIBS)
+
+test_managed_foreign_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_FOREIGN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_FOREIGN_INTERNAL_OBJS) $(LDLIBS)
+
+test_capsule_pool_internal: $(RUNTIME_OBJS) $(TEST_CAPSULE_POOL_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_CAPSULE_POOL_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_capsule_pool_internal tsan-test_capsule_pool_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_CAPSULE_POOL_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_CAPSULE_POOL_INTERNAL_OBJS) $(LDLIBS)
+
+test_managed_scheduler_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_SCHEDULER_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_SCHEDULER_INTERNAL_OBJS) $(LDLIBS)
+
+ifeq ($(HOST_PLATFORM),linux)
+MANAGED_LINUX_COMPILER_EXPORT_FLAGS = -Wl,--export-dynamic
+endif
+$(OBJDIR)/tests/test_managed_linux_compiler.o: CPPFLAGS += -DLLAM_ENABLE_TEST_HOOKS=1
+$(OBJDIR)/tests/test_managed_linux_compiler.o: $(TESTHOOK_BUILD_SIGNATURE)
+test_managed_linux_compiler: $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_managed_linux_compiler.o
+	$(CC) $(CFLAGS) $(MANAGED_LINUX_COMPILER_EXPORT_FLAGS) -o $@ $^ $(LDLIBS)
+
+test_managed_async_registered: $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_ASYNC_REGISTERED_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_ASYNC_REGISTERED_OBJS) $(LDLIBS)
+
+test_managed_async_linux_x86_64: $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_ASYNC_LINUX_X86_64_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_ASYNC_LINUX_X86_64_OBJS) $(LDLIBS)
+
+test_managed_image_internal: $(RUNTIME_OBJS) $(TEST_MANAGED_IMAGE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) $(MANAGED_CONSUMER_EXPORT_FLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MANAGED_IMAGE_INTERNAL_OBJS) $(LDLIBS)
+
+test_managed_async_compiler: $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_ASYNC_COMPILER_OBJS)
+	$(CC) $(CFLAGS) $(MANAGED_CONSUMER_EXPORT_FLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_ASYNC_COMPILER_OBJS) $(LDLIBS)
+
+asan-test_managed_catalog_internal tsan-test_managed_catalog_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_CATALOG_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_CATALOG_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_managed_foreign_internal tsan-test_managed_foreign_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_FOREIGN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_FOREIGN_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_managed_scheduler_internal tsan-test_managed_scheduler_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_SCHEDULER_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_MANAGED_SCHEDULER_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_native_domain_internal tsan-test_native_domain_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_NATIVE_DOMAIN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_NATIVE_DOMAIN_INTERNAL_OBJS) $(LDLIBS)
+
+test_processor_resource_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_RESOURCE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_RESOURCE_INTERNAL_OBJS) $(LDLIBS)
+
+test_processor_queue_timer_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_QUEUE_TIMER_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_QUEUE_TIMER_INTERNAL_OBJS) $(LDLIBS)
+
+test_processor_allocator_io_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_ALLOCATOR_IO_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_ALLOCATOR_IO_INTERNAL_OBJS) $(LDLIBS)
+
+test_foreign_detach_internal: $(RUNTIME_OBJS) $(TEST_FOREIGN_DETACH_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_FOREIGN_DETACH_INTERNAL_OBJS) $(LDLIBS)
+
+test_relief_worker_internal: $(RUNTIME_OBJS) $(TEST_RELIEF_WORKER_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RELIEF_WORKER_INTERNAL_OBJS) $(LDLIBS)
+
+test_preempt_capabilities: $(RUNTIME_OBJS) $(TEST_PREEMPT_CAPABILITIES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_PREEMPT_CAPABILITIES_OBJS) $(LDLIBS)
+
+test_default_policy_internal: $(RUNTIME_OBJS) $(TEST_DEFAULT_POLICY_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_DEFAULT_POLICY_INTERNAL_OBJS) $(LDLIBS)
+
+test_magic2_internal: $(RUNTIME_OBJS) $(TEST_MAGIC2_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MAGIC2_INTERNAL_OBJS) $(LDLIBS)
+
+bench_magic2_cpu: $(RUNTIME_OBJS) $(OBJDIR)/experiments/magic2/bench_magic2_cpu.o
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(OBJDIR)/experiments/magic2/bench_magic2_cpu.o $(LDLIBS)
+
+bench_magic2_kernels: $(RUNTIME_OBJS) $(OBJDIR)/experiments/magic2/bench_magic2_kernels.o
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(OBJDIR)/experiments/magic2/bench_magic2_kernels.o $(LDLIBS)
+
+$(OBJDIR)/experiments/magic2/bench_magic2_kernels.o: experiments/magic2/bench_magic2_kernels.c $(RUNTIME_PRIV_HDRS) src/internal/runtime_magic2.h src/internal/magic2.h $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/experiments/magic2/bench_magic2_cpu.o: experiments/magic2/bench_magic2_cpu.c $(RUNTIME_PRIV_HDRS) src/internal/runtime_magic2.h src/internal/magic2.h $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+asan-test_magic2_internal tsan-test_magic2_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_MAGIC2_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MAGIC2_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_preempt_capabilities tsan-test_preempt_capabilities: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_PREEMPT_CAPABILITIES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_PREEMPT_CAPABILITIES_OBJS) $(LDLIBS)
+
+asan-test_default_policy_internal tsan-test_default_policy_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_DEFAULT_POLICY_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_DEFAULT_POLICY_INTERNAL_OBJS) $(LDLIBS)
+
+test_async_preempt_linux_x86_64: $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS)
+	$(CC) $(CFLAGS) $(TEST_ASYNC_SIGNAL_WRAP_LDFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS) $(LDLIBS)
+
+test_async_preempt_multi_linux_x86_64: $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_MULTI_LINUX_X86_64_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_MULTI_LINUX_X86_64_OBJS) $(LDLIBS)
+
+test_async_context_linux_arm64: $(TEST_ASYNC_CONTEXT_LINUX_ARM64_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_ASYNC_CONTEXT_LINUX_ARM64_OBJS) -pthread
+
+test_linux_arm64_async_scheduler_real: $(RUNTIME_TESTHOOK_OBJS) $(TEST_LINUX_ARM64_ASYNC_SCHEDULER_REAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_LINUX_ARM64_ASYNC_SCHEDULER_REAL_OBJS) $(LDLIBS)
+
+test_async_context_darwin: $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_CONTEXT_DARWIN_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_CONTEXT_DARWIN_OBJS) $(LDLIBS)
+
+test_darwin_arm64_async_scheduler_real: $(RUNTIME_TESTHOOK_OBJS) $(TEST_DARWIN_ARM64_ASYNC_SCHEDULER_REAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_DARWIN_ARM64_ASYNC_SCHEDULER_REAL_OBJS) $(LDLIBS)
+
+test: test_async_preempt_multi_linux_x86_64 test_async_context_linux_arm64 test_async_context_darwin test_darwin_arm64_async_scheduler_real test_linux_arm64_async_scheduler_real
+
+asan-test_async_preempt_multi_linux_x86_64 tsan-test_async_preempt_multi_linux_x86_64: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_MULTI_LINUX_X86_64_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_MULTI_LINUX_X86_64_OBJS) $(LDLIBS)
+
+llam_preempt_metadata_inspect: $(PREEMPT_METADATA_OBJS) $(PREEMPT_METADATA_INSPECT_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(PREEMPT_METADATA_OBJS) $(PREEMPT_METADATA_INSPECT_OBJS)
+
+test_preempt_metadata: $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_OBJS)
+
+test_preempt_metadata_v2: $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_V2_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_V2_OBJS)
+
+asan-test_preempt_metadata_v2 tsan-test_preempt_metadata_v2: require-sanitizer-target $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_V2_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_V2_OBJS)
+
+test_preempt_metadata_registration: $(RUNTIME_OBJS) $(TEST_PREEMPT_METADATA_REGISTRATION_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_PREEMPT_METADATA_REGISTRATION_OBJS) $(LDLIBS)
+
+asan-test_preempt_metadata: $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_OBJS)
+
+asan-test_preempt_metadata_registration tsan-test_preempt_metadata_registration: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_PREEMPT_METADATA_REGISTRATION_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_PREEMPT_METADATA_REGISTRATION_OBJS) $(LDLIBS)
+
+tsan-test_preempt_metadata: $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(PREEMPT_METADATA_OBJS) $(TEST_PREEMPT_METADATA_OBJS)
+
+test-preempt-metadata: test_preempt_metadata test_preempt_metadata_v2
+	./test_preempt_metadata
+	./test_preempt_metadata_v2
+	@if command -v bash >/dev/null 2>&1; then \
+		$(PYTHON) scripts/test_llam_clang.py; \
+	else \
+		echo "llam-clang wrapper test skipped: bash unavailable"; \
+	fi
+	$(PYTHON) scripts/test_preempt_sdk_metadata.py
+
+test-preempt-sdk-metadata:
+	$(PYTHON) scripts/test_preempt_sdk_metadata.py
+
+test-preempt-package:
+	$(PYTHON) scripts/test_preempt_package.py
+	$(PYTHON) scripts/test_package_license_layout.py
+
+.PHONY: test-sdk-install
+SDK_TEST_BUILD_DIR ?= build
+test-sdk-install:
+	$(PYTHON) scripts/test_sdk_install.py --build-dir "$(SDK_TEST_BUILD_DIR)"
+
+preempt-tools:
+	@set -e; case "$(LLAM_PREEMPT_TOOLING)" in \
+		off) echo "preemption tooling disabled; use LLAM_PREEMPT_TOOLING=auto or required" ;; \
+		auto|required) \
+			cmake -S . -B "$(PREEMPT_TOOLING_BUILD_DIR)" \
+				-DLLAM_PREEMPT_TOOLING="$(LLAM_PREEMPT_TOOLING)"; \
+			cmake --build "$(PREEMPT_TOOLING_BUILD_DIR)" \
+				--target llam_preempt_metadata_inspect test_preempt_metadata \
+					test_preempt_metadata_registration; \
+			if grep -q '^LLAM_PREEMPT_PLUGIN_AVAILABLE:INTERNAL=TRUE$$' \
+				"$(PREEMPT_TOOLING_BUILD_DIR)/CMakeCache.txt"; then \
+				cmake --build "$(PREEMPT_TOOLING_BUILD_DIR)" --target llam_preempt_pass; \
+			fi; \
+			ctest --test-dir "$(PREEMPT_TOOLING_BUILD_DIR)" \
+				--output-on-failure -R '^(test_preempt_metadata|test_preempt_metadata_registration|test_llam_clang_wrapper|test_preempt_sdk_metadata|test_preempt_cmake_install|test_preempt_package|test_llam_preempt_llvm_plugin)$$' ;; \
+		*) echo "LLAM_PREEMPT_TOOLING must be off, auto, or required" >&2; exit 2 ;; \
+	esac
+
+test-processor-resource: test_processor_resource_internal
+	./test_processor_resource_internal
+	$(PYTHON) scripts/test_legacy_lease_boundary.py
+	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
+
+test-processor-queue-timer: test_processor_queue_timer_internal
+	./test_processor_queue_timer_internal
+
+test-processor-allocator-io: test_processor_allocator_io_internal
+	./test_processor_allocator_io_internal || test $$? -eq 77
+
+test-foreign-detach: test_foreign_detach_internal
+	./test_foreign_detach_internal
+
+test-relief-worker: test_relief_worker_internal
+	./test_relief_worker_internal
 
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
@@ -2177,6 +2924,9 @@ asan-test_runtime_api_edges: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_RUN
 asan-test_runtime_core tsan-test_runtime_core: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
 
+asan-test_runtime_regressions: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_RUNTIME_REGRESSIONS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_REGRESSIONS_OBJS) $(LDLIBS)
+
 noowner-test_runtime_select_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS) $(LDLIBS)
 
@@ -2189,8 +2939,32 @@ asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: require
 asan-test_worker_identity_internal tsan-test_worker_identity_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WORKER_IDENTITY_INTERNAL_OBJS) $(LDLIBS)
 
+asan-test_execution_lease_internal tsan-test_execution_lease_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_EXECUTION_LEASE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_EXECUTION_LEASE_INTERNAL_OBJS) $(LDLIBS)
+
 asan-test_legacy_lease_internal tsan-test_legacy_lease_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_LEGACY_LEASE_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_processor_resource_internal tsan-test_processor_resource_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_RESOURCE_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_RESOURCE_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_processor_queue_timer_internal tsan-test_processor_queue_timer_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_QUEUE_TIMER_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_QUEUE_TIMER_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_processor_allocator_io_internal tsan-test_processor_allocator_io_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_ALLOCATOR_IO_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_PROCESSOR_ALLOCATOR_IO_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_foreign_detach_internal tsan-test_foreign_detach_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_FOREIGN_DETACH_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_FOREIGN_DETACH_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_relief_worker_internal tsan-test_relief_worker_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_RELIEF_WORKER_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RELIEF_WORKER_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_async_preempt_linux_x86_64 tsan-test_async_preempt_linux_x86_64: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS)
+	$(CC) $(CFLAGS) $(TEST_ASYNC_SIGNAL_WRAP_LDFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_ASYNC_PREEMPT_LINUX_X86_64_OBJS) $(LDLIBS)
+
+asan-test_watchdog_liveness_internal tsan-test_watchdog_liveness_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WATCHDOG_LIVENESS_INTERNAL_OBJS) $(LDLIBS)
 
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
@@ -2227,6 +3001,14 @@ $(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
 		experiments/lcwe/lcwe_model_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe -c -o $@ $<
+
+$(OBJDIR)/tools/preempt/%.o: tools/preempt/%.c tools/preempt/metadata.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Itools/preempt -c -o $@ $<
+
+$(SHARED_OBJDIR)/tools/preempt/%.o: tools/preempt/%.c tools/preempt/metadata.h
+	@mkdir -p $(dir $@)
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -Itools/preempt -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
@@ -2380,6 +3162,10 @@ $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c $(LLAM_PUBLIC_HDRS) exa
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(OBJDIR)/examples/cpu_spike.o: examples/cpu_spike.c $(LLAM_PUBLIC_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
 $(OBJDIR)/examples/broker.o: examples/broker.c $(LLAM_PUBLIC_HDRS) $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
@@ -2415,6 +3201,10 @@ $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(OBJDIR)/tests/fixtures/%.o: tests/fixtures/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
@@ -2431,6 +3221,46 @@ $(OBJDIR)/tests/test_legacy_lease_internal.o: tests/test_legacy_lease_internal.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 
+$(OBJDIR)/tests/test_async_preempt_linux_x86_64.o: tests/test_async_preempt_linux_x86_64.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(TEST_ASYNC_SIGNAL_WRAP_CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_watchdog_liveness_internal.o: tests/test_watchdog_liveness_internal.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_async_preempt_multi_linux_x86_64.o: tests/test_async_preempt_multi_linux_x86_64.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_async_context_linux_arm64.o: tests/test_async_context_linux_arm64.c tests/fixtures/async_darwin_leaf.h $(RUNTIME_PRIV_HDRS) $(BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_linux_arm64_async_scheduler_real.o: tests/test_darwin_arm64_async_scheduler_real.c tests/fixtures/async_darwin_leaf.h $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 -DLLAM_ASYNC_SHARED_TEST_LINUX=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_async_context_darwin.o: tests/test_async_context_darwin.c tests/fixtures/async_darwin_leaf.h $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_darwin_arm64_async_scheduler_real.o: tests/test_darwin_arm64_async_scheduler_real.c tests/fixtures/async_darwin_leaf.h $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_processor_resource_internal.o: tests/test_processor_resource_internal.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_processor_queue_timer_internal.o: tests/test_processor_queue_timer_internal.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_processor_allocator_io_internal.o: tests/test_processor_allocator_io_internal.c $(RUNTIME_PRIV_HDRS) $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
 clean:
 	rm -rf $(CLEAN_DIRS)
 	rm -f $(CLEAN_FILES)
@@ -2440,11 +3270,16 @@ clean:
 		fi; \
 	done
 
-package: all test
-	./scripts/package_release.sh
+package: all test preempt-tools
+	LLAM_PREEMPT_TOOLING="$(LLAM_PREEMPT_TOOLING)" \
+	PREEMPT_TOOLING_BUILD_DIR="$(PREEMPT_TOOLING_BUILD_DIR)" \
+		./scripts/package_release.sh
 
 bench-matrix: bench
 	python3 scripts/bench_matrix.py
+
+cpu-spike-compare: cpu_spike
+	python3 scripts/cpu_spike_compare.py
 
 server-stress: server
 	python3 scripts/stress_server.py --server ./server
@@ -2476,4 +3311,39 @@ verify-windows:
 platform-status:
 	@echo "host platform: $(HOST_PLATFORM)"
 
+endif
+
+ifneq ($(HOST_PLATFORM),windows)
+# Public embedding/cancellation/deadline usability contract.
+test_api_usability: $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS) $(LDLIBS)
+
+asan-test_api_usability tsan-test_api_usability: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS) $(LDLIBS)
+
+.PHONY: test-platform-support
+test-platform-support:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/test_platform_support.py
+
+example_explicit_runtime: $(RUNTIME_OBJS) $(OBJDIR)/examples/explicit_runtime.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+test: test-platform-support example_explicit_runtime
+
+$(OBJDIR)/examples/explicit_runtime.o: examples/explicit_runtime.c $(LLAM_PUBLIC_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+all: example_explicit_runtime
+endif
+
+.PHONY: test-managed-ci-contract test-managed-benchmark-inputs
+test-managed-ci-contract:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/test_managed_ci.py
+
+test-managed-benchmark-inputs:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/test_managed_benchmark.py
+
+ifneq ($(HOST_PLATFORM),windows)
+test: test-managed-ci-contract test-managed-benchmark-inputs
 endif

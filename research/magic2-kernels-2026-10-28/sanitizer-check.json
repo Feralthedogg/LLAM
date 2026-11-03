@@ -1,0 +1,42 @@
+[
+  {
+    "command": [
+      "clang",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Werror",
+      "-O1",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fsanitize=address,undefined",
+      "-Iinclude",
+      "-Isrc/internal",
+      "-Isrc",
+      "-Itools/preempt",
+      "-D_GNU_SOURCE",
+      "-D_XOPEN_SOURCE=700",
+      "-D_DARWIN_C_SOURCE",
+      "experiments/magic2/bench_magic2_kernels.c",
+      "libllam_runtime.a",
+      "-pthread",
+      "-o",
+      "/Users/feral/Desktop/Programming/LLAM/research/magic2-kernels-2026-10-28/kernel-asan"
+    ],
+    "exit_code": 0,
+    "seconds": 0.6646331670344807,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/Users/feral/Desktop/Programming/LLAM/research/magic2-kernels-2026-10-28/kernel-asan",
+      "--self-test"
+    ],
+    "exit_code": 0,
+    "seconds": 0.08502266701543704,
+    "stdout": "{\"self_test\":\"passed\",\"checks\":2400,\"kernels\":4}\n",
+    "stderr": ""
+  }
+]

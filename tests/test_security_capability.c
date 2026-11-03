@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_capability.h"
@@ -279,8 +279,8 @@ static bool test_io_req_published_once(const llam_shard_t *shard, const llam_io_
     if (shard == NULL || req == NULL) {
         return false;
     }
-    matches += shard->allocator.io_req_free == req ? 1U : 0U;
-    matches += atomic_load_explicit(&shard->allocator.io_req_remote_free, memory_order_acquire) == req ? 1U : 0U;
+    matches += shard->processor.allocator.io_req_free == req ? 1U : 0U;
+    matches += atomic_load_explicit(&shard->processor.allocator.io_req_remote_free, memory_order_acquire) == req ? 1U : 0U;
     return matches == 1U;
 }
 
@@ -306,8 +306,8 @@ static int test_io_req_cancel_retire_blocks_address_reuse(void) {
 
     llam_io_req_free(&shard, &release_first);
     if (atomic_load_explicit(&release_first.lifetime_refs, memory_order_acquire) != 1U ||
-        shard.allocator.io_req_free != NULL ||
-        atomic_load_explicit(&shard.allocator.io_req_remote_free, memory_order_acquire) != NULL ||
+        shard.processor.allocator.io_req_free != NULL ||
+        atomic_load_explicit(&shard.processor.allocator.io_req_remote_free, memory_order_acquire) != NULL ||
         atomic_load_explicit(&release_first.free_after_cancel, memory_order_acquire) != 0U) {
         fprintf(stderr, "[test_security_capability] release-first request published with cancel owner live\n");
         return -1;
@@ -318,8 +318,8 @@ static int test_io_req_cancel_retire_blocks_address_reuse(void) {
         return -1;
     }
 
-    shard.allocator.io_req_free = NULL;
-    atomic_store_explicit(&shard.allocator.io_req_remote_free, NULL, memory_order_release);
+    shard.processor.allocator.io_req_free = NULL;
+    atomic_store_explicit(&shard.processor.allocator.io_req_remote_free, NULL, memory_order_release);
     llam_io_req_reset(&finalizer_first, &runtime, 0U, 0U);
     if (!llam_io_req_lifetime_activate(&finalizer_first) ||
         !llam_io_req_lifetime_try_acquire(&finalizer_first) ||
@@ -327,8 +327,8 @@ static int test_io_req_cancel_retire_blocks_address_reuse(void) {
         return -1;
     }
     if (atomic_load_explicit(&finalizer_first.lifetime_refs, memory_order_acquire) != 1U ||
-        shard.allocator.io_req_free != NULL ||
-        atomic_load_explicit(&shard.allocator.io_req_remote_free, memory_order_acquire) != NULL) {
+        shard.processor.allocator.io_req_free != NULL ||
+        atomic_load_explicit(&shard.processor.allocator.io_req_remote_free, memory_order_acquire) != NULL) {
         fprintf(stderr, "[test_security_capability] finalizer-first request published with API owner live\n");
         return -1;
     }
@@ -360,8 +360,8 @@ static int test_io_req_event_pin_blocks_address_reuse(void) {
     llam_io_req_backend_event_pin(&req);
     llam_io_req_free(&shard, &req);
     if (atomic_load_explicit(&req.lifetime_refs, memory_order_acquire) != 1U ||
-        shard.allocator.io_req_free != NULL ||
-        atomic_load_explicit(&shard.allocator.io_req_remote_free, memory_order_acquire) != NULL ||
+        shard.processor.allocator.io_req_free != NULL ||
+        atomic_load_explicit(&shard.processor.allocator.io_req_remote_free, memory_order_acquire) != NULL ||
         atomic_load_explicit(&req.backend_event_refs, memory_order_acquire) != 1U) {
         fprintf(stderr, "[test_security_capability] event-pinned io req was recycled before event retire\n");
         return -1;
@@ -397,7 +397,7 @@ static int test_embedded_io_req_cancel_retire_blocks_address_reuse(void) {
     atomic_init(&task.scan_refs, 0U);
     llam_io_req_reset(&task.embedded_io_req, &runtime, UINT_MAX, UINT_MAX);
     llam_io_req_reset(&heap_req, &runtime, 0U, 0U);
-    shard.allocator.io_req_free = &heap_req;
+    shard.processor.allocator.io_req_free = &heap_req;
     g_llam_tls_shard = &shard;
     g_llam_tls_task = &task;
 
@@ -459,7 +459,7 @@ static int test_embedded_io_req_event_pin_blocks_address_reuse(void) {
     atomic_init(&task.scan_refs, 0U);
     llam_io_req_reset(&task.embedded_io_req, &runtime, UINT_MAX, UINT_MAX);
     llam_io_req_reset(&heap_req, &runtime, 0U, 0U);
-    shard.allocator.io_req_free = &heap_req;
+    shard.processor.allocator.io_req_free = &heap_req;
     g_llam_tls_shard = &shard;
     g_llam_tls_task = &task;
 
@@ -613,7 +613,15 @@ static int test_delayed_io_cancel_rejects_reused_embedded_generation(void) {
     runtime.active_nodes = 1U;
     shard.runtime = &runtime;
     shard.id = 0U;
-    shard.io_node_index = 0U;
+    shard.processor.runtime = &runtime;
+    shard.processor.compat_shard = &shard;
+    shard.processor.id = 0U;
+    shard.processor.cpu_id = 0U;
+    shard.processor.node_index = 0U;
+    shard.processor.io_node_index = 0U;
+    shard.processor.event_fd = LLAM_INVALID_FD;
+    atomic_init(&shard.processor.online, 1U);
+    atomic_init(&shard.processor.event_pending, 0U);
     node.runtime = &runtime;
     node.event_fd = -1;
     task.owner_runtime = &runtime;
@@ -1295,6 +1303,41 @@ static int test_token_validation_and_rights(void) {
     if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_SEND, object.revocation_epoch + 1U),
                      EACCES,
                      "revoked token unexpectedly accepted") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int test_capability_mac_known_answer(void) {
+    static const uint8_t expected[LLAM_CAPABILITY_MAC_BYTES] = {
+        0x24U, 0xf6U, 0xf0U, 0xe5U, 0xcbU, 0xc4U, 0x0aU, 0x37U,
+        0x29U, 0x9bU, 0xbbU, 0x45U, 0xf5U, 0x79U, 0x96U, 0xdbU
+    };
+    llam_capability_key_t key;
+    llam_capability_token_t token;
+    uint8_t actual[LLAM_CAPABILITY_MAC_BYTES];
+    size_t i;
+
+    key.words[0] = UINT64_C(0x0001020304050607);
+    key.words[1] = UINT64_C(0x08090a0b0c0d0e0f);
+    key.words[2] = UINT64_C(0x1011121314151617);
+    key.words[3] = UINT64_C(0x18191a1b1c1d1e1f);
+    memset(&token, 0, sizeof(token));
+    token.version = 1U;
+    token.family = 7U;
+    token.runtime_id = UINT64_C(0x0123456789abcdef);
+    token.slot = 42U;
+    token.generation = 11U;
+    token.rights = UINT64_C(0x83);
+    token.revocation_epoch = 5U;
+    token.subject_id = UINT64_C(0x1122334455667788);
+    for (i = 0U; i < sizeof(token.nonce); ++i) {
+        token.nonce[i] = (uint8_t)i;
+    }
+
+    llam_capability_test_compute_mac(&key, &token, actual);
+    if (memcmp(actual, expected, sizeof(expected)) != 0) {
+        fputs("capability MAC known-answer vector changed\n", stderr);
         return -1;
     }
     return 0;
@@ -15289,6 +15332,7 @@ int main(int argc, char **argv) {
     }
 
     LLAM_RUN_SECURITY_TEST(test_token_validation_and_rights);
+    LLAM_RUN_SECURITY_TEST(test_capability_mac_known_answer);
     LLAM_RUN_SECURITY_TEST(test_raw_capability_validate_requires_nonzero_rights);
     LLAM_RUN_SECURITY_TEST(test_token_tamper_rejected);
     LLAM_RUN_SECURITY_TEST(test_token_subject_binding);

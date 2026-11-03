@@ -8,6 +8,10 @@ the boundary `CHANGES`: the implementation must define ownerless-state return
 rights, helper handback completion, native-thread lifetime validation, and
 pause-acknowledgement generations before it is considered mergeable.
 
+This document freezes the Phase 1A design boundary. Phase 1B later moved
+processor topology and the ordinary scheduler wake pair while preserving the
+Phase 1A lease as execution-publication authority.
+
 ## Goal
 
 Make the existing primary/helper/redirect handoff an explicit, epoch-bearing
@@ -34,33 +38,44 @@ Phase 1A changes only the internal execution-publication boundary:
 
 ## Explicit non-goals
 
-Phase 1A does not move runnable queues, timers, allocator/cache, wake handles,
-or logical I/O ownership into the processor.  It does not add foreign detach,
+Phase 1A itself did not move runnable queues, timers, allocator/cache, topology,
+scheduler wake handles, or logical I/O ownership into the processor. Phase 1B
+subsequently moved topology and ordinary scheduler wake state, then queues and
+timers, and then the allocator, per-P stack caches, and logical I/O routing.
+Phase 1A does not add foreign detach,
 async context capture, compiler metadata, Windows/BSD async preemption, or a
 new public execution-contract API.  Rust, Python, JVM, .NET, and Go wrappers
 are not part of this work or of the later Phase 6 scope.
 
 ## Authority model
 
-`llam_shard_t` remains the composition root and continues to own queues,
-timers, allocator/cache, I/O routing, online state, public metrics, and task
-registry state.  The following internal state is authoritative after the
-corresponding migration commit:
+`llam_shard_t` remains the composition root and compatibility identity. The
+following internal state is authoritative after its corresponding migration:
 
 | State | Authority | Compatibility rule |
 | --- | --- | --- |
 | Lease holder, epoch, transfer state, return claimant | One embedded lease coordinator on the shard, protected by the existing opaque/handoff mutex | Helper-active and redirect booleans are projections only; grant decisions never read them as ownership truth |
 | Task executing on an M, including a foreign-blocked task | `llam_worker_t.active_g` and worker-local timestamps | The old shard `current` is removed as a writable authority once the active-G migration lands |
-| Runnable queues, timers, allocator/cache, I/O, online/pause policy | Existing shard fields | P-field migration is Phase 1B |
+| Processor topology and ordinary scheduler wake pair | Stable embedded processor cell | CPU/locality/I/O route is immutable after initialization; online is atomic; the wake descriptor remains live across online/offline transitions |
+| Versioned P-owner projection | Processor owner record protected by the compatibility shard's existing lock and transactionally composed with lease changes | P generation is distinct from the lease epoch; the projection and its non-owning ticket never replace lease execution authority |
+| Runnable queues, timers, allocator, per-P stack caches, and logical I/O route | Stable embedded processor cell | Allocation-owner IDs remain distinct from task home/live P and logical I/O owner; attached requests retain their node route |
+| Runtime-wide stack fallback cache | Runtime | Never duplicate or transfer the mutex-bearing cache state |
+| I/O-node backend, public metrics, and task registry | Existing node/shard fields | Node backend, public schema, and task-list ownership remain unchanged |
 | Native thread creation/join compatibility | Existing shard lifecycle fields plus a worker binding/liveness record used by the lease | Join never uses a stale worker snapshot; target validity is checked under the lease lock |
 | Watchdog preemption target | Current lease owner's live worker binding | `preempt_thread` is removed after all readers are migrated |
 | Public stats, trace, ABI | Existing public aggregation and headers | No public struct, symbol, or stat-schema change |
 
-The worker and processor shells introduced in Phase 0 remain descriptive for
-association and role.  Phase 1A adds only the M-local execution and binding
-fields needed to make the lease and watchdog truthful; it does not create a
-second processor owner, a generic `is_executor()` predicate, or a copied P
-resource set.
+The worker and processor identity fields introduced in Phase 0 remain stable
+for association and role. Phase 1A adds the M-local execution and binding
+fields needed to make the lease and watchdog truthful. Phase 1B Task 1 added
+topology, wake state, and the versioned P-owner record as inert metadata. Task
+2A composes that record with every lease writer under `opaque_lock ->
+shard->lock` and issues only revalidated, non-owning tickets; the lease remains
+the sole execution-publication authority. Task 2B gates P queue/timer mutation
+and rehomes timers transactionally. Task 3 places allocator and per-P stack
+cache state in its final processor storage and keeps logical I/O routing behind
+the P accessor without conflating allocator owner, in-flight completion, or
+attached-node identities. No mutex-bearing P resource is copied.
 
 ## Lease state machine
 
@@ -235,9 +250,11 @@ Darwin host; platform-neutral compilation and registration checks still run.
 
 ## Later boundaries
 
-Phase 1B physically moves P-owned queues, timers, allocator/cache, wake state,
-and logical I/O routing after the lease and watchdog invariants are stable.
-Phase 2 adds explicit foreign detach/reattach and relief-worker behavior.
+Phase 1B has physically moved P-owned queues, timers, allocator, processor-local
+stack caches, wake state, and logical I/O routing after the lease and watchdog
+invariants were stable. Phase 2 adds generation-checked foreign detach/reattach
+and fail-closed relief/watchdog checks through the existing helper/redirect
+bridge; see [Phase 2 Foreign Detach and Fail-Closed Relief M](2026-09-09-phase2-foreign-detach.md).
 Async context capture, compiler metadata, platform-specific asynchronous
 backends, capability flags, observability expansion, and completion ABI are
 separate later increments; language wrappers remain explicitly out of scope.

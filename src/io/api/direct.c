@@ -27,7 +27,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -435,6 +435,8 @@ int llam_try_direct_rw(llam_fd_t fd,
                             ssize_t *result_out,
                             bool *socket_op_out) {
     ssize_t rc;
+    int scope_error = llam_io_scope_error(g_llam_tls_task);
+    if (scope_error != 0) { errno = scope_error; return -1; }
 
     (void)recv_op;
 

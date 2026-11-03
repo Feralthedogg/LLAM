@@ -1,71 +1,72 @@
 <!--
 Copyright 2026 Feralthedogg
-SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-Licensed under the LLAM Commercial Reciprocity License 1.0.
-See the LICENSE file distributed with this Software.
+SPDX-License-Identifier: Apache-2.0
+Licensed under the Apache License, Version 2.0.
+See LICENSES/Apache-2.0.txt.
 -->
 
 # Licensing
 
-The current LLAM repository is **mixed-license**. A file's governing terms are
-selected by its file notice and by the explicit Apache path manifest described
-below; the root license does not replace rights already granted for previously
-published Apache-licensed files.
+## Current first-party license
 
-## LLAM Commercial Reciprocity License 1.0
+All current first-party LLAM source code, public headers, documentation,
+tests, examples, build files, and tools are licensed under the
+[Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+This includes current files that previously carried LLAM's custom license.
 
-The root [LICENSE](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE) is
-the human-facing copy of the LLAM Commercial Reciprocity License 1.0. The same
-text is provided byte-for-byte for SPDX-aware tooling at
-[LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt).
+The complete, unmodified license is in the root
+[`LICENSE`](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE), with a
+byte-identical SPDX lookup copy at
+[`LICENSES/Apache-2.0.txt`](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/Apache-2.0.txt).
+The current repository no longer uses a per-path license manifest.
+First-party files without an embedded header are also covered by the root
+license; generated or uncommentable files may use an adjacent `.license`
+sidecar. New-file notices are specified in
+[`CONTRIBUTING.md`](https://github.com/Feralthedogg/LLAM/blob/main/CONTRIBUTING.md).
 
-The custom license applies to files carrying this identifier and to newly
-created first-party files that are not in the Apache manifest:
+Apache-2.0 permits commercial use. There are no additional LLAM-specific
+source-disclosure duties, commercial reciprocity conditions, or mandatory
+defect-reporting deadlines. Apache's own redistribution, notice, patent, and
+other terms still apply; this summary does not replace the license.
 
-```text
-SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
-```
+## Contributions and reporting
 
-This is a source-available license. It is not an OSI-approved open source
-license.
+Contributions are accepted under Apache-2.0 as described in `CONTRIBUTING.md`;
+the Developer Certificate of Origin sign-off remains part of the contribution
+process. Do not submit material you lack the right to contribute under those
+terms.
 
-## Apache License 2.0 files
+Bug and security reports are voluntary. Suspected vulnerabilities should be
+reported through the private route in
+[the security policy](https://github.com/Feralthedogg/LLAM/blob/main/.github/SECURITY.md),
+not through public issues containing sensitive details.
 
-Files already distributed under Apache License 2.0 remain under those terms,
-including later modifications to the same files. Their exact current paths are
-listed in
-[LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt),
-and the governing text is stored at
-[LICENSES/OLD-LICENSE/Apache-2.0.txt](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/OLD-LICENSE/Apache-2.0.txt).
+## Third-party material and distribution
 
-Apache-marked source files use `SPDX-License-Identifier: Apache-2.0` and point
-to that text. For formats that cannot carry a header, an adjacent `.license`
-sidecar supplies the same notice.
+Third-party material retains its original terms and copyright attributions.
+The vendored `third_party/magic2/` snapshot remains MIT-licensed; its origin and
+pinned revision are recorded in
+[`UPSTREAM.md`](https://github.com/Feralthedogg/LLAM/blob/main/third_party/magic2/UPSTREAM.md).
+Other algorithm and implementation attributions are in
+[`THIRD_PARTY_NOTICES.md`](https://github.com/Feralthedogg/LLAM/blob/main/THIRD_PARTY_NOTICES.md).
 
-The manifest is authoritative for **Untagged** files as well: a listed path is
-Apache-licensed even if its format has no in-file notice. A path not listed in
-the manifest is not made Apache-licensed merely because a similarly named file
-existed in another revision.
+Release packages and installed metadata include `LICENSE`, `NOTICE`,
+`THIRD_PARTY_NOTICES.md`, `LICENSES/Apache-2.0.txt`, and the magic2 license at
+`LICENSES/THIRD_PARTY/magic2/LICENSE`. First-party relicensing does not replace
+third-party licenses.
 
-## Historical boundary and lineage
+## Historical versions
 
-Immutable tags, commits, releases, and copies keep the terms under which they
-were received. In particular, `v2.2.1` and earlier published snapshots remain
-under the Apache License 2.0 terms shipped with those snapshots.
+The Apache-2.0 return was authorized for the current working tree on
+2026-09-23. Old commits, tags, and already-distributed archives are not
+rewritten by this change. Their accompanying terms remain part of those
+historical copies; this is not a retroactive revocation of previously granted
+rights. The former licensing plans are explicitly marked superseded and do
+not govern the current repository. No new release is published by a local
+license edit.
 
-For the transition audit, Apache lineage was reconstructed from the published
-tips `9062b687d3205ffdff24f3f1c05eac019b2b9a34` and
-`f4b3f4f39d254e2c1463ec33b5b3c58f5fb505b0`. The root `LICENSE` is an explicit
-custom-license exception. Files created after that boundary use the custom
-license unless they contain separately licensed material.
-
-## Release packages and third-party material
-
-Release archives and installed metadata include the root `LICENSE`, its
-`LicenseRef` mirror, the Apache 2.0 text, and the Apache file manifest. This
-keeps the mixed-license selection rules available alongside every distributed
-copy.
-
-Separately licensed third-party material must retain its own copyright and
-license notices and be recorded conspicuously. Neither LLAM license replaces
-those terms.
+Verification records preserve their recorded Git inventories. A deleted file
+name in a valid `git_status_before` porcelain snapshot describes that captured
+working tree; it does not select the current license. The policy checker keeps
+that history intact while still checking active paths, other record fields and
+all current source and configuration.

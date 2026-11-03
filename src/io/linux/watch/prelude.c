@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/linux/runtime_io_watch_linux_internal.h"
@@ -66,11 +66,11 @@ unsigned llam_multishot_owner_node_index(llam_runtime_t *rt, unsigned fallback_n
         return fallback_node_index;
     }
 
-    hash = llam_hash_watch_identity_u64((uint64_t)st.st_dev);
     // Include fd as a final tie-breaker. Device/inode gives stable ownership
     // across duplicate descriptors; fd reduces clustering for anonymous handles.
-    hash ^= llam_hash_watch_identity_u64((uint64_t)st.st_ino);
-    hash ^= llam_hash_watch_identity_u64((uint64_t)(unsigned)fd);
+    hash = llam_hash_watch_identity((uint64_t)st.st_dev,
+                                    (uint64_t)st.st_ino,
+                                    (uint64_t)(unsigned)fd);
     return (unsigned)(hash % rt->active_nodes);
 }
 

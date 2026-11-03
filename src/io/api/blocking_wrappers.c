@@ -25,7 +25,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "io/runtime_io_api_internal.h"
@@ -104,6 +104,8 @@ int llam_getaddrinfo_result(const char *node,
                             const struct addrinfo *hints,
                             struct addrinfo **out,
                             int *gai_error) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_getaddrinfo_call_t call;
     void *ignored = NULL;
 
@@ -128,6 +130,8 @@ int llam_getaddrinfo_result(const char *node,
 }
 
 void llam_freeaddrinfo_result(struct addrinfo *result) {
+    LLAM_NATIVE_API_GUARD();
+
     if (result != NULL) {
         freeaddrinfo(result);
     }
@@ -216,6 +220,8 @@ static void *llam_blocking_open_call(void *arg) {
 }
 
 int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_open_call_t call;
     void *ignored = NULL;
 
@@ -371,6 +377,8 @@ static void *llam_blocking_stat_call(void *arg) {
 }
 
 int llam_stat_path_ex(const char *path, llam_file_stat_t *out, size_t out_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_stat_call_t call;
     void *ignored = NULL;
     size_t copy_size;

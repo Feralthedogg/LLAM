@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -54,6 +54,7 @@ static void llam_publish_reinject_active_g(llam_shard_t *target,
                               llam_now_ns(),
                               memory_order_release);
     }
+    llam_worker_begin_g_run(worker, task);
     llam_worker_publish_active_g(worker, task);
 }
 
@@ -71,14 +72,18 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
                                     llam_task_t *task,
                                     bool hot,
                                     llam_trace_kind_t kind,
-                                    llam_wait_reason_t reason,
-                                    bool direct_local) {
+    llam_wait_reason_t reason,
+    bool direct_local,
+    const llam_processor_queue_access_t *access) {
     llam_task_state_id_t from = task->state;
+    if (direct_local &&
+        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
+        direct_local = false;
+    }
     if (shard->runtime->experimental_dynamic_shards != 0U &&
-        atomic_load_explicit(&shard->online, memory_order_relaxed) == 0U) {
+        llam_processor_try_set_online(&shard->processor, true)) {
         // Waking work onto an offline dynamic shard brings it back online and
         // updates the runtime's min/max online-shard diagnostics.
-        atomic_store_explicit(&shard->online, 1U, memory_order_release);
         llam_runtime_note_online_shards(shard->runtime,
                                       atomic_fetch_add_explicit(&shard->runtime->online_shards, 1U, memory_order_acq_rel) + 1U);
     }
@@ -89,7 +94,9 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
     task->last_runnable_ns =
         llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
-    if (shard->opaque_redirect_active) {
+    if (llam_async_preempt_enqueue_locked(shard, task)) {
+        /* Wait-generation ownership is already resolved; preserve the G's native origin. */
+    } else if (shard->opaque_redirect_active) {
         // A shard in opaque-block redirect mode should not receive local work;
         // send the task to its redirect target or spill to overflow.
         shard->metrics.migrations += 1U;
@@ -102,13 +109,21 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
         // the current worker will immediately see local queue state.
         task->enqueue_hot = 0U;
         if (hot) {
-            if (llam_queue_push_bounded_locked(shard, &shard->hot_q, LLAM_HOT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(shard,
+                                               &shard->processor.hot_q,
+                                               LLAM_HOT_QUEUE_CAP,
+                                               task,
+                                               access)) {
                 shard->metrics.hot_enqueues += 1U;
             }
         } else {
-            (void)llam_norm_queue_push_owner_locked(shard, task);
+            (void)llam_norm_queue_push_owner_locked(shard, access, task);
         }
-    } else if (llam_queue_push_bounded_locked(shard, &shard->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
+    } else if (llam_queue_push_bounded_locked(shard,
+                                             &shard->processor.inject_q,
+                                             LLAM_INJECT_QUEUE_CAP,
+                                             task,
+                                             NULL)) {
         shard->metrics.inject_enqueues += 1U;
     }
     shard->metrics.wakes += 1U;
@@ -157,18 +172,44 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     bool pressure;
     bool effective_hot;
     bool direct_local;
+    llam_processor_queue_access_t access;
+    bool access_valid = false;
 
     if (rt == NULL || task == NULL || rt->active_shards == 0U) {
         return;
+    }
+    {
+        unsigned origin_id = llam_async_preempt_task_origin_shard(task);
+
+        if (origin_id != UINT_MAX) {
+            target_id = origin_id;
+        }
     }
     if (target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         target_id = llam_pick_runnable_shard(rt, task);
     }
 
+    if (rt->managed_policy_pools) {
+        llam_worker_t *execution_worker = task->managed_execution_worker;
+        if (execution_worker != NULL && execution_worker->role == LLAM_WORKER_ROLE_LEGACY_COMPAT) {
+            target_id = execution_worker->compat_shard->id;
+        } else if (target_id >= rt->portable_processor_count) {
+            if (rt->portable_processor_count == 0U) abort();
+            target_id %= rt->portable_processor_count;
+        }
+    }
     target = &rt->shards[target_id];
     pressure = llam_runtime_pressure_signal(rt);
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
     direct_local = (g_llam_tls_shard == target && g_llam_tls_task != NULL);
+    if (direct_local) {
+        access_valid = llam_processor_queue_access_snapshot(&target->processor, &access) &&
+                       (access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
+                        access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN);
+        if (!access_valid) {
+            direct_local = false;
+        }
+    }
 
     llam_disarm_task_wait_deadline(task);
     // Wake ownership transfers from the wait primitive/I/O request back to the
@@ -176,7 +217,13 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     llam_task_clear_wait_tracking_or_abort(task);
     pthread_mutex_lock(&target->lock);
     effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, pressure);
-    llam_mark_runnable_locked(target, task, effective_hot, kind, reason, direct_local);
+    llam_mark_runnable_locked(target,
+                              task,
+                              effective_hot,
+                              kind,
+                              reason,
+                              direct_local,
+                              access_valid ? &access : NULL);
     pthread_mutex_unlock(&target->lock);
     if (!direct_local) {
         llam_kick_shard(target);
@@ -205,14 +252,31 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_task_state_id_t task_from;
     bool effective_hot;
     int caller_errno = llam_thread_errno_load();
+    llam_processor_queue_access_t access;
 
     if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
         target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         return false;
     }
+    if (rt->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
+        /* Every registered execution/restoration needs a fresh scheduler claim. */
+        return false;
+    }
+#if defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT) && \
+    ((defined(__linux__) && defined(__x86_64__)) || (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64) || LLAM_ASYNC_CONTEXT_SHARED)
+    if (atomic_load_explicit(&rt->async_preempt_enabled, memory_order_acquire) != 0U) {
+        /* Preserve capture/restore retirement and dispatch through the scheduler. */
+        return false;
+    }
+#endif
 
     target = &rt->shards[target_id];
     if (g_llam_tls_shard != target || current == task) {
+        return false;
+    }
+    if (!llam_processor_queue_access_snapshot(&target->processor, &access) ||
+        (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
+         access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
         return false;
     }
 
@@ -235,8 +299,8 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         llam_lockfree_normq_enabled(rt) &&
         !target->opaque_redirect_active &&
         (rt->direct_handoff_allow_timers != 0U ||
-         atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U)) {
-        if (llam_norm_queue_push_yield_unlocked(target, current)) {
+         atomic_load_explicit(&target->processor.timer_count, memory_order_acquire) == 0U)) {
+    if (llam_norm_queue_push_yield_unlocked(target, current)) {
             uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
 
             /*
@@ -269,7 +333,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             }
             target->metrics.yields += 1U;
             target->metrics.ctx_switches += 1U;
-            target->direct_handoff_streak += 1U;
+            target->processor.direct_handoff_streak += 1U;
             (void)kind;
             (void)task_from;
             llam_thread_errno_store(caller_errno);
@@ -280,7 +344,9 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
 #endif
 
     pthread_mutex_lock(&target->lock);
-    if (target->opaque_redirect_active || target->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(target, &access) ||
+        target->opaque_redirect_active ||
+        target->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         pthread_mutex_unlock(&target->lock);
         return false;
     }
@@ -288,7 +354,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, false);
     // Put the yielding task on the normal FIFO side so the just-woken peer can
     // run promptly without starving older normal work.
-    if (!llam_norm_queue_push_yield_locked(target, current)) {
+    if (!llam_norm_queue_push_yield_locked(target, &access, current)) {
         pthread_mutex_unlock(&target->lock);
         return false;
     }
@@ -324,7 +390,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     }
     target->metrics.yields += 1U;
     target->metrics.ctx_switches += 1U;
-    target->direct_handoff_streak += 1U;
+    target->processor.direct_handoff_streak += 1U;
     llam_trace_shard(target, task, kind, task_from, LLAM_TASK_STATE_RUNNING, reason);
     llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);

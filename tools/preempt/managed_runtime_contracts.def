@@ -1,0 +1,178 @@
+/*
+ * Copyright 2026 Feralthedogg
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * See LICENSES/Apache-2.0.txt.
+ */
+
+/* Versioned SDK effect contracts. The fourth argument is the required effect,
+ * not an assertion inferred from a function's spelling. IDs are wire identities:
+ * append only, never rename or reuse an existing ID. Only these reviewed runtime operations may
+ * execute from a managed task without entering a native callback domain.
+ *
+ * Signature: return type followed by zero or more parameter types. v = void,
+ * p = address-space-zero pointer, i = i32, q = i64 (also 64-bit size_t/ssize_t),
+ * f = llam_fd_t (i64 on Windows, i32 elsewhere), h = llam_handle_t (pointer on
+ * Windows, i32 elsewhere). No varargs, non-C calling convention, or ABI-changing
+ * parameter/return attributes are allowed. Pointer pointees intentionally do
+ * not participate in the native ABI; managedTypeIdentity retains every LLVM
+ * ABI attribute for contracts outside this scalar SDK table.
+ *
+ * Lifecycle/loader mutation, manual blocking-domain transitions, debug writes,
+ * and narrow integer ABIs remain outside this profile. Name prefixes grant no
+ * effect. Public declarations and these ABI shapes are checked by compiler tests.
+ */
+
+LLAM_RUNTIME_CONTRACT(1, llam_yield, "v", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(2, llam_task_safepoint, "v", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(3, llam_sleep_until, "iq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(4, llam_sleep_ns, "iq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(5, llam_join, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(6, llam_join_until, "ipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(7, llam_detach, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(8, llam_call_blocking_result, "ippp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(9, llam_call_blocking, "ppp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(10, llam_now_ns, "q", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(11, llam_current_task, "p", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(12, llam_task_id, "qp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(13, llam_task_flags, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(14, llam_task_class, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(15, llam_task_set_class, "ii", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(16, llam_task_state_name, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(17, llam_task_local_key_create, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(18, llam_task_local_key_delete, "ii", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(19, llam_task_local_get, "pi", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(20, llam_task_local_set, "iip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(21, llam_mutex_create, "p", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(22, llam_mutex_destroy, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(23, llam_mutex_lock, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(24, llam_mutex_lock_until, "ipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(25, llam_mutex_trylock, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(26, llam_mutex_unlock, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(27, llam_cond_create, "p", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(28, llam_cond_destroy, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(29, llam_cond_wait, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(30, llam_cond_wait_until, "ippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(31, llam_cond_signal, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(32, llam_cond_broadcast, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(33, llam_channel_create, "pq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(34, llam_channel_destroy, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(35, llam_channel_send, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(36, llam_channel_try_send, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(37, llam_channel_send_until, "ippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(38, llam_channel_recv_result, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(39, llam_channel_try_recv_result, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(40, llam_channel_recv_until_result, "ipqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(41, llam_channel_recv, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(42, llam_channel_recv_until, "ppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(43, llam_channel_close, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(44, llam_channel_select, "ipqqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(45, llam_cancel_token_create, "p", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(46, llam_cancel_token_destroy, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(47, llam_cancel_token_cancel, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(48, llam_cancel_token_is_cancelled, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(49, llam_timer_create_ex, "ipqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(50, llam_timer_create, "iqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(51, llam_timer_wait, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(52, llam_timer_wait_until, "ipqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(53, llam_timer_reset, "ipqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(54, llam_timer_cancel, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(55, llam_timer_destroy, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(56, llam_signal_set_create_ex, "ipqpqp", NATIVE_AFFINE)
+LLAM_RUNTIME_CONTRACT(57, llam_signal_wait, "ipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(58, llam_signal_wait_until, "ipqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(59, llam_signal_set_destroy, "ip", NATIVE_AFFINE)
+LLAM_RUNTIME_CONTRACT(60, llam_task_group_create, "p", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(61, llam_task_group_destroy, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(62, llam_task_group_spawn_ex, "pppppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(63, llam_task_group_spawn, "ppppp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(64, llam_task_group_cancel, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(65, llam_task_group_join, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(66, llam_task_group_join_until, "ipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(67, llam_spawn_ex, "ppppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(68, llam_spawn, "pppp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(69, llam_runtime_spawn_ex, "pppppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(70, llam_runtime_request_stop, "i", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(71, llam_read, "qfpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(72, llam_read_handle, "qhpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(73, llam_read_when_ready, "qfpqi", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(74, llam_write, "qfpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(75, llam_writev, "qfpi", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(76, llam_pread, "qfpqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(77, llam_pwrite, "qfpqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(78, llam_preadv, "qfpiq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(79, llam_pwritev, "qfpiq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(80, llam_write_handle, "qhpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(81, llam_pread_handle, "qhpqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(82, llam_pwrite_handle, "qhpqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(83, llam_preadv_handle, "qhpiq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(84, llam_pwritev_handle, "qhpiq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(85, llam_close, "if", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(86, llam_close_handle, "ih", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(87, llam_read_owned, "qfqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(88, llam_recv_owned, "qfqip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(89, llam_recvfrom, "qfpqipp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(90, llam_sendto, "qfpqipi", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(91, llam_recvfrom_owned, "qfqippp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(92, llam_io_buffer_opts_init, "ipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(93, llam_io_buffer_alloc_ex, "ipqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(94, llam_io_buffer_alloc, "iqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(95, llam_io_buffer_alloc_aligned, "iqqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(96, llam_io_buffer_alignment, "qp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(97, llam_pread_owned_aligned, "qfqqqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(98, llam_pread_handle_owned_aligned, "qhqqqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(99, llam_io_buffer_release, "vp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(100, llam_io_buffer_data, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(101, llam_io_buffer_size, "qp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(102, llam_io_buffer_capacity, "qp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(103, llam_accept, "ffpp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(104, llam_connect, "ifpi", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(105, llam_getaddrinfo_result, "ippppp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(106, llam_freeaddrinfo_result, "vp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(107, llam_open_async, "ipiip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(108, llam_stat_path_ex, "ippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(109, llam_call_native_affine_result, "ippp", NATIVE_AFFINE)
+
+/* ABI 2.3 additions; existing wire identities remain unchanged. */
+LLAM_RUNTIME_CONTRACT(110, llam_wait_opts_init, "ipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(111, llam_runtime_channel_create, "ppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(112, llam_runtime_mutex_create, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(113, llam_runtime_cond_create, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(114, llam_runtime_cancel_token_create, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(115, llam_runtime_task_group_create, "pp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(116, llam_task_group_create_ex, "ppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(117, llam_runtime_task_group_create_ex, "pppq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(118, llam_runtime_timer_create_ex, "ippqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(119, llam_runtime_signal_set_create_ex, "ippqpqp", NATIVE_AFFINE)
+LLAM_RUNTIME_CONTRACT(120, llam_runtime_request_stop_handle, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(121, llam_runtime_get_resources_ex, "ippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(122, llam_read_ex, "qfpqpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(123, llam_write_ex, "qfpqpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(124, llam_read_handle_ex, "qhpqpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(125, llam_write_handle_ex, "qhpqpq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(126, llam_connect_ex, "ifpipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(127, llam_poll_fd_ex, "ifippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(128, llam_read_until, "qfpqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(129, llam_write_until, "qfpqq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(130, llam_connect_until, "ifpiq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(131, llam_poll_fd_until, "ifiqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(132, llam_read_exact_ex, "ifpqpqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(133, llam_write_all_ex, "ifpqpqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(134, llam_read_exact, "ifpqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(135, llam_write_all, "ifpqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(136, llam_task_local_set_owned, "iipp", NATIVE_AFFINE)
+LLAM_RUNTIME_CONTRACT(137, llam_task_local_take_result, "iip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(138, llam_task_set_result, "ipi", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(139, llam_task_get_result, "ippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(140, llam_join_result, "ippq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(141, llam_join_result_until, "ipqpq", RUNTIME_CRITICAL)

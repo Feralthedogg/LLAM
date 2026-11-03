@@ -3,12 +3,12 @@
  * @brief Runtime allocator front-end and shared slab-growth policy.
  *
  * @details
- * This translation unit owns allocation policy that is shared by the shard-local
+ * This translation unit owns allocation policy that is shared by processor-local
  * object caches:
  *  - slab storage selection (calloc vs. mmap + optional huge-page advice),
  *  - chunk bookkeeping for allocator teardown,
  *  - runtime-wide blocking-job pooling,
- *  - and shard slab growth for task, wait, timer, I/O request, and I/O buffer
+ *  - and processor slab growth for task, wait, timer, I/O request, and I/O buffer
  *    objects.
  *
  * Fast allocation/free paths live in the object-specific files. The functions
@@ -30,10 +30,14 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#if defined(LLAM_ENABLE_TEST_HOOKS) && defined(__linux__) && defined(__x86_64__) && \
+    defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+#include "async_preempt_abi.h"
+#endif
 
 /** Minimum allocation size where the experimental huge-allocation path is used. */
 #define LLAM_HUGE_ALLOC_MIN_BYTES (2U * 1024U * 1024U)
@@ -184,14 +188,23 @@ int llam_allocator_record_chunk(llam_allocator_t *allocator,
     chunk->item_kind = item_kind;
     chunk->item_count = item_count;
     chunk->mmapped = mmapped;
-    chunk->next = allocator->chunks;
-    allocator->chunks = chunk;
+    llam_allocator_link_chunk_locked(allocator, chunk);
     pthread_mutex_unlock(&allocator->lock);
     return 0;
 }
 
+/** @brief Publish backing storage under the allocator lock, with O(1) unlink. */
+void llam_allocator_link_chunk_locked(llam_allocator_t *allocator, llam_alloc_chunk_t *chunk) {
+    chunk->next = allocator->chunks;
+    chunk->prev_link = &allocator->chunks;
+    if (chunk->next != NULL) {
+        chunk->next->prev_link = &chunk->next;
+    }
+    allocator->chunks = chunk;
+}
+
 /**
- * @brief Lock a shard allocator and record the acquisition metric.
+ * @brief Lock a processor allocator and record the acquisition metric.
  *
  * @param allocator Allocator to lock.
  */
@@ -201,7 +214,7 @@ void llam_allocator_lock(llam_allocator_t *allocator) {
 }
 
 /**
- * @brief Unlock a shard allocator.
+ * @brief Unlock a processor allocator.
  *
  * @param allocator Allocator to unlock.
  */
@@ -210,7 +223,7 @@ void llam_allocator_unlock(llam_allocator_t *allocator) {
 }
 
 /**
- * @brief Initialize an allocator embedded in a shard.
+ * @brief Initialize an allocator embedded in a processor.
  *
  * @param allocator Allocator storage to initialize.
  */
@@ -220,12 +233,13 @@ int llam_allocator_init(llam_allocator_t *allocator) {
     memset(allocator, 0, sizeof(*allocator));
     rc = pthread_mutex_init(&allocator->lock, NULL);
     if (rc != 0) {
-        // Allocator locks protect all shard-local slabs.  Startup must fail
-        // rather than publishing a shard with an unusable allocator lock.
+        // Allocator locks protect all processor-local slabs. Startup must fail
+        // rather than publishing a processor with an unusable allocator lock.
         errno = rc;
         return -1;
     }
     allocator->lock_initialized = true;
+    atomic_init(&allocator->task_external_retire_pending, 0U);
     atomic_store(&allocator->remote_free_pending, 0U);
     atomic_store(&allocator->task_remote_free, NULL);
     atomic_store(&allocator->wait_remote_free, NULL);
@@ -237,7 +251,7 @@ int llam_allocator_init(llam_allocator_t *allocator) {
 }
 
 /**
- * @brief Destroy a shard allocator and release every recorded slab.
+ * @brief Destroy a processor allocator and release every recorded slab.
  *
  * @param allocator Allocator to tear down.
  *
@@ -255,9 +269,16 @@ void llam_allocator_destroy(llam_allocator_t *allocator) {
         if (chunk->item_kind == LLAM_ALLOC_CHUNK_TASK && chunk->storage != NULL) {
             llam_task_t *tasks = chunk->storage;
 
-            if (llam_task_unregister_public_slab(tasks, chunk->item_count) != 0) {
+            for (unsigned i = 0U; i < chunk->item_count; ++i) {
+                if (tasks[i].owner_runtime != NULL &&
+                    atomic_load_explicit(&tasks[i].scan_refs, memory_order_acquire) != 0U) {
+                    keep_chunk = true;
+                    break;
+                }
+            }
+            if (keep_chunk || llam_task_unregister_public_slab(tasks, chunk->item_count) != 0) {
                 /*
-                 * The task public-op counter is saturated/corrupted.  Freeing
+                 * A task still has scan refs or a saturated public-op counter. Freeing
                  * the slab could turn an outstanding forged/stale handle path
                  * into UAF, so teardown leaks this chunk instead of hanging or
                  * releasing unsafe storage.
@@ -268,6 +289,8 @@ void llam_allocator_destroy(llam_allocator_t *allocator) {
             // destroyed even for task objects that never reached user code.
             if (!keep_chunk) {
                 for (unsigned i = 0U; i < chunk->item_count; ++i) {
+                    /* Slabs own every task, including tasks never listed for diagnostics. */
+                    llam_task_release_resources(&tasks[i]);
                     if (tasks[i].lock_initialized) {
                         pthread_mutex_destroy(&tasks[i].lock);
                         tasks[i].lock_initialized = false;
@@ -312,6 +335,7 @@ static void llam_block_job_init(llam_block_job_t *job) {
     job->wait_node = NULL;
     atomic_init(&job->state, LLAM_BLOCK_JOB_ABORTED);
     job->holds_task_ref = false;
+    job->async_slot_reserved = false;
     job->next = NULL;
 }
 
@@ -338,6 +362,7 @@ static void llam_block_job_reset(llam_block_job_t *job) {
     job->wait_node = NULL;
     atomic_store_explicit(&job->state, LLAM_BLOCK_JOB_ABORTED, memory_order_release);
     job->holds_task_ref = false;
+    job->async_slot_reserved = false;
     job->next = NULL;
 }
 
@@ -409,6 +434,13 @@ llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt) {
         errno = EINVAL;
         return NULL;
     }
+#if defined(LLAM_ENABLE_TEST_HOOKS) && defined(__linux__) && defined(__x86_64__) && \
+    defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
+    if (llam_async_preempt_test_block_alloc_failure(rt)) {
+        errno = ENOMEM;
+        return NULL;
+    }
+#endif
 
     for (;;) {
         pthread_mutex_lock(&rt->block_lock);
@@ -439,6 +471,7 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
     llam_task_t *task;
     llam_block_job_t *expected_job;
     bool release_task_ref;
+    bool release_async_slot;
 
     if (rt == NULL || job == NULL) {
         return;
@@ -446,6 +479,7 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
 
     task = job->task;
     release_task_ref = job->holds_task_ref;
+    release_async_slot = job->async_slot_reserved;
     if (release_task_ref && task != NULL) {
         /*
          * Stop new cancellation resolvers from discovering this job, then wait
@@ -465,6 +499,7 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
         }
     }
     job->holds_task_ref = false;
+    job->async_slot_reserved = false;
     job->task = NULL;
     job->wait_node = NULL;
 
@@ -475,6 +510,10 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
     pthread_mutex_unlock(&rt->block_lock);
     if (release_task_ref && task != NULL) {
         (void)llam_task_scan_ref_release(rt, task);
+    }
+    /* Cancellation alone cannot return capacity: resolver/ref drain and recycling precede it. */
+    if (release_async_slot) {
+        llam_async_preempt_block_release(rt);
     }
 }
 
@@ -494,9 +533,9 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
     unsigned i;
 
     if (items == NULL) {
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
     // Task locks are part of the object contract, so initialize every item
@@ -510,15 +549,15 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
                 pthread_mutex_destroy(&items[i].lock);
             }
             llam_release_alloc_storage(items, alloc_bytes, mmapped);
-            llam_allocator_lock(&shard->allocator);
-            shard->allocator.slab_grow_failures += 1U;
-            llam_allocator_unlock(&shard->allocator);
+            llam_allocator_lock(&shard->processor.allocator);
+            shard->processor.allocator.slab_grow_failures += 1U;
+            llam_allocator_unlock(&shard->processor.allocator);
             errno = rc;
             return -1;
         }
         items[i].lock_initialized = true;
     }
-    if (llam_allocator_record_chunk(&shard->allocator,
+    if (llam_allocator_record_chunk(&shard->processor.allocator,
                                   items,
                                   alloc_bytes,
                                   mmapped,
@@ -529,9 +568,9 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
             items[i].lock_initialized = false;
         }
         llam_release_alloc_storage(items, alloc_bytes, mmapped);
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
 
@@ -539,16 +578,16 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
 
     // Publish all items only after bookkeeping succeeds; otherwise teardown
     // would not know how to release this backing allocation.
-    llam_allocator_lock(&shard->allocator);
-    shard->allocator.slab_grows += 1U;
+    llam_allocator_lock(&shard->processor.allocator);
+    shard->processor.allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_TASK_SLAB_COUNT; ++i) {
         items[i].alloc_owner_shard = shard->id;
         items[i].alloc_external_pool = false;
-        items[i].alloc_next = shard->allocator.task_free;
-        shard->allocator.task_free = &items[i];
-        shard->allocator.task_allocs += 1U;
+        items[i].alloc_next = shard->processor.allocator.task_free;
+        shard->processor.allocator.task_free = &items[i];
+        shard->processor.allocator.task_allocs += 1U;
     }
-    llam_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->processor.allocator);
     return 0;
 }
 
@@ -562,13 +601,19 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
  */
 void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt) {
     const char *value;
-    unsigned target = 128U;
+    unsigned target;
     unsigned shard_id;
     unsigned slabs;
 
     if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U) {
         return;
     }
+    /* One warm slab bounds idle metadata in ordinary/debug runtimes. Latency
+     * profiles retain the larger reserve; explicit prewarm still overrides it. */
+    target = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ||
+                     rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY
+                 ? 128U
+                 : LLAM_TASK_SLAB_COUNT;
     value = llam_env_get("LLAM_TASK_CACHE_PREWARM");
     if (value != NULL && value[0] != '\0') {
         char *end = NULL;
@@ -618,28 +663,28 @@ int llam_allocator_grow_wait_slab(llam_shard_t *shard) {
     unsigned i;
 
     if (items == NULL) {
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
-    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+    if (llam_allocator_record_chunk(&shard->processor.allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
         llam_release_alloc_storage(items, alloc_bytes, mmapped);
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
 
-    llam_allocator_lock(&shard->allocator);
-    shard->allocator.slab_grows += 1U;
+    llam_allocator_lock(&shard->processor.allocator);
+    shard->processor.allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_WAIT_NODE_SLAB_COUNT; ++i) {
         llam_wait_node_reset(&items[i], shard->runtime, shard->id);
-        items[i].alloc_next = shard->allocator.wait_free;
-        shard->allocator.wait_free = &items[i];
-        shard->allocator.wait_allocs += 1U;
+        items[i].alloc_next = shard->processor.allocator.wait_free;
+        shard->processor.allocator.wait_free = &items[i];
+        shard->processor.allocator.wait_allocs += 1U;
     }
-    llam_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->processor.allocator);
     return 0;
 }
 
@@ -659,29 +704,29 @@ int llam_allocator_grow_timer_slab(llam_shard_t *shard) {
     unsigned i;
 
     if (items == NULL) {
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
-    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+    if (llam_allocator_record_chunk(&shard->processor.allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
         llam_release_alloc_storage(items, alloc_bytes, mmapped);
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
 
-    llam_allocator_lock(&shard->allocator);
-    shard->allocator.slab_grows += 1U;
+    llam_allocator_lock(&shard->processor.allocator);
+    shard->processor.allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_TIMER_NODE_SLAB_COUNT; ++i) {
         items[i].owner_runtime = shard->runtime;
         items[i].owner_shard = shard->id;
-        items[i].alloc_next = shard->allocator.timer_free;
-        shard->allocator.timer_free = &items[i];
-        shard->allocator.timer_allocs += 1U;
+        items[i].alloc_next = shard->processor.allocator.timer_free;
+        shard->processor.allocator.timer_free = &items[i];
+        shard->processor.allocator.timer_allocs += 1U;
     }
-    llam_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->processor.allocator);
     return 0;
 }
 
@@ -701,31 +746,31 @@ int llam_allocator_grow_io_req_slab(llam_shard_t *shard) {
     unsigned i;
 
     if (items == NULL) {
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
-    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+    if (llam_allocator_record_chunk(&shard->processor.allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
         llam_release_alloc_storage(items, alloc_bytes, mmapped);
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
 
-    llam_allocator_lock(&shard->allocator);
-    shard->allocator.slab_grows += 1U;
+    llam_allocator_lock(&shard->processor.allocator);
+    shard->processor.allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_IO_REQ_SLAB_COUNT; ++i) {
         // Requests track both logical owner and allocation owner because live
         // I/O can migrate/rehome while the backing object still returns to the
         // original slab owner.
         llam_io_req_reset(&items[i], shard->runtime, shard->id, shard->id);
-        items[i].alloc_next = shard->allocator.io_req_free;
-        shard->allocator.io_req_free = &items[i];
-        shard->allocator.io_req_allocs += 1U;
+        items[i].alloc_next = shard->processor.allocator.io_req_free;
+        shard->processor.allocator.io_req_free = &items[i];
+        shard->processor.allocator.io_req_allocs += 1U;
     }
-    llam_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->processor.allocator);
     return 0;
 }
 
@@ -739,39 +784,44 @@ int llam_allocator_grow_io_buffer_slab(llam_shard_t *shard) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
     unsigned slab_count = llam_io_buffer_slab_count(shard);
+    size_t item_bytes = sizeof(llam_io_buffer_t) + LLAM_IO_BUFFER_INLINE_BYTES;
     llam_io_buffer_t *items = llam_alloc_slab_storage(shard->runtime,
-                                                  (size_t)slab_count * sizeof(*items),
+                                                  (size_t)slab_count * item_bytes,
                                                   &alloc_bytes,
                                                   &mmapped);
     unsigned i;
 
     if (items == NULL) {
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
-    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+    if (llam_allocator_record_chunk(&shard->processor.allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
         llam_release_alloc_storage(items, alloc_bytes, mmapped);
-        llam_allocator_lock(&shard->allocator);
-        shard->allocator.slab_grow_failures += 1U;
-        llam_allocator_unlock(&shard->allocator);
+        llam_allocator_lock(&shard->processor.allocator);
+        shard->processor.allocator.slab_grow_failures += 1U;
+        llam_allocator_unlock(&shard->processor.allocator);
         return -1;
     }
 
-    llam_allocator_lock(&shard->allocator);
-    shard->allocator.slab_grows += 1U;
+    llam_allocator_lock(&shard->processor.allocator);
+    shard->processor.allocator.slab_grows += 1U;
     for (i = 0; i < slab_count; ++i) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)((unsigned char *)items + (size_t)i * item_bytes);
+
         // Buffer objects start with inline storage. Larger request payloads may
         // attach external storage later and release it before cache return.
-        items[i].owner_runtime = shard->runtime;
-        items[i].alloc_owner_shard = shard->id;
-        items[i].data = items[i].inline_data;
-        items[i].capacity = LLAM_IO_BUFFER_INLINE_BYTES;
-        items[i].alloc_next = shard->allocator.io_buffer_free;
-        shard->allocator.io_buffer_free = &items[i];
-        shard->allocator.io_buffer_allocs += 1U;
+        buffer->owner_runtime = shard->runtime;
+        buffer->alloc_owner_shard = shard->id;
+        buffer->inline_capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+        buffer->inline_data = (unsigned char *)(buffer + 1);
+        buffer->data = buffer->inline_data;
+        buffer->capacity = buffer->inline_capacity;
+        buffer->alloc_next = shard->processor.allocator.io_buffer_free;
+        shard->processor.allocator.io_buffer_free = buffer;
+        shard->processor.allocator.io_buffer_allocs += 1U;
     }
-    llam_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->processor.allocator);
     return 0;
 }

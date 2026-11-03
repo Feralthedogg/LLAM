@@ -17,7 +17,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "llam/runtime.h"
@@ -54,12 +54,29 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, profile);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved0);
 ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_mode);
 ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_poll_period);
+_Static_assert(offsetof(llam_runtime_opts_t, worker_count) == 56U, "ABI2.2 runtime prefix changed");
+_Static_assert(sizeof(llam_runtime_opts_t) == 80U, "ABI2.3 runtime options size changed");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->max_tasks) == sizeof(uint64_t), "fixed-width task limit");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->experimental_flags) == sizeof(uint64_t),
                "llam_runtime_opts_t.experimental_flags must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns) == sizeof(uint64_t),
                "llam_runtime_opts_t.preempt_quantum_ns must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->sqpoll_cpu) == sizeof(int32_t),
                "llam_runtime_opts_t.sqpoll_cpu must be fixed-width");
+_Static_assert(sizeof(llam_windows_async_preempt_range_t) == 24U,
+               "certified Windows range must have a fixed 24-byte layout");
+_Static_assert(offsetof(llam_windows_async_preempt_range_t, end_pc) == 8U &&
+                   offsetof(llam_windows_async_preempt_range_t, flags) == 16U,
+               "certified Windows range field offsets must not move");
+ASSERT_FIELD_U32(llam_windows_async_preempt_range_t, flags);
+ASSERT_FIELD_U32(llam_windows_async_preempt_range_t, reserved0);
+ASSERT_FIELD_U32(llam_windows_async_preempt_opts_t, flags);
+ASSERT_FIELD_U32(llam_windows_async_preempt_opts_t, reserved0);
+_Static_assert(offsetof(llam_windows_async_preempt_opts_t, ranges) == 8U,
+               "Windows opt-in range pointer must follow its fixed-width header");
+_Static_assert(sizeof(((llam_windows_async_preempt_opts_t *)0)->range_count) ==
+                   sizeof(uint64_t),
+               "Windows opt-in range count must be fixed-width");
 ASSERT_FIELD_U32(llam_runtime_stats_t, active_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers_floor);
@@ -90,6 +107,9 @@ ASSERT_FIELD_U32(llam_io_buffer_opts_t, flags);
 ASSERT_FIELD_U32(llam_io_buffer_opts_t, reserved0);
 _Static_assert(LLAM_RUNTIME_OPTS_CURRENT_SIZE == sizeof(llam_runtime_opts_t),
                "LLAM_RUNTIME_OPTS_CURRENT_SIZE must match llam_runtime_opts_t");
+_Static_assert(LLAM_WINDOWS_ASYNC_PREEMPT_OPTS_CURRENT_SIZE ==
+                   sizeof(llam_windows_async_preempt_opts_t),
+               "Windows opt-in size macro must match its struct");
 _Static_assert(LLAM_SPAWN_OPTS_CURRENT_SIZE == sizeof(llam_spawn_opts_t),
                "LLAM_SPAWN_OPTS_CURRENT_SIZE must match llam_spawn_opts_t");
 _Static_assert(LLAM_RUNTIME_STATS_CURRENT_SIZE == sizeof(llam_runtime_stats_t),
@@ -230,7 +250,9 @@ static int test_llam_option_initializers(void) {
     if (runtime_opts.deterministic != 0U ||
         runtime_opts.sqpoll_cpu != -1 ||
         runtime_opts.profile != LLAM_RUNTIME_PROFILE_BALANCED ||
-        runtime_opts.experimental_flags != 0U) {
+        runtime_opts.experimental_flags != 0U || runtime_opts.worker_count != 0U ||
+        runtime_opts.blocking_worker_count != 0U || runtime_opts.max_tasks != 0U ||
+        runtime_opts.max_blocking_jobs != 0U) {
         return test_fail("llam runtime option defaults are inconsistent");
     }
 

@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -82,7 +82,10 @@ static int llam_task_group_reserve_locked(llam_task_group_t *group, size_t neede
     return 0;
 }
 
-llam_task_group_t *llam_task_group_create(void) {
+static llam_task_group_t *llam_task_group_create_owned(llam_runtime_t *owner_runtime, uint32_t flags) {
+    if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
+
+
     llam_task_group_t *group = calloc(1, sizeof(*group));
     int rc;
 
@@ -97,9 +100,10 @@ llam_task_group_t *llam_task_group_create(void) {
         return NULL;
     }
     group->lock_initialized = true;
-    group->owner_runtime = llam_runtime_owner_for_new_object();
+    group->owner_runtime = owner_runtime;
+    group->flags = flags;
     llam_public_active_op_init(&group->active_ops);
-    group->cancel_token = llam_cancel_token_create();
+    group->cancel_token = llam_cancel_token_create_owned(owner_runtime);
     if (group->cancel_token == NULL) {
         pthread_mutex_destroy(&group->lock);
         free(group);
@@ -117,11 +121,66 @@ llam_task_group_t *llam_task_group_create(void) {
     return llam_task_group_public_handle(group);
 }
 
+llam_task_group_t *llam_task_group_create(void) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    return llam_task_group_create_owned(llam_runtime_owner_for_new_object(), 0U);
+}
+
+llam_task_group_t *llam_runtime_task_group_create(llam_runtime_t *runtime) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return NULL;
+    llam_task_group_t *result = llam_task_group_create_owned(pinned, 0U);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
+}
+
+static int llam_task_group_normalize_flags(const llam_task_group_opts_t *opts, size_t size,
+                                           uint32_t *flags) {
+    *flags = 0U;
+    if (opts == NULL) return 0;
+    if (size == 0U) { errno = EINVAL; return -1; }
+    llam_task_group_opts_t raw = {0};
+    memcpy(&raw, opts, size < sizeof(raw) ? size : sizeof(raw));
+    if (size >= sizeof(raw.flags)) *flags = raw.flags;
+    if ((*flags & ~LLAM_TASK_GROUP_F_LINK_CANCEL) != 0U ||
+        (size >= sizeof(raw) && raw.reserved0 != 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+llam_task_group_t *llam_task_group_create_ex(const llam_task_group_opts_t *opts, size_t size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    uint32_t flags;
+    if (llam_task_group_normalize_flags(opts, size, &flags) != 0) return NULL;
+    return llam_task_group_create_owned(llam_runtime_owner_for_new_object(), flags);
+}
+
+llam_task_group_t *llam_runtime_task_group_create_ex(llam_runtime_t *runtime,
+                                                    const llam_task_group_opts_t *opts, size_t size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    uint32_t flags;
+    if (llam_task_group_normalize_flags(opts, size, &flags) != 0) return NULL;
+    llam_runtime_t *pinned = NULL;
+    if (llam_runtime_begin_object_creation(runtime, &pinned) != 0) return NULL;
+    llam_task_group_t *result = llam_task_group_create_owned(pinned, flags);
+    int saved_errno = errno;
+    llam_runtime_end_public_op(pinned);
+    errno = saved_errno;
+    return result;
+}
+
 llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,
                                       void *arg,
                                       const llam_spawn_opts_t *opts,
                                       size_t opts_size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     llam_spawn_opts_t raw_opts;
     llam_spawn_opts_t effective_opts;
     size_t copy_size;
@@ -236,10 +295,14 @@ llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
                                    llam_task_fn fn,
                                    void *arg,
                                    const llam_spawn_opts_t *opts) {
+    LLAM_NATIVE_API_GUARD(NULL);
+
     return llam_task_group_spawn_ex(group, fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
 }
 
 int llam_task_group_cancel(llam_task_group_t *group) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     llam_cancel_token_t *token;
 
     if (llam_task_group_lock_live(group, &group) != 0) {
@@ -314,9 +377,13 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
 }
 
 int llam_task_group_join(llam_task_group_t *group) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_task_group_join_impl(group, false, 0U);
 }
 
 int llam_task_group_join_until(llam_task_group_t *group, uint64_t deadline_ns) {
+    LLAM_NATIVE_API_GUARD(-1);
+
     return llam_task_group_join_impl(group, true, deadline_ns);
 }

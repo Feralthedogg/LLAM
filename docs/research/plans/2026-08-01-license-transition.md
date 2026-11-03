@@ -1,5 +1,8 @@
 # LLAM 3.0.0 License Transition Implementation Plan
 
+> Superseded on 2026-09-23. Historical record only; the current first-party
+> license is Apache-2.0. See [current licensing](../../licensing.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Establish `v3.0.0` as the first LLAM Commercial Reciprocity

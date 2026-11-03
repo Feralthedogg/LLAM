@@ -5,8 +5,8 @@ implementations may rely on when loading LLAM dynamically.
 
 ## ABI Stability
 
-LLAM exposes one stable public ABI family: symbols declared in
-`include/llam/runtime.h`.
+LLAM exposes one stable public ABI family: public symbols declared in
+`include/llam/runtime.h`, `include/llam/io.h` and `include/llam/managed.h`.
 
 All other non-static implementation symbols are private even if a platform
 linker happens to export them. Language runtimes must bind only documented
@@ -17,9 +17,31 @@ The current public ABI version is:
 ```text
 LLAM_VERSION         = 3.0.0
 LLAM_ABI_VERSION_MAJOR = 2
-LLAM_ABI_VERSION_MINOR = 0
+LLAM_ABI_VERSION_MINOR = 3
 LLAM_ABI_VERSION       = (major << 16) | minor
 ```
+
+ABI 2.3 adds explicit-runtime object constructors and diagnostics, runtime resource
+limits and bounded drain, linked group cancellation, per-operation I/O wait
+options, progress-preserving transfers, task results and owned task-local cleanup.
+`llam_runtime_opts_t` grows from 56 to 80 bytes at its tail. Old 56-byte callers
+retain automatic worker counts and unlimited task/blocking-job admission. New
+limits use fixed-width fields; input tails are read only when completely present.
+`llam_wait_opts_t` is 24 bytes, group options are 8 bytes, task results are 16 bytes,
+and runtime resources are 64 bytes on supported 64-bit targets. Query functions
+copy only the compatible prefix and preserve an unknown caller tail. New function
+availability requires ABI minor >= 3; resolve symbols before binding them.
+
+ABI 2.2 adds `<llam/managed.h>` and the managed constructor, module, policy
+query and native-affine callback interfaces. `llam_preempt_opts_t` and
+`llam_module_opts_t` are 24 bytes; `llam_preempt_info_t` is 168 bytes on the
+supported 64-bit ABIs. The information structure retains its earlier 88-byte
+prefix, the 144-byte quantum tail, and the appended prepared-pool counters.
+All option/query interfaces copy only the caller/library compatible prefix,
+use defaults for omitted input tails and preserve unknown caller output tails.
+Existing constructors retain their scheduling contract; the new managed
+constructor selects `ASYNC_AUTO` by default. See the
+[managed runtime contract](reference/managed-runtime.md).
 
 ABI rules:
 
@@ -89,6 +111,7 @@ with `errno` set on failure.
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
 | Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_create`, `llam_runtime_default`, `llam_runtime_run_handle`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_destroy`, `llam_runtime_shutdown` | Explicit runtime handles are the canonical embedding boundary. Legacy host-thread lifecycle calls operate on `llam_runtime_default()`; managed task spawn/stop/shutdown wrappers target the current owner runtime and cannot cross-stop peer runtimes. Shutdown releases backend resources while public cleanup handles keep their documented post-shutdown behavior. FFI bindings should prefer `_ex` and option initializers. |
+| Experimental Windows async | `llam_runtime_enable_experimental_windows_async_preempt_ex` | ABI 2.1 additive expert-only, pre-run one-way opt-in. Caller certifies PE-image instruction ranges and explicitly acknowledges possible process-wide fail-fast; LLAM verifies image backing/lifetime and machine support, not code semantics. Unavailable builds export the symbol but return `ENOTSUP`. |
 | Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_runtime_spawn_ex`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. Embedders with explicit runtimes should spawn with `llam_runtime_spawn_ex()`. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until`, `llam_timer_create_ex`, `llam_timer_create`, `llam_timer_wait`, `llam_timer_wait_until`, `llam_timer_reset`, `llam_timer_cancel`, `llam_timer_destroy` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. Waitable interval timers are runtime-aware public handles; destroy returns `EBUSY` while a wait/reset/cancel operation is active. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. Cancel/query also fail with `EBUSY` during active public-handle teardown. Managed cross-runtime token operations fail with `EXDEV`. |
@@ -109,6 +132,10 @@ passed into LLAM use `_ex` entry points:
 
 ```c
 int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size);
+int llam_runtime_enable_experimental_windows_async_preempt_ex(
+    llam_runtime_t *runtime,
+    const llam_windows_async_preempt_opts_t *opts,
+    size_t opts_size);
 llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg,
                            const llam_spawn_opts_t *opts,
                            size_t opts_size);
@@ -122,6 +149,15 @@ at the same defaults used by the convenience wrappers. This lets older FFI
 bindings pass smaller option structs to newer libraries when fields are
 appended at the tail. Passing an option pointer with `opts_size == 0` fails
 with `errno = EINVAL`.
+
+The experimental Windows async opt-in requires every v1 field and deliberately
+has no initializer that could silently acknowledge process-wide fail-fast.
+Callers set its acknowledgement flag explicitly. Its input range array is
+copied on success; range semantics are certified by the caller, not inferred
+from ABI metadata or PE executable-page checks. The options and ranges must
+remain unchanged until the call returns. An older library ignores option
+bytes beyond its known v1 prefix; callers requiring future tail semantics
+must check the loaded ABI minor before opting in.
 
 The loaded library writes only the ABI prefix it knows. If a newer binding
 passes a larger local option, stats, or ABI-info struct to an older LLAM
@@ -138,6 +174,7 @@ bindings:
 
 ```c
 LLAM_RUNTIME_OPTS_CURRENT_SIZE
+LLAM_WINDOWS_ASYNC_PREEMPT_OPTS_CURRENT_SIZE
 LLAM_SPAWN_OPTS_CURRENT_SIZE
 LLAM_RUNTIME_STATS_CURRENT_SIZE
 LLAM_IO_BUFFER_OPTS_CURRENT_SIZE
@@ -279,7 +316,6 @@ Expected dynamic artifacts:
 
 ```text
 Linux:  libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.3.0.0
-BSD:    libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.3.0.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.2.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.
@@ -351,7 +387,11 @@ task. Cross-runtime tokens are rejected with `EXDEV` before the task is
 published.
 
 `llam_join()` waits for task completion. Managed LLAM task callers park
-cooperatively. Unmanaged OS-thread callers block the calling thread and do not
+cooperatively. A task inside `llam_enter_blocking()` has relinquished its
+processor and instead waits on its existing native thread; `llam_yield()` in
+that foreign scope is a no-op. A foreign join preserves timeout/cancellation
+and completion ownership, including after a stop-time failed leave. Unmanaged
+OS-thread callers block the calling thread and do not
 drive scheduler progress by themselves; another thread must call `llam_run()` or
 the target must already be able to complete. `llam_join_until()` uses an
 absolute deadline in `llam_now_ns()` units. Passing deadline `0` is an already
@@ -405,6 +445,11 @@ they provide explicit LLAM boundaries where an already requested preemption can
 be honored. `LLAM_PREEMPT_POLL_EVERY` evaluates its arguments once, treats
 `interval` values `0` and `1` as "poll every call", and is safe to use in tight
 loops where a full `llam_yield()` would be too expensive.
+
+The separately enabled experimental Win64 backend is an exception only for
+caller-certified PE-image intervals, not arbitrary instructions or arbitrary
+C/C++ code. Its public opt-in is host-only, one-way, and may terminate the
+hosting process if a committed remote context transaction becomes uncertain.
 
 ## Synchronization Semantics
 

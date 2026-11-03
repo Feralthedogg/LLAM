@@ -23,7 +23,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -42,6 +42,7 @@ enum {
  * @return -1 with @c errno set to @c ENOTSUP otherwise.
  */
 int llam_require_task_context(void) {
+    LLAM_NATIVE_API_GUARD(-1);
     llam_runtime_t *rt;
 
     if (g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+# See LICENSES/Apache-2.0.txt.
 
 param(
     [string]$Prefix,
@@ -23,6 +23,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Target -match '^(freebsd|openbsd|netbsd|dragonflybsd)-') {
+    throw "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling"
+}
 
 if ([string]::IsNullOrWhiteSpace($Prefix)) {
     if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -428,6 +432,8 @@ function Install-ArchiveContentsFrom {
 
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "README.md") (Join-Path $Prefix "share\llam\README.md")
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "LICENSE") (Join-Path $Prefix "share\llam\LICENSE")
+    Copy-FileIfPresent (Join-Path $ArchiveSourceDir "NOTICE") (Join-Path $Prefix "share\llam\NOTICE")
+    Copy-FileIfPresent (Join-Path $ArchiveSourceDir "THIRD_PARTY_NOTICES.md") (Join-Path $Prefix "share\llam\THIRD_PARTY_NOTICES.md")
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "CHANGELOG.md") (Join-Path $Prefix "share\llam\CHANGELOG.md")
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "VERSION") (Join-Path $Prefix "share\llam\VERSION")
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "ABI_MAJOR") (Join-Path $Prefix "share\llam\ABI_MAJOR")

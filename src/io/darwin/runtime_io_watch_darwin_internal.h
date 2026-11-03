@@ -22,7 +22,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #ifndef LLAM_RUNTIME_IO_WATCH_DARWIN_INTERNAL_H
@@ -96,7 +96,9 @@ typedef struct llam_darwin_recv_completion {
 } llam_darwin_recv_completion_t;
 
 /* Shared queue/watch helpers also used by Linux-side common code. */
-uint64_t llam_hash_watch_identity_u64(uint64_t value);
+uint64_t llam_hash_watch_identity(uint64_t device,
+                                  uint64_t inode,
+                                  uint64_t descriptor);
 void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta);
 bool llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);

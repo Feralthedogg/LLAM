@@ -22,10 +22,11 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
+#include "managed_scheduler.h"
 
 /**
  * @brief Push a task at the tail of an intrusive task queue.
@@ -133,48 +134,34 @@ bool llam_wait_queue_remove(llam_wait_queue_t *queue, llam_wait_node_t *node) {
  * @param queue Queue to mutate.
  * @return Removed task, or NULL if empty.
  */
-llam_task_t *llam_queue_pop_head(llam_queue_t *queue) {
-    llam_task_t *task = queue->head;
+/* A runnable publication may precede the source G's actual context save. The
+ * source dispatch reservation survives active-G clearing and is released only
+ * after the return callback. Queue locks retain task storage while this acquire
+ * observes that release; skipped Gs keep their original queue and ownership. */
+static llam_task_t *llam_queue_pop_available(llam_queue_t *queue, bool from_tail) {
+    llam_task_t *task = from_tail ? queue->tail : queue->head;
 
-    if (task == NULL) {
-        return NULL;
-    }
-
-    queue->head = task->queue_next;
-    if (queue->head != NULL) {
-        queue->head->queue_prev = NULL;
-    } else {
-        queue->tail = NULL;
-    }
+    while (task != NULL &&
+           (atomic_load_explicit(&task->managed_dispatch_owner, memory_order_acquire) != NULL ||
+            !llam_managed_task_matches_worker(task, g_llam_tls_worker)))
+        task = from_tail ? task->queue_prev : task->queue_next;
+    if (task == NULL) return NULL;
+    if (task->queue_prev != NULL) task->queue_prev->queue_next = task->queue_next;
+    else queue->head = task->queue_next;
+    if (task->queue_next != NULL) task->queue_next->queue_prev = task->queue_prev;
+    else queue->tail = task->queue_prev;
     task->queue_next = NULL;
     task->queue_prev = NULL;
-    queue->depth -= 1;
+    queue->depth -= 1U;
     return task;
 }
 
-/**
- * @brief Pop the tail task from an intrusive task queue.
- *
- * @param queue Queue to mutate.
- * @return Removed task, or NULL if empty.
- */
+llam_task_t *llam_queue_pop_head(llam_queue_t *queue) {
+    return llam_queue_pop_available(queue, false);
+}
+
 llam_task_t *llam_queue_pop_tail(llam_queue_t *queue) {
-    llam_task_t *task = queue->tail;
-
-    if (task == NULL) {
-        return NULL;
-    }
-
-    queue->tail = task->queue_prev;
-    if (queue->tail != NULL) {
-        queue->tail->queue_next = NULL;
-    } else {
-        queue->head = NULL;
-    }
-    task->queue_next = NULL;
-    task->queue_prev = NULL;
-    queue->depth -= 1;
-    return task;
+    return llam_queue_pop_available(queue, true);
 }
 
 /**
@@ -230,7 +217,7 @@ bool llam_shard_is_online(const llam_shard_t *shard) {
     if (shard->runtime->experimental_dynamic_shards == 0U) {
         return true;
     }
-    return atomic_load_explicit(&((llam_shard_t *)shard)->online, memory_order_acquire) != 0U;
+    return llam_processor_online(&shard->processor);
 }
 
 /**

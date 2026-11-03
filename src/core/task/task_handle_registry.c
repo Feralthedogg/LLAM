@@ -24,7 +24,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * See LICENSES/OLD-LICENSE/Apache-2.0.txt.
+ * See LICENSES/Apache-2.0.txt.
  */
 
 #include "runtime_internal.h"
@@ -172,7 +172,6 @@ llam_task_t *llam_task_resolve_public_handle_locked(const llam_task_t *handle) {
 }
 
 static void llam_task_unregister_live_locked(llam_task_t *task) {
-    llam_task_t **link = &g_llam_task_registry;
 
     if (task->public_handle_slot < g_llam_task_public_slots.count) {
         llam_public_slot_release(&g_llam_task_public_slots,
@@ -182,13 +181,13 @@ static void llam_task_unregister_live_locked(llam_task_t *task) {
         atomic_store_explicit(&task->public_handle_generation, 0U, memory_order_release);
     }
 
-    while (*link != NULL) {
-        if (*link == task) {
-            *link = task->registry_next;
-            task->registry_next = NULL;
-            return;
+    if (task->registry_prev_link != NULL) {
+        *task->registry_prev_link = task->registry_next;
+        if (task->registry_next != NULL) {
+            task->registry_next->registry_prev_link = task->registry_prev_link;
         }
-        link = &(*link)->registry_next;
+        task->registry_next = NULL;
+        task->registry_prev_link = NULL;
     }
 }
 
@@ -204,6 +203,10 @@ void llam_task_register_public_slab(llam_task_t *items, unsigned count) {
         items[i].public_handle_slot = SIZE_MAX;
         atomic_init(&items[i].public_handle_generation, 0U);
         items[i].registry_next = g_llam_task_registry;
+        items[i].registry_prev_link = &g_llam_task_registry;
+        if (g_llam_task_registry != NULL) {
+            g_llam_task_registry->registry_prev_link = &items[i].registry_next;
+        }
         g_llam_task_registry = &items[i];
     }
     pthread_mutex_unlock(&g_llam_task_registry_lock);
@@ -248,6 +251,47 @@ int llam_task_unregister_public_slab(llam_task_t *items, unsigned count) {
         }
     }
     return 0;
+}
+
+/**
+ * @brief Retire an idle host span without waiting on readers or registry locks.
+ *
+ * The allocator owns every slot and has observed a zero live-item count. The
+ * registry lock excludes new public pins while all existing pins/scan refs are
+ * checked and every slot is invalidated. A busy span remains registered and
+ * addressable; no partial retirement is performed. Allocator-owned registered
+ * storage carries an unlink link, so retirement never scans unrelated tasks.
+ * Untrusted public/raw-pointer membership checks still walk/validate as before.
+ */
+bool llam_task_try_unregister_public_slab(llam_task_t *items, unsigned count) {
+    int rc;
+
+    if (items == NULL || count == 0U) {
+        errno = EINVAL;
+        return false;
+    }
+    rc = pthread_mutex_trylock(&g_llam_task_registry_lock);
+    if (rc != 0) {
+        errno = rc;
+        return false;
+    }
+    for (unsigned i = 0U; i < count; ++i) {
+        if (llam_public_active_op_count(&items[i].active_ops) != 0U ||
+            (items[i].owner_runtime != NULL &&
+             atomic_load_explicit(&items[i].scan_refs, memory_order_acquire) != 0U)) {
+            pthread_mutex_unlock(&g_llam_task_registry_lock);
+            errno = EBUSY;
+            return false;
+        }
+    }
+    for (unsigned i = 0U; i < count; ++i) {
+        if (items[i].registry_prev_link != NULL) {
+            llam_task_unregister_live_locked(&items[i]);
+            items[i].public_handle_slot = SIZE_MAX;
+        }
+    }
+    pthread_mutex_unlock(&g_llam_task_registry_lock);
+    return true;
 }
 
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle) {
