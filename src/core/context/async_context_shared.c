@@ -2275,13 +2275,14 @@ static bool llam_shared_capture_not_due(const llam_shared_control_t *control, ui
 }
 
 static bool llam_shared_controller_tick(llam_shared_control_t *control, uint64_t now_ns) {
+    if (control == NULL) return false;
     llam_runtime_t *runtime = control->runtime;
     llam_shared_bank_t *bank = NULL;
     enum llam_shared_action action;
     unsigned expected = 0U;
     unsigned phase;
     bool pending;
-    if (control == NULL || !atomic_load_explicit(&runtime->exec_started, memory_order_acquire) ||
+    if (!atomic_load_explicit(&runtime->exec_started, memory_order_acquire) ||
         !atomic_compare_exchange_strong_explicit(&control->controller_busy, &expected, 1U,
                                                   memory_order_acquire, memory_order_relaxed)) return false;
     phase = atomic_load_explicit(&control->start_phase, memory_order_acquire);

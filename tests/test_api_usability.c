@@ -54,7 +54,7 @@ static void check_task(object_case_t *state, bool passed) {
 
 static void object_task(void *argument) {
     object_case_t *state = argument;
-    void *value = state;
+    void *value = (void *)(uintptr_t)1U;
     check_task(state, llam_channel_send(state->channel, NULL) == 0);
     check_task(state, llam_channel_recv_result(state->channel, &value) == 0 && value == NULL);
     check_task(state, llam_mutex_lock(state->mutex) == 0);

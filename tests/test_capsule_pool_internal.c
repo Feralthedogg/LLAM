@@ -20,7 +20,7 @@
 #include <stdio.h>
 
 #define CHECK(expression) do { if (!(expression)) { \
-    fprintf(stderr, "capsule pool:%u: %s (errno=%d)\n", __LINE__, #expression, errno); \
+    fprintf(stderr, "capsule pool:%d: %s (errno=%d)\n", __LINE__, #expression, errno); \
     return -1; \
 } } while (0)
 

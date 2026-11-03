@@ -35,7 +35,7 @@ static void producer(void *argument) {
 
 static void consumer(void *argument) {
     request_t *request = argument;
-    void *message = request;
+    void *message = NULL;
     int error = 0;
     if (llam_channel_recv_result(request->channel, &message) != 0) error = errno;
     else if (message != NULL) error = EINVAL;

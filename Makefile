@@ -2451,19 +2451,29 @@ test-tsan:
 	$(PYTHON) scripts/check_legacy_lease_boundary.py --root .
 
 
-CPPCHECK_ASYNC_CONTEXT_ARGS :=
-CPPCHECK_MAGIC2_ARGS := --suppress=preprocessorErrorDirective:src/internal/magic2.h
-ifneq ($(HOST_PLATFORM),linux)
-CPPCHECK_ASYNC_CONTEXT_ARGS += --suppress=preprocessorErrorDirective:src/core/context/async_context_linux_x86_64.c
+CPPCHECK_HOST_ARGS :=
+ifeq ($(HOST_PLATFORM),linux)
+CPPCHECK_HOST_ARGS += -D__linux__=1
+else ifeq ($(HOST_PLATFORM),darwin)
+CPPCHECK_HOST_ARGS += -D__APPLE__=1 -D__MACH__=1
 endif
+ifeq ($(UNAME_M),x86_64)
+CPPCHECK_HOST_ARGS += -D__x86_64__=1
+else ifneq ($(filter arm64 aarch64,$(UNAME_M)),)
+CPPCHECK_HOST_ARGS += -D__aarch64__=1
+endif
+# Follow registered host translation units; foreign-only probe sources retain
+# their compile-time errors. Test hooks are enabled only for the test pass.
+CPPCHECK_RUNTIME_SOURCES = $(wildcard $(patsubst $(OBJDIR)/%.o,%.c,$(RUNTIME_OBJS)))
+CPPCHECK_ARGS = --platform=unix64 --std=c11 --enable=warning,performance,portability \
+	--error-exitcode=1 --inline-suppr \
+	--suppress=preprocessorErrorDirective:src/internal/magic2.h \
+	-DUINTPTR_MAX=18446744073709551615ULL -DUINT32_MAX=4294967295U \
+	$(CPPCHECK_HOST_ARGS) $(CPPFLAGS)
 
 analyze-cppcheck:
-	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
-		--error-exitcode=1 --inline-suppr \
-		$(CPPCHECK_ASYNC_CONTEXT_ARGS) \
-		$(CPPCHECK_MAGIC2_ARGS) \
-		-DUINTPTR_MAX=18446744073709551615ULL -DUINT32_MAX=4294967295U \
-		-Iinclude -Isrc/internal -Isrc src include tests examples
+	cppcheck $(CPPCHECK_ARGS) $(CPPCHECK_RUNTIME_SOURCES) include examples
+	cppcheck $(CPPCHECK_ARGS) -DLLAM_ENABLE_TEST_HOOKS=1 tests
 
 audit-deps:
 	cd scripts/bench_tokio_compare && cargo audit

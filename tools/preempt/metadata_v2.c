@@ -142,9 +142,9 @@ uint64_t llam_llpm2_runtime_type_id(uint64_t contract_id, uint16_t architecture,
     }
     uint64_t hash = hash_text(UINT64_C(14695981039346656037), runtime_type(signature[0], native_abi));
     hash = hash_text(hash, " (");
-    for (size_t i = 1U; signature[i] != '\0'; ++i) {
-        if (i != 1U) hash = hash_text(hash, ", ");
-        hash = hash_text(hash, runtime_type(signature[i], native_abi));
+    for (const char *parameter = signature + 1U; *parameter != '\0'; ++parameter) {
+        if (parameter != signature + 1U) hash = hash_text(hash, ", ");
+        hash = hash_text(hash, runtime_type(*parameter, native_abi));
     }
     char suffix[] = "):0:0:0";
     suffix[4] = (char)('0' + architecture);

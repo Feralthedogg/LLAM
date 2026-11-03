@@ -91,6 +91,12 @@ The build must have been configured with `LLAM_MANAGED_TOOLING=required` and the
 matching LLVM development package. Reports preserve the registered CTest
 inventory, build log and JUnit results.
 
+The plugin follows the selected LLVM package's linkage model. Shared LLVM
+packages link its shared target; official Linux bundles with static tools use
+LLVM's loadable-module rules and the tools' exported plugin API. The plugin
+does not embed a separate LLVM registry. Both forms must pass the same compiler
+and installed-SDK checks.
+
 ## Create and run tasks
 
 An ordinary task can use calls, local arrays, atomics and supported arithmetic.
