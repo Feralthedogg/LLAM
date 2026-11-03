@@ -182,6 +182,21 @@ static void registered_observer_task(void *argument) {
     registered_check(test, llam_sleep_ns(UINT64_C(1000000)) == 0);
     registered_check(test, atomic_load_explicit(&test->finished, memory_order_acquire) <
                            test->leaf_count);
+    if (test->rendezvous) {
+        /* A valid run may restore both leaves on their home Ps. Exercise
+         * timer-driven reacquisition until the round-robin claimant actually
+         * borrows a P, instead of assuming the first timing sample did so. */
+        uint64_t deadline = llam_now_ns() + UINT64_C(5000000000);
+        while (atomic_load_explicit(&test->borrowed_p, memory_order_acquire) == 0U &&
+               llam_now_ns() < deadline) {
+            if (llam_sleep_ns(UINT64_C(100000)) != 0) {
+                registered_check(test, false);
+                break;
+            }
+            (void)registered_ticket(test);
+        }
+        registered_check(test, atomic_load_explicit(&test->borrowed_p, memory_order_acquire) != 0U);
+    }
     atomic_store_explicit(&test->observer_ran, 1U, memory_order_release);
 }
 
@@ -201,6 +216,15 @@ static llam_runtime_t *registered_runtime(bool single_p, bool automatic) {
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = automatic ? LLAM_PREEMPT_AUTO : LLAM_PREEMPT_STRICT;
     options.preempt_quantum_ns = UINT64_C(1000000);
+    if (!single_p && !registered_dynamic) {
+        unsigned *cpus = NULL;
+        unsigned available = llam_count_allowed_cpus(&cpus);
+        free(cpus);
+        if (available == 0U) { free(runtime); return NULL; }
+        /* A fixed two-P topology exercises actual concurrent native workers
+         * without making the transport oracle depend on the host CPU count. */
+        if (available >= 2U) options.worker_count = 2U;
+    }
     if (registered_dynamic) options.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
     if (llam_runtime_init_registered_rt(runtime, &options, sizeof(options), true,
                                         REGISTERED_EXTRA_WORKERS) != 0) {
@@ -303,7 +327,10 @@ static int registered_run(bool single_p, bool automatic) {
                 goto done;
             }
         for (unsigned i = 0U; i < test.leaf_count + 1U; ++i) {
-            if (llam_join(tasks[i]) != 0) goto done;
+            if (llam_join(tasks[i]) != 0) {
+                fprintf(stderr, "registered native join: run=%u task=%u errno=%d\n", run, i, errno);
+                goto done;
+            }
             tasks[i] = NULL;
         }
         if (atomic_load(&test.started) != test.leaf_count ||
@@ -315,14 +342,23 @@ static int registered_run(bool single_p, bool automatic) {
                 atomic_load(&test.observer_ran), atomic_load(&test.errors));
             goto done;
         }
-        if (!single_p && !registered_dynamic && atomic_load(&test.borrowed_p) == 0U) goto done;
+        if (!single_p && !registered_dynamic && atomic_load(&test.borrowed_p) == 0U) {
+            fprintf(stderr, "registered native: no foreign P observed (run=%u, leaves=%u)\n", run, test.leaf_count);
+            goto done;
+        }
         for (unsigned i = 0U; i < test.leaf_count; ++i) {
-            llam_async_shared_stats_t worker_stats;
+            llam_async_shared_stats_t worker_stats = {0};
             if (!llam_async_shared_worker_stats(test.leaves[i].origin, &worker_stats) ||
-                worker_stats.captures == 0U) goto done;
+                worker_stats.captures == 0U) {
+                fprintf(stderr, "registered native: missing worker captures (run=%u, leaf=%u)\n", run, i);
+                goto done;
+            }
             if (!single_p && !registered_dynamic) {
                 for (unsigned j = 0U; j < i; ++j) {
-                    if (test.leaves[i].origin == test.leaves[j].origin) goto done;
+                    if (test.leaves[i].origin == test.leaves[j].origin) {
+                        fprintf(stderr, "registered native: shared origin (run=%u, leaves=%u/%u)\n", run, i, j);
+                        goto done;
+                    }
                 }
             }
         }
@@ -330,7 +366,11 @@ static int registered_run(bool single_p, bool automatic) {
             llam_worker_t *worker = registered_worker_at(runtime, i);
             uint64_t incarnation = atomic_load_explicit(&worker->incarnation,
                                                         memory_order_acquire);
-            if (incarnation != run + 1U) goto done;
+            if (incarnation != run + 1U) {
+                fprintf(stderr, "registered native: incarnation=%" PRIu64 " expected=%u M=%zu\n",
+                    incarnation, run + 1U, i);
+                goto done;
+            }
         }
     }
     printf("registered native: %zu M / %u P, two runs, original-M exact restore, "

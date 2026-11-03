@@ -545,6 +545,9 @@ static int publication_before_context_save(bool lockfree) {
     /* Real competing Ms skip the reserved source at the normal tail and
      * finish its children while the source's context is still unsaved. */
     atomic_store_explicit(&test.children_release, 1U, memory_order_release);
+    /* The source is deliberately held before scheduler re-entry. Wake idle
+     * peers explicitly so this tests reserved-G dequeue, not wake timing. */
+    llam_wake_all_shards(test.runtime);
     /* Chase-Lev stealing deliberately leaves shallow backlogs to their owner.
      * Require substantial peer progress, then exact completion after release. */
     unsigned progress_target = lockfree ? PUBLICATION_CHILDREN / 2U : PUBLICATION_CHILDREN;
@@ -553,15 +556,15 @@ static int publication_before_context_save(bool lockfree) {
         const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
         (void)nanosleep(&delay, NULL);
     }
-    bool peers_finished = atomic_load_explicit(&test.children_done, memory_order_acquire) >=
-                          progress_target;
+    unsigned children_before_release = atomic_load_explicit(&test.children_done, memory_order_acquire);
+    bool peers_finished = children_before_release >= progress_target;
     bool source_not_resumed = atomic_load_explicit(&test.completed, memory_order_acquire) == 0U;
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_REGISTERED_YIELD, false);
     CHECK(pthread_join(driver, NULL) == 0);
     if (!reached || !reserved || !peers_finished || !source_not_resumed || test.run_result != 0)
-        fprintf(stderr, "publication lockfree=%u reached=%u reserved=%u children=%u source=%u run=%d\n",
-                lockfree, reached, reserved, atomic_load(&test.children_done),
-                atomic_load(&test.completed), test.run_result);
+        fprintf(stderr, "publication lockfree=%u reached=%u reserved=%u children=%u/%u source_held=%u run=%d\n",
+                lockfree, reached, reserved, children_before_release, progress_target,
+                source_not_resumed, test.run_result);
     CHECK(reached && reserved && peers_finished && source_not_resumed && test.run_result == 0);
     CHECK(atomic_load_explicit(&test.completed, memory_order_acquire) == 1U);
     CHECK(atomic_load_explicit(&test.children_done, memory_order_acquire) == PUBLICATION_CHILDREN);

@@ -82,6 +82,8 @@
   ARM64 channel/select smoke floors with the Linux x86-64 portability gate.
 * record a helper's original fatal startup error before publishing failure, so
   runtime completion cannot race ahead and report success.
+* make concurrency gates wake competing workers explicitly and observe actual
+  P borrowing in a fixed two-P native fixture before asserting it occurred.
 
 ## 2.2.1 - 2026-08-01
 
