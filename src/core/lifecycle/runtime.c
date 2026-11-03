@@ -37,6 +37,44 @@ uint32_t g_llam_xsave_mask_lo;
 uint32_t g_llam_xsave_mask_hi;
 /** @brief FP-control context flag used by platform context switch code. */
 uint32_t g_llam_fp_control_context;
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+/* Dyld owns the storage. The libc key only caches its address for bound Ms;
+ * it owns no allocation and installs no callback into an unloadable image. */
+static _Thread_local llam_scheduler_tls_t g_llam_scheduler_tls;
+static pthread_key_t g_llam_scheduler_tls_key;
+static bool g_llam_scheduler_tls_key_ready;
+
+__attribute__((constructor))
+static void llam_scheduler_tls_cache_initialize(void) {
+    g_llam_scheduler_tls_key_ready = pthread_key_create(&g_llam_scheduler_tls_key, NULL) == 0;
+}
+
+__attribute__((destructor))
+static void llam_scheduler_tls_cache_destroy(void) {
+    if (g_llam_scheduler_tls_key_ready) {
+        (void)pthread_key_delete(g_llam_scheduler_tls_key);
+        g_llam_scheduler_tls_key_ready = false;
+    }
+}
+
+__attribute__((noinline, pure))
+llam_scheduler_tls_t *llam_scheduler_tls_current(void) {
+    /* Read the mutable libc TSD value, not a const native TLS address. Calls
+     * may share this read until an opaque operation such as ctx_switch. */
+    if (g_llam_scheduler_tls_key_ready) {
+        llam_scheduler_tls_t *cached = pthread_getspecific(g_llam_scheduler_tls_key);
+        if (cached != NULL) return cached;
+    }
+    return &g_llam_scheduler_tls;
+}
+
+void llam_scheduler_tls_cache_bind_current(void) {
+    if (g_llam_scheduler_tls_key_ready) {
+        /* Failure only loses the cache: the dyld TLS fallback remains valid. */
+        (void)pthread_setspecific(g_llam_scheduler_tls_key, &g_llam_scheduler_tls);
+    }
+}
+#else
 /** @brief Thread-local shard currently running on this native thread. */
 _Thread_local llam_shard_t *g_llam_tls_shard;
 /** @brief Thread-local worker identity slot currently running on this native thread. */
@@ -47,6 +85,7 @@ _Thread_local llam_processor_t *g_llam_tls_processor;
 _Thread_local llam_task_t *g_llam_tls_task;
 /** @brief Thread-local scheduler context for returning from task fibers. */
 _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
+#endif
 /** @brief Thread-local hint requesting a yield after I/O handoff. */
 _Thread_local unsigned g_llam_tls_io_handoff_yield;
 /** @brief Thread-local redirect target hint while leaving opaque blocking. */

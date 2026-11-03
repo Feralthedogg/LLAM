@@ -97,6 +97,8 @@
 * batch chat input broadcasts and outbox publication before waking writers,
   retaining per-message ordering, ownership and delivery/drop accounting; reuse
   validated queue ownership within one locked FIFO commit.
+* cache Intel macOS scheduler cursors in native-thread storage while refreshing
+  the cursor after worker migration; retain dyld storage and unload-safe cleanup.
 
 ## 2.2.1 - 2026-08-01
 

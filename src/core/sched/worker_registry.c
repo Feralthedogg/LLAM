@@ -155,6 +155,9 @@ int llam_worker_bind_registered(llam_worker_t *worker, llam_ctx_t *scheduler_ctx
     llam_shard_t *home = worker != NULL ? worker->compat_shard : NULL;
     uint64_t incarnation;
 
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    llam_scheduler_tls_cache_bind_current();
+#endif
     if (!llam_worker_registered_for(worker, runtime) || home == NULL ||
         !home->opaque_lock_initialized || scheduler_ctx == NULL ||
         runtime->execution_lease_mode != LLAM_EXECUTION_LEASE_REGISTERED ||

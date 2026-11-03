@@ -41,11 +41,31 @@ extern uint32_t g_llam_xsave_mask_hi;
 extern uint32_t g_llam_fp_control_context;
 
 // Scheduler TLS. These are set only while a runtime worker or managed task runs.
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+typedef struct llam_scheduler_tls {
+    llam_shard_t *shard;
+    llam_worker_t *worker;
+    llam_processor_t *processor;
+    llam_task_t *task;
+    llam_ctx_t *scheduler_ctx;
+} llam_scheduler_tls_t;
+
+/* Read-only, never const: an opaque context switch invalidates this lookup. */
+__attribute__((pure)) llam_scheduler_tls_t *llam_scheduler_tls_current(void);
+void llam_scheduler_tls_cache_bind_current(void);
+
+#define g_llam_tls_shard (llam_scheduler_tls_current()->shard)
+#define g_llam_tls_worker (llam_scheduler_tls_current()->worker)
+#define g_llam_tls_processor (llam_scheduler_tls_current()->processor)
+#define g_llam_tls_task (llam_scheduler_tls_current()->task)
+#define g_llam_tls_scheduler_ctx (llam_scheduler_tls_current()->scheduler_ctx)
+#else
 extern _Thread_local llam_shard_t *g_llam_tls_shard;
 extern _Thread_local llam_worker_t *g_llam_tls_worker;
 extern _Thread_local llam_processor_t *g_llam_tls_processor;
 extern _Thread_local llam_task_t *g_llam_tls_task;
 extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
+#endif
 
 #include "managed_domain.h"
 

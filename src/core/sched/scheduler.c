@@ -1037,6 +1037,9 @@ void llam_scheduler_bind_identity(llam_shard_t *shard,
     if (shard == NULL || worker == NULL || ctx == NULL) {
         return;
     }
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    llam_scheduler_tls_cache_bind_current();
+#endif
     /* Binding metadata and lease publication share the handoff lock. */
     pthread_mutex_lock(&shard->opaque_lock);
     incarnation = atomic_fetch_add_explicit(&worker->incarnation,

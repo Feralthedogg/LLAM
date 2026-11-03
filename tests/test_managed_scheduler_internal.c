@@ -50,6 +50,9 @@ typedef struct errno_migration_test {
     unsigned mode;
     int source_error;
     int destination_error;
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    bool tls_cursor_ok;
+#endif
     _Alignas(16) unsigned char task_stack[65536];
     _Alignas(16) unsigned char peer_stack[65536];
 } errno_migration_test_t;
@@ -68,11 +71,18 @@ static void errno_migration_peer(void) {
 
 static void errno_migration_task(void) {
     errno_migration_test_t *test = errno_migration;
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    llam_worker_t *source_worker = g_llam_tls_worker;
+#endif
     errno = EDOM;
     if (test->mode == 0U) llam_switch_task_to_scheduler(&test->task, &test->source);
     else if (test->mode == 1U) llam_switch_task_to_task(&test->task, &test->peer);
     else llam_switch_task_to_task_hot(&test->task, &test->peer);
     test->destination_error = current_thread_error();
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    test->tls_cursor_ok = source_worker == (llam_worker_t *)&test->source &&
+                         g_llam_tls_worker == (llam_worker_t *)&test->destination;
+#endif
     atomic_store_explicit(&test->stage, 2U, memory_order_release);
     llam_ctx_switch(&test->task.ctx, &test->destination);
     abort();
@@ -96,7 +106,14 @@ static void errno_migration_context(llam_ctx_t *context, unsigned char *stack,
 
 static void *errno_migration_source(void *argument) {
     errno_migration_test_t *test = argument;
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    /* Opaque markers only; no runtime API dereferences these as workers. */
+    g_llam_tls_worker = (llam_worker_t *)&test->source;
+#endif
     llam_ctx_switch(&test->source, &test->task.ctx);
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    g_llam_tls_worker = NULL;
+#endif
     errno = ERANGE;
     /* Destination cannot resume until this native M owns the sentinel. */
     atomic_store_explicit(&test->stage, 1U, memory_order_release);
@@ -109,7 +126,13 @@ static void *errno_migration_destination(void *argument) {
     errno_migration_test_t *test = argument;
     while (atomic_load_explicit(&test->stage, memory_order_acquire) != 1U) llam_pause_cpu();
     errno = E2BIG;
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    g_llam_tls_worker = (llam_worker_t *)&test->destination;
+#endif
     llam_ctx_switch(&test->destination, &test->task.ctx);
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+    g_llam_tls_worker = NULL;
+#endif
     return NULL;
 }
 
@@ -129,12 +152,18 @@ static int errno_migration_cases(void) {
         CHECK(pthread_create(&destination, NULL, errno_migration_destination, test) == 0);
         CHECK(pthread_join(source, NULL) == 0 && pthread_join(destination, NULL) == 0);
         int source_error = test->source_error, destination_error = test->destination_error;
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+        bool tls_cursor_ok = test->tls_cursor_ok;
+#endif
         free(test);
         errno_migration = NULL;
         if (source_error != ERANGE || destination_error != EDOM)
             fprintf(stderr, "errno migration mode %u: source=%d/%d destination=%d/%d\n",
                 mode, source_error, ERANGE, destination_error, EDOM);
         CHECK(source_error == ERANGE && destination_error == EDOM);
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+        CHECK(tls_cursor_ok);
+#endif
     }
     return 0;
 }
