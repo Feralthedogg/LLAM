@@ -52,14 +52,28 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import os
           import subprocess
 
           out = Path('.artifacts/runtime-diagnostic')
           out.mkdir(parents=True, exist_ok=True)
           for name in ('asan-test_execution_lease_internal', 'asan-test_managed_scheduler_internal'):
+              native_failed = False
+              for iteration in range(1, 51):
+                  env = dict(os.environ, ASAN_OPTIONS='halt_on_error=1:handle_abort=1:allow_addr2line=1',
+                             UBSAN_OPTIONS='halt_on_error=1', LLAM_MANAGED_SCHEDULER_VERBOSE='1')
+                  result = subprocess.run(['./' + name], env=env, text=True,
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                  print(f'{name} native repeat {iteration}/50: {result.returncode}', flush=True)
+                  if result.returncode:
+                      native_failed = True
+                      (out / (name + '-native.log')).write_text(result.stdout)
+                      print(result.stdout, flush=True)
+                      break
               for iteration in range(1, 51):
                   args = ['gdb', '--batch', '--return-child-result',
                           '-ex', 'set pagination off',
+                          '-ex', 'set disable-randomization off',
                           '-ex', 'handle SIGUSR1 SIGUSR2 SIGURG SIGALRM SIGILL nostop noprint pass',
                           '-ex', 'set environment ASAN_OPTIONS=halt_on_error=1:detect_leaks=0:handle_segv=0:handle_abort=0',
                           '-ex', 'set environment UBSAN_OPTIONS=halt_on_error=1',
@@ -68,10 +82,14 @@ jobs:
                   result = subprocess.run(args, text=True, stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, timeout=120)
                   print(f'{name} debugger repeat {iteration}/50: {result.returncode}', flush=True)
+                  if iteration == 1:
+                      (out / (name + '-debugger-first.log')).write_text(result.stdout)
                   if result.returncode:
                       (out / (name + '.log')).write_text(result.stdout)
                       print(result.stdout, flush=True)
                       raise SystemExit(1)
+              if native_failed:
+                  raise SystemExit('Native failure did not reproduce under debugger')
           PY
       - uses: actions/upload-artifact@v6
         if: always()
