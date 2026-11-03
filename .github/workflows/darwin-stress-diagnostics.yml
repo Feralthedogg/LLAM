@@ -1,0 +1,90 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSE.
+
+name: Darwin Runtime Stress Diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: Full runtime stress repetitions (1-1000)
+        required: true
+        default: "500"
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-runtime-stress:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      OUT_DIR: .artifacts/darwin-stress-diagnostics
+      STRESS_REPEAT: ${{ inputs.repeat }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate repeat count
+        run: |
+          python3 - <<'PY'
+          import os
+          value = os.environ["STRESS_REPEAT"]
+          if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 1000:
+              raise SystemExit("repeat must be an integer between 1 and 1000")
+          PY
+
+      - name: Build native runtime stress
+        run: |
+          cmake -S . -B build/diagnostics -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang \
+            '-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG -g'
+          cmake --build build/diagnostics --target test_runtime_stress -j 4
+
+      - name: Repeat native runtime stress
+        run: |
+          set -o pipefail
+          ulimit -c 0
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
+          for i in $(seq 1 "$STRESS_REPEAT"); do
+            echo "[test_runtime_stress repeat $i/$STRESS_REPEAT]"
+            ./build/diagnostics/test_runtime_stress
+          done 2>&1 | tee "$OUT_DIR/runtime-stress.log"
+
+      - name: Collect native crash reports
+        if: failure()
+        run: |
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
+          for attempt in 1 2 3 4 5; do
+            echo "Checking native crash reports ($attempt/5)"
+            copied=0
+            for directory in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+              for report in "$directory"/test_runtime_stress*.ips "$directory"/test_runtime_stress*.crash; do
+                if [ -f "$report" ] && [ ! -L "$report" ]; then
+                  cp "$report" "$OUT_DIR/"
+                  copied=1
+                fi
+              done
+            done
+            if [ "$copied" -eq 1 ]; then break; fi
+            sleep 2
+          done
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darwin-runtime-stress-diagnostics
+          path: .artifacts/darwin-stress-diagnostics
+          if-no-files-found: ignore
