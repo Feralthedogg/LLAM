@@ -204,6 +204,10 @@ when the test must apply producer backpressure instead of dropping outbox
 entries. `server_flood --server-lossless` starts the target server in that
 mode, while `--server-best-effort` pins the bounded-drop throughput policy.
 
+The chat reader groups up to 64 complete input lines before waking writers,
+flushing at the end of each read. Writers use ordered vectored writes for the
+queued batch. Statistics still count individual messages and deliveries.
+
 Run the full composite server stress suite:
 
 ```bash

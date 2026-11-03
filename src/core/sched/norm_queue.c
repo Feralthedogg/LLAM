@@ -367,14 +367,14 @@ llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
 bool llam_norm_queue_push_yield_locked(llam_shard_t *shard,
                                        const llam_processor_queue_access_t *access,
                                        llam_task_t *task) {
-    bool pushed;
-
-    if (shard == NULL || task == NULL ||
-        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
+    if (shard == NULL || task == NULL) {
         return false;
     }
     if (!llam_lockfree_normq_enabled(shard->runtime)) {
         return llam_norm_queue_push_owner_locked(shard, access, task);
+    }
+    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
+        return false;
     }
     if (!llam_norm_queue_note_enqueue(shard)) {
         return false;
@@ -384,17 +384,19 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard,
      * Owner pops the Chase-Lev deque LIFO. Yielded tasks need FIFO behavior so
      * a cooperative handoff can run older peer work before resuming itself.
      */
-    pushed = llam_queue_push_bounded_locked(shard,
-                                            &shard->processor.norm_q,
-                                            LLAM_NORM_QUEUE_CAP,
-                                            task,
-                                            access);
-    if (pushed) {
+    /* Authority was validated before the depth reservation, and this queue
+     * lock still protects the same P projection. Commit the bounded FIFO
+     * directly rather than repeating the owner validation in the generic
+     * hot/normal/inject helper. Authority is checked once for this locked commit. */
+    if (shard->processor.norm_q.depth < LLAM_NORM_QUEUE_CAP) {
+        llam_queue_push_tail(&shard->processor.norm_q, task);
         shard->metrics.norm_enqueues += 1U;
-    } else {
-        (void)llam_norm_queue_note_dequeue(shard);
+        return true;
     }
-    return pushed;
+    shard->metrics.queue_overflows += 1U;
+    llam_enqueue_overflow_task(shard->runtime, task);
+    (void)llam_norm_queue_note_dequeue(shard);
+    return false;
 }
 
 /**

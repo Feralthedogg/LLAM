@@ -889,21 +889,17 @@ static inline bool llam_processor_queue_access_snapshot_pair_locked(
         return false;
     }
     actor = g_llam_tls_worker;
-    if (!llam_worker_can_own_processor(actor, &shard->processor)) {
-        return false;
-    }
-    actor_incarnation = atomic_load_explicit(&actor->binding_incarnation,
-                                              memory_order_acquire);
     record = &shard->processor.owner_record;
     lease = llam_shard_legacy_lease_const_locked(shard);
     runtime = shard->runtime;
-    /* The execute ticket already validates the composed lease/P projection and
-     * its live native binding. Reuse that proof for the same TLS actor. */
+    /* The execute ticket validates registry membership, the composed lease/P
+     * projection and its live binding before actor is dereferenced. The same
+     * owner cannot rebind while these ownership locks remain held. */
     if (llam_processor_owner_ticket_snapshot_pair_locked(shard, &ticket) &&
-        ticket.owner_m == actor && ticket.worker_incarnation == actor_incarnation) {
+        ticket.owner_m == actor) {
         access_out->processor = &shard->processor;
         access_out->actor_m = actor;
-        access_out->actor_incarnation = actor_incarnation;
+        access_out->actor_incarnation = ticket.worker_incarnation;
         access_out->projected_owner_m = ticket.owner_m;
         access_out->projected_worker_incarnation = ticket.worker_incarnation;
         access_out->lease_projection_epoch = ticket.lease_projection_epoch;
@@ -914,8 +910,10 @@ static inline bool llam_processor_queue_access_snapshot_pair_locked(
         return true;
     }
 
+    if (!llam_worker_can_own_processor(actor, &shard->processor)) return false;
+    actor_incarnation = atomic_load_explicit(&actor->binding_incarnation,
+                                              memory_order_acquire);
     if (!llam_worker_binding_live(actor, actor_incarnation) ||
-        !llam_worker_can_own_processor(actor, &shard->processor) ||
         runtime == NULL || !llam_execution_lease_state_matches(runtime, lease->state) ||
         !llam_processor_owner_record_well_formed(record) ||
         record->p_generation == 0U || record->p_generation == UINT64_MAX) {

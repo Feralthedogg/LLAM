@@ -94,6 +94,9 @@
   establish Mach port death before testing dead-target capture refusal.
 * resolve worker-local state in a fresh activation when a blocking callback
   resumes on another native worker, avoiding retained source-thread TLS addresses.
+* batch chat input broadcasts and outbox publication before waking writers,
+  retaining per-message ordering, ownership and delivery/drop accounting; reuse
+  validated queue ownership within one locked FIFO commit.
 
 ## 2.2.1 - 2026-08-01
 

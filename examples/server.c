@@ -234,6 +234,12 @@ static void chat_message_release(chat_message_t *message) {
     }
 }
 
+static void chat_message_release_batch(chat_message_t **messages, size_t count) {
+    for (size_t i = 0U; i < count; ++i) {
+        chat_message_release(messages[i]);
+    }
+}
+
 static int chat_client_fd(const chat_client_t *client) {
     return atomic_load_explicit(&client->fd, memory_order_acquire);
 }
@@ -557,36 +563,49 @@ static void chat_outbox_destroy(chat_outbox_t *outbox) {
     }
 }
 
-static bool chat_outbox_push(chat_client_t *client, chat_message_t *message) {
+/* Consume every supplied reference, including entries dropped or cancelled
+ * while a lossless producer waits for ring capacity. */
+static size_t chat_outbox_push_batch(chat_client_t *client, chat_message_t **messages,
+                                      size_t count) {
     chat_outbox_t *outbox = &client->outbox;
+    size_t index = 0U;
+    size_t enqueued = 0U;
 
-    if (message == NULL) { return false; }
-    for (;;) {
+    while (index < count) {
         bool need_wake = false;
 
         chat_outbox_lock(outbox);
         if (atomic_load_explicit(&outbox->closed, memory_order_acquire)) {
             if (outbox->closed_drop_counter != NULL) {
-                (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, 1U, memory_order_relaxed);
+                (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, count - index,
+                                                 memory_order_relaxed);
             }
             chat_outbox_unlock(outbox);
-            chat_message_release(message);
-            return false;
+            chat_message_release_batch(messages + index, count - index);
+            return enqueued;
         }
         if (outbox->count < CHAT_OUTBOX_CAP) {
+            size_t available = CHAT_OUTBOX_CAP - outbox->count;
+            size_t accepted = count - index < available ? count - index : available;
             if (outbox->count == 0U && !outbox->wake_pending) {
                 outbox->wake_pending = true;
                 need_wake = true;
             }
-            outbox->ring[outbox->tail] = message;
-            outbox->tail = (outbox->tail + 1U) % CHAT_OUTBOX_CAP;
-            outbox->count += 1U;
+            for (size_t i = 0U; i < accepted; ++i) {
+                outbox->ring[outbox->tail] = messages[index++];
+                outbox->tail = (outbox->tail + 1U) % CHAT_OUTBOX_CAP;
+            }
+            outbox->count += accepted;
+            enqueued += accepted;
             chat_outbox_unlock(outbox);
 
+            /* Wake after publishing the complete available batch. In lossless
+             * mode this also lets the writer drain a partial enqueue before
+             * the producer waits for the remaining ring capacity. */
             if (need_wake && llam_channel_try_send(outbox->wake, outbox) != 0 && errno == EPIPE) {
                 chat_outbox_close(outbox);
             }
-            return true;
+            continue;
         }
         if (!outbox->lossless) {
             /*
@@ -595,22 +614,28 @@ static bool chat_outbox_push(chat_client_t *client, chat_message_t *message) {
              * benchmark loss is explainable rather than silent data loss.
              */
             if (outbox->full_drop_counter != NULL) {
-                (void)atomic_fetch_add_explicit(outbox->full_drop_counter, 1U, memory_order_relaxed);
+                (void)atomic_fetch_add_explicit(outbox->full_drop_counter, count - index,
+                                                 memory_order_relaxed);
             }
             chat_outbox_unlock(outbox);
-            chat_message_release(message);
-            return false;
+            chat_message_release_batch(messages + index, count - index);
+            return enqueued;
         }
         chat_outbox_unlock(outbox);
 
         if (atomic_load_explicit(&g_stop_requested, memory_order_acquire) ||
             atomic_load_explicit(&client->closing, memory_order_acquire) != 0U) {
-            chat_message_release(message);
-            return false;
+            chat_message_release_batch(messages + index, count - index);
+            return enqueued;
         }
         // Lossless mode turns outbox capacity pressure into cooperative producer backpressure.
         llam_yield();
     }
+    return enqueued;
+}
+
+static bool chat_outbox_push(chat_client_t *client, chat_message_t *message) {
+    return message != NULL && chat_outbox_push_batch(client, &message, 1U) == 1U;
 }
 
 static size_t chat_outbox_pop_batch(chat_outbox_t *outbox, chat_message_t **messages, size_t cap, bool *closed_out) {
@@ -810,14 +835,15 @@ static void chat_queue_text(chat_client_t *client, const char *text) {
     (void)chat_queue_message(client, chat_message_create(text, strlen(text)));
 }
 
-static void chat_broadcast_message(chat_server_t *server, const chat_client_t *sender, chat_message_t *message) {
+static void chat_broadcast_messages(chat_server_t *server, const chat_client_t *sender,
+                                    chat_message_t **messages, size_t message_count) {
     chat_client_t *targets[CHAT_MAX_BROADCAST_TARGETS];
     unsigned count = 0U;
-    unsigned enqueued = 0U;
+    size_t enqueued = 0U;
     unsigned i;
     int lock_rc;
 
-    if (message == NULL) {
+    if (message_count == 0U) {
         return;
     }
     /*
@@ -856,21 +882,27 @@ static void chat_broadcast_message(chat_server_t *server, const chat_client_t *s
     }
     (void)pthread_rwlock_unlock(&server->clients_lock);
 
-    (void)atomic_fetch_add_explicit(&server->broadcast_messages_created, 1U, memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&server->broadcast_messages_created, message_count, memory_order_relaxed);
     if (count > 0U) {
-        (void)atomic_fetch_add_explicit(&server->broadcast_deliveries_attempted, count, memory_order_relaxed);
+        (void)atomic_fetch_add_explicit(&server->broadcast_deliveries_attempted,
+                                         count * message_count, memory_order_relaxed);
     }
     for (i = 0U; i < count; ++i) {
-        chat_message_retain(message);
-        if (chat_outbox_push(targets[i], message)) {
-            enqueued += 1U;
+        for (size_t j = 0U; j < message_count; ++j) {
+            chat_message_retain(messages[j]);
         }
+        enqueued += chat_outbox_push_batch(targets[i], messages, message_count);
         chat_client_end_enqueue(targets[i]);
         chat_client_release(targets[i]);
     }
     if (enqueued > 0U) {
         (void)atomic_fetch_add_explicit(&server->broadcast_deliveries_enqueued, enqueued, memory_order_relaxed);
     }
+}
+
+static void chat_broadcast_message(chat_server_t *server, const chat_client_t *sender,
+                                   chat_message_t *message) {
+    if (message != NULL) chat_broadcast_messages(server, sender, &message, 1U);
 }
 
 static void chat_broadcast_system(chat_server_t *server, const chat_client_t *client, const char *event) {
@@ -887,23 +919,40 @@ static void chat_broadcast_system(chat_server_t *server, const chat_client_t *cl
     chat_message_release(message);
 }
 
-static void chat_client_broadcast_line(chat_client_t *client, const char *data, size_t len) {
+static chat_message_t *chat_client_line_message(chat_client_t *client, const char *data, size_t len) {
     size_t copy_len;
-    chat_message_t *message;
 
     if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
-        return;
+        return NULL;
     }
     copy_len = len;
     if (copy_len > CHAT_INPUT_CAP) {
         copy_len = CHAT_INPUT_CAP;
     }
-    message = chat_message_create_prefixed(client->prefix, client->prefix_len, data, copy_len);
+    return chat_message_create_prefixed(client->prefix, client->prefix_len, data, copy_len);
+}
+
+static void chat_client_broadcast_line(chat_client_t *client, const char *data, size_t len) {
+    chat_message_t *message = chat_client_line_message(client, data, len);
     if (message == NULL) {
         return;
     }
     chat_broadcast_message(client->server, client, message);
     chat_message_release(message);
+}
+
+static void chat_client_flush_lines(chat_client_t *client, chat_message_t **messages, size_t *count) {
+    chat_broadcast_messages(client->server, client, messages, *count);
+    chat_message_release_batch(messages, *count);
+    *count = 0U;
+}
+
+static void chat_client_batch_line(chat_client_t *client, const char *data, size_t len,
+                                    chat_message_t **messages, size_t *count) {
+    chat_message_t *message = chat_client_line_message(client, data, len);
+    if (message == NULL) return;
+    messages[(*count)++] = message;
+    if (*count == CHAT_WRITE_BATCH) chat_client_flush_lines(client, messages, count);
 }
 
 static size_t chat_complete_line_span(const char *data, size_t len) {
@@ -917,6 +966,8 @@ static size_t chat_complete_line_span(const char *data, size_t len) {
 
 static void chat_client_process_input(chat_client_t *client, const char *data, size_t len) {
     size_t off = 0U;
+    size_t count = 0U;
+    chat_message_t *messages[CHAT_WRITE_BATCH];
 
     while (off < len && !atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
         size_t span;
@@ -926,7 +977,7 @@ static void chat_client_process_input(chat_client_t *client, const char *data, s
         if (client->input_len == 0U) {
             span = chat_complete_line_span(data + off, len - off);
             if (span > 0U) {
-                chat_client_broadcast_line(client, data + off, span);
+                chat_client_batch_line(client, data + off, span, messages, &count);
                 off += span;
                 continue;
             }
@@ -948,23 +999,18 @@ static void chat_client_process_input(chat_client_t *client, const char *data, s
             }
             size_t tail_len = client->input_len - span;
 
-            chat_client_broadcast_line(client, client->input, span);
+            chat_client_batch_line(client, client->input, span, messages, &count);
             if (tail_len > 0U) {
                 memmove(client->input, client->input + span, tail_len);
             }
             client->input_len = tail_len;
         }
         if (client->input_len == sizeof(client->input)) {
-            chat_client_broadcast_line(client, client->input, client->input_len);
+            chat_client_batch_line(client, client->input, client->input_len, messages, &count);
             client->input_len = 0U;
         }
     }
-}
-
-static void chat_writer_release_batch(chat_message_t **messages, size_t count) {
-    for (size_t i = 0U; i < count; ++i) {
-        chat_message_release(messages[i]);
-    }
+    chat_client_flush_lines(client, messages, &count);
 }
 
 static void chat_writer_drop_backlog(chat_client_t *client) {
@@ -975,7 +1021,7 @@ static void chat_writer_drop_backlog(chat_client_t *client) {
         if (count == 0U) {
             return;
         }
-        chat_writer_release_batch(batch, count);
+        chat_message_release_batch(batch, count);
     }
 }
 
@@ -1002,11 +1048,11 @@ static void chat_writer_task(void *arg) {
             if (atomic_load_explicit(&client->closing, memory_order_acquire) != 0U ||
                 chat_write_batch(client, batch, count) != 0) {
                 chat_client_begin_close(client);
-                chat_writer_release_batch(batch, count);
+                chat_message_release_batch(batch, count);
                 chat_writer_drop_backlog(client);
                 goto done;
             }
-            chat_writer_release_batch(batch, count);
+            chat_message_release_batch(batch, count);
             count = chat_outbox_pop_batch(&client->outbox, batch, CHAT_WRITE_BATCH, &closed);
         }
     }

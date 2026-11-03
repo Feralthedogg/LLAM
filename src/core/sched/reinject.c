@@ -286,16 +286,15 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     /* Keep the validated P projection stable through enqueue and active-G
      * publication; release the queue lock before the native context switch. */
     if (!llam_processor_queue_access_lock(&target->processor, &access)) return false;
-    if (!llam_processor_queue_access_validate_owner_mutation_locked(target, &access) ||
-        target->opaque_redirect_active ||
+    if (target->opaque_redirect_active ||
         target->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         pthread_mutex_unlock(&target->lock);
         return false;
     }
 
     effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, false);
-    // Put the yielding task on the normal FIFO side so the just-woken peer can
-    // run promptly without starving older normal work.
+    /* The enqueue validates the access before any queue/depth mutation. Keep
+     * this lock through that validation and the complete handoff commit. */
     if (!llam_norm_queue_push_yield_locked(target, &access, current)) {
         pthread_mutex_unlock(&target->lock);
         return false;
