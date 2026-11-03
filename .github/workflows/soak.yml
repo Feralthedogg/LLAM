@@ -24,6 +24,10 @@ on:
         description: Deterministic seed for server composite soak
         required: false
         default: "9001"
+      runtime_stress_repeat:
+        description: Full runtime stress repetitions before soak (50-1000)
+        required: false
+        default: "50"
 
 permissions:
   contents: read
@@ -51,6 +55,7 @@ jobs:
     env:
       OUT_DIR: .artifacts/soak/${{ matrix.name }}
       SOAK_SEED: ${{ github.event.inputs.seed || '9001' }}
+      RUNTIME_STRESS_REPEAT: ${{ github.event.inputs.runtime_stress_repeat || '50' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -91,6 +96,12 @@ jobs:
       - name: Pre-soak unit gate
         run: |
           set -o pipefail
+          python3 - <<'PY'
+          import os
+          value = os.environ["RUNTIME_STRESS_REPEAT"]
+          if not value.isascii() or not value.isdecimal() or not 50 <= int(value) <= 1000:
+              raise SystemExit("runtime_stress_repeat must be an integer between 50 and 1000")
+          PY
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           ctest --test-dir build/soak --output-on-failure --timeout 300 2>&1 | tee "$OUT_DIR/ctest.log"
           for i in $(seq 1 10); do
@@ -108,8 +119,8 @@ jobs:
             LLAM_RUNTIME_INVARIANT_SCENARIOS=96 \
               ./build/soak/test_runtime_invariants
           done 2>&1 | tee "$OUT_DIR/test_runtime_invariants_repeat.log"
-          for i in $(seq 1 50); do
-            echo "[test_runtime_stress repeat $i/50]"
+          for i in $(seq 1 "$RUNTIME_STRESS_REPEAT"); do
+            echo "[test_runtime_stress repeat $i/$RUNTIME_STRESS_REPEAT]"
             ./build/soak/test_runtime_stress
           done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
 
