@@ -75,31 +75,32 @@ jobs:
               if prctl(0x59616d61, os.getppid(), 0, 0, 0) != 0:
                   raise OSError(ctypes.get_errno(), 'PR_SET_PTRACER failed')
 
-          for iteration in range(1, 101):
-              process = subprocess.Popen(['./test_multi_runtime_core', '--case',
-                                          'destroyed_runtime_io_cancel_does_not_stop_peer_runtime'], text=True,
-                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                          preexec_fn=allow_parent_debugger)
-              try:
-                  output, _ = process.communicate(timeout=20)
-              except subprocess.TimeoutExpired:
+          case = 'destroyed_runtime_io_cancel_does_not_stop_peer_runtime'
+          for arguments in (['--case', case], ['--through-case', case]):
+              for iteration in range(1, 101):
+                  process = subprocess.Popen(['./test_multi_runtime_core'] + arguments, text=True,
+                                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                              preexec_fn=allow_parent_debugger)
                   try:
-                      debug = subprocess.run(['gdb', '--batch', '-ex', 'set pagination off',
-                                               '-ex', 'thread apply all bt 40', '-p', str(process.pid)],
-                                              text=True, stdout=subprocess.PIPE,
-                                              stderr=subprocess.STDOUT, timeout=30)
-                  finally:
-                      process.kill()
-                      output, _ = process.communicate()
-                  report = output + '\n' + debug.stdout
-                  (out / 'multi-runtime-hang.log').write_text(report)
-                  print(report, flush=True)
-                  raise SystemExit('Native multi-runtime wait exceeded diagnostic deadline')
-              print(f'native multi-runtime repeat {iteration}/100: {process.returncode}', flush=True)
-              if process.returncode:
-                  (out / 'multi-runtime-failure.log').write_text(output)
-                  print(output, flush=True)
-                  raise SystemExit(1)
+                      output, _ = process.communicate(timeout=20)
+                  except subprocess.TimeoutExpired:
+                      try:
+                          debug = subprocess.run(['gdb', '--batch', '-ex', 'set pagination off',
+                                                   '-ex', 'thread apply all bt 40', '-p', str(process.pid)],
+                                                  text=True, stdout=subprocess.PIPE,
+                                                  stderr=subprocess.STDOUT, timeout=30)
+                      finally:
+                          process.kill()
+                          output, _ = process.communicate()
+                      report = output + '\n' + debug.stdout
+                      (out / 'multi-runtime-hang.log').write_text(report)
+                      print(report, flush=True)
+                      raise SystemExit('Native multi-runtime wait exceeded diagnostic deadline')
+                  print(f'native multi-runtime repeat {iteration}/100: {process.returncode}', flush=True)
+                  if process.returncode:
+                      (out / 'multi-runtime-failure.log').write_text(output)
+                      print(output, flush=True)
+                      raise SystemExit(1)
           PY
       - name: Capture native failure stacks
         if: ${{ !cancelled() }}

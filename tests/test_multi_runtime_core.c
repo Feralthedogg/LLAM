@@ -4429,11 +4429,14 @@ int main(int argc, char **argv) {
         {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
     };
     size_t i;
-    const char *selected = NULL;
-    bool matched = false;
+    size_t begin = 0U, end = sizeof(tests) / sizeof(tests[0]);
 
-    if (argc == 3 && strcmp(argv[1], "--case") == 0) selected = argv[2];
-    else if (argc != 1) return test_fail("expected --case NAME or no arguments");
+    if (argc == 3 && (strcmp(argv[1], "--case") == 0 || strcmp(argv[1], "--through-case") == 0)) {
+        for (i = 0U; i < end && strcmp(argv[2], tests[i].name) != 0; ++i) {}
+        if (i == end) return test_fail("unknown multi-runtime test case");
+        if (strcmp(argv[1], "--case") == 0) begin = i;
+        end = i + 1U;
+    } else if (argc != 1) return test_fail("expected --case/--through-case NAME or no arguments");
 
     /*
      * CI timeout diagnostics depend on seeing the last completed subcase.
@@ -4442,14 +4445,11 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
-    for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); ++i) {
-        if (selected != NULL && strcmp(selected, tests[i].name) != 0) continue;
-        matched = true;
+    for (i = begin; i < end; ++i) {
         if (run_named_test(&tests[i]) != 0) {
             return 1;
         }
     }
-    if (!matched) return test_fail("unknown multi-runtime test case");
     printf("[test_multi_runtime_core] ok\n");
     return 0;
 }
