@@ -1813,6 +1813,51 @@ static void channel_close_select_task(void *arg) {
         return;
     }
 
+    /* Positive expired deadlines must release prepared locks and pins, in
+     * either lock order and with repeated operands on the general path. */
+    for (unsigned order = 0U; order < 3U; ++order) {
+        ops[0].channel = order == 1U ? state->secondary : state->primary;
+        ops[1].channel = order == 0U ? state->secondary : state->primary;
+        errno = 0;
+        if (llam_channel_select(ops, 2U, 1U, &selected) != -1 || errno != ETIMEDOUT) {
+            task_fail(state, "channel select expired prepared pair", errno);
+            return;
+        }
+    }
+
+    {
+        llam_channel_t *resolved = NULL;
+        void *token = state;
+
+        if (llam_channel_try_send(state->primary, token) != 0 ||
+            llam_channel_try_send_buffered_fast(state->primary, NULL, &resolved) != 0 ||
+            resolved == NULL) {
+            task_fail(state, "channel send fallback preparation", errno);
+            return;
+        }
+        bool pinned = llam_public_active_op_count(&resolved->active_ops) == 1U;
+        pthread_mutex_unlock(&resolved->lock);
+        if (!pinned || llam_channel_try_recv_result(state->primary, &received) != 0 ||
+            received != token) {
+            llam_channel_end_public_op(resolved);
+            task_fail(state, "channel send fallback storage pin", errno);
+            return;
+        }
+        errno = 0;
+        int destroy_rc = llam_channel_destroy(state->primary);
+        int destroy_errno = errno;
+        if (destroy_rc == 0) {
+            state->primary = NULL;
+            task_fail(state, "channel send fallback pin allowed idle destroy", EINVAL);
+            return;
+        }
+        llam_channel_end_public_op(resolved);
+        if (destroy_rc != -1 || destroy_errno != EBUSY) {
+            task_fail(state, "channel send fallback pin blocks idle destroy", destroy_errno);
+            return;
+        }
+    }
+
     if (llam_channel_close(state->secondary) != 0) {
         task_fail(state, "channel select close fixture", errno);
         return;

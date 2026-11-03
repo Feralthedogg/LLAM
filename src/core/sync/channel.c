@@ -344,10 +344,11 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
     llam_wait_node_t *node;
     bool receiver_wake_required = false;
     bool wait_tracking_published = false;
+    llam_channel_t *fallback_channel = NULL;
     int rc;
 
     if (!has_deadline) {
-        int fast = llam_channel_try_send_buffered_fast(channel, value);
+        int fast = llam_channel_try_send_buffered_fast(channel, value, &fallback_channel);
 
         if (fast > 0) {
             return 0;
@@ -357,11 +358,15 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
         }
     }
 
-    channel = llam_channel_resolve_public_handle(channel);
+    channel = fallback_channel != NULL ? fallback_channel
+                                      : llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
         return -1;
     }
     if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
+        if (fallback_channel != NULL) {
+            pthread_mutex_unlock(&channel->lock);
+        }
         llam_channel_end_public_op(channel);
         return -1;
     }
@@ -369,7 +374,9 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
     shard = g_llam_tls_shard;
     llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
 
-    pthread_mutex_lock(&channel->lock);
+    if (fallback_channel == NULL) {
+        pthread_mutex_lock(&channel->lock);
+    }
     if (channel->closed) {
         pthread_mutex_unlock(&channel->lock);
         llam_channel_end_public_op(channel);

@@ -58,6 +58,7 @@ int llam_require_task_context(void);
 #define LLAM_SELECT_TRY_NOT_READY 0
 #define LLAM_SELECT_TRY_SELECTED 1
 #define LLAM_SELECT_TRY_FALLBACK 2
+#define LLAM_SELECT_TRY_PREPARED 3
 
 typedef enum llam_select_completion_result {
     LLAM_SELECT_COMPLETION_LOST = 0,
@@ -98,7 +99,10 @@ int llam_channel_register_live(llam_channel_t *channel);
 void llam_channel_tls_cache_drain(void);
 void llam_channel_global_cache_drain(void);
 void llam_channel_hot_safepoint(void);
-int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value);
+/* Fallback storage carries one active-op pin and its channel lock. */
+int llam_channel_try_send_buffered_fast(llam_channel_t *handle,
+                                        void *value,
+                                        llam_channel_t **fallback_channel);
 
 /*
  * Public channel-handle encoding.
@@ -175,7 +179,8 @@ int llam_channel_select_try_ready_large(llam_select_op_t *ops,
 int llam_channel_select_try_ready_batch(llam_select_op_t *ops,
                                         size_t op_count,
                                         size_t start,
-                                        size_t *selected_index);
+                                        size_t *selected_index,
+                                        llam_channel_t **waiting_channels);
 int llam_channel_select_try_one_fast(llam_select_op_t *op);
 int llam_channel_select_try_one(llam_select_op_t *op);
 

@@ -106,14 +106,12 @@ int llam_channel_select_try_ready_large(llam_select_op_t *ops,
     return rc;
 }
 
-static int llam_channel_select_try_one_resolved(llam_select_op_t *op, llam_channel_t *channel) {
+static int llam_channel_select_try_one_locked(llam_select_op_t *op, llam_channel_t *channel) {
     void *value;
 
-    pthread_mutex_lock(&channel->lock);
     if (op->kind == LLAM_SELECT_OP_RECV) {
         if (channel->count > 0U) {
             if (channel->send_waiters.head != NULL) {
-                pthread_mutex_unlock(&channel->lock);
                 return LLAM_SELECT_TRY_FALLBACK;
             }
             if (channel->capacity == 1U) {
@@ -123,31 +121,25 @@ static int llam_channel_select_try_one_resolved(llam_select_op_t *op, llam_chann
                 channel->head = (channel->head + 1U) & channel->mask;
             }
             channel->count -= 1U;
-            pthread_mutex_unlock(&channel->lock);
             *op->recv_out = value;
             return LLAM_SELECT_TRY_SELECTED;
         }
         if (channel->send_waiters.head != NULL) {
-            pthread_mutex_unlock(&channel->lock);
             return LLAM_SELECT_TRY_FALLBACK;
         }
         if (channel->closed) {
-            pthread_mutex_unlock(&channel->lock);
             *op->recv_out = NULL;
             op->result_errno = EPIPE;
             return LLAM_SELECT_TRY_SELECTED;
         }
-        pthread_mutex_unlock(&channel->lock);
         return LLAM_SELECT_TRY_NOT_READY;
     }
 
     if (channel->closed) {
-        pthread_mutex_unlock(&channel->lock);
         op->result_errno = EPIPE;
         return LLAM_SELECT_TRY_SELECTED;
     }
     if (channel->recv_waiters.head != NULL) {
-        pthread_mutex_unlock(&channel->lock);
         return LLAM_SELECT_TRY_FALLBACK;
     }
     if (channel->count < channel->capacity) {
@@ -158,11 +150,61 @@ static int llam_channel_select_try_one_resolved(llam_select_op_t *op, llam_chann
             channel->tail = (channel->tail + 1U) & channel->mask;
         }
         channel->count += 1U;
-        pthread_mutex_unlock(&channel->lock);
         return LLAM_SELECT_TRY_SELECTED;
     }
-    pthread_mutex_unlock(&channel->lock);
     return LLAM_SELECT_TRY_NOT_READY;
+}
+
+static int llam_channel_select_try_one_resolved(llam_select_op_t *op, llam_channel_t *channel) {
+    int selected;
+
+    pthread_mutex_lock(&channel->lock);
+    selected = llam_channel_select_try_one_locked(op, channel);
+    pthread_mutex_unlock(&channel->lock);
+    return selected;
+}
+
+/* Registry lock is held; distinct channels are locked in the select lock order. */
+static int llam_channel_select_prepare_pair(llam_select_op_t *ops,
+                                             llam_channel_t *first,
+                                             llam_channel_t *second,
+                                             size_t *selected_index,
+                                             llam_channel_t **waiting_channels) {
+    llam_channel_t *low = (uintptr_t)first < (uintptr_t)second ? first : second;
+    llam_channel_t *high = low == first ? second : first;
+    int selected;
+
+    pthread_mutex_lock(&low->lock);
+    pthread_mutex_lock(&high->lock);
+    selected = llam_channel_select_try_one_locked(&ops[0], first);
+    if (selected == LLAM_SELECT_TRY_SELECTED) {
+        *selected_index = 0U;
+    } else if (selected == LLAM_SELECT_TRY_NOT_READY) {
+        selected = llam_channel_select_try_one_locked(&ops[1], second);
+        if (selected == LLAM_SELECT_TRY_SELECTED) {
+            *selected_index = 1U;
+        }
+    }
+    if (selected == LLAM_SELECT_TRY_NOT_READY) {
+        if (llam_public_active_op_try_begin(&first->active_ops) != 0) {
+            selected = -1;
+        } else if (llam_public_active_op_try_begin(&second->active_ops) != 0) {
+            llam_channel_end_public_op(first);
+            selected = -1;
+        } else {
+            /*
+             * Replace registry protection with pins and transfer both locks.
+             * The caller initializes stack wait nodes and enqueues them before
+             * releasing these locks, with no allocation or suspension between.
+             */
+            waiting_channels[0] = first;
+            waiting_channels[1] = second;
+            return LLAM_SELECT_TRY_PREPARED;
+        }
+    }
+    pthread_mutex_unlock(&high->lock);
+    pthread_mutex_unlock(&low->lock);
+    return selected;
 }
 
 int llam_channel_select_try_one_fast(llam_select_op_t *op) {
@@ -182,7 +224,9 @@ int llam_channel_select_try_one_fast(llam_select_op_t *op) {
     return rc;
 }
 
-static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, size_t *selected_index) {
+static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops,
+                                                        size_t *selected_index,
+                                                        llam_channel_t **waiting_channels) {
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     llam_runtime_t *current_owner = llam_runtime_tls_owner_fast();
 #endif
@@ -212,8 +256,10 @@ static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, si
     }
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     if (LLAM_UNLIKELY(first->owner_runtime == NULL || first->owner_runtime != current_owner)) {
+        int error = first->owner_runtime == NULL ? EINVAL : EXDEV;
+
         llam_channel_public_registry_unlock();
-        errno = first->owner_runtime == NULL ? EINVAL : EXDEV;
+        errno = error;
         return -1;
     }
 #else
@@ -238,8 +284,10 @@ static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, si
     }
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     if (LLAM_UNLIKELY(second->owner_runtime == NULL || second->owner_runtime != current_owner)) {
+        int error = second->owner_runtime == NULL ? EINVAL : EXDEV;
+
         llam_channel_public_registry_unlock();
-        errno = second->owner_runtime == NULL ? EINVAL : EXDEV;
+        errno = error;
         return -1;
     }
 #else
@@ -271,6 +319,13 @@ static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, si
         return LLAM_SELECT_TRY_SELECTED;
     }
 
+    if (waiting_channels != NULL) {
+        selected = llam_channel_select_prepare_pair(ops, first, second,
+                                                     selected_index, waiting_channels);
+        llam_channel_public_registry_unlock();
+        return selected;
+    }
+
     selected = llam_channel_select_try_one_resolved(&ops[1], second);
     if (selected < 0 || selected == LLAM_SELECT_TRY_FALLBACK) {
         llam_channel_public_registry_unlock();
@@ -289,7 +344,8 @@ static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, si
 int llam_channel_select_try_ready_batch(llam_select_op_t *ops,
                                         size_t op_count,
                                         size_t start,
-                                        size_t *selected_index) {
+                                        size_t *selected_index,
+                                        llam_channel_t **waiting_channels) {
     llam_channel_t *channels[LLAM_CHANNEL_SELECT_INLINE_OPS];
     size_t i;
 
@@ -297,7 +353,7 @@ int llam_channel_select_try_ready_batch(llam_select_op_t *ops,
         return LLAM_SELECT_TRY_FALLBACK;
     }
     if (op_count == 2U && start == 0U) {
-        return llam_channel_select_try_ready_pair_registry(ops, selected_index);
+        return llam_channel_select_try_ready_pair_registry(ops, selected_index, waiting_channels);
     }
     if (llam_channel_resolve_public_handles_for_select(ops, op_count, channels) != 0) {
         return -1;

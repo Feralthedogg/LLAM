@@ -658,14 +658,30 @@ int llam_channel_select(llam_select_op_t *ops,
 
 
     for (;;) {
+        bool prepared_pair = false;
+
         if (op_count <= LLAM_CHANNEL_SELECT_INLINE_OPS) {
-            int selected = llam_channel_select_try_ready_batch(ops, op_count, start, selected_index);
+            /* Only an idle task's two stack nodes can be prepared while the
+             * ready probe still holds the channel locks. Other shapes retain
+             * the general allocation and collection path below. */
+            bool can_prepare = deadline_ns != 0U && op_count == 2U &&
+                               atomic_load_explicit(&task->active_wait_node, memory_order_acquire) == NULL &&
+                               atomic_load_explicit(&task->active_select_state, memory_order_acquire) == NULL;
+            int selected = llam_channel_select_try_ready_batch(ops, op_count, start, selected_index,
+                                                                can_prepare ? inline_op_channels : NULL);
 
             if (selected < 0) {
                 return -1;
             }
             if (selected == LLAM_SELECT_TRY_SELECTED) {
                 return 0;
+            }
+            if (selected == LLAM_SELECT_TRY_PREPARED) {
+                prepared_pair = true;
+                inline_channels[0] = inline_op_channels[0];
+                inline_channels[1] = inline_op_channels[1];
+                llam_channel_select_sort_channels(inline_channels, 2U);
+                goto select_not_ready;
             }
             if (selected == LLAM_SELECT_TRY_NOT_READY) {
                 goto select_not_ready;
@@ -732,6 +748,10 @@ int llam_channel_select(llam_select_op_t *ops,
 select_not_ready:
         wait_tracking_published = false;
         if (deadline_ns == 0U || llam_deadline_passed(deadline_ns)) {
+            if (prepared_pair) {
+                llam_channel_select_unlock_channels(inline_channels, 2U);
+                llam_channel_select_release_channels(inline_channels, 2U);
+            }
             errno = ETIMEDOUT;
             return -1;
         }
@@ -778,7 +798,9 @@ select_not_ready:
         atomic_init(&state.wake_queued, 0U);
         atomic_init(&state.timer_refs, 0U);
 
-        if (llam_channel_select_collect_channels(ops, op_count, channels, op_channels, &channel_count) != 0) {
+        if (prepared_pair) {
+            channel_count = 2U;
+        } else if (llam_channel_select_collect_channels(ops, op_count, channels, op_channels, &channel_count) != 0) {
             if (heap_arrays) {
                 free(nodes);
                 free(channels);
@@ -789,6 +811,9 @@ select_not_ready:
         state.channels = channels;
         state.channel_count = channel_count;
         if (llam_channel_select_alloc_nodes(shard, task, stack_wait_nodes, ops, op_count, &state) != 0) {
+            if (prepared_pair) {
+                llam_channel_select_unlock_channels(channels, channel_count);
+            }
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
@@ -798,8 +823,10 @@ select_not_ready:
             return -1;
         }
 
-        llam_channel_select_lock_channels(channels, channel_count);
-        if (llam_channel_select_any_ready_locked(&state)) {
+        if (!prepared_pair) {
+            llam_channel_select_lock_channels(channels, channel_count);
+        }
+        if (!prepared_pair && llam_channel_select_any_ready_locked(&state)) {
             llam_channel_select_unlock_channels(channels, channel_count);
             llam_channel_select_release_nodes(shard, stack_wait_nodes, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);

@@ -33,12 +33,15 @@ typedef enum llam_channel_fast_result {
     LLAM_CHANNEL_FAST_ERROR = -1,
 } llam_channel_fast_result_t;
 
-int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value) {
+int llam_channel_try_send_buffered_fast(llam_channel_t *handle,
+                                        void *value,
+                                        llam_channel_t **fallback_channel) {
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     llam_runtime_t *current_owner;
 #endif
     llam_channel_t *channel;
 
+    *fallback_channel = NULL;
     if (g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
         return LLAM_CHANNEL_FAST_FALLBACK;
     }
@@ -63,8 +66,10 @@ int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value) {
     }
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
     if (LLAM_UNLIKELY(channel->owner_runtime == NULL || channel->owner_runtime != current_owner)) {
+        int error = channel->owner_runtime == NULL ? EINVAL : EXDEV;
+
         llam_channel_public_registry_unlock();
-        errno = channel->owner_runtime == NULL ? EINVAL : EXDEV;
+        errno = error;
         return LLAM_CHANNEL_FAST_ERROR;
     }
 #else
@@ -96,7 +101,18 @@ int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value) {
         return LLAM_CHANNEL_FAST_ERROR;
     }
     if (LLAM_UNLIKELY(channel->recv_waiters.head != NULL || channel->count >= channel->capacity)) {
-        pthread_mutex_unlock(&channel->lock);
+        /*
+         * Transfer the validated storage and the channel lock to the blocking
+         * state machine. Its active-op pin replaces the registry lock before
+         * destroy can observe the object; no raw storage crosses unprotected.
+         * The caller must not suspend before releasing channel->lock.
+         */
+        if (llam_public_active_op_try_begin(&channel->active_ops) != 0) {
+            pthread_mutex_unlock(&channel->lock);
+            llam_channel_public_registry_unlock();
+            return LLAM_CHANNEL_FAST_ERROR;
+        }
+        *fallback_channel = channel;
         llam_channel_public_registry_unlock();
         return LLAM_CHANNEL_FAST_FALLBACK;
     }
