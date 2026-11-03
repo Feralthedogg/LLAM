@@ -45,7 +45,7 @@ jobs:
             runner: ubuntu-24.04
             cc: gcc
           - name: macos-aarch64-hour-soak
-            runner: macos-14
+            runner: macos-26
             cc: clang
 
     env:

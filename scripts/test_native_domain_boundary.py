@@ -76,6 +76,10 @@ class NativeBoundaryTests(unittest.TestCase):
         self.assertTrue(self.mutated("src/core/preempt/native_domain.c",
                                     "if (worker == NULL) return;", "pthread_mutex_lock(&some_lock); if (worker == NULL) return;"))
 
+    def test_binding_must_probe_conditional_lock_free_atomics(self) -> None:
+        self.assertTrue(self.mutated("src/core/preempt/native_domain.c",
+                                    "!atomic_is_lock_free(&g_native_domain_slots[0].native_id)", "0"))
+
     def test_syscall_assembly_is_part_of_the_reviewed_contract(self) -> None:
         self.assertTrue(self.mutated("src/core/preempt/native_domain.c", '"svc #0x80"', '"svc #0x81"'))
         self.assertTrue(self.mutated("src/core/preempt/native_domain.c", '"r8", "r9", "r10"', '"r8", "r9"'))

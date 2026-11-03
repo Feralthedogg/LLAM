@@ -46,7 +46,7 @@ jobs:
             runner: macos-15-intel
             cc: clang
           - target: macos-aarch64
-            runner: macos-14
+            runner: macos-26
             cc: clang
           - target: windows-x86_64
             runner: windows-2022

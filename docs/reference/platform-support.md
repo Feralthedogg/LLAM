@@ -39,6 +39,11 @@ builds the experimental Intel macOS adapter. Compilation is not a
 successful runtime probe or a release/performance qualification. Unknown ISA,
 mitigation, TLS, signal or context state is refused before capture.
 
+ARM64 native CI uses macOS 26 and its SDK so the Mach SME state query is
+available. Older SDKs that omit `ARM_SME_STATE`, or hosts whose extended state
+cannot be qualified, return `ENOTSUP` for native capture. Compatibility
+constructors retain their boundary/safepoint behavior on those hosts.
+
 Legacy constructors retain boundary/safepoint preemption. The expert Windows
 caller-certified-range API remains available with its separate process-wide
 fail-fast acknowledgement; it does not qualify arbitrary C or JIT mappings.

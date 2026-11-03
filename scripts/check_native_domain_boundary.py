@@ -49,7 +49,7 @@ REVIEWED = {('src/io/api/wait_options.c', 'llam_wait_opts_init'): '137a70a2ca1bd
  ('src/core/preempt/native_domain.c', 'llam_managed_native_enter'): 'cf47bf3a255704d52acedb5a33553b99b622990ab66594c095c5592e4720e539',
  ('src/core/preempt/native_domain.c', 'llam_managed_native_leave'): 'c62d331f9f2f220400f95cdbee6aaa4a17410f570625d03ce30b54a7c97c43dc',
  ('src/internal/managed_domain.h', 'llam_native_domain_blocked'): '6533309355ad61a82c2cea5ac4c068712ca6bd6481bf99ce992c30e78f366e2d',
- ('src/core/preempt/native_domain.c', 'llam_native_domain_bind'): 'ace0f53463152c29d1bb972043acd4956737e908b50564dd63a898a205e63193',
+ ('src/core/preempt/native_domain.c', 'llam_native_domain_bind'): 'c3d0c78772230f36efb1019fadeae26a004e17a47314ec534b6b6874e224014c',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_unbind'): '05fa5771a0806e08ce4ff5298651d387bf4a44f868b4d57a418467cd9c73ac3a',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_worker_init'): '7575695c0140b6e0b8fc173c9fed584f8420b6ef72b16264bcd348738e34d643'}
 

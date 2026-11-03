@@ -44,8 +44,14 @@ typedef struct llam_native_domain_slot {
 static llam_native_domain_slot_t g_native_domain_slots[LLAM_NATIVE_DOMAIN_SLOTS];
 atomic_uint g_llam_native_domains;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+/* MSVC reports conditional support; binding probes the actual guard objects. */
+_Static_assert(ATOMIC_LLONG_LOCK_FREE >= 1 && ATOMIC_POINTER_LOCK_FREE >= 1 &&
+               ATOMIC_INT_LOCK_FREE >= 1, "native guards need lock-free atomic support");
+#else
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2 &&
                ATOMIC_INT_LOCK_FREE == 2, "native guards need lock-free atomics");
+#endif
 _Static_assert(LLAM_NATIVE_DOMAIN_SLOTS * (LLAM_NATIVE_DOMAIN_DEPTH_MAX + 1U) < UINT_MAX,
                "global guard count must not wrap, including in-flight entries");
 
@@ -127,6 +133,17 @@ void llam_native_domain_worker_init(llam_worker_t *worker) {
 int llam_native_domain_bind(llam_worker_t *worker) {
     uint64_t native_id = llam_native_domain_id();
     if (!LLAM_NATIVE_DOMAIN_AVAILABLE) return 0; /* Legacy-only port. */
+#if defined(_MSC_VER) && !defined(__clang__)
+    /* Probe before a slot can publish this M to signal/native guards. Array
+     * elements share the same atomic types and natural alignment. */
+    if (!atomic_is_lock_free(&g_native_domain_slots[0].native_id) ||
+        !atomic_is_lock_free(&g_native_domain_slots[0].worker) ||
+        !atomic_is_lock_free(&g_llam_native_domains) ||
+        !atomic_is_lock_free(&worker->native_domain_depth)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+#endif
     if (native_id == 0U || native_id > INT64_MAX) {
         errno = ENOTSUP;
         return -1;

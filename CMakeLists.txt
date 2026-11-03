@@ -1863,6 +1863,12 @@ foreach(LLAM_TEST_TARGET
         test_preempt_capabilities
         test_default_policy_internal
         test_magic2_internal
+        bench_handoff
+        bench_select_prepare
+        bench_watch_index
+        test_handoff_protocol
+        test_large_select
+        test_io_watch_index
         test_async_preempt_linux_x86_64
         test_async_preempt_multi_linux_x86_64
         test_async_context_linux_arm64
