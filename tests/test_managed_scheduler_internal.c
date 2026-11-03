@@ -551,6 +551,96 @@ static int compatibility_steal_preserves_portable_queue(void) {
     return 0;
 }
 
+typedef struct blocking_migration_test {
+    _Atomic(llam_worker_t *) source_worker;
+    atomic_uint source_parked;
+    atomic_uint returned;
+    atomic_uint failures;
+} blocking_migration_test_t;
+
+static void blocking_migration_service(llam_worker_t *worker, void *argument) {
+    blocking_migration_test_t *test = argument;
+    if (worker != atomic_load_explicit(&test->source_worker, memory_order_acquire) ||
+        atomic_load_explicit(&test->returned, memory_order_acquire) != 0U) return;
+    if (g_llam_tls_processor != NULL)
+        atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
+    /* The source M has returned P. Hold it outside every task until another
+     * M resumes the blocking API. Retire its non-owning shard cursor so a
+     * migrated C frame cannot accidentally use the source M's TLS slot. */
+    llam_shard_t *source_cursor = g_llam_tls_shard;
+    g_llam_tls_shard = NULL;
+    atomic_store_explicit(&test->source_parked, 1U, memory_order_release);
+    uint64_t deadline = llam_now_ns() + UINT64_C(5000000000);
+    while (atomic_load_explicit(&test->returned, memory_order_acquire) == 0U) {
+        if (llam_now_ns() >= deadline) {
+            atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
+            break;
+        }
+        const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
+        (void)nanosleep(&delay, NULL);
+    }
+    g_llam_tls_shard = source_cursor;
+}
+
+static void *blocking_migration_callback(void *argument) {
+    blocking_migration_test_t *test = argument;
+    uint64_t deadline = llam_now_ns() + UINT64_C(5000000000);
+    while (atomic_load_explicit(&test->source_parked, memory_order_acquire) == 0U) {
+        if (llam_now_ns() >= deadline) {
+            atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
+            break;
+        }
+        const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
+        (void)nanosleep(&delay, NULL);
+    }
+    return test;
+}
+
+static void blocking_migration_task(void *argument) {
+    blocking_migration_test_t *test = argument;
+    void *result = NULL;
+    atomic_store_explicit(&test->source_worker, g_llam_tls_worker, memory_order_release);
+    int rc = llam_call_blocking_result(blocking_migration_callback, test, &result);
+    if (rc != 0 || result != test)
+        atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
+    atomic_store_explicit(&test->returned, 1U, memory_order_release);
+}
+
+static int blocking_result_after_migration(void) {
+    unsigned *cpus = NULL;
+    unsigned available = llam_count_allowed_cpus(&cpus);
+    free(cpus);
+    CHECK(available != 0U);
+    if (available < 2U) return 0;
+    llam_runtime_opts_t opts;
+    llam_preempt_opts_t policy;
+    llam_runtime_t *runtime = NULL;
+    blocking_migration_test_t test = {0};
+    const llam_managed_scheduler_ops_t ops = {.service = blocking_migration_service};
+    llam_spawn_opts_t spawn_opts;
+    CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
+    CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
+    CHECK(llam_spawn_opts_init(&spawn_opts, sizeof(spawn_opts)) == 0);
+    opts.worker_count = 2U;
+    opts.deterministic = 0U;
+    opts.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    policy.policy = LLAM_PREEMPT_POLICY_COOPERATIVE;
+    spawn_opts.flags = LLAM_SPAWN_F_NO_PREEMPT;
+    CHECK(llam_runtime_create_managed(&opts, sizeof(opts), &policy, sizeof(policy), &runtime) == 0);
+    CHECK(register_task_class(runtime, blocking_migration_task, LLAM_MANAGED_EXECUTION_PORTABLE) == 0);
+    runtime->managed_scheduler_ops = &ops;
+    runtime->managed_scheduler_data = &test;
+    llam_task_t *task = llam_runtime_spawn_ex(runtime, blocking_migration_task, &test,
+                                             &spawn_opts, sizeof(spawn_opts));
+    CHECK(task != NULL && llam_runtime_run_handle(runtime) == 0);
+    CHECK(llam_join(task) == 0);
+    CHECK(atomic_load_explicit(&test.source_parked, memory_order_acquire) == 1U &&
+          atomic_load_explicit(&test.returned, memory_order_acquire) == 1U &&
+          atomic_load_explicit(&test.failures, memory_order_acquire) == 0U);
+    llam_runtime_destroy(runtime);
+    return 0;
+}
+
 static void publication_child(void *argument) {
     scheduler_test_t *test = argument;
     while (atomic_load_explicit(&test->children_release, memory_order_acquire) == 0U)
@@ -1094,6 +1184,8 @@ int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--errno-migration") == 0)
         return errno_migration_cases() == 0 ? 0 : 1;
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (argc == 2 && strcmp(argv[1], "--blocking-migration") == 0)
+        return blocking_result_after_migration() == 0 ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--async-bookkeeping") == 0) {
 #if LLAM_ASYNC_CONTEXT_SHARED
         return native_bookkeeping() == 0 ? 0 : 1;
@@ -1120,6 +1212,7 @@ int main(int argc, char **argv) {
         run_case(false, false) != 0 || run_case(false, true) != 0 || shutdown_without_owner() != 0) return 1;
 #if defined(LLAM_ENABLE_TEST_HOOKS)
     if (compatibility_steal_preserves_portable_queue() != 0) return 1;
+    if (blocking_result_after_migration() != 0) return 1;
     if (publication_before_context_save(false) != 0 || publication_before_context_save(true) != 0)
         return 1;
     if (wake_before_context_save() != 0) return 1;

@@ -138,6 +138,25 @@ jobs:
             --soak-hour \
             --seed "$SOAK_SEED" 2>&1 | tee "$OUT_DIR/server_composite_hour.log"
 
+      - name: Collect native Darwin crash reports
+        if: failure() && runner.os == 'macOS'
+        run: |
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
+          for attempt in 1 2 3 4 5; do
+            echo "Checking native crash reports ($attempt/5)"
+            copied=0
+            for directory in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+              for report in "$directory"/test_runtime_*.ips "$directory"/test_runtime_*.crash; do
+                if [ -f "$report" ] && [ ! -L "$report" ]; then
+                  cp "$report" "$OUT_DIR/"
+                  copied=1
+                fi
+              done
+            done
+            if [ "$copied" -eq 1 ]; then break; fi
+            sleep 2
+          done
+
       - name: Upload soak diagnostics
         if: always()
         uses: actions/upload-artifact@v6

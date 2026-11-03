@@ -92,6 +92,8 @@
 * keep work stealing within the portable and compatibility processor pools so
   incompatible thieves cannot strand runnable work behind a reserved source;
   establish Mach port death before testing dead-target capture refusal.
+* resolve worker-local state in a fresh activation when a blocking callback
+  resumes on another native worker, avoiding retained source-thread TLS addresses.
 
 ## 2.2.1 - 2026-08-01
 

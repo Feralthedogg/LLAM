@@ -197,6 +197,30 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
     pthread_mutex_lock(&shard->opaque_lock);
 }
 
+/* A parked C frame can resume on another native M. Resolve scheduler TLS in a
+ * fresh activation: a compiler may retain the source M's TLS address across
+ * the context switch, even when it reloads the value stored at that address. */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static int llam_blocking_finish_wait(llam_task_t *task, llam_wait_node_t *node,
+                                      void **out) {
+    llam_cancel_token_unregister_task(task);
+    llam_task_clear_wait_tracking_or_abort(task);
+    llam_sync_wait_node_release(g_llam_tls_shard, node);
+    int wake_error = llam_consume_task_wake_error(task);
+    if (wake_error != 0) {
+        llam_thread_errno_store(wake_error);
+        return -1;
+    }
+    llam_thread_errno_store(task->blocking_errno);
+    *out = task->blocking_result;
+    g_llam_tls_shard->metrics.blocking_completions += 1U;
+    return 0;
+}
+
 /**
  * @brief Run a blocking callback on the runtime blocking-worker pool.
  *
@@ -215,24 +239,24 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
  *
  * @param fn  Blocking callback to execute.
  * @param arg User argument passed to @p fn.
+ * @param out Receives the callback result; NULL is a valid successful result.
  *
- * @return Callback result on success, or @c NULL on allocation failure,
- *         cancellation, invalid callback, or a callback that legitimately
- *         returns @c NULL. @c errno carries the disambiguating status.
+ * @return 0 on success, or -1 on failure with @c errno describing the error.
  */
 int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     LLAM_NATIVE_API_GUARD(-1);
 
     llam_runtime_t *rt;
-    llam_task_t *task = g_llam_tls_task;
-    llam_worker_t *worker = g_llam_tls_worker;
+    llam_task_t *task;
+    llam_worker_t *worker;
     llam_cancel_lock_set_t cancel_locks;
     llam_block_job_t *job;
     llam_wait_node_t *node;
     bool async_reserved = false;
-    int wake_error;
 
     llam_task_safepoint();
+    task = g_llam_tls_task;
+    worker = g_llam_tls_worker;
 
     if (out == NULL) {
         errno = EINVAL;
@@ -402,18 +426,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
         llam_switch_task_to_scheduler(task,
                                     g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
     }
-    llam_cancel_token_unregister_task(task);
-    llam_task_clear_wait_tracking_or_abort(task);
-    llam_sync_wait_node_release(g_llam_tls_shard, node);
-    wake_error = llam_consume_task_wake_error(task);
-    if (wake_error != 0) {
-        llam_thread_errno_store(wake_error);
-        return -1;
-    }
-    llam_thread_errno_store(task->blocking_errno);
-    *out = task->blocking_result;
-    g_llam_tls_shard->metrics.blocking_completions += 1U;
-    return 0;
+    return llam_blocking_finish_wait(task, node, out);
 }
 
 void *llam_call_blocking(llam_blocking_fn fn, void *arg) {
