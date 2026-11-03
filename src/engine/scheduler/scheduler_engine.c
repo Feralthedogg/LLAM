@@ -82,6 +82,11 @@ static bool llam_should_steal_from_victim(llam_shard_t *thief, llam_shard_t *vic
     if (thief == NULL || victim == NULL || victim == thief) {
         return false;
     }
+    if (thief->runtime->managed_policy_pools &&
+        ((thief->id < thief->runtime->portable_processor_count) !=
+         (victim->id < thief->runtime->portable_processor_count))) {
+        return false;
+    }
     if (llam_runtime_steal_pause_active(thief->runtime) || llam_shard_merge_pause_requested(thief) ||
         llam_shard_merge_pause_requested(victim)) {
         return false;
@@ -221,6 +226,8 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
  */
 llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard) {
     unsigned i;
+    unsigned first = 0U;
+    unsigned limit = rt->active_shards;
     llam_shard_t *best_same_node = NULL;
     llam_shard_t *best_remote = NULL;
     unsigned best_same_depth = 0U;
@@ -232,8 +239,18 @@ llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard) {
     if (!llam_shard_is_online(shard)) {
         return NULL;
     }
+    /* Compatibility and portable Ps own separate admission pools. A
+     * mismatched Chase-Lev thief would remove a G only to defer it into the
+     * victim's FIFO, stranding ordinary work behind an unsaved source. Keep
+     * both victim selection and the direct steal entry within the same pool. */
+    if (rt->managed_policy_pools) {
+        if (shard->id < rt->portable_processor_count)
+            limit = rt->portable_processor_count;
+        else
+            first = rt->portable_processor_count;
+    }
 
-    for (i = 0; i < rt->active_shards; ++i) {
+    for (i = first; i < limit; ++i) {
         unsigned depth;
 
         // Prefer same-locality work first; remote stealing is the fallback below.
@@ -254,7 +271,7 @@ llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard) {
         return llam_take_local_task(shard);
     }
 
-    for (i = 0; i < rt->active_shards; ++i) {
+    for (i = first; i < limit; ++i) {
         unsigned depth;
 
         if (llam_processor_node_index(&rt->shards[i].processor) ==

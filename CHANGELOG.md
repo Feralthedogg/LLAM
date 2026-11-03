@@ -89,6 +89,9 @@
 * select the installed Visual Studio generation on Windows deep runners, keep
   concurrent-destroy tests from reading reclaimed runtimes, and isolate the
   reserved-publication fixture from incidental safepoint yields.
+* keep work stealing within the portable and compatibility processor pools so
+  incompatible thieves cannot strand runnable work behind a reserved source;
+  establish Mach port death before testing dead-target capture refusal.
 
 ## 2.2.1 - 2026-08-01
 

@@ -306,8 +306,19 @@ static int fixture_run(unsigned fail_point) {
         ++captures;
     }
     if (pthread_join(worker, NULL) != 0) abort();
+    /* pthread_join can return before Mach tears down the native thread port.
+     * Establish the dead-target precondition without suspending a live target. */
+    bool target_dead = false;
+    deadline = fixture_now_ns() + UINT64_C(5000000000);
+    do {
+        mach_port_type_t type = 0U;
+        if (mach_port_type(mach_task_self(), port, &type) != KERN_SUCCESS) break;
+        target_dead = (type & MACH_PORT_TYPE_DEAD_NAME) != 0U;
+        if (!target_dead) fixture_pause();
+    } while (!target_dead && fixture_now_ns() < deadline);
     /* A dead native target is refused without owning an increment. */
-    bool dead_refused = llam_darwin_async_suspend(port, &tx) == -1 && !tx.suspended;
+    bool dead_refused = target_dead &&
+        llam_darwin_async_suspend(port, &tx) == -1 && !tx.suspended;
     if (mach_port_deallocate(mach_task_self(), port) != KERN_SUCCESS) abort();
     munmap(mapping, bytes + 2U * page);
     if (error != 0 || captures != FIXTURE_CAPTURES || !negatives || !dead_refused ||
@@ -315,8 +326,11 @@ static int fixture_run(unsigned fail_point) {
         atomic_load(&f.peers) != captures || atomic_load(&f.errors) != 0U ||
         f.result != FIXTURE_ITERATIONS * (FIXTURE_ITERATIONS + 1U) / 2U ||
         !llam_async_darwin_snapshot_valid(&f.snapshot, f.result, f.stack_low, f.stack_high)) {
-        fprintf(stderr, "Darwin mechanism FAIL: errno=%d capture=%u peer=%u errors=%u result=%" PRIu64 "\n",
-                error, captures, atomic_load(&f.peers), atomic_load(&f.errors), f.result);
+        fprintf(stderr, "Darwin mechanism FAIL: errno=%d capture=%u peer=%u errors=%u result=%" PRIu64
+                " negatives=%u dead=%u read=%u foreign=%u snapshot=%u\n",
+                error, captures, atomic_load(&f.peers), atomic_load(&f.errors), f.result,
+                negatives, dead_refused, read_refused, foreign_suspend_refused,
+                llam_async_darwin_snapshot_valid(&f.snapshot, f.result, f.stack_low, f.stack_high));
         return 1;
     }
     printf("test_async_context_darwin: %u native capture/restore/return witnesses; full GPR/NEON/flags/FP/mask/errno and finite result passed\n", captures);

@@ -156,6 +156,7 @@ typedef struct scheduler_test {
     atomic_uint run_done;
     atomic_uint children_release;
     atomic_uint children_done;
+    atomic_uint children_spawned;
     _Atomic(llam_task_t *) source_task;
     atomic_uint *processor_active;
     bool gate_enabled;
@@ -487,6 +488,69 @@ static int shutdown_without_owner(void) {
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 #define PUBLICATION_CHILDREN 32U
 
+static void queue_isolation_child(void *argument) {
+    atomic_uint *completed = argument;
+    atomic_fetch_add_explicit(completed, 1U, memory_order_release);
+}
+
+static int compatibility_steal_preserves_portable_queue(void) {
+    enum { STEAL_CHILDREN = 8 };
+    llam_runtime_opts_t opts;
+    llam_preempt_opts_t policy;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *handles[STEAL_CHILDREN];
+    atomic_uint completed = 0U;
+    bool preserved = false;
+    CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
+    CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
+    opts.worker_count = 1U;
+    opts.deterministic = 0U;
+    opts.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    policy.policy = LLAM_PREEMPT_POLICY_COOPERATIVE;
+    CHECK(llam_runtime_create_managed(&opts, sizeof(opts), &policy, sizeof(policy), &runtime) == 0);
+    CHECK(runtime->managed_policy_pools && runtime->portable_processor_count == 1U &&
+          runtime->compatibility_processor_count == 1U);
+    CHECK(register_task_class(runtime, queue_isolation_child, LLAM_MANAGED_EXECUTION_PORTABLE) == 0);
+    for (unsigned i = 0U; i < STEAL_CHILDREN; ++i) {
+        handles[i] = llam_runtime_spawn_ex(runtime, queue_isolation_child, &completed, NULL, 0U);
+        CHECK(handles[i] != NULL);
+    }
+    for (unsigned i = 0U; i < 2U; ++i) {
+        llam_shard_t *shard = &runtime->shards[i];
+        llam_worker_t *worker = &shard->primary_worker;
+        llam_ctx_t context = {0};
+        llam_processor_owner_ticket_t ticket;
+        CHECK(llam_worker_bind_registered(worker, &context) == 0);
+        uint64_t incarnation = atomic_load_explicit(&worker->binding_incarnation, memory_order_acquire);
+        pthread_mutex_lock(&shard->opaque_lock);
+        bool claimed = llam_execution_lease_claim_locked(shard, worker, incarnation);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        CHECK(claimed && llam_processor_owner_ticket_snapshot(&shard->processor, &ticket));
+        if (i == 0U) {
+            llam_drain_inject_queue(shard);
+            CHECK(llam_norm_queue_depth(shard) == STEAL_CHILDREN && shard->processor.norm_q.depth == 0U);
+        } else {
+            /* A mismatched thief must not demote portable Chase-Lev work to
+             * its victim's FIFO, where an unsaved source may hold the P. */
+            llam_task_t *task = llam_try_steal_task(runtime, shard);
+            preserved = task == NULL &&
+                runtime->shards[0].processor.norm_q.depth == 0U &&
+                llam_norm_queue_depth(&runtime->shards[0]) == STEAL_CHILDREN;
+        }
+        pthread_mutex_lock(&shard->opaque_lock);
+        bool returned = llam_execution_lease_return_locked(shard, worker, &ticket);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        CHECK(returned && llam_worker_unbind_registered(worker) == 0);
+    }
+    CHECK(llam_runtime_run_handle(runtime) == 0);
+    for (unsigned i = 0U; i < STEAL_CHILDREN; ++i) CHECK(llam_join(handles[i]) == 0);
+    CHECK(atomic_load_explicit(&completed, memory_order_acquire) == STEAL_CHILDREN);
+    llam_runtime_destroy(runtime);
+    CHECK(preserved);
+    return 0;
+}
+
 static void publication_child(void *argument) {
     scheduler_test_t *test = argument;
     while (atomic_load_explicit(&test->children_release, memory_order_acquire) == 0U)
@@ -506,7 +570,10 @@ static void publication_source(void *argument) {
         llam_task_t *child = llam_spawn_ex(publication_child, test,
                                           &child_options, sizeof(child_options));
         task_check(test, child != NULL);
-        if (child != NULL) task_check(test, llam_detach(child) == 0);
+        if (child != NULL) {
+            task_check(test, llam_detach(child) == 0);
+            atomic_fetch_add_explicit(&test->children_spawned, 1U, memory_order_release);
+        }
     }
     llam_yield();
     task_check(test, current_has_reservation());
@@ -572,6 +639,20 @@ static int publication_before_context_save(bool lockfree) {
     unsigned children_before_release = atomic_load_explicit(&test.children_done, memory_order_acquire);
     bool peers_finished = children_before_release >= progress_target;
     bool source_not_resumed = atomic_load_explicit(&test.completed, memory_order_acquire) == 0U;
+    if (!peers_finished) {
+        fprintf(stderr, "publication spawned=%u portable_P=%u active_P=%u\n",
+            atomic_load(&test.children_spawned), test.runtime->portable_processor_count,
+            test.runtime->active_shards);
+        for (unsigned i = 0U; i < test.runtime->active_shards; ++i) {
+            llam_shard_t *p = &test.runtime->shards[i];
+            pthread_mutex_lock(&p->lock);
+            unsigned inject = p->processor.inject_q.depth, hot = p->processor.hot_q.depth;
+            unsigned fifo = p->processor.norm_q.depth, normal = llam_norm_queue_depth(p);
+            pthread_mutex_unlock(&p->lock);
+            fprintf(stderr, "publication P=%u inject=%u hot=%u fifo=%u normal=%u\n",
+                i, inject, hot, fifo, normal);
+        }
+    }
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_REGISTERED_YIELD, false);
     CHECK(pthread_join(driver, NULL) == 0);
     if (!reached || !reserved || !peers_finished || !source_not_resumed || test.run_result != 0)
@@ -1038,6 +1119,7 @@ int main(int argc, char **argv) {
     if (errno_migration_cases() != 0 || dynamic_empty_processors() != 0 || run_case(true, false) != 0 ||
         run_case(false, false) != 0 || run_case(false, true) != 0 || shutdown_without_owner() != 0) return 1;
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (compatibility_steal_preserves_portable_queue() != 0) return 1;
     if (publication_before_context_save(false) != 0 || publication_before_context_save(true) != 0)
         return 1;
     if (wake_before_context_save() != 0) return 1;
