@@ -29,6 +29,7 @@
 #if !defined(__linux__) || !defined(__x86_64__) || !defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
 int main(void) { puts("registered Linux x86-64: native adapter unavailable"); return 77; }
 #else
+#include <cpuid.h>
 extern unsigned llam_async_safe_leaf(atomic_uint *release);
 extern char llam_async_safe_leaf_begin[], llam_async_safe_leaf_end[];
 
@@ -172,6 +173,22 @@ static llam_runtime_t *make_runtime(bool multi) {
                                               (uintptr_t)llam_async_safe_leaf_end) != 0 ||
         llam_async_preempt_enable_runtime(rt) != 0) {
         int error = errno;
+        unsigned a = 0U, b = 0U, c = 0U, d = 0U, cet = 0U;
+        uint64_t xcr0 = 0U;
+#ifdef __CET__
+        cet = __CET__;
+#endif
+        if (__get_cpuid(1U, &a, &b, &c, &d) &&
+            (c & (bit_XSAVE | bit_OSXSAVE)) == (bit_XSAVE | bit_OSXSAVE)) {
+            unsigned low, high;
+            __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0U));
+            xcr0 = ((uint64_t)high << 32U) | low;
+        }
+        a = b = c = d = 0U;
+        (void)__get_cpuid_count(0xDU, 9U, &a, &b, &c, &d);
+        fprintf(stderr, "registered native refusal: reason=%u CET=%u XCR0=%#llx PKRU=%u/%u/%u\n",
+                atomic_load(&rt->preempt_capability.failure_reason), cet,
+                (unsigned long long)xcr0, a, b, c);
         llam_runtime_destroy(rt);
         errno = error;
         return NULL;

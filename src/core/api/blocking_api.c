@@ -702,6 +702,23 @@ static bool llam_foreign_token_publish(llam_shard_t *shard,
         published = true;
     }
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (!published) {
+        llam_worker_t *helper = &shard->opaque_helper_worker;
+        fprintf(stderr, "foreign publish refused: mode=%u lease=%u handoff=%u seq=%llu/%llu "
+                "worker=%llu/%llu task=%llu/%llu exec=%u guards=%u/%u token=%u "
+                "helper_exec=%u helper_guards=%u/%u helper_token=%u helper_depth=%u\n",
+                (unsigned)mode, (unsigned)lease->state, (unsigned)lease_handoff_ready,
+                (unsigned long long)transfer_sequence, (unsigned long long)lease->transfer_sequence,
+                (unsigned long long)worker_run_generation, (unsigned long long)atomic_load(&worker->run_generation),
+                (unsigned long long)task_run_generation, (unsigned long long)atomic_load(&task->run_generation),
+                atomic_load(&worker->execution_state), atomic_load(&worker->runtime_critical_depth),
+                atomic_load(&worker->preempt_disable_depth), (unsigned)token->state,
+                atomic_load(&helper->execution_state), atomic_load(&helper->runtime_critical_depth),
+                atomic_load(&helper->preempt_disable_depth), (unsigned)helper->foreign_token.state,
+                helper->foreign_token.task != NULL ? atomic_load(&helper->foreign_token.task->opaque_blocking_depth) : 0U);
+    }
+#endif
     pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
     return published;
