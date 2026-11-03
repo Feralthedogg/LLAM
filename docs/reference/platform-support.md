@@ -44,6 +44,15 @@ available. Older SDKs that omit `ARM_SME_STATE`, or hosts whose extended state
 cannot be qualified, return `ENOTSUP` for native capture. Compatibility
 constructors retain their boundary/safepoint behavior on those hosts.
 
+Mach capture retains the native thread's SSBS policy bit; a restore refuses a
+policy change before mutating the thread. Linux ARM64 accepts an exact inactive,
+non-streaming SVE header and retains its vector length, while live SVE, SME and
+unknown records remain outside the FPSIMD profile. Linux x86-64 retains PKRU in
+the full kernel XSAVE payload only while the original M's protection-key policy
+matches its startup baseline. Callbacks, signal handlers and other code must not
+change those native policies while continuations are saved; these profiles do
+not virtualize a separate mitigation or protection-key policy for each task.
+
 Legacy constructors retain boundary/safepoint preemption. The expert Windows
 caller-certified-range API remains available with its separate process-wide
 fail-fast acknowledgement; it does not qualify arbitrary C or JIT mappings.

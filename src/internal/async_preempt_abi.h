@@ -184,6 +184,9 @@ typedef struct llam_async_preempt_state {
     bool drain_request;
     uint32_t request_owner_state;
     uint64_t request_run_generation;
+    /* Immutable during one native-M run; no per-G protection-key policy. */
+    uint32_t pkru_offset;
+    uint32_t pkru_baseline;
 } llam_async_preempt_state_t;
 
 _Static_assert(offsetof(llam_async_preempt_state_t, scheduler_fxstate) == LLAM_ASYNC_PREEMPT_SCHEDULER_FXSTATE_OFFSET,

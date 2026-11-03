@@ -406,6 +406,37 @@ static void fixture_parser_tests(void) {
     frame = good; fixture_record(&frame, 528U, 0x45535201U, 16U);
     fixture_record(&frame, 544U, 0x45535201U, 16U); fixture_negative(&frame);
     frame = good; fixture_record(&frame, 528U, 0x53564501U, 16U); fixture_negative(&frame);
+    {
+        uint16_t properties[4] = {16U, 0U, 0U, 0U};
+        frame = good;
+        fixture_record(&frame, 528U, 0x53564501U, 16U);
+        memcpy(frame.uc_mcontext.__reserved + 536U, properties, sizeof(properties));
+        FIXTURE_CHECK(llam_linux_arm64_async_read(&frame, EDOM, &machine) == 0);
+        FIXTURE_CHECK(machine.sve_vl == 16U);
+        expected = frame;
+        FIXTURE_CHECK(llam_linux_arm64_async_restore(&frame, &machine) == 0);
+        FIXTURE_CHECK(memcmp(&frame, &expected, sizeof(frame)) == 0);
+        properties[0] = 32U;
+        memcpy(frame.uc_mcontext.__reserved + 536U, properties, sizeof(properties));
+        expected = frame;
+        FIXTURE_CHECK(llam_linux_arm64_async_restore(&frame, &machine) == ENOTSUP);
+        FIXTURE_CHECK(memcmp(&frame, &expected, sizeof(frame)) == 0);
+        properties[0] = 16U; properties[1] = 1U;
+        memcpy(frame.uc_mcontext.__reserved + 536U, properties, sizeof(properties));
+        fixture_negative(&frame); /* Streaming SVE remains unqualified. */
+        properties[1] = 0U; properties[2] = 1U;
+        memcpy(frame.uc_mcontext.__reserved + 536U, properties, sizeof(properties));
+        fixture_negative(&frame);
+        properties[2] = 0U;
+        memcpy(frame.uc_mcontext.__reserved + 536U, properties, sizeof(properties));
+        fixture_record(&frame, 544U, 0x53564501U, 16U);
+        memcpy(frame.uc_mcontext.__reserved + 552U, properties, sizeof(properties));
+        fixture_negative(&frame); /* Duplicate SVE records are not a policy. */
+        frame = good;
+        fixture_record(&frame, 528U, 0x53564501U, 576U);
+        memcpy(frame.uc_mcontext.__reserved + 536U, properties, sizeof(properties));
+        fixture_negative(&frame); /* Live scalable registers are never dropped. */
+    }
     frame = good; fixture_record(&frame, 528U, 0x45585401U, 32U); fixture_negative(&frame);
     frame = good; fixture_record(&frame, 528U, 0x54504902U, 16U); fixture_negative(&frame);
     frame = good; fixture_record(&frame, 528U, 0xdeadbeefU, 16U); fixture_negative(&frame);

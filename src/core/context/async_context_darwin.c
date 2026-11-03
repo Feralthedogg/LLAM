@@ -161,8 +161,9 @@ int llam_darwin_async_read(llam_darwin_async_transaction_t *tx,
         neon_count != ARM_NEON_STATE64_COUNT) {
         return llam_darwin_async_error(ENOTSUP);
     }
-    /* Only EL0 baseline NZCV is admitted. Preserve, never strip, pointer state. */
-    if ((out->general.__cpsr & ~UINT32_C(0xf0000000)) != 0U ||
+    /* XNU preserves kernel-owned CPSR policy bits on thread_set_state. Admit
+     * SSBS without clearing it; restore must observe the same native policy. */
+    if ((out->general.__cpsr & ~(LLAM_DARWIN_ASYNC_NZCV_MASK | LLAM_DARWIN_ASYNC_SSBS_MASK)) != 0U ||
         (out->general.__pad & ~UINT32_C(1)) != 0U) {
         return llam_darwin_async_error(ENOTSUP);
     }
@@ -210,6 +211,14 @@ int llam_darwin_async_write(llam_darwin_async_transaction_t *tx,
     }
     /* Verify the destination is still in the same qualified baseline profile. */
     if (!llam_darwin_async_baseline_state(tx->thread)) {
+        return llam_darwin_async_error(ENOTSUP);
+    }
+    arm_thread_state64_t current = {0};
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(tx->thread, ARM_THREAD_STATE64, (thread_state_t)&current, &count) != KERN_SUCCESS ||
+        count != ARM_THREAD_STATE64_COUNT ||
+        (current.__cpsr & ~LLAM_DARWIN_ASYNC_NZCV_MASK) !=
+            (captured->general.__cpsr & ~LLAM_DARWIN_ASYNC_NZCV_MASK)) {
         return llam_darwin_async_error(ENOTSUP);
     }
     if (llam_darwin_async_set_state(tx->thread, ARM_NEON_STATE64,

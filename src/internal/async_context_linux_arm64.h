@@ -45,11 +45,13 @@ typedef struct llam_linux_arm64_async_machine {
     uint32_t fpsr;
     int entry_errno;
     bool valid;
+    uint16_t sve_vl; /* Zero without SVE; otherwise an inactive header's VL. */
 } llam_linux_arm64_async_machine_t;
 
 /* Bounded async-signal-safe transport. Return an error NUMBER, without changing
  * errno or publishing ownership. Failure never changes the input frame or out.
- * Only the initial FPSIMD profile is supported; SVE/SME/unknown state defers.
+ * FPSIMD and an inactive SVE header are supported. Live SVE/SME/unknown state
+ * defers; vector-length policy must match the fresh origin-M frame.
  * The caller captures entry errno before any handler work and returns normally
  * from the handler after success. Do not call a restorer or replay an old frame.
  * All arguments must be disjoint, owned, prevalidated readable/writable storage. */

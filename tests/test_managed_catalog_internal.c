@@ -367,7 +367,10 @@ static int check_native_fixture(llam_runtime_t *runtime, llam_runtime_t *peer, c
     void *native = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (native == NULL) fprintf(stderr, "fixture dlopen: %s\n", dlerror());
     CHECK(native != NULL);
-    fixture_entry_fn entry = (fixture_entry_fn)dlsym(native, "entry");
+    void *symbol = dlsym(native, "entry");
+    fixture_entry_fn entry;
+    _Static_assert(sizeof(entry) == sizeof(symbol), "POSIX loader function pointer width");
+    memcpy(&entry, &symbol, sizeof(entry));
 #endif
     CHECK(entry != NULL);
     llam_managed_image_t image;

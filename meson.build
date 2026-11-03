@@ -77,13 +77,12 @@ if preempt_mode != 'off'
     cpp_available = add_languages('cpp', required: preempt_mode == 'required')
     if cpp_available
       llvm_dependency = dependency('llvm',
+        method: 'config-tool',
         modules: ['core', 'analysis', 'passes', 'support'],
         required: preempt_mode == 'required')
       if llvm_dependency.found()
         llvm_major = llvm_dependency.version().split('.')[0].to_int()
-        llvm_config_program = find_program(
-          'llvm-config-@0@'.format(llvm_major), 'llvm-config', required: true)
-        llvm_include_path = run_command(llvm_config_program, '--includedir', check: true).stdout().strip()
+        llvm_include_path = llvm_dependency.get_variable(configtool: 'includedir')
         llvm_system_include = include_directories(llvm_include_path, is_system: true)
         llvm_link_dependency = llvm_dependency.partial_dependency(includes: false, sources: false)
         plugin_target = shared_module('llam_preempt_pass',

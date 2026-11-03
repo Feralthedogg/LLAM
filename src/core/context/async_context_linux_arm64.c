@@ -26,6 +26,7 @@
 enum {
     LLAM_LINUX_ARM64_FPSIMD_MAGIC = 0x46508001U,
     LLAM_LINUX_ARM64_ESR_MAGIC = 0x45535201U,
+    LLAM_LINUX_ARM64_SVE_MAGIC = 0x53564501U,
     LLAM_LINUX_ARM64_FPSIMD_BYTES = 528U,
     LLAM_LINUX_ARM64_ESR_BYTES = 16U,
     LLAM_LINUX_ARM64_RECORD_ALIGN = 16U
@@ -64,11 +65,13 @@ static bool llam_linux_arm64_async_general(uint64_t pc, uint64_t sp, uint64_t ps
            (pstate & ~LLAM_LINUX_ARM64_PSTATE_ALLOWED) == 0U;
 }
 
-static int llam_linux_arm64_async_profile(const ucontext_t *frame, size_t *fpsimd_offset) {
+static int llam_linux_arm64_async_profile(const ucontext_t *frame, size_t *fpsimd_offset,
+                                         uint16_t *sve_vl) {
     const unsigned char *records;
     size_t offset = 0U;
     size_t fpsimd = SIZE_MAX;
     bool esr_seen = false;
+    uint16_t vector_length = 0U;
 
     if (frame == NULL) return EINVAL;
     if (!llam_linux_arm64_async_general(frame->uc_mcontext.pc, frame->uc_mcontext.sp,
@@ -80,6 +83,7 @@ static int llam_linux_arm64_async_profile(const ucontext_t *frame, size_t *fpsim
         if (header[0] == 0U && header[1] == 0U) {
             if (fpsimd == SIZE_MAX) return ENOTSUP;
             *fpsimd_offset = fpsimd;
+            *sve_vl = vector_length;
             return 0;
         }
         if (header[1] < LLAM_LINUX_ARM64_RECORD_ALIGN ||
@@ -91,8 +95,18 @@ static int llam_linux_arm64_async_profile(const ucontext_t *frame, size_t *fpsim
         } else if (header[0] == LLAM_LINUX_ARM64_ESR_MAGIC) {
             if (esr_seen || header[1] != LLAM_LINUX_ARM64_ESR_BYTES) return ENOTSUP;
             esr_seen = true; /* Informational; never copied to the fresh frame. */
+        } else if (header[0] == LLAM_LINUX_ARM64_SVE_MAGIC) {
+            uint16_t properties[4];
+            /* Linux emits this header even when SVE registers are not live.
+             * No scalable payload exists in the exact 16-byte, non-streaming
+             * form. Keep its per-thread VL; never shrink a live SVE record. */
+            if (vector_length != 0U || header[1] != 16U) return ENOTSUP;
+            memcpy(properties, records + offset + 8U, sizeof(properties));
+            if (!sve_vl_valid(properties[0]) || properties[1] != 0U ||
+                properties[2] != 0U || properties[3] != 0U) return ENOTSUP;
+            vector_length = properties[0];
         } else {
-            /* Includes EXTRA pointers, live OR header-only SVE/SME, TPIDR2,
+            /* Includes EXTRA pointers, SME, TPIDR2,
              * FPMR and access restrictions. Never follow extension pointers. */
             return ENOTSUP;
         }
@@ -104,9 +118,10 @@ static int llam_linux_arm64_async_profile(const ucontext_t *frame, size_t *fpsim
 int llam_linux_arm64_async_read(const ucontext_t *frame, int entry_errno,
                               llam_linux_arm64_async_machine_t *out) {
     size_t fpsimd;
+    uint16_t sve_vl;
     int error;
     if (out == NULL) return EINVAL;
-    error = llam_linux_arm64_async_profile(frame, &fpsimd);
+    error = llam_linux_arm64_async_profile(frame, &fpsimd, &sve_vl);
     if (error != 0) return error;
 
     memcpy(out->x, frame->uc_mcontext.regs, sizeof(out->x));
@@ -119,6 +134,7 @@ int llam_linux_arm64_async_read(const ucontext_t *frame, int entry_errno,
     memcpy(&out->fpcr, frame->uc_mcontext.__reserved + fpsimd + 12U, sizeof(out->fpcr));
     memcpy(out->q, frame->uc_mcontext.__reserved + fpsimd + 16U, sizeof(out->q));
     out->entry_errno = entry_errno;
+    out->sve_vl = sve_vl;
     out->valid = true; /* Caller release-publishes the containing bank afterwards. */
     return 0;
 }
@@ -126,13 +142,15 @@ int llam_linux_arm64_async_read(const ucontext_t *frame, int entry_errno,
 int llam_linux_arm64_async_redirect(ucontext_t *frame, const llam_ctx_t *scheduler,
                                   const sigset_t *scheduler_mask) {
     size_t fpsimd;
+    uint16_t sve_vl;
     int error;
     if (scheduler == NULL || scheduler_mask == NULL) return EINVAL;
-    error = llam_linux_arm64_async_profile(frame, &fpsimd);
+    error = llam_linux_arm64_async_profile(frame, &fpsimd, &sve_vl);
     if (error != 0) return error;
     if (!llam_linux_arm64_async_address(scheduler->sp, 16U) ||
         !llam_linux_arm64_async_address(scheduler->lr, 4U) || scheduler->simd_flags != 0U) return ENOTSUP;
     (void)fpsimd;
+    (void)sve_vl;
 
     /* Native OS return goes to this bridge on M's already-saved stack. The
      * bridge restores M's ABI state and returns to the actual switch caller.
@@ -150,11 +168,13 @@ int llam_linux_arm64_async_redirect(ucontext_t *frame, const llam_ctx_t *schedul
 int llam_linux_arm64_async_restore(ucontext_t *fresh_frame,
                                  const llam_linux_arm64_async_machine_t *machine) {
     size_t fpsimd;
+    uint16_t sve_vl;
     int error;
     if (machine == NULL || !machine->valid) return EINVAL;
     if (!llam_linux_arm64_async_general(machine->pc, machine->sp, machine->pstate)) return ENOTSUP;
-    error = llam_linux_arm64_async_profile(fresh_frame, &fpsimd);
+    error = llam_linux_arm64_async_profile(fresh_frame, &fpsimd, &sve_vl);
     if (error != 0) return error;
+    if (sve_vl != machine->sve_vl) return ENOTSUP;
 
     /* Complete validation precedes the first write. Keep every OS-owned field
      * and the NEW record layout; replace only native payload and kernel mask. */

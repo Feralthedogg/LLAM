@@ -71,6 +71,9 @@
   the managed compiler driver.
 * correct platform definitions for CMake tests, MSVC atomic initialization,
   migration-sensitive fuzz errno access and `noreturn` native-wrapper witnesses.
+* preserve native SSBS and unchanged protection-key policies during asynchronous
+  capture/restore, admit inactive SVE headers without dropping scalable state,
+  and keep LLVM headers, libraries and installed drivers on the selected version.
 
 ## 2.2.1 - 2026-08-01
 

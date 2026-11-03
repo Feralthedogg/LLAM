@@ -36,6 +36,7 @@ int main(void) {
 #include <string.h>
 #include <time.h>
 #include <ucontext.h>
+#include <cpuid.h>
 #if defined(LLAM_TEST_WRAP_SIGACTION)
 #include "async_signal_registry.h"
 #include <sys/wait.h>
@@ -125,6 +126,50 @@ static int async_test_legacy_fpu_frame(void) {
     return 0;
 }
 
+static int async_test_pkru_frame(void) {
+    _Alignas(64) unsigned char source[644] = {0}, destination[644] = {0}, before[644];
+    ucontext_t context = {0};
+    llam_async_preempt_state_t state = {0};
+    uint32_t magic = UINT32_C(0x46505853), trailer = UINT32_C(0x46505845);
+    uint32_t bytes = 584U, extended = 588U, pkru = UINT32_C(0x55555554);
+    uint64_t features = UINT64_C(515), active = features;
+    memcpy(source + 464U, &magic, 4U);
+    memcpy(source + 468U, &extended, 4U);
+    memcpy(source + 472U, &features, 8U);
+    memcpy(source + 480U, &bytes, 4U);
+    memcpy(source + 512U, &active, 8U);
+    memcpy(source + 576U, &pkru, 4U);
+    memcpy(source + 584U, &trailer, 4U);
+    state.xstate_area = destination;
+    state.xstate_capacity = 640U;
+    state.xsave_mask = features;
+    state.pkru_offset = 576U;
+    state.pkru_baseline = pkru;
+    context.uc_mcontext.fpregs = (fpregset_t)source;
+    if (!llam_async_preempt_test_capture_xstate(&state, &context) ||
+        state.captured_xstate_size != extended || memcmp(source, destination, extended) != 0) return 1;
+    memcpy(before, destination, sizeof(before));
+    pkru ^= UINT32_C(0x40000000);
+    memcpy(source + 576U, &pkru, 4U);
+    if (llam_async_preempt_test_capture_xstate(&state, &context) ||
+        memcmp(before, destination, sizeof(before)) != 0) return 1;
+    active = 3U;
+    memcpy(source + 512U, &active, 8U);
+    if (llam_async_preempt_test_capture_xstate(&state, &context)) return 1;
+    state.pkru_baseline = 0U;
+    if (!llam_async_preempt_test_capture_xstate(&state, &context)) return 1;
+    active = features;
+    memcpy(source + 512U, &active, 8U);
+    state.pkru_baseline = pkru;
+    source[580] = 1U;
+    if (llam_async_preempt_test_capture_xstate(&state, &context)) return 1;
+    source[580] = 0U;
+    state.pkru_offset = 0U;
+    if (llam_async_preempt_test_capture_xstate(&state, &context)) return 1;
+    puts("test_async_preempt_linux_x86_64: PKRU baseline preservation and changed-policy refusal passed");
+    return 0;
+}
+
 static int async_test_frame_refusal(void) {
     ucontext_t context = {0};
 
@@ -142,7 +187,7 @@ static int async_test_frame_refusal(void) {
         return 1;
     }
     puts("test_async_preempt_linux_x86_64: missing signal selectors refused (contract check passed)");
-    return async_test_legacy_fpu_frame();
+    return async_test_legacy_fpu_frame() || async_test_pkru_frame();
 }
 
 static void async_allocation_task(void *opaque) {
@@ -228,10 +273,14 @@ typedef struct async_preempt_test_state {
 
 static void async_leaf_task(void *arg) {
     async_preempt_test_state_t *state = arg;
+    unsigned a, b, c, d, pkru = 0U, restored_pkru = 0U;
+    bool has_pkru = __get_cpuid_count(7U, 0U, &a, &b, &c, &d) && (c & (1U << 4U)) != 0U;
+    if (has_pkru) __asm__ volatile("rdpkru" : "=a"(pkru), "=d"(d) : "c"(0U) : "memory");
 
     atomic_store_explicit(&state->leaf_started, 1U, memory_order_release);
-    atomic_store_explicit(&state->leaf_registers_ok,
-                          llam_async_safe_leaf(&state->release_leaf),
+    unsigned registers_ok = llam_async_safe_leaf(&state->release_leaf);
+    if (has_pkru) __asm__ volatile("rdpkru" : "=a"(restored_pkru), "=d"(d) : "c"(0U) : "memory");
+    atomic_store_explicit(&state->leaf_registers_ok, registers_ok && pkru == restored_pkru,
                           memory_order_release);
     atomic_store_explicit(&state->leaf_returned, 1U, memory_order_release);
 }
@@ -1010,6 +1059,7 @@ int main(int argc, char **argv) {
     int result = 1;
 
     (void)setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && strcmp(argv[1], "--frame-only") == 0) return async_test_frame_refusal();
     if (argc == 2 && strcmp(argv[1], "--signal-namespace") == 0) {
         return async_test_signal_namespace();
     }

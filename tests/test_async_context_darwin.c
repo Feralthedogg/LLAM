@@ -128,8 +128,8 @@ static void *fixture_worker(void *opaque) {
     return NULL; /* The controller retains and releases the published send right. */
 }
 
-static bool fixture_machine_ok(const llam_darwin_async_machine_t *m) {
-    if (!m->valid || m->general.__cpsr != UINT32_C(0xa0000000) ||
+static bool fixture_machine_ok(const llam_darwin_async_machine_t *m, uint32_t native_policy) {
+    if (!m->valid || m->general.__cpsr != (UINT32_C(0xa0000000) | native_policy) ||
         m->neon.__fpcr != UINT32_C(0x800000) ||
         m->neon.__fpsr != UINT32_C(0x8000000)) return false;
     for (unsigned i = 2U; i < 29U; ++i) {
@@ -189,6 +189,7 @@ static int fixture_run(unsigned fail_point) {
     bool foreign_suspend_refused;
     int error = 0;
     thread_t port;
+    uint32_t native_policy;
 
     if (mapping == MAP_FAILED) return 1;
     f.stack_low = (uintptr_t)mapping + page;
@@ -209,6 +210,11 @@ static int fixture_run(unsigned fail_point) {
         mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
 
         if (thread_suspend(port) != KERN_SUCCESS) abort();
+        arm_thread_state64_t general = {0};
+        mach_msg_type_number_t general_count = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&general,
+                             &general_count) != KERN_SUCCESS || general_count != ARM_THREAD_STATE64_COUNT) abort();
+        native_policy = general.__cpsr & ~LLAM_DARWIN_ASYNC_NZCV_MASK;
         foreign_suspend_refused = llam_darwin_async_suspend(port, &tx) == -1 &&
                                   errno == EBUSY && !tx.suspended;
         foreign_suspend_refused = foreign_suspend_refused &&
@@ -239,7 +245,7 @@ static int fixture_run(unsigned fail_point) {
             fixture_pause();
             continue;
         }
-        if (!fixture_machine_ok(&captured)) {
+        if (!fixture_machine_ok(&captured, native_policy)) {
             error = EILSEQ;
             llam_darwin_async_resume(&tx);
             break;
@@ -257,6 +263,10 @@ static int fixture_run(unsigned fail_point) {
             wrong_origin.origin_thread = MACH_PORT_NULL;
             rejected = rejected &&
                 llam_darwin_async_write(&tx, &wrong_origin) == -1 && !tx.mutated;
+            llam_darwin_async_machine_t wrong_policy = captured;
+            wrong_policy.general.__cpsr ^= LLAM_DARWIN_ASYNC_SSBS_MASK;
+            rejected = rejected && llam_darwin_async_write(&tx, &wrong_policy) == -1 &&
+                       errno == ENOTSUP && !tx.mutated;
             llam_darwin_async_test_fail(LLAM_DARWIN_ASYNC_TEST_FAIL_SME_QUERY);
             rejected = rejected &&
                 llam_darwin_async_read(&tx, &refused) == -1 && errno == ENOTSUP &&
@@ -284,6 +294,11 @@ static int fixture_run(unsigned fail_point) {
             llam_darwin_async_test_fail(fail_point);
         }
         if (llam_darwin_async_write(&tx, &captured) != 0) abort();
+        arm_thread_state64_t restored = {0};
+        mach_msg_type_number_t restored_count = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&restored,
+                             &restored_count) != KERN_SUCCESS || restored_count != ARM_THREAD_STATE64_COUNT ||
+            restored.__cpsr != captured.general.__cpsr) abort();
         if (fail_point == LLAM_DARWIN_ASYNC_TEST_FAIL_RESUME) {
             llam_darwin_async_test_fail(fail_point);
         }

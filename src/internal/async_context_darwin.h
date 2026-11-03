@@ -22,6 +22,9 @@
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 
+#define LLAM_DARWIN_ASYNC_NZCV_MASK UINT32_C(0xf0000000)
+#define LLAM_DARWIN_ASYNC_SSBS_MASK UINT32_C(0x1000)
+
 /* Thread state is native and origin-M-only, never a portable serialized ABI. */
 typedef struct llam_darwin_async_machine {
     arm_thread_state64_t general;

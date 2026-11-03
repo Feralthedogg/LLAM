@@ -659,9 +659,9 @@ llam_task_t *llam_runtime_spawn_group_owned_ex(llam_runtime_t *runtime,
     return task;
 }
 
-llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
-    LLAM_NATIVE_API_GUARD(NULL);
-
+/* Public callers have already checked the native domain on this same M. */
+static llam_task_t *llam_spawn_current(llam_task_fn fn, void *arg,
+                                      const llam_spawn_opts_t *opts, size_t opts_size) {
     llam_runtime_t *runtime = llam_runtime_current_owner();
     llam_runtime_t *pinned_runtime = NULL;
     llam_task_t *task;
@@ -683,8 +683,13 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     return task;
 }
 
+llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    return llam_spawn_current(fn, arg, opts, opts_size);
+}
+
 llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
     LLAM_NATIVE_API_GUARD(NULL);
 
-    return llam_spawn_ex(fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
+    return llam_spawn_current(fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
 }

@@ -1161,6 +1161,20 @@ static bool llam_async_capture_xstate(llam_async_preempt_state_t *state,
         if ((xstate_bv & ~state->xsave_mask) != 0U || xcomp_bv != 0U) {
             return false;
         }
+        if ((state->xsave_mask & LLAM_ASYNC_PREEMPT_XSTATE_PKRU_MASK) != 0U) {
+            uint32_t pkru = 0U; /* Absent XSAVE component denotes architectural init state. */
+            if (state->pkru_offset < LLAM_ASYNC_PREEMPT_XSTATE_HEADER_BYTES ||
+                state->pkru_offset > state->xstate_capacity - 8U) return false;
+            if ((xstate_bv & LLAM_ASYNC_PREEMPT_XSTATE_PKRU_MASK) != 0U) {
+                if (state->pkru_offset > xstate_size - 8U ||
+                    llam_async_load_u32(source + state->pkru_offset + 4U) != 0U) return false;
+                pkru = llam_async_load_u32(source + state->pkru_offset);
+            }
+            /* The trampoline and runtime use the same native protection policy
+             * as G. Refuse changes before publishing or modifying any state;
+             * the complete admitted component is restored by kernel sigreturn. */
+            if (pkru != state->pkru_baseline) return false;
+        }
         /* Preserve the signal ABI trailer as well as the XSAVE register image. */
         copy_size = extended_size;
         state->xstate_format = LLAM_ASYNC_PREEMPT_XSTATE_FORMAT_XSAVE;
@@ -1561,17 +1575,21 @@ static int llam_async_state_init_xstate(llam_async_preempt_state_t *state) {
             errno = ENOTSUP;
             return -1;
         }
-        /* PKRU changes data-page access rights; this trampoline cannot restore it last yet. */
-        if ((state->xsave_mask & LLAM_ASYNC_PREEMPT_XSTATE_PKRU_MASK) != 0U) {
-            errno = ENOTSUP;
-            return -1;
-        }
         area_size = ebx > ecx ? (size_t)ebx : (size_t)ecx;
         state->xstate_format = LLAM_ASYNC_PREEMPT_XSTATE_FORMAT_XSAVE;
         if (area_size < LLAM_ASYNC_PREEMPT_XSTATE_HEADER_BYTES ||
             area_size > LLAM_ASYNC_PREEMPT_XSTATE_MAX_BYTES) {
             errno = ENOTSUP;
             return -1;
+        }
+        if ((state->xsave_mask & LLAM_ASYNC_PREEMPT_XSTATE_PKRU_MASK) != 0U) {
+            if (!__get_cpuid_count(0xDU, 9U, &eax, &ebx, &ecx, &edx) ||
+                eax != 8U || ebx < LLAM_ASYNC_PREEMPT_XSTATE_HEADER_BYTES ||
+                ebx > area_size - 8U || (ecx & 1U) != 0U) {
+                errno = ENOTSUP;
+                return -1;
+            }
+            state->pkru_offset = ebx;
         }
     }
     state->xstate_capacity = area_size;
@@ -2274,7 +2292,14 @@ int llam_async_preempt_worker_ready(llam_worker_t *worker) {
         }
     }
 #endif
-    /* Validate the actual thread's signal ABI before dispatching any user G. */
+    if (state->pkru_offset != 0U) {
+        unsigned value, high;
+        __asm__ volatile("rdpkru" : "=a"(value), "=d"(high) : "c"(0U) : "memory");
+        if (high != 0U) { errno = ENOTSUP; goto failed; }
+        state->pkru_baseline = value;
+    }
+    /* Validate the actual thread's signal ABI before dispatching any user G.
+     * The release also publishes this M's immutable protection-key baseline. */
     atomic_store_explicit(&state->frame_probe_status, 1U, memory_order_release);
     rc = raise(runtime->async_preempt_signal);
     if (rc != 0 ||

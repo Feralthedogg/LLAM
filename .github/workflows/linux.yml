@@ -225,8 +225,11 @@ jobs:
       - name: Verify required compiler preemption tooling
         if: matrix.name == 'linux-x86_64-gcc'
         run: |
-          make LLAM_PREEMPT_TOOLING=required PREEMPT_TOOLING_BUILD_DIR=build/preempt-tools preempt-tools
-          meson setup build/meson-preempt -Dpreempt_tooling=required
+          LLVM_DIR="$(llvm-config-14 --cmakedir)" \
+            make LLAM_PREEMPT_TOOLING=required PREEMPT_TOOLING_BUILD_DIR=build/preempt-tools preempt-tools
+          mkdir -p build
+          printf "[binaries]\nllvm-config = '/usr/bin/llvm-config-14'\n" > build/llvm14-native.ini
+          meson setup build/meson-preempt --native-file build/llvm14-native.ini -Dpreempt_tooling=required
           meson compile -C build/meson-preempt
           meson test -C build/meson-preempt --print-errorlogs
           DESTDIR="$PWD/build/meson-sdk" meson install -C build/meson-preempt

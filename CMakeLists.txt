@@ -1999,6 +1999,8 @@ add_test(NAME test_default_policy_internal COMMAND test_default_policy_internal)
 add_test(NAME test_magic2_internal COMMAND test_magic2_internal)
 set_tests_properties(test_magic2_internal PROPERTIES TIMEOUT 45)
 add_test(NAME test_async_preempt_linux_x86_64 COMMAND test_async_preempt_linux_x86_64)
+add_test(NAME test_async_preempt_xstate_policy COMMAND test_async_preempt_linux_x86_64 --frame-only)
+set_tests_properties(test_async_preempt_xstate_policy PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 10)
 set_tests_properties(test_async_preempt_linux_x86_64 PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME test_async_preempt_linux_signal_namespace
     COMMAND test_async_preempt_linux_x86_64 --signal-namespace)
