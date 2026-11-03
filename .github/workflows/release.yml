@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 name: Release
 
@@ -129,9 +129,12 @@ jobs:
           grep '/examples/server_flood_stats.h$' package-files.txt
           grep '/LICENSE$' package-files.txt
           grep '/NOTICE$' package-files.txt
-          grep '/LICENSES/Apache-2.0.txt$' package-files.txt
+          if grep '/LICENSES/' package-files.txt; then
+            echo 'retired central license directory was packaged' >&2
+            exit 1
+          fi
           grep '/THIRD_PARTY_NOTICES.md$' package-files.txt
-          grep '/LICENSES/THIRD_PARTY/magic2/LICENSE$' package-files.txt
+          grep '/third_party/magic2/LICENSE$' package-files.txt
           rm -f package-files.txt
           tmp="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-smoke.XXXXXX")"
           trap 'rm -rf "$tmp"' EXIT
@@ -150,8 +153,8 @@ jobs:
           cmp LICENSE "$tmp/prefix-success/share/llam/LICENSE"
           cmp NOTICE \
             "$tmp/prefix-success/share/llam/NOTICE"
-          cmp LICENSES/Apache-2.0.txt \
-            "$tmp/prefix-success/share/llam/LICENSES/Apache-2.0.txt"
+          cmp LICENSE \
+            "$tmp/prefix-success/share/llam/LICENSE"
           cmp THIRD_PARTY_NOTICES.md \
             "$tmp/prefix-success/share/llam/THIRD_PARTY_NOTICES.md"
           mkdir -p "$tmp/outside"
@@ -217,9 +220,8 @@ jobs:
           foreach ($file in @(
             "LICENSE",
             "NOTICE",
-            "LICENSES\Apache-2.0.txt",
             "THIRD_PARTY_NOTICES.md",
-            (Join-Path (Join-Path (Join-Path "LICENSES" "THIRD_PARTY") "magic2") "LICENSE"),
+            (Join-Path (Join-Path "third_party" "magic2") "LICENSE"),
             "install.sh",
             "install.ps1",
             "include\llam\runtime.h",
@@ -266,8 +268,8 @@ jobs:
           if ($sourceNotice -ne $installedNotice) {
             throw "archive-local Windows installer changed the NOTICE attribution"
           }
-          $sourceApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\Apache-2.0.txt").Hash
-          $installedApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\Apache-2.0.txt")).Hash
+          $sourceApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSE").Hash
+          $installedApacheLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSE")).Hash
           if ($sourceApacheLicense -ne $installedApacheLicense) {
             throw "archive-local Windows installer changed the Apache 2.0 text"
           }
@@ -277,7 +279,7 @@ jobs:
             throw "archive-local Windows installer changed the third-party attributions"
           }
           $sourceMagic2License = (Get-FileHash -Algorithm SHA256 -LiteralPath "third_party\magic2\LICENSE").Hash
-          $installedMagic2LicensePath = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $successPrefix "share") "llam") "LICENSES") "THIRD_PARTY") "magic2"
+          $installedMagic2LicensePath = Join-Path (Join-Path (Join-Path (Join-Path $successPrefix "share") "llam") "third_party") "magic2"
           $installedMagic2License = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $installedMagic2LicensePath "LICENSE")).Hash
           if ($sourceMagic2License -ne $installedMagic2License) {
             throw "archive-local Windows installer changed the vendored magic2 license"

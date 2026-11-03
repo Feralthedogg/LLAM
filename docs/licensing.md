@@ -2,7 +2,7 @@
 Copyright 2026 Feralthedogg
 SPDX-License-Identifier: Apache-2.0
 Licensed under the Apache License, Version 2.0.
-See LICENSES/Apache-2.0.txt.
+See LICENSE.
 -->
 
 # Licensing
@@ -15,9 +15,7 @@ tests, examples, build files, and tools are licensed under the
 This includes current files that previously carried LLAM's custom license.
 
 The complete, unmodified license is in the root
-[`LICENSE`](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE), with a
-byte-identical SPDX lookup copy at
-[`LICENSES/Apache-2.0.txt`](https://github.com/Feralthedogg/LLAM/blob/main/LICENSES/Apache-2.0.txt).
+[`LICENSE`](https://github.com/Feralthedogg/LLAM/blob/main/LICENSE).
 The current repository no longer uses a per-path license manifest.
 First-party files without an embedded header are also covered by the root
 license; generated or uncommentable files may use an adjacent `.license`
@@ -51,8 +49,8 @@ Other algorithm and implementation attributions are in
 [`THIRD_PARTY_NOTICES.md`](https://github.com/Feralthedogg/LLAM/blob/main/THIRD_PARTY_NOTICES.md).
 
 Release packages and installed metadata include `LICENSE`, `NOTICE`,
-`THIRD_PARTY_NOTICES.md`, `LICENSES/Apache-2.0.txt`, and the magic2 license at
-`LICENSES/THIRD_PARTY/magic2/LICENSE`. First-party relicensing does not replace
+`THIRD_PARTY_NOTICES.md`, and the magic2 license at
+`third_party/magic2/LICENSE`. First-party relicensing does not replace
 third-party licenses.
 
 ## Historical versions

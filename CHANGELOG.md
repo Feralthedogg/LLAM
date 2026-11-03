@@ -1,9 +1,13 @@
 # LLAM ChangeLog
 
-## Unreleased
+## 3.0.0 - 2026-11-03
 
 ### Added
 
+* add compiler-qualified managed C execution with LLVM 23.1.2, LLPM2 final-image
+  admission, native worker probes and asynchronous capture/restore on qualified
+  Linux, macOS ARM64 and Windows MinGW profiles; retain compatibility constructors'
+  boundary/safepoint behavior.
 * complete explicit-runtime object creation, stop, JSON/dump diagnostics, resource
   snapshots and per-runtime worker/blocking/task/job limits; add bounded host drain
   that retains handles and in-flight memory on timeout.
@@ -13,69 +17,59 @@
   compiler-qualified native-affine tasks).
 * add checked explicit-runtime/group examples and regression coverage for nullable
   values, budget inheritance, partial transfers, admission, drain and cleanup.
-
 * add one atomic, expert-only public Win64 experimental async-preemption
   opt-in for caller-certified PE-image ranges, with explicit process-wide
   fail-fast acknowledgement; unavailable builds export an `ENOTSUP` stub.
-
 * add opt-in preemption metadata tooling and a conservative LLVM pass/driver;
   Rust, Python, JVM, .NET, and Go language-binding wrappers remain excluded.
-
 * add private platform capability/fallback reporting for cooperative and
   experimental Linux x86-64 hybrid preemption, with async context and
   foreign-detach/relief observability in internal dumps.
-
 * integrate the supplied Magic2 implementation behind private LLAM plumbing,
   including managed caller-scheduled CPU plans and a selective heavy-work
   policy that falls back before admission under low cost or runtime pressure;
   add exact-result tests and an isolated manual/Magic2/automatic benchmark.
-
 * vendor the upstream `magic2` repository under `third_party/magic2/` at
   commit `b890268b2be97a73977c73a2110b5b5f0af65500`, retaining its MIT license.
+* add private security-reporting guidance, a structured non-security defect form,
+  Apache contribution terms, DCO instructions and a tested license-policy gate.
+* require compiler, runtime-import contract, admitted-image and relocated complete
+  SDK checks in the ordinary Linux CI path, using pinned LLVM 23.1.2 tooling.
 
 ### Changed
 
 * end FreeBSD, OpenBSD, NetBSD and DragonFly BSD support from 3.0.0; remove BSD CI
   and release artifacts and reject retired targets in builds/install/package/SDK
   tooling. macOS kqueue remains supported; earlier BSD sources/reports are history.
-* advance the additive ABI to 2.3; retain the 56-byte runtime-options prefix and
-  append fixed-width resource limits. Existing constructors and legacy group token
-  override semantics remain compatible; managed defaults are documented separately.
-* preserve spawn request budgets across waits, prevent late cancellation delivery
-  from affecting a subsequent wait, and allow group cleanup after runtime teardown
-  has invalidated all of its child handles.
-
+* update product, installer, packaging, workflow, shared-library and documentation
+  metadata to `3.0.0`; advance the additive ABI to 2.3 while retaining ABI major 2
+  and the 56-byte runtime-options prefix, with fixed-width resource limits appended.
+* retain existing constructors and legacy group token override semantics;
+  document managed defaults and requested/effective preemption policy separately.
 * license all current first-party LLAM files under Apache License 2.0; remove
   the custom-license selection manifest and mandatory defect-reporting terms,
-  and update notices, contribution terms, policy checks, and release/install
+  and update notices, contribution terms, policy checks and release/install
   metadata. Existing third-party terms and previously distributed versions
   are unchanged.
-
+* use the root `LICENSE` as the canonical first-party license and remove the
+  duplicate `LICENSES/` directory. Preserve vendored licenses under `third_party/`
+  in source, packages and installed SDK metadata.
+* remove local `research/` and `.superpowers/sdd/` reports from Git tracking and
+  exclude generated executables, caches and local development outputs.
 * retain the expert Windows opt-in symbol and JSON statistics; caller-certified
   metadata does not automatically register ranges or change the compatibility
   constructors' boundary/safepoint behavior.
 
-## 3.0.0 - 2026-08-01
+### Fixed
 
-### Changed
-
-* establish a mixed-license repository for `v3.0.0`: newly created and
-  custom-marked files use the LLAM Commercial Reciprocity License 1.0, while
-  files already published under Apache License 2.0 remain Apache-licensed and
-  are recorded in an explicit path manifest.
-
-* update product, installer, packaging, workflow, shared-library, and
-  documentation metadata for `3.0.0` while retaining the public ABI at
-  `2.0`.
-
-### Added
-
-* add private security-reporting guidance, a structured non-security defect
-  form, contribution licensing and DCO instructions, and an explicit licensing
-  history.
-
-* enforce the repository license contract with a tested policy checker in the
-  normal verification flow.
+* preserve spawn request budgets across waits, prevent late cancellation delivery
+  from affecting a subsequent wait, and allow group cleanup after runtime teardown
+  has invalidated all of its child handles.
+* align Windows installer smoke checks with the current release version, support
+  official Linux LLVM plugin linkage, and build complete SDK contents before
+  installation and relocation checks.
+* correct platform definitions for CMake tests, MSVC atomic initialization,
+  migration-sensitive fuzz errno access and `noreturn` native-wrapper witnesses.
 
 ## 2.2.1 - 2026-08-01
 

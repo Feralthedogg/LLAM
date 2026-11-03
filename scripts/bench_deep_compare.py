@@ -2,7 +2,7 @@
 # Copyright 2026 Feralthedogg
 # SPDX-License-Identifier: Apache-2.0
 # Licensed under the Apache License, Version 2.0.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 """Run an isolated, multi-axis LLAM/Go/Tokio benchmark investigation.
 

@@ -2,7 +2,7 @@
 # Copyright 2026 Feralthedogg
 # SPDX-License-Identifier: Apache-2.0
 # Licensed under the Apache License, Version 2.0.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ SOURCE_ROOT = Path(__file__).resolve().parent.parent
 HEADER = """/* Copyright 2026 Feralthedogg
  * SPDX-License-Identifier: Apache-2.0
  * Licensed under the Apache License, Version 2.0.
- * See LICENSES/Apache-2.0.txt.
+ * See LICENSE.
  */
 """
 SIDECAR = """SPDX-FileCopyrightText: 2026 Feralthedogg
@@ -63,7 +63,7 @@ class LicensePolicyTest(unittest.TestCase):
         self.assertIn("Apache-2.0 license policy ok", result.stdout)
 
     def test_missing_required_metadata(self) -> None:
-        for relative in ("LICENSE", "NOTICE", "LICENSES/Apache-2.0.txt", "THIRD_PARTY_NOTICES.md"):
+        for relative in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"):
             with self.subTest(path=relative):
                 path = self.root / relative
                 saved = path.read_bytes()
@@ -73,17 +73,16 @@ class LicensePolicyTest(unittest.TestCase):
 
     def test_reject_symlink_license(self) -> None:
         (self.root / "LICENSE").unlink()
-        (self.root / "LICENSE").symlink_to("LICENSES/Apache-2.0.txt")
+        (self.root / "LICENSE").symlink_to("NOTICE")
         self.assertIn("LICENSE: required policy file", self.errors())
 
-    def test_root_and_spdx_copy_must_match(self) -> None:
+    def test_root_license_must_remain_canonical(self) -> None:
         self.write("LICENSE", "modified\n")
-        self.assertIn("byte-identical", self.errors())
-
-    def test_canonical_text_cannot_be_rewritten_even_in_both_copies(self) -> None:
-        self.write("LICENSE", "different terms\n")
-        self.write(policy.APACHE_LICENSE, "different terms\n")
         self.assertIn("published grant", self.errors())
+
+    def test_retired_duplicate_license_directory_is_rejected(self) -> None:
+        self.write("LICENSES/Apache-2.0.txt", (self.root / "LICENSE").read_text())
+        self.assertIn("retired license metadata", self.errors())
 
     def test_retired_license_text_and_manifest_rejected(self) -> None:
         for relative in policy.RETIRED_PATHS:

@@ -2,7 +2,7 @@
 
 Copyright 2026 Feralthedogg
 SPDX-License-Identifier: Apache-2.0
-Licensed under the Apache License, Version 2.0. See LICENSES/Apache-2.0.txt.
+Licensed under the Apache License, Version 2.0. See LICENSE.
 
 This file records algorithm and implementation provenance for LLAM. The
 Apache License, Version 2.0 applies to LLAM's original code; the
@@ -14,7 +14,7 @@ third-party material.
 The vendored `third_party/magic2/` snapshot is distributed under its upstream
 MIT License, preserved in `third_party/magic2/LICENSE`. Its pinned source and
 revision are documented in `third_party/magic2/UPSTREAM.md`. Release packages
-retain this license at `LICENSES/THIRD_PARTY/magic2/LICENSE`.
+retain this license at `third_party/magic2/LICENSE`.
 The byte-identical private mirror `src/internal/magic2.h` is also MIT-licensed,
 not first-party Apache-2.0 code. The provenance file `UPSTREAM.md` is
 LLAM-authored Apache-2.0 metadata and is not part of the upstream snapshot.

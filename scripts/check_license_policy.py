@@ -2,7 +2,7 @@
 # Copyright 2026 Feralthedogg
 # SPDX-License-Identifier: Apache-2.0
 # Licensed under the Apache License, Version 2.0.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 """Check the current Apache-2.0 policy without relabeling third-party material."""
 
@@ -16,17 +16,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-APACHE_LICENSE = Path("LICENSES/Apache-2.0.txt")
+APACHE_LICENSE = Path("LICENSE")
 APACHE_SHA256 = "7d16370e642185e2eecad74eaf1e15179b27e2690f82644e7d247b395b600430"
 APACHE_REF = "SPDX-License-Identifier: Apache-2.0"
 APACHE_NOTICE = "Licensed under the Apache License, Version 2.0"
-APACHE_FILE_NOTICE = "See LICENSES/Apache-2.0.txt."
+APACHE_FILE_NOTICE = "See LICENSE."
 CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion in LLAM, you agree
 to license that contribution under the Apache License, Version 2.0,
 unless the submission is conspicuously marked "Not a Contribution" or a
 separate written agreement applies."""
 RETIRED_ID = "LicenseRef-LLAM-Commercial-Reciprocity-1.0"
 RETIRED_PATHS = (
+    Path("LICENSES/Apache-2.0.txt"),
     Path("LICENSES") / (RETIRED_ID + ".txt"),
     Path("LICENSES/OLD-LICENSE/Apache-2.0.txt"),
     Path("LICENSES/OLD-LICENSE/APACHE-2.0-FILES.txt"),
@@ -51,7 +52,7 @@ NEGATIVE_TEST_FILES = frozenset({
     Path("scripts/test_package_license_layout_windows.ps1"),
 })
 REQUIRED_FILES = (
-    Path("LICENSE"), APACHE_LICENSE, Path("NOTICE"), Path("THIRD_PARTY_NOTICES.md"),
+    APACHE_LICENSE, Path("NOTICE"), Path("THIRD_PARTY_NOTICES.md"),
     Path("README.md"), Path("CONTRIBUTING.md"), Path("docs/licensing.md"),
     Path(".github/SECURITY.md"), Path(".github/ISSUE_TEMPLATE/config.yml"),
     Path(".github/ISSUE_TEMPLATE/defect-report.yml"),
@@ -142,8 +143,8 @@ def check(root: Path, include_untracked: bool = False) -> list[str]:
     canonical = (root / APACHE_LICENSE).read_bytes()
     if hashlib.sha256(canonical).hexdigest() != APACHE_SHA256:
         errors.append(f"{APACHE_LICENSE}: canonical Apache text differs from the published grant")
-    if (root / "LICENSE").read_bytes() != canonical:
-        errors.append("LICENSE: must be byte-identical to LICENSES/Apache-2.0.txt")
+    if (root / "LICENSES").exists():
+        errors.append("LICENSES: retired license metadata directory must not be active")
 
     def read(relative: str) -> str:
         return (root / relative).read_text(encoding="utf-8")
@@ -168,7 +169,7 @@ def check(root: Path, include_untracked: bool = False) -> list[str]:
         errors.append("docs/licensing.md: current scope or historical boundary is missing")
     for relative in ("scripts/package_release.sh", "scripts/package_release_windows.ps1"):
         text = read(relative).replace("\\", "/")
-        for marker in ("LICENSES/Apache-2.0.txt", "NOTICE", "THIRD_PARTY_NOTICES.md", "third_party/magic2/LICENSE"):
+        for marker in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "third_party/magic2/LICENSE"):
             if marker not in text:
                 errors.append(f"{relative}: missing packaging metadata: {marker}")
     for relative in ("scripts/install.sh", "scripts/install.ps1"):

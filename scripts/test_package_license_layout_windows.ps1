@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 $ErrorActionPreference = "Stop"
 
@@ -20,9 +20,9 @@ $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("llam-license-layout-" 
 $Repo = Join-Path $TempRoot "repo"
 $Build = Join-Path $Repo "build\Release"
 $Notice = "NOTICE"
-$ApacheLicense = "LICENSES\Apache-2.0.txt"
+$ApacheLicense = "LICENSE"
 $ThirdPartyNotices = "THIRD_PARTY_NOTICES.md"
-$ThirdPartyMagic2License = "LICENSES\THIRD_PARTY\magic2\LICENSE"
+$ThirdPartyMagic2License = "third_party\magic2\LICENSE"
 $NoticeText = "LLAM attribution`n"
 $ApacheText = "Apache license`n"
 $ThirdPartyNoticesText = "third-party attributions`n"
@@ -113,7 +113,6 @@ try {
         Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\$Script") -Destination (Join-Path $Repo "scripts\$Script")
     }
 
-    Write-Utf8File (Join-Path $Repo "LICENSE") $ApacheText
     Write-Utf8File (Join-Path $Repo $Notice) $NoticeText
     Write-Utf8File (Join-Path $Repo $ApacheLicense) $ApacheText
     Write-Utf8File (Join-Path $Repo $ThirdPartyNotices) $ThirdPartyNoticesText
@@ -185,8 +184,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $PackageRoot "OLD-LICENSES")) {
         throw "obsolete top-level OLD-LICENSES directory was packaged"
     }
-    if ((Test-Path -LiteralPath (Join-Path $PackageRoot "LICENSES\OLD-LICENSE")) -or
-        (Get-ChildItem -LiteralPath (Join-Path $PackageRoot "LICENSES") -Recurse -Filter "LicenseRef-LLAM*")) {
+    if (Test-Path -LiteralPath (Join-Path $PackageRoot "LICENSES")) {
         throw "retired LLAM license metadata was packaged"
     }
 

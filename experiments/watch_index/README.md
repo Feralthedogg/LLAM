@@ -12,7 +12,7 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-See LICENSES/Apache-2.0.txt.
+See LICENSE.
 -->
 
 # I/O watch index validation and measurement
@@ -122,4 +122,4 @@ python3 -B scripts/bench_watch_index.py --baseline /path/to/frozen/baseline-benc
 ```
 
 The recorded October 27 results, validation limits, and reversible task patch
-are in [the experiment report](../../research/watch-index-2026-10-27/REPORT.md).
+are in the experiment report (`research/watch-index-2026-10-27/REPORT.md`, local output).

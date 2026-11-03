@@ -12,7 +12,7 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-See LICENSES/Apache-2.0.txt.
+See LICENSE.
 -->
 
 # Qualified native async runtime comparison
@@ -144,5 +144,5 @@ Case isolation is required for this comparison. An initial multi-case LLAM smoke
 failed at io_echo with EPERM, while all isolated measured I/O samples passed;
 that same-process limitation was not repaired by this benchmark task.
 
-See [the recorded comparison](../../research/async-runtime-compare-2026-10-27/REPORT.md)
+See the recorded comparison (`research/async-runtime-compare-2026-10-27/REPORT.md`, local output)
 for exact versions, results, p99 values, activation proofs, raw records and limits.

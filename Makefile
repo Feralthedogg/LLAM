@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 CC ?= cc
 AR ?= ar
@@ -1607,11 +1607,10 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 		Linux-aarch64) package_target=linux-aarch64 ;; \
 		*) echo "unsupported package symlink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES" "$$tmp_dir/outside"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/NOTICE"; \
-	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
 	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
 	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
 	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
@@ -1671,11 +1670,10 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 		Linux-aarch64) package_target=linux-aarch64 ;; \
 		*) echo "unsupported package unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/NOTICE"; \
-	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
 	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
 	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
 	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
@@ -1717,11 +1715,10 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 		Linux-aarch64) package_target=linux-aarch64 ;; \
 		*) echo "unsupported package input smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES" "$$tmp_dir/outside"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/NOTICE"; \
-	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
 	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
 	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
 	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
@@ -1763,12 +1760,11 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 		Linux-aarch64) package_target=linux-aarch64 ;; \
 		*) echo "unsupported package input hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/NOTICE"; \
-	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
 	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
 	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
 	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
@@ -1811,11 +1807,10 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 		Linux-aarch64) package_target=linux-aarch64 ;; \
 		*) echo "unsupported package liblink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/NOTICE"; \
-	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
 	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
 	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
 	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \
@@ -1856,12 +1851,11 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 		Linux-aarch64) package_target=linux-aarch64 ;; \
 		*) echo "unsupported package regular-liblink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/NOTICE"; \
-	: > "$$tmp_dir/repo/LICENSES/Apache-2.0.txt"; \
 	: > "$$tmp_dir/repo/THIRD_PARTY_NOTICES.md"; \
 	mkdir -p "$$tmp_dir/repo/third_party/magic2"; \
 	cp third_party/magic2/LICENSE "$$tmp_dir/repo/third_party/magic2/LICENSE"; \

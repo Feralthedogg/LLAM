@@ -12,7 +12,7 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-See LICENSES/Apache-2.0.txt.
+See LICENSE.
 -->
 
 # Large channel select preparation
@@ -127,6 +127,6 @@ cross-platform performance require separate measurement. The small-path result
 means no material regression was detected in these cases, not identical timing
 for all inputs or host conditions.
 
-See [the recorded results](../../research/select-prepare-2026-10-27/REPORT.md)
+See the recorded results (`research/select-prepare-2026-10-27/REPORT.md`, local output)
 for complete channel-count tables, the rejected exploratory case, raw samples,
 validation limitations and cleanup status.

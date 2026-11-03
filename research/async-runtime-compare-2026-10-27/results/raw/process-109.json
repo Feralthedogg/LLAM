@@ -1,9 +1,0 @@
-{
-  "command": [
-    "/Users/feral/Desktop/Programming/LLAM/scripts/bench_tokio_compare/target/release/bench_tokio_compare"
-  ],
-  "case": "poll_wake",
-  "returncode": 0,
-  "stdout": "[tokio-bench] config rounds=127 warmup=8 worker_threads=1 spawn_tasks=512 channel_messages=4096 select_ops=4096 io_messages=512 poll_events=512 sleep_tasks=1024 sleep_yields=4 sleep_us=30000 opaque_scopes=64\n[tokio-bench] name=poll_wake_approx rounds=127 warmup=8 ops=512 ops_per_sec=798181.63 p50_us=636.58 p99_us=741.83\n",
-  "stderr": ""
-}

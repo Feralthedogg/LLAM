@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 param(
     [string]$Prefix,
@@ -428,7 +428,7 @@ function Install-ArchiveContentsFrom {
     Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "docs") (Join-Path $Prefix "share\llam\docs")
     Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "examples") (Join-Path $Prefix "share\llam\examples")
     Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "scripts") (Join-Path $Prefix "share\llam\scripts")
-    Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "LICENSES") (Join-Path $Prefix "share\llam\LICENSES")
+    Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "third_party") (Join-Path $Prefix "share\llam\third_party")
 
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "README.md") (Join-Path $Prefix "share\llam\README.md")
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "LICENSE") (Join-Path $Prefix "share\llam\LICENSE")

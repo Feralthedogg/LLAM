@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 from __future__ import annotations
 
@@ -29,9 +29,9 @@ from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent
 NOTICE_RELATIVE = Path("NOTICE")
-APACHE_LICENSE_RELATIVE = Path("LICENSES/Apache-2.0.txt")
+APACHE_LICENSE_RELATIVE = Path("LICENSE")
 THIRD_PARTY_NOTICES_RELATIVE = Path("THIRD_PARTY_NOTICES.md")
-THIRD_PARTY_MAGIC2_LICENSE_RELATIVE = Path("LICENSES/THIRD_PARTY/magic2/LICENSE")
+THIRD_PARTY_MAGIC2_LICENSE_RELATIVE = Path("third_party/magic2/LICENSE")
 NOTICE_BYTES = b"LLAM attribution\n"
 APACHE_LICENSE_BYTES = b"Apache license\n"
 THIRD_PARTY_NOTICES_BYTES = b"third-party attributions\n"
@@ -95,7 +95,6 @@ class PackageLicenseLayoutTest(unittest.TestCase):
         self._copy_script("install.sh")
         self._copy_script("install.ps1")
 
-        self._write("LICENSE", APACHE_LICENSE_BYTES)
         self._write(NOTICE_RELATIVE, NOTICE_BYTES)
         self._write(APACHE_LICENSE_RELATIVE, APACHE_LICENSE_BYTES)
         self._write(THIRD_PARTY_NOTICES_RELATIVE, THIRD_PARTY_NOTICES_BYTES)
@@ -204,24 +203,21 @@ class PackageLicenseLayoutTest(unittest.TestCase):
             self.assertIn(apache_name, names)
             self.assertIn(attributions_name, names)
             self.assertIn(third_party_name, names)
-            root_license = archive.extractfile(f"{self.package}/LICENSE")
             notice = archive.extractfile(notice_name)
             apache_license = archive.extractfile(apache_name)
             attributions = archive.extractfile(attributions_name)
             third_party_license = archive.extractfile(third_party_name)
 
-            self.assertIsNotNone(root_license)
             self.assertIsNotNone(notice)
             self.assertIsNotNone(apache_license)
             self.assertIsNotNone(attributions)
             self.assertIsNotNone(third_party_license)
-            self.assertEqual(APACHE_LICENSE_BYTES, root_license.read())
             self.assertEqual(NOTICE_BYTES, notice.read())
             self.assertEqual(APACHE_LICENSE_BYTES, apache_license.read())
             self.assertEqual(THIRD_PARTY_NOTICES_BYTES, attributions.read())
             self.assertEqual(THIRD_PARTY_MAGIC2_LICENSE_BYTES, third_party_license.read())
             self.assertFalse(any("/OLD-LICENSES/" in name for name in names))
-            self.assertFalse(any("/OLD-LICENSE/" in name or "LicenseRef-LLAM" in name for name in names))
+            self.assertFalse(any("/LICENSES/" in name or "LicenseRef-LLAM" in name for name in names))
 
     def test_archive_installer_preserves_active_license_metadata(self) -> None:
         self._package_archive()
@@ -272,7 +268,7 @@ class PackageLicenseLayoutTest(unittest.TestCase):
         self.assertEqual(THIRD_PARTY_MAGIC2_LICENSE_BYTES,
                          (prefix / "share/llam" / THIRD_PARTY_MAGIC2_LICENSE_RELATIVE).read_bytes())
         self.assertFalse((prefix / "share/llam/OLD-LICENSES").exists())
-        self.assertFalse((prefix / "share/llam/LICENSES/OLD-LICENSE").exists())
+        self.assertFalse((prefix / "share/llam/LICENSES").exists())
 
 
 if __name__ == "__main__":

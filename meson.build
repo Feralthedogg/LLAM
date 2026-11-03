@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 project('llam-preempt-tooling',
   'c',
@@ -67,8 +67,8 @@ install_data('tools/preempt/metadata.h',
 
 install_data('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md',
   install_dir: join_paths(get_option('datadir'), 'llam'))
-install_data('LICENSES/Apache-2.0.txt',
-  install_dir: join_paths(get_option('datadir'), 'llam', 'LICENSES'))
+install_data('third_party/magic2/LICENSE',
+  install_dir: join_paths(get_option('datadir'), 'llam', 'third_party', 'magic2'))
 
 if preempt_mode != 'off'
   if not preempt_target_supported

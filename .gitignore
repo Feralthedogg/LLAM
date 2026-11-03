@@ -146,9 +146,8 @@ __pycache__/
 /test_*
 /asan-test_*
 /tsan-test_*
-/research/**/artifacts/
-/research/**/host-logs/
 
-# The measured executable is retained locally beside its raw samples.
-/research/magic2-kernels-2026-10-28/bench_magic2_kernels.measured
-/research/magic2-kernels-2026-10-28/bench_magic2_kernels.measured.license
+# Keep local research, agent notes and the retired license copy out of Git.
+/research/
+/.superpowers/sdd/
+/LICENSES/

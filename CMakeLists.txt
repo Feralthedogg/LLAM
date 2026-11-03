@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -2417,14 +2417,8 @@ install(
 )
 
 install(
-    FILES LICENSES/Apache-2.0.txt
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/LICENSES
-    COMPONENT PreemptTools
-)
-
-install(
     FILES third_party/magic2/LICENSE
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/LICENSES/THIRD_PARTY/magic2
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/third_party/magic2
 )
 
 install(

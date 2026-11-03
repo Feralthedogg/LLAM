@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 """Exercise release staging for optional preemption SDK files."""
 
@@ -56,7 +56,6 @@ def make_fixture(root: Path, *, with_plugin: bool) -> None:
         "CHANGELOG.md",
         "NOTICE",
         "THIRD_PARTY_NOTICES.md",
-        "LICENSES/Apache-2.0.txt",
         "third_party/magic2/LICENSE",
         "scripts/package_release.sh",
         "scripts/generate_sdk_metadata.sh",

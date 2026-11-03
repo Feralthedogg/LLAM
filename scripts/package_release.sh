@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 set -eu
 
@@ -334,7 +334,6 @@ validate_safe_output_path "$out_dir" 0
 require_input "$root_dir/LICENSE"
 require_input "$root_dir/NOTICE"
 require_input "$root_dir/THIRD_PARTY_NOTICES.md"
-require_input "$root_dir/LICENSES/Apache-2.0.txt"
 require_input "$root_dir/third_party/magic2/LICENSE"
 require_input "$root_dir/README.md"
 require_input "$root_dir/CHANGELOG.md"
@@ -441,7 +440,6 @@ fi
 validate_release_input_file "$root_dir/LICENSE"
 validate_release_input_file "$root_dir/NOTICE"
 validate_release_input_file "$root_dir/THIRD_PARTY_NOTICES.md"
-validate_release_input_file "$root_dir/LICENSES/Apache-2.0.txt"
 validate_release_input_file "$root_dir/third_party/magic2/LICENSE"
 validate_release_input_file "$root_dir/README.md"
 validate_release_input_file "$root_dir/CHANGELOG.md"
@@ -501,7 +499,7 @@ validate_safe_output_path "$archive.sha256"
 validate_safe_output_path "$out_dir/$package_name.tar.gz"
 validate_safe_output_path "$out_dir/$package_name.tar.gz.sha256"
 rm -rf "$stage" "$archive" "$archive.sha256" "$out_dir/$package_name.tar.gz" "$out_dir/$package_name.tar.gz.sha256"
-mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts" "$stage/LICENSES" "$stage/LICENSES/THIRD_PARTY/magic2" "$stage/share/llam/preempt"
+mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts" "$stage/third_party/magic2" "$stage/share/llam/preempt"
 validate_safe_output_path "$stage" 0
 validate_safe_stage_tree "$stage"
 
@@ -509,8 +507,7 @@ printf '%s\n' "$version" > "$stage/VERSION"
 printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
 printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
 cp "$root_dir/LICENSE" "$root_dir/NOTICE" "$root_dir/THIRD_PARTY_NOTICES.md" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
-cp "$root_dir/LICENSES/Apache-2.0.txt" "$stage/LICENSES/"
-cp "$root_dir/third_party/magic2/LICENSE" "$stage/LICENSES/THIRD_PARTY/magic2/"
+cp "$root_dir/third_party/magic2/LICENSE" "$stage/third_party/magic2/"
 cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
 cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" \
     "$root_dir/scripts/cli_numbers.py" "$root_dir/scripts/process_utils.py" \

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 param(
     [string]$Target = "windows-x86_64",
@@ -228,8 +228,7 @@ foreach ($Dir in @(
     "examples",
     "include",
     "lib",
-    "LICENSES",
-    "LICENSES\THIRD_PARTY\magic2",
+    "third_party\magic2",
     "scripts",
     "share\llam\cmake",
     "lib\pkgconfig"
@@ -275,7 +274,6 @@ $BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "NOTICE")
 Require-Input (Join-Path $Root "THIRD_PARTY_NOTICES.md")
-Require-Input (Join-Path $Root "LICENSES\Apache-2.0.txt")
 Require-Input (Join-Path $Root "third_party\magic2\LICENSE")
 Require-Input (Join-Path $Root "README.md")
 Require-Input (Join-Path $Root "CHANGELOG.md")
@@ -294,7 +292,6 @@ foreach ($InputPath in @(
     (Join-Path $Root "LICENSE"),
     (Join-Path $Root "NOTICE"),
     (Join-Path $Root "THIRD_PARTY_NOTICES.md"),
-    (Join-Path $Root "LICENSES\Apache-2.0.txt"),
     (Join-Path $Root "third_party\magic2\LICENSE"),
     (Join-Path $Root "README.md"),
     (Join-Path $Root "CHANGELOG.md"),
@@ -316,9 +313,7 @@ Set-Content -LiteralPath (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "ABI_MAJOR") -Value $AbiMajor -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "LIBRARY_VERSION") -Value $LibraryVersion -NoNewline
 Copy-Item -LiteralPath @((Join-Path $Root "LICENSE"), (Join-Path $Root "NOTICE"), (Join-Path $Root "THIRD_PARTY_NOTICES.md"), (Join-Path $Root "README.md"), (Join-Path $Root "CHANGELOG.md")) -Destination $Stage
-New-Item -ItemType Directory -Force -Path (Join-Path $Stage "LICENSES") | Out-Null
-Copy-Item -LiteralPath (Join-Path $Root "LICENSES\Apache-2.0.txt") -Destination (Join-Path $Stage "LICENSES")
-Copy-Item -LiteralPath (Join-Path $Root "third_party\magic2\LICENSE") -Destination (Join-Path $Stage "LICENSES\THIRD_PARTY\magic2")
+Copy-Item -LiteralPath (Join-Path $Root "third_party\magic2\LICENSE") -Destination (Join-Path $Stage "third_party\magic2")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.sh") -Destination $Stage
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 foreach ($Item in Get-ChildItem -LiteralPath (Join-Path $Root "docs") -Force) {

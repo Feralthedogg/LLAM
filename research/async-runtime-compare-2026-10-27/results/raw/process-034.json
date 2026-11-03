@@ -1,9 +1,0 @@
-{
-  "command": [
-    "/Users/feral/Desktop/Programming/LLAM/bench_async_compare"
-  ],
-  "case": "poll_wake",
-  "returncode": 0,
-  "stdout": "[bench] config rounds=127 warmup=8 profile=release-fast worker_rings=0 worker_rings_multishot=0 dynamic_workers=0 lockfree_normq=0 huge_alloc=0 sqpoll=0 sqpoll_cpu=-1 idle_spin_ns=0 idle_spin_iters=0 spawn_tasks=512 channel_messages=4096 select_ops=4096 io_messages=512 poll_events=512 sleep_tasks=1024 sleep_yields=4 sleep_us=30000 opaque_scopes=64\n[bench-async] case=poll_wake enabled=1 workers=1 safe_ranges=1 qualification_captures=58 qualification_restores=58 workload_captures=0 workload_restores=0 execution_debt=0 binding_ops=0\n[bench] name=poll_wake rounds=127 warmup=8 ops=512 ops_per_sec=285460.65 p50_us=1773.75 p99_us=2117.38 ctx_switches=79593 idle_polls=194 idle_spin_hits=0 idle_spin_fallbacks=0 idle_spin_us=0.00 io_submits=10142 io_submit_calls=0 io_submit_syscalls=0 overflows=0 overflow_depth=0 dynamic_workers=0 online_workers=1 online_workers_floor=1 online_workers_min=1 online_workers_max=1 worker_rings=0 worker_rings_multishot=0 lockfree_normq=0 huge_alloc=0 sqpoll=0 active_workers=1 active_nodes=1 yield_direct_attempts=0 yield_direct_fast_hits=0 yield_direct_locked_hits=0 yield_direct_fail_context=0 yield_direct_fail_policy=0 yield_direct_fail_no_work=0 yield_direct_fail_self=0 yield_direct_fail_push=0 wake_handoff_attempts=0 wake_handoff_hits=0 wake_handoff_fail_context=0 wake_handoff_fail_policy=0 wake_handoff_fail_race=0 opaque_block_avg_us=0.00 opaque_block_max_us=0.00 opaque_block_samples=0 opaque_enter_wait_avg_us=0.00 opaque_enter_wait_max_us=0.00 opaque_enter_wait_samples=0 opaque_leave_wait_avg_us=0.00 opaque_leave_wait_max_us=0.00 opaque_leave_wait_samples=0\n",
-  "stderr": ""
-}

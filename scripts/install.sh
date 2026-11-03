@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# See LICENSES/Apache-2.0.txt.
+# See LICENSE.
 
 set -eu
 
@@ -765,7 +765,7 @@ run_archive_install_from() {
     copy_dir "$install_src_dir/docs" "$prefix/share/llam/docs"
     copy_dir "$install_src_dir/examples" "$prefix/share/llam/examples"
     copy_dir "$install_src_dir/scripts" "$prefix/share/llam/scripts"
-    copy_dir "$install_src_dir/LICENSES" "$prefix/share/llam/LICENSES"
+    copy_dir "$install_src_dir/third_party" "$prefix/share/llam/third_party"
 
     copy_file "$install_src_dir/README.md" "$prefix/share/llam/README.md"
     copy_file "$install_src_dir/LICENSE" "$prefix/share/llam/LICENSE"
