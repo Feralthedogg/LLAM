@@ -4377,7 +4377,7 @@ cleanup:
     return rc;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     static const multi_runtime_named_test_t tests[] = {
         {"sync_handle_family_confusion", test_sync_handle_family_confusion},
         {"runtime_run_handle_rejects_null", test_runtime_run_handle_rejects_null},
@@ -4429,6 +4429,11 @@ int main(void) {
         {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
     };
     size_t i;
+    const char *selected = NULL;
+    bool matched = false;
+
+    if (argc == 3 && strcmp(argv[1], "--case") == 0) selected = argv[2];
+    else if (argc != 1) return test_fail("expected --case NAME or no arguments");
 
     /*
      * CI timeout diagnostics depend on seeing the last completed subcase.
@@ -4438,10 +4443,13 @@ int main(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
 
     for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); ++i) {
+        if (selected != NULL && strcmp(selected, tests[i].name) != 0) continue;
+        matched = true;
         if (run_named_test(&tests[i]) != 0) {
             return 1;
         }
     }
+    if (!matched) return test_fail("unknown multi-runtime test case");
     printf("[test_multi_runtime_core] ok\n");
     return 0;
 }

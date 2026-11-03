@@ -130,9 +130,18 @@ static void llam_managed_return_processor(llam_shard_t *shard, llam_worker_t *wo
             }
             draining = true;
         }
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_BEFORE_REGISTERED_RETURN);
         returned = llam_execution_lease_return_locked(shard, worker, draining ? NULL : ticket);
         pthread_mutex_unlock(&shard->opaque_lock);
-        if (!returned) abort();
+        if (!returned) {
+            /* A request can revoke the ordinary ticket after the flag read.
+             * Release the gate so shutdown can publish STOPPING, then retry
+             * through its separate drain authority; a stale ticket is never
+             * treated as permission to return the ordinary grant. */
+            if (!draining && atomic_load_explicit(&shard->runtime->shutdown_requested,
+                                                   memory_order_acquire)) continue;
+            abort();
+        }
         return;
     }
 }

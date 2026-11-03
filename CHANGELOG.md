@@ -104,6 +104,9 @@
   round trips. Attribute sampled wake handoffs before switching contexts.
 * sum watchdog progress counters directly, removing unnecessary SIMD buffers
   and the Linux AVX-512 stack-store crash while preserving stall detection.
+* retry a registered P return through STOPPING drain when shutdown revokes the
+  ordinary ticket after its initial flag check; retain fatal refusal of invalid
+  drain authority and cover that exact boundary with a deterministic gate.
 
 ## 2.2.1 - 2026-08-01
 

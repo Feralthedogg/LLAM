@@ -16,11 +16,17 @@
 name: Runtime diagnostic
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        type: choice
+        default: all
+        options: [all, linux, macos]
 permissions:
   contents: read
 
 jobs:
   linux-sanitizer-debug:
+    if: inputs.scope != 'macos'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -70,7 +76,8 @@ jobs:
                   raise OSError(ctypes.get_errno(), 'PR_SET_PTRACER failed')
 
           for iteration in range(1, 101):
-              process = subprocess.Popen(['./test_multi_runtime_core'], text=True,
+              process = subprocess.Popen(['./test_multi_runtime_core', '--case',
+                                          'destroyed_runtime_io_cancel_does_not_stop_peer_runtime'], text=True,
                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                           preexec_fn=allow_parent_debugger)
               try:
@@ -144,4 +151,85 @@ jobs:
         with:
           name: runtime-native-failure-stacks
           path: .artifacts/runtime-diagnostic
+          if-no-files-found: ignore
+
+  macos-intel-performance:
+    if: inputs.scope != 'linux'
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          path: after
+      - uses: actions/checkout@v6
+        with:
+          ref: 2623e0f751b8d00431be540be2842aae99ba1854
+          submodules: recursive
+          path: before
+      - name: Build matched native benchmarks
+        run: |
+          mkdir -p .artifacts/runtime-intel-performance
+          sysctl hw.model machdep.cpu.brand_string hw.ncpu hw.cpufrequency > .artifacts/runtime-intel-performance/host.txt
+          for source in before after; do
+            cmake -S "$source" -B "$source/build/perf" -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
+            cmake --build "$source/build/perf" --target bench -j4
+          done
+          cmake -S after -B after/build/lto -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
+          cmake --build after/build/lto --target bench test_managed_scheduler_internal -j4
+          after/build/lto/test_managed_scheduler_internal --errno-migration
+      - name: Compare on the same native host
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import statistics
+          import subprocess
+
+          samples = []
+          out = Path('.artifacts/runtime-intel-performance')
+          paths = dict(before='before/build/perf/bench', after='after/build/perf/bench',
+                       lto='after/build/lto/bench')
+          for case in ('channel_pingpong', 'select_park_wake', 'select_recv_ready', 'select_timeout'):
+              for pair in range(12):
+                  versions = ['before', 'after', 'lto']
+                  order = pair % len(versions)
+                  for version in versions[order:] + versions[:order]:
+                      env = dict(os.environ, LLAM_BENCH_ONLY=case, LLAM_BENCH_ROUNDS='9',
+                                 LLAM_BENCH_WARMUP_ROUNDS='1', LLAM_BENCH_CHANNEL_MESSAGES='1024',
+                                 LLAM_BENCH_SELECT_OPS='1024')
+                      result = subprocess.run([paths[version]], env=env,
+                                              text=True, capture_output=True, check=True, timeout=120)
+                      match = re.search(r'ops_per_sec=([0-9.]+)', result.stdout)
+                      if match is None:
+                          raise RuntimeError(result.stdout + result.stderr)
+                      samples.append(dict(case=case, pair=pair + 1, version=version,
+                                          ops_per_sec=float(match[1]), stdout=result.stdout))
+              (out / 'paired.json').write_text(json.dumps(samples, indent=2) + '\n')
+              medians = {version: statistics.median(s['ops_per_sec'] for s in samples
+                         if s['case'] == case and s['version'] == version) for version in paths}
+              print(case, medians, 'ratio', medians['after'] / medians['before'], flush=True)
+          PY
+      - name: Check unchanged Intel floors
+        run: |
+          python3 after/scripts/bench_guard.py --bench "$PWD/after/build/perf/bench" \
+            --rounds 9 --select-ops 1024 \
+            --min-ops "spawn_join=300000,channel_pingpong=750000,select_recv_ready=3000000,select_park_wake=500000,select_timeout=4000000,io_echo=100000,poll_wake=100000" \
+            --out .artifacts/runtime-intel-performance/perf_guard.json
+      - name: Inspect link-time optimization separately
+        if: ${{ !cancelled() }}
+        run: |
+          python3 after/scripts/bench_guard.py --bench "$PWD/after/build/lto/bench" \
+            --rounds 9 --select-ops 1024 \
+            --min-ops "spawn_join=300000,channel_pingpong=750000,select_recv_ready=3000000,select_park_wake=500000,select_timeout=4000000,io_echo=100000,poll_wake=100000" \
+            --out .artifacts/runtime-intel-performance/lto_guard.json
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: runtime-intel-performance
+          path: .artifacts/runtime-intel-performance
           if-no-files-found: ignore

@@ -521,6 +521,62 @@ static int shutdown_without_owner(void) {
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 #define PUBLICATION_CHILDREN 32U
 
+static int shutdown_during_processor_return(void) {
+    llam_runtime_opts_t opts;
+    llam_preempt_opts_t policy;
+    scheduler_test_t test = {0};
+    pthread_t driver, destroyer;
+    bool destroy_started = false;
+    bool reached, stopping = false;
+
+    CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
+    CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
+    opts.deterministic = 1U;
+    opts.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    policy.policy = LLAM_PREEMPT_POLICY_COOPERATIVE;
+    CHECK(llam_runtime_create_managed(&opts, sizeof(opts), &policy, sizeof(policy), &test.runtime) == 0);
+    CHECK(register_task_class(test.runtime, shutdown_waiter, LLAM_MANAGED_EXECUTION_PORTABLE) == 0);
+    llam_task_t *task = llam_runtime_spawn_ex(test.runtime, shutdown_waiter, &test, NULL, 0U);
+    CHECK(task != NULL && llam_detach(task) == 0);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_REGISTERED_RETURN, true);
+    int error = pthread_create(&driver, NULL, run_runtime, &test);
+    if (error != 0) {
+        llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_REGISTERED_RETURN, false);
+        llam_runtime_destroy(test.runtime);
+        return -1;
+    }
+    uint64_t deadline = llam_now_ns() + UINT64_C(5000000000);
+    while ((atomic_load_explicit(&test.entries, memory_order_acquire) == 0U ||
+            !llam_lease_test_gate_reached(LLAM_LEASE_TEST_BEFORE_REGISTERED_RETURN)) &&
+           llam_now_ns() < deadline) {
+        const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
+        (void)nanosleep(&delay, NULL);
+    }
+    reached = atomic_load_explicit(&test.entries, memory_order_acquire) != 0U &&
+              llam_lease_test_gate_reached(LLAM_LEASE_TEST_BEFORE_REGISTERED_RETURN);
+    if (reached && pthread_create(&destroyer, NULL, destroy_runtime, &test) == 0) {
+        destroy_started = true;
+        /* The held return gate keeps this runtime and its run pin alive. */
+        while (!atomic_load_explicit(&test.runtime->shutdown_requested, memory_order_acquire) &&
+               llam_now_ns() < deadline) {
+            const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
+            (void)nanosleep(&delay, NULL);
+        }
+        stopping = atomic_load_explicit(&test.runtime->shutdown_requested, memory_order_acquire);
+    }
+    /* Shutdown revokes the captured ticket while M still holds opaque_lock.
+     * The first return must refuse it, unlock, and rejoin the drain protocol. */
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_REGISTERED_RETURN, false);
+    if (!destroy_started) (void)llam_runtime_request_stop_handle(test.runtime);
+    CHECK(pthread_join(driver, NULL) == 0);
+    if (destroy_started) CHECK(pthread_join(destroyer, NULL) == 0);
+    else llam_runtime_destroy(test.runtime);
+    CHECK(reached && stopping && test.run_result == 0);
+    CHECK(atomic_load_explicit(&test.completed, memory_order_acquire) == 1U);
+    CHECK(atomic_load_explicit(&test.failures, memory_order_acquire) == 0U);
+    return 0;
+}
+
 static void queue_isolation_child(void *argument) {
     atomic_uint *completed = argument;
     atomic_fetch_add_explicit(completed, 1U, memory_order_release);
@@ -1217,6 +1273,8 @@ int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--errno-migration") == 0)
         return errno_migration_cases() == 0 ? 0 : 1;
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (argc == 2 && strcmp(argv[1], "--return-race") == 0)
+        return shutdown_during_processor_return() == 0 ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--blocking-migration") == 0)
         return blocking_result_after_migration() == 0 ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--async-bookkeeping") == 0) {
@@ -1253,6 +1311,7 @@ int main(int argc, char **argv) {
     RUN_CASE(run_case(false, true));
     RUN_CASE(shutdown_without_owner());
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+    RUN_CASE(shutdown_during_processor_return());
     RUN_CASE(compatibility_steal_preserves_portable_queue());
     RUN_CASE(blocking_result_after_migration());
     RUN_CASE(publication_before_context_save(false));
