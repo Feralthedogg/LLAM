@@ -888,8 +888,12 @@ static int test_helper_signal_stack_einval(void) {
     state.runtime = runtime;
     shard = &runtime->shards[0];
     llam_worker_test_force_sigaltstack_error(LLAM_WORKER_ROLE_OPAQUE_HELPER, EINVAL);
+    /* A later helper write cannot repair a run result already returned to the
+     * host. Hold the helper after publishing failure until that result exists. */
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_START_FAILURE, true);
     task = llam_runtime_spawn_ex(runtime, helper_failure_task, &state, NULL, 0U);
     if (task == NULL || pthread_create(&run_thread, NULL, helper_signal_failure_run_main, &state) != 0) {
+        llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_START_FAILURE, false);
         destroy_runtime_bounded(&runtime, "helper-sigaltstack EINVAL runtime destroy exceeded the bounded deadline");
         fprintf(stderr,
                 "test_worker_identity_internal: helper sigaltstack EINVAL setup failed: errno=%d (%s)\n",
@@ -898,9 +902,13 @@ static int test_helper_signal_stack_einval(void) {
         return 1;
     }
     run_created = true;
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_AFTER_HELPER_START_FAILURE) != 0) {
+        test_fail(&state.failure, "helper start failure was not published");
+    }
     if (wait_flag(&state.run_done, legacy_deadline()) != 0) {
         test_fail(&state.failure, "helper sigaltstack EINVAL did not wake the primary run");
     }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_HELPER_START_FAILURE, false);
     if (run_created) {
         pthread_join(run_thread, NULL);
         run_created = false;
@@ -923,6 +931,9 @@ static int test_helper_signal_stack_einval(void) {
     if (run_rc != -1 || run_errno != EINVAL ||
         atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != EINVAL ||
         state.enter_rc != 0 || state.leave_rc != 0) {
+        fprintf(stderr, "helper stack failure: run=%d errno=%d fatal=%d enter=%d leave=%d\n",
+                run_rc, run_errno, atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire),
+                state.enter_rc, state.leave_rc);
         test_fail(&state.failure, "helper sigaltstack EINVAL did not preserve fatal runtime semantics");
     }
     if (failure_result(&state.failure, "helper sigaltstack EINVAL failure semantics changed")) {

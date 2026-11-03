@@ -2018,6 +2018,12 @@ void *llam_opaque_helper_main(void *arg) {
     llam_bind_current_thread_to_cpu(llam_processor_cpu_id(&shard->processor));
     llam_tune_scheduler_thread(shard, true);
     if (llam_scheduler_try_install_signal_stack(&shard->opaque_helper_worker) != 0) {
+        int error = errno;
+
+        /* The primary can finish its run as soon as failed is published. Latch
+         * the original error and request stop before exposing that completion;
+         * wake operations must not replace the signal-stack errno. */
+        llam_record_fatal(rt, error);
         pthread_mutex_lock(&shard->opaque_lock);
         shard->opaque_helper_failed = true;
         shard->opaque_helper_ready = false;
@@ -2025,7 +2031,7 @@ void *llam_opaque_helper_main(void *arg) {
         atomic_store_explicit(&shard->opaque_helper_exit_ack, true, memory_order_release);
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
-        llam_record_fatal(rt, errno);
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_HELPER_START_FAILURE);
         llam_scheduler_unbind_identity(shard, &shard->opaque_helper_worker);
         llam_scheduler_clear_identity();
         return NULL;

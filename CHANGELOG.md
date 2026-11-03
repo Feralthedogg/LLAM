@@ -80,6 +80,8 @@
 * reuse validated queue ownership and retain the queue lock through local enqueue
   and dequeue operations, avoiding duplicate handoff probes; align hosted Linux
   ARM64 channel/select smoke floors with the Linux x86-64 portability gate.
+* record a helper's original fatal startup error before publishing failure, so
+  runtime completion cannot race ahead and report success.
 
 ## 2.2.1 - 2026-08-01
 
