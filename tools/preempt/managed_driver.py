@@ -85,7 +85,9 @@ def parse(arguments: list[str]) -> Invocation:
             link_flags.append(arg)
         elif arg.endswith(".c") and not arg.startswith("-"):
             sources.append(Path(arg))
-        elif arg.endswith((".o", ".obj", ".a", ".so", ".dylib", ".lib")) and not arg.startswith("-"):
+        elif (not arg.startswith("-") and
+              (arg.endswith((".o", ".obj", ".a", ".so", ".dylib", ".lib")) or
+               re.fullmatch(r".+\.so(?:\.[0-9]+)+", Path(arg).name))):
             objects.append(arg)
         elif arg.startswith(("-O", "-g", "-D", "-I", "-U", "-W", "-std=", "-m", "-f")):
             compile_flags.append(arg)

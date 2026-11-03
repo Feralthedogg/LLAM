@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "preempt"))
 from managed_verify import (Call, Entry, VerificationError, abi_hash, decode, native_thunk,
                             parse_records, read_image, verify)  # noqa: E402
+from managed_driver import parse as parse_invocation  # noqa: E402
 
 OPTIONS: argparse.Namespace
 
@@ -106,6 +107,17 @@ class ManagedCompilerTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertTrue(calls[0].flags & 8)
             self.assertFalse(any(call.flags & 16 for call in calls))
+
+    def test_versioned_elf_library_arguments(self) -> None:
+        options = [f"--llam-llvm-bin={self.llvm}", f"--llam-managed-plugin={self.plugin}",
+                   "-o", str(self.work / "parse-only-output")]
+        for suffix in (".so", ".so.3", ".so.3.0.0"):
+            library = "relocated sdk/lib/libllam_runtime" + suffix
+            with self.subTest(library=library):
+                self.assertEqual(parse_invocation([*options, library]).objects, [library])
+        for suffix in (".so.debug", ".so.3x"):
+            with self.subTest(suffix=suffix), self.assertRaises(VerificationError):
+                parse_invocation([*options, "libllam_runtime" + suffix])
 
     def test_auto_keeps_unknown_code_legacy_without_safe_ranges(self) -> None:
         path = self.work / "legacy.c"

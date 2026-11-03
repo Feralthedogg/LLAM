@@ -67,7 +67,8 @@
   has invalidated all of its child handles.
 * align Windows installer smoke checks with the current release version, support
   official Linux LLVM plugin linkage, and build complete SDK contents before
-  installation and relocation checks.
+  installation and relocation checks; accept versioned ELF library inputs in
+  the managed compiler driver.
 * correct platform definitions for CMake tests, MSVC atomic initialization,
   migration-sensitive fuzz errno access and `noreturn` native-wrapper witnesses.
 
