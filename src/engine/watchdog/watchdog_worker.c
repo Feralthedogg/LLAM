@@ -195,32 +195,6 @@ static void llam_windows_async_test_note_ctrl_tick(void) {
 #endif
 #endif
 
-#if LLAM_ARCH_AARCH64
-#include <arm_neon.h>
-#elif defined(__linux__) && LLAM_ARCH_X86_64 && (defined(__GNUC__) || defined(__clang__))
-#include <immintrin.h>
-#endif
-
-#if defined(__linux__) && LLAM_ARCH_X86_64 && (defined(__GNUC__) || defined(__clang__))
-#define LLAM_WATCHDOG_HAVE_AVX512 1
-#else
-#define LLAM_WATCHDOG_HAVE_AVX512 0
-#endif
-
-#define LLAM_METRIC_NEXT_FIELD(prev, next) \
-    _Static_assert(offsetof(llam_metrics_t, next) == offsetof(llam_metrics_t, prev) + sizeof(uint64_t), \
-                   "llam_metrics_t progress counter fields must remain contiguous")
-
-LLAM_METRIC_NEXT_FIELD(ctx_switches, yields);
-LLAM_METRIC_NEXT_FIELD(yields, parks);
-LLAM_METRIC_NEXT_FIELD(parks, wakes);
-LLAM_METRIC_NEXT_FIELD(wakes, timeout_wakes);
-LLAM_METRIC_NEXT_FIELD(timeout_wakes, cancel_wakes);
-LLAM_METRIC_NEXT_FIELD(steals, migrations);
-LLAM_METRIC_NEXT_FIELD(blocking_calls, blocking_completions);
-LLAM_METRIC_NEXT_FIELD(blocking_completions, io_submits);
-LLAM_METRIC_NEXT_FIELD(io_submits, io_completions);
-
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 /**
  * @brief Nudge shards that own timers on Windows.
@@ -258,117 +232,22 @@ static void llam_watchdog_nudge_pending_shards(llam_runtime_t *rt) {
 }
 #endif
 
-#if !LLAM_ARCH_AARCH64 || LLAM_WATCHDOG_HAVE_AVX512
-static uint64_t llam_watchdog_sum_u64_scalar(const uint64_t *values, size_t count) {
-    uint64_t sum = 0U;
-    size_t i;
-
-    for (i = 0U; i < count; ++i) {
-        sum += values[i];
-    }
-    return sum;
-}
-#endif
-
-#if LLAM_WATCHDOG_HAVE_AVX512
-__attribute__((target("avx512f")))
-static uint64_t llam_watchdog_sum_u64_avx512(const uint64_t *values, size_t count) {
-    __m512i acc = _mm512_setzero_si512();
-    uint64_t lanes[8];
-    uint64_t sum = 0U;
-    size_t i = 0U;
-
-    while (i + 8U <= count) {
-        __m512i chunk = _mm512_loadu_si512((const void *)(values + i));
-
-        acc = _mm512_add_epi64(acc, chunk);
-        i += 8U;
-    }
-    if (i < count) {
-        __mmask8 mask = (__mmask8)((1U << (count - i)) - 1U);
-        __m512i chunk = _mm512_maskz_loadu_epi64(mask, values + i);
-
-        acc = _mm512_add_epi64(acc, chunk);
-    }
-    _mm512_storeu_si512((void *)lanes, acc);
-    for (i = 0U; i < 8U; ++i) {
-        sum += lanes[i];
-    }
-    return sum;
-}
-
-static bool llam_watchdog_cpu_has_avx512f(void) {
-    static atomic_int cached = -1;
-    int value = atomic_load_explicit(&cached, memory_order_acquire);
-
-    if (value < 0) {
-        value = __builtin_cpu_supports("avx512f") != 0 ? 1 : 0;
-        atomic_store_explicit(&cached, value, memory_order_release);
-    }
-    return value != 0;
-}
-#endif
-
-#if LLAM_ARCH_AARCH64
-static uint64_t llam_watchdog_sum_u64_neon(const uint64_t *values, size_t count) {
-    uint64x2_t acc = vdupq_n_u64(0U);
-    uint64_t sum;
-    size_t i = 0U;
-
-    while (i + 2U <= count) {
-        uint64x2_t chunk = vld1q_u64(values + i);
-
-        acc = vaddq_u64(acc, chunk);
-        i += 2U;
-    }
-    sum = vgetq_lane_u64(acc, 0) + vgetq_lane_u64(acc, 1);
-    if (i < count) {
-        sum += values[i];
-    }
-    return sum;
-}
-#endif
-
-static uint64_t llam_watchdog_sum_u64(const uint64_t *values, size_t count) {
-#if LLAM_WATCHDOG_HAVE_AVX512
-    if (llam_watchdog_cpu_has_avx512f()) {
-        return llam_watchdog_sum_u64_avx512(values, count);
-    }
-#endif
-#if LLAM_ARCH_AARCH64
-    return llam_watchdog_sum_u64_neon(values, count);
-#else
-    return llam_watchdog_sum_u64_scalar(values, count);
-#endif
-}
-
 uint64_t llam_watchdog_metrics_progress_sum(const llam_metrics_t *metrics) {
-    uint64_t first_group[6];
-    uint64_t second_group[2];
-    uint64_t third_group[4];
-    uint64_t sum;
-
-    /*
-     * Keep the previous deadlock semantics: include externally visible
-     * scheduler/I/O progress, but do not include watchdog-owned counters that
-     * could mask a real stall.
-     */
-    first_group[0] = atomic_load_explicit(&metrics->ctx_switches, memory_order_relaxed);
-    first_group[1] = atomic_load_explicit(&metrics->yields, memory_order_relaxed);
-    first_group[2] = atomic_load_explicit(&metrics->parks, memory_order_relaxed);
-    first_group[3] = atomic_load_explicit(&metrics->wakes, memory_order_relaxed);
-    first_group[4] = atomic_load_explicit(&metrics->timeout_wakes, memory_order_relaxed);
-    first_group[5] = atomic_load_explicit(&metrics->cancel_wakes, memory_order_relaxed);
-    second_group[0] = atomic_load_explicit(&metrics->steals, memory_order_relaxed);
-    second_group[1] = atomic_load_explicit(&metrics->migrations, memory_order_relaxed);
-    third_group[0] = atomic_load_explicit(&metrics->blocking_calls, memory_order_relaxed);
-    third_group[1] = atomic_load_explicit(&metrics->blocking_completions, memory_order_relaxed);
-    third_group[2] = atomic_load_explicit(&metrics->io_submits, memory_order_relaxed);
-    third_group[3] = atomic_load_explicit(&metrics->io_completions, memory_order_relaxed);
-
-    sum = llam_watchdog_sum_u64(first_group, 6U);
-    sum += llam_watchdog_sum_u64(second_group, 2U);
-    sum += llam_watchdog_sum_u64(third_group, 4U);
+    /* Fixed small groups need no SIMD buffers or ISA dispatch. Keep the same
+     * relaxed atomic observations and unsigned wraparound, excluding controller
+     * bookkeeping that could otherwise mask a stalled application. */
+    uint64_t sum = atomic_load_explicit(&metrics->ctx_switches, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->yields, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->parks, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->wakes, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->timeout_wakes, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->cancel_wakes, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->steals, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->migrations, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->blocking_calls, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->blocking_completions, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->io_submits, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->io_completions, memory_order_relaxed);
     sum += atomic_load_explicit(&metrics->opaque_compensations, memory_order_relaxed);
     sum += atomic_load_explicit(&metrics->opaque_redirect_activations, memory_order_relaxed);
     sum += atomic_load_explicit(&metrics->total_run_ns, memory_order_relaxed);

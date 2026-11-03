@@ -102,6 +102,8 @@
 * carry validated channel pins and locks into wait preparation, coalesce managed
   context/owner checks, and preserve captured task errno without redundant TLS
   round trips. Attribute sampled wake handoffs before switching contexts.
+* sum watchdog progress counters directly, removing unnecessary SIMD buffers
+  and the Linux AVX-512 stack-store crash while preserving stall detection.
 
 ## 2.2.1 - 2026-08-01
 

@@ -302,7 +302,44 @@ cleanup:
     return result;
 }
 
+static int watchdog_test_progress_sum(void) {
+    llam_metrics_t metrics;
+    atomic_uint_fast64_t *progress[] = {
+        &metrics.ctx_switches, &metrics.yields, &metrics.parks, &metrics.wakes,
+        &metrics.timeout_wakes, &metrics.cancel_wakes, &metrics.steals, &metrics.migrations,
+        &metrics.blocking_calls, &metrics.blocking_completions, &metrics.io_submits,
+        &metrics.io_completions, &metrics.opaque_compensations,
+        &metrics.opaque_redirect_activations, &metrics.total_run_ns,
+    };
+    uint64_t expected = 0U;
+
+    for (size_t i = 0U; i < sizeof(progress) / sizeof(progress[0]); ++i)
+        atomic_init(progress[i], 0U);
+    atomic_init(&metrics.watchdog_hits, UINT64_MAX);
+    atomic_init(&metrics.preempt_requests, UINT64_MAX);
+    atomic_init(&metrics.deadlock_suspicions, UINT64_MAX);
+    if (llam_watchdog_metrics_progress_sum(&metrics) != 0U) return 1;
+    for (size_t i = 0U; i < sizeof(progress) / sizeof(progress[0]); ++i) {
+        uint64_t value = UINT64_C(1) << i;
+        atomic_store_explicit(progress[i], value, memory_order_relaxed);
+        expected += value;
+        if (llam_watchdog_metrics_progress_sum(&metrics) != expected) {
+            fprintf(stderr, "watchdog progress: missing/duplicate counter %zu\n", i);
+            return 1;
+        }
+    }
+    expected = 0U;
+    for (size_t i = 0U; i < sizeof(progress) / sizeof(progress[0]); ++i) {
+        atomic_store_explicit(progress[i], UINT64_MAX, memory_order_relaxed);
+        expected += UINT64_MAX;
+    }
+    if (llam_watchdog_metrics_progress_sum(&metrics) != expected) return 1;
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (watchdog_test_progress_sum() != 0) return 1;
+    if (argc == 2 && strcmp(argv[1], "--progress-sum") == 0) return 0;
     if (argc == 2 && strcmp(argv[1], "--wait-reference") == 0) {
         return watchdog_test_wait_reference();
     }
