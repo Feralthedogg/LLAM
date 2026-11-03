@@ -29,9 +29,9 @@ is separate from the ordinary runtime/backend matrix above:
 | --- | --- |
 | macOS ARM64 | Ordinary compiler C, original-M/fresh-P restore, mixed compatibility lane, affine TLS destruction/refill, dynamic Ps and shutdown tested natively. |
 | Linux ARM64 | Native ARM64 Linux kernel/container execution; signal mailbox, LLPM2 ELF image admission, ordinary C and registered M/P tests. |
-| Linux x86-64 | Full-system Linux 6.8 x86-64 guest with native signal frames, finite register/error/mask checks, affine lifetime and dynamic P tests. The recorded guest uses one virtual CPU and TCG; this does not qualify multicore hardware or wider ISA extensions. |
-| Windows x86-64 / MinGW | Actual Windows 10 x64 tests cover LLPM2 PE admission, ordinary C, registered Ms/Ps, native FLS destruction/refill and shutdown. The LLVM 23.1.2 producer was cross-hosted; native Windows LLVM tooling installation and MSVC runtime qualification remain separate gates. |
-| macOS x86-64 | Explicit experimental Mach adapter and complete runtime cross-build. Intel native execution is still untested; Rosetta is rejected as a native profile. |
+| Linux x86-64 | Native Linux x86-64 CI covers signal frames, register/error/mask preservation, registered Ms/Ps, affine lifetime and dynamic P cases. Explicit two-P/one-CPU oversubscription tests are separate from hardware/performance qualification; wider ISA state still requires its native probe. |
+| Windows x86-64 / MinGW | Actual Windows 10 x64 tests cover LLPM2 PE admission, ordinary C, registered Ms/Ps, native FLS destruction/refill and shutdown. The LLVM 23.1.2 producer was cross-hosted; native Windows LLVM tooling installation and the MSVC asynchronous profile remain separate gates. Ordinary MSVC runtime/IOCP builds are covered by native Windows CI. |
+| macOS x86-64 | The ordinary Intel runtime passes native CI. The experimental Mach asynchronous adapter requires explicit enablement and is not qualified by that CI; Rosetta is rejected as a native profile. |
 
 Qualified Linux, macOS ARM64 and MinGW builds compile the native backend by
 default. `LLAM_EXPERIMENTAL_ASYNC_PREEMPT=OFF` disables it; explicit `ON` also

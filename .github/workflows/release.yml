@@ -442,15 +442,21 @@ jobs:
           {
             echo "# LLAM ${version}"
             echo
-            echo "LLAM ${version} publishes native runtime builds for Linux, macOS, and Windows x86_64."
+            echo "LLAM ${version} publishes runtime SDKs for Linux and macOS on x86_64/aarch64, and Windows x86_64."
             echo
             echo "## Highlights"
             echo
-            echo "- Native Darwin x86_64 assembly context switching for Intel Mac builds."
-            echo "- kqueue-based macOS I/O backend coverage."
-            echo "- io_uring/liburing Linux I/O backend for x86_64 and aarch64."
-            echo "- Windows x86_64 IOCP backend archive with WSARecv/WSASend/AcceptEx/ConnectEx coverage."
-            echo "- SDK metadata for CMake and pkg-config consumers."
+            echo "- Compiler-qualified managed C and asynchronous preemption with image admission and native-thread probes."
+            echo "- Explicit-runtime object creation, diagnostics, resource limits and bounded drain."
+            echo "- I/O deadline/cancellation options, partial-transfer helpers, linked group cancellation and task results."
+            echo "- io_uring on Linux, kqueue on macOS and native Windows x86_64 IOCP support."
+            echo "- Public ABI 2.3 with ABI major 2 retained; first-party Apache-2.0 licensing and preserved third-party notices."
+            echo "- BSD support ends in 3.0.0."
+            echo
+            echo "## Managed C requirements"
+            echo
+            echo "The standard archives contain the runtime SDK. Build the LLVM 23.1.2 managed producer separately using the [managed C guide](https://github.com/${REPOSITORY}/blob/${TAG}/docs/reference/managed-runtime.md)."
+            echo "Asynchronous execution requires compiler/image admission and a qualified native profile. Compatibility constructors retain boundary/safepoint preemption. See the [profile matrix](https://github.com/${REPOSITORY}/blob/${TAG}/docs/reference/platform-support.md) for platform limits."
             echo
             echo "## Downloads"
             echo

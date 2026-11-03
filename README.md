@@ -16,10 +16,39 @@ quickstart examples, platform support, CLI/tool options, and operations guides.
 
 LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
-LLAM is not Linux-only. The Linux backend uses io_uring/liburing, macOS/Darwin
-use kqueue-based watch and completion paths, and the native Windows
+The Linux backend uses io_uring/liburing, macOS/Darwin uses kqueue-based
+watch and completion paths, and the native Windows
 10/11 backend uses IOCP for overlapped Winsock `read`/`write`/`accept`/`connect`
 plus generic HANDLE `ReadFile`/`WriteFile` requests.
+
+## 3.0.0 at a glance
+
+- Compiler-qualified managed C and asynchronous preemption, with loaded-image
+  admission, native-thread probes, and requested/effective policy reporting.
+- Explicit-runtime object creation, stop, diagnostics, resource limits and
+  deadline-bounded drain.
+- Common I/O deadline/cancellation options, partial-transfer helpers, linked
+  group cancellation, task results and task-local cleanup callbacks.
+- Linux, macOS and Windows runtime packages. BSD support ends in 3.0.0.
+- Public ABI **2.3**, retaining ABI major **2** and compatible option prefixes.
+
+See the [3.0.0 changelog](CHANGELOG.md) for the complete release changes.
+
+### Choose an execution path
+
+`llam_runtime_create_managed()` uses the LLVM **23.1.2** managed producer and
+qualified native profiles to preempt admitted CPU loops without application
+polls. Build the matching compiler/runtime SDK using the
+[managed C guide](docs/reference/managed-runtime.md). Standard release archives
+provide the runtime SDK; they do not bundle this managed producer or LLVM.
+
+`llam_runtime_create()` and the process-default constructors retain
+boundary/safepoint preemption. Their CPU loops need LLAM calls or explicit
+polls. Arbitrary unqualified C and unsupported native state have no
+asynchronous interruption guarantee. The
+[native profile matrix](docs/reference/platform-support.md) is separate from
+the ordinary runtime/I/O platform table below; Intel macOS asynchronous capture
+is experimental, and Windows managed-profile evidence currently covers MinGW.
 
 ## Key Features
 
@@ -54,7 +83,6 @@ plus generic HANDLE `ReadFile`/`WriteFile` requests.
 BSD support ended in **3.0.0**. Current builds, installers and release packages
 support Linux, macOS and Windows. Use versioned 2.x sources/tooling for legacy
 BSD deployments; earlier BSD experiments are historical evidence only.
-
 
 Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 On Windows 11 policy, associated socket/HANDLE objects attempt
@@ -96,6 +124,9 @@ CC=clang make -j4
 ```
 
 Build native Windows with CMake:
+
+Run these commands from an x64 Visual Studio developer shell or a configured
+MinGW toolchain environment.
 
 ```powershell
 cmake -S . -B build-windows -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DLLAM_ENABLE_WINDOWS_BACKEND=ON
@@ -353,7 +384,9 @@ Windows backend scope, policy split, and acceptance gates are tracked in `docs/o
 
 ## Execution Model
 
-Embedding applications should drive explicit runtime handles:
+Embedding applications should drive explicit runtime handles. This example uses
+the compatibility constructor; use the managed C workflow above for qualified
+asynchronous execution.
 
 1. Create a runtime with `llam_runtime_create()`.
 2. Spawn root tasks with `llam_runtime_spawn_ex()`.
@@ -362,10 +395,12 @@ Embedding applications should drive explicit runtime handles:
 
 ```c
 #include "llam/runtime.h"
+#include <errno.h>
 
 static void root(void *arg) {
     (void)arg;
-    /* ordinary blocking-style C control flow */
+    int error = llam_sleep_ns(1000000) == 0 ? 0 : errno;
+    (void)llam_task_set_result(NULL, error);
 }
 
 int main(void) {
@@ -376,14 +411,22 @@ int main(void) {
         return 1;
     }
     task = llam_runtime_spawn_ex(rt, root, NULL, NULL, 0);
-    if (task == NULL || llam_runtime_run_handle(rt) != 0 || llam_join(task) != 0) {
+    if (task == NULL || llam_runtime_run_handle(rt) != 0) {
         llam_runtime_destroy(rt);
         return 1;
     }
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
     llam_runtime_destroy(rt);
-    return 0;
+    return failed;
 }
 ```
+
+The complete [explicit-runtime example](examples/explicit_runtime.c) also
+checks object creation, linked group cancellation, nullable channel values,
+borrowed child results and cleanup. Run `make example_explicit_runtime`, then
+`./example_explicit_runtime` and `./example_explicit_runtime --cancel`.
 
 The process-default compatibility lifecycle is still available for simple single-runtime programs:
 
@@ -436,35 +479,14 @@ argument and use `llam_join()` when a parent task needs the child to finish.
 Every task handle returned by `llam_spawn*()` must be consumed by either a
 successful join or `llam_detach()`.
 
-```c
-#include "llam/runtime.h"
+Keep task arguments and pointed-to resources alive until the task has completed,
+including cancellation and runtime-error cleanup. `llam_task_set_result()` and
+`llam_join_result()` carry an application value/error independently of runtime
+`errno`. Group child handles are borrowed: inspect a completed child with
+`llam_task_get_result()` before joining its group, which consumes child handles.
 
-#include <stdint.h>
-#include <stdio.h>
-
-typedef struct job {
-    int input;
-    int output;
-} job_t;
-
-static void child(void *arg) {
-    job_t *job = arg;
-
-    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
-    job->output = job->input * job->input;
-}
-
-static void root(void *arg) {
-    (void)arg;
-
-    job_t job = {.input = 12};
-    llam_task_t *task = llam_spawn(child, &job, NULL);
-
-    if (task != NULL && llam_join(task) == 0) {
-        printf("result=%d\n", job.output);
-    }
-}
-```
+The [explicit-runtime example](examples/explicit_runtime.c) demonstrates these
+lifetimes with both successful and cancelled runs.
 
 Deadline-based APIs use absolute timestamps from `llam_now_ns()`.
 
@@ -477,117 +499,28 @@ int rc = llam_join_until(task, deadline);
 
 A channel transfers pointer values between tasks. Capacity must be at least `1`; capacity `1` or greater behaves like a bounded buffer.
 
-```c
-#include "llam/runtime.h"
+Create a channel for a chosen runtime with `llam_runtime_channel_create()`.
+`NULL` is a valid payload, so use `llam_channel_recv_result()` or its timed/try
+forms to distinguish it from failure. Closing rejects new sends while allowing
+buffered values to drain; destroy returns `EBUSY` while values or waiters remain.
 
-#include <stdio.h>
-
-typedef struct pipe_state {
-    llam_channel_t *channel;
-} pipe_state_t;
-
-static void producer(void *arg) {
-    pipe_state_t *state = arg;
-
-    (void)llam_channel_send(state->channel, "ping");
-    (void)llam_channel_send(state->channel, "pong");
-    (void)llam_channel_close(state->channel);
-}
-
-static void consumer(void *arg) {
-    pipe_state_t *state = arg;
-    const char *msg;
-
-    while ((msg = llam_channel_recv(state->channel)) != NULL) {
-        printf("recv=%s\n", msg);
-    }
-}
-
-static void root(void *arg) {
-    (void)arg;
-
-    pipe_state_t state = {
-        .channel = llam_channel_create(2),
-    };
-
-    if (state.channel == NULL) {
-        return;
-    }
-
-    llam_task_t *a = llam_spawn(producer, &state, NULL);
-    llam_task_t *b = llam_spawn(consumer, &state, NULL);
-
-    if (a != NULL) {
-        (void)llam_join(a);
-    }
-    if (b != NULL) {
-        (void)llam_join(b);
-    }
-    llam_channel_destroy(state.channel);
-}
-```
+The [checked producer/consumer example](examples/explicit_runtime.c) covers
+nullable payloads, linked cancellation, channel drain and destruction.
 
 ## I/O
 
 LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, datagram `recvfrom`/`sendto`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, owned-buffer reads, DNS resolution, and blocking filesystem open/stat wrappers. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
 
-```c
-#include "llam/runtime.h"
+A stream read or write may transfer only a prefix. Use `llam_read_exact()` or
+`llam_write_all()` when the application needs the whole buffer, and retain the
+reported progress if a later transfer fails. The `*_ex` forms accept common
+absolute-deadline/cancellation options; bounded byte I/O requires a managed task
+and a supported socket/nonblocking or overlapped I/O path.
 
-#include <stdio.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-typedef struct echo_state {
-    int reader;
-    int writer;
-} echo_state_t;
-
-static void reader_task(void *arg) {
-    echo_state_t *state = arg;
-    char buf[64];
-
-    ssize_t n = llam_read(state->reader, buf, sizeof(buf));
-    if (n > 0) {
-        printf("read=%.*s\n", (int)n, buf);
-    }
-}
-
-static void writer_task(void *arg) {
-    echo_state_t *state = arg;
-    const char *msg = "hello";
-
-    (void)llam_write(state->writer, msg, strlen(msg));
-}
-
-static void root(void *arg) {
-    (void)arg;
-
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-        return;
-    }
-
-    echo_state_t state = {
-        .reader = sv[0],
-        .writer = sv[1],
-    };
-
-    llam_task_t *reader = llam_spawn(reader_task, &state, NULL);
-    llam_task_t *writer = llam_spawn(writer_task, &state, NULL);
-
-    if (reader != NULL) {
-        (void)llam_join(reader);
-    }
-    if (writer != NULL) {
-        (void)llam_join(writer);
-    }
-
-    (void)llam_close(sv[0]);
-    (void)llam_close(sv[1]);
-}
-```
+The [I/O demo tasks](examples/demo_tasks.c) and
+[I/O regression tests](tests/test_io_buffers.c) exercise complete request and
+buffer lifetimes. See the [I/O API reference](docs/reference/api.md) for platform
+restrictions and failure contracts.
 
 The owned-buffer API lets the runtime allocate the I/O buffer. Release it with `llam_io_buffer_release()`.
 EOF or a zero-byte read returns `0` with `buffer == NULL`; failures return `-1`, set `errno`, and also leave `buffer == NULL`.
@@ -646,7 +579,14 @@ llam_io_buffer_release(buffer);
 
 ## Blocking Work
 
-Long CPU work or blocking syscalls can pin a worker if they run directly inside a task. Use `llam_call_blocking_result()` to offload such work without ambiguity, or wrap explicit blocking regions with `llam_enter_blocking()` and `llam_leave_blocking()`.
+Blocking syscalls and foreign library work can pin a worker. Use
+`llam_call_blocking_result()` to offload them through the runtime's blocking
+pool. Qualified managed CPU loops can use native asynchronous preemption;
+unknown foreign code still needs explicit integration.
+
+Manual `llam_enter_blocking()` / `llam_leave_blocking()` regions belong to the
+compatibility runtime. Registered managed runtimes return `ENOTSUP` for these
+calls; use the blocking callback API there.
 
 ```c
 #include "llam/runtime.h"
@@ -679,7 +619,25 @@ if (llam_enter_blocking() == 0) {
 
 ## Public API Summary
 
-Runtime lifecycle:
+Selected APIs are listed below. The [public API reference](docs/reference/api.md)
+and [public headers](include/llam/) define the complete contracts.
+
+Explicit-runtime and 3.0 integration:
+
+| API | Purpose |
+| --- | --- |
+| `llam_runtime_create` / `llam_runtime_spawn_ex` / `llam_runtime_run_handle` / `llam_runtime_destroy` | Explicit compatibility-runtime lifecycle. |
+| `llam_runtime_create_managed` / `llam_runtime_preempt_info_ex` | Compiler-qualified managed runtime and requested/effective policy queries through `<llam/managed.h>`. |
+| `llam_runtime_channel_create` / `llam_runtime_mutex_create` / `llam_runtime_cond_create` | Create objects for a chosen runtime from a host thread. |
+| `llam_runtime_cancel_token_create` / `llam_runtime_task_group_create_ex` | Explicit cancellation ownership and opt-in `LLAM_TASK_GROUP_F_LINK_CANCEL` composition. |
+| `llam_runtime_request_stop_handle` / `llam_runtime_drain_until` / `llam_runtime_get_resources_ex` | Stop, bounded drain and advisory resource snapshots. |
+| `llam_runtime_write_stats_json_handle` / `llam_dump_runtime_state_handle` | Diagnostics for a selected runtime. |
+| `llam_wait_opts_init` / `llam_read_ex` / `llam_write_ex` / `llam_connect_ex` / `llam_poll_fd_ex` | One absolute deadline and extra cancellation token per I/O operation. Bounded byte I/O requires supported managed I/O. |
+| `llam_read_exact_ex` / `llam_write_all_ex` | Transfer helpers with progress retained on partial failure. |
+| `llam_task_set_result` / `llam_join_result` / `llam_task_get_result` | Application results and errors, including successful `NULL` values and completed borrowed group children. |
+| `llam_task_local_set_owned` / `llam_task_local_take_result` | Task-local cleanup callbacks and explicit ownership transfer. |
+
+Compatibility lifecycle:
 
 | API | Purpose |
 | --- | --- |
@@ -857,18 +815,17 @@ bindings should model task classes, stack classes, profiles, flags, and
 32-bit state counters as `uint32_t`; `sqpoll_cpu` is `int32_t`.
 
 ```c
-llam_runtime_opts_t opts = {
-    .deterministic = 0,
-    .forced_yield_every = 0,
-    .experimental_flags =
-        LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS |
-        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ,
-    .profile = LLAM_RUNTIME_PROFILE_BALANCED,
-};
+llam_runtime_opts_t opts;
+if (llam_runtime_opts_init(&opts, sizeof(opts)) != 0) return 1;
+opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS |
+                          LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+opts.worker_count = 4;
+opts.max_tasks = 4096;
 
-if (llam_runtime_init(&opts) != 0) {
-    return 1;
-}
+llam_runtime_t *runtime = NULL;
+if (llam_runtime_create(&opts, sizeof(opts), &runtime) != 0) return 1;
+/* Spawn tasks, drive this runtime, then destroy it after joining. */
+llam_runtime_destroy(runtime);
 ```
 
 Important fields:
@@ -882,6 +839,10 @@ Important fields:
 | `idle_spin_max_iters` | Maximum idle-spin iterations. |
 | `sqpoll_cpu` | CPU reserved for SQPOLL. |
 | `profile` | Runtime policy profile: balanced, release-fast, debug-safe, or io-latency. |
+| `worker_count` | Processor count; `0` selects CPU/profile defaults. |
+| `blocking_worker_count` | Blocking pool size; `0` selects platform defaults. |
+| `max_tasks` | Admitted task objects, including retained completions; `0` is unlimited. |
+| `max_blocking_jobs` | Queued and running blocking callbacks; `0` is unlimited. |
 
 Experimental flags:
 
@@ -940,7 +901,7 @@ Selected environment variables:
 | `LLAM_PREEMPT_POLL_PERIOD` | `0`-`4096` | Override the task-local safepoint flag-poll period. `0` uses the profile default; strict mode forces frequent polling. |
 | `LLAM_PREEMPT_QUANTUM_NS` | nanoseconds | Override the global preemption slice. `0` uses task-class defaults. |
 | `LLAM_SAFEPOINT_CLOCK_PERIOD` | `0`-`4096` | Bound cheap-safepoint clock sampling. `0` samples every safepoint. |
-| `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for opaque blocking; default is enabled on Linux. |
+| `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for compatibility opaque blocking; default is disabled. |
 | `LLAM_TIMER_HEAP_PREWARM` | timer slots | Preallocate shard timer heap slots to avoid growth during sleep/deadline fanout. |
 | `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm the default stack cache before high fanout workloads. |
 | `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata slabs before high fanout workloads. |
@@ -950,6 +911,12 @@ Selected environment variables:
 | `LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS` | waiter count | Stress live poll/accept/inflight waiters; automatically clamped by fd budget. |
 
 ## Benchmarks
+
+CI throughput guards are smoke checks, not a 3.0.0 performance baseline.
+Public comparison numbers require scheduled artifacts for the measured commit,
+matching compiler settings, worker counts and workloads. See the
+[benchmark guide](docs/operations/benchmarks.md) for the nine-round CI guard
+and platform-specific floors.
 
 Run all LLAM benchmark cases:
 
@@ -1043,6 +1010,9 @@ make test
 ```
 
 Build a local release archive:
+
+Use a clean checkout for packaging. Preserve any measurements you need before
+running `make clean`, which also removes profiling outputs.
 
 ```bash
 make clean all test
@@ -1150,8 +1120,8 @@ current maintained contract rather than future roadmap work:
 
 ### 2. Core Runtime Roadmap
 
-Future core-runtime work should tighten LLAM itself without changing the stable
-2.x source-compatible public contract:
+Future core-runtime work should preserve the public ABI major 2 contract
+retained by 3.0.0, including size-aware compatible option prefixes:
 
 - Keep extending direct API coverage when new edge cases are found, especially
   around shutdown races, cancellation ownership, lost wakeups, select fanout,
@@ -1209,9 +1179,12 @@ clear examples, and CI that catches platform regressions early.
 
 ### Overview
 
-LLAM is a user-level N:M thread scheduler. A small number of OS worker threads (typically one per CPU core) run many lightweight tasks. Each task has its own stack and can be suspended and resumed without kernel intervention.
+LLAM is a user-level N:M thread scheduler. Portable tasks share OS workers and
+processor capacity; native-affine tasks retain a dedicated native worker.
+Each task has its own stack. Cooperative transfers can stay in user space,
+while qualified asynchronous capture uses the platform's kernel transport.
 
-The diagrams below separate the boundaries that matter in the current 2.x tree:
+The diagrams below separate the boundaries that matter in the current 3.0 tree:
 the public API entry points, runtime-instance ownership, per-runtime scheduler
 and backend state, public-handle hardening, and the optional broker/process
 boundary used when an embedder needs stronger isolation than in-process opaque
@@ -1376,14 +1349,18 @@ Their legacy C loops still require LLAM calls or explicit polls. The separate
 [expert Windows API](docs/build.md#native-windows-build) continues to accept
 explicitly caller-certified PE intervals under its process fail-fast contract.
 
-**Shards** are per-worker scheduler partitions. Each shard owns:
+**Processors (Ps)** own scheduler queues, timers and allocation state, retained
+in shard storage. Compatibility workers normally retain their home P;
+registered managed workers (Ms) acquire and return P execution leases. A P is
+not permanently tied to one native M. Each shard owns:
 
 - **Three run queues**: `hot_q` (latency-critical, capacity 1024), `norm_q` (normal, capacity 4096), and `inject_q` (cross-shard, capacity 1024).
 - **A timer heap**: min-heap ordered by deadline, used for `llam_sleep_until` and timed waits.
 - **A per-shard allocator**: slab-based pools for tasks, wait nodes, timer nodes, I/O requests, and I/O buffers, each with lock-free remote-free queues for cross-shard deallocation.
 - **A stack cache**: per-class (default/large/huge) stack mapping reuse pool.
 - **Scheduler context**: the fiber context (`llam_ctx_t`) the scheduler loop itself runs on.
-- **An opaque helper thread**: a pre-spawned compensation thread that takes over scheduling when the primary worker enters a blocking region.
+- **Compatibility helper state**: a helper thread is created on demand for an
+  announced blocking region; registered managed execution uses its separate M/P path.
 
 The `norm_q` has two implementations selected at init time: a mutex-guarded FIFO queue, or a **Chase-Lev lock-free deque** (`llam_cldeque_t`) for work-stealing. The lock-free deque is a bounded circular buffer of 4096 task pointers with separated `top` (steal end) and `bottom` (push/pop end) atomics, each on its own cache line.
 
@@ -1394,7 +1371,9 @@ nodes complete requests back to the owning shard's task.
 
 ### Scheduler Loop
 
-The core scheduler loop (`llam_scheduler_loop`) runs on each worker thread:
+The compatibility scheduler loop (`llam_scheduler_loop`) runs on its worker
+threads. Registered managed execution uses `llam_managed_runtime_run()` and
+fresh P claims around dispatch and native restoration. The compatibility loop is:
 
 ```
 loop:
@@ -1414,12 +1393,13 @@ Task selection priority: **hot queue → normal queue → inject queue → steal
 
 ### Wake Handoff Fusion
 
-Wake Handoff Fusion is the same-shard wake fast path used by channel, mutex,
+Wake Handoff Fusion is the compatibility same-shard wake fast path used by channel, mutex,
 condition-variable, join, yield, and I/O handoff paths when the producer and
 waiter are already inside the same runtime shard. Instead of always enqueueing
 the woken task and signaling the worker wake handle, LLAM validates the owner
 runtime, waiter state, timer policy, live-task guard, and direct-handoff budget,
-then switches through the scheduler context directly into useful local work.
+then transfers execution to useful local work. Registered managed execution
+returns through its scheduler to preserve reservations and native continuation lifetime.
 
 The path is a policy optimization only. Context mismatch, timer pressure,
 budget exhaustion, queue races, push failure, or disabled handoff all fall back
@@ -1434,15 +1414,18 @@ windows without publishing policy changes.
 
 ### Context Switching
 
-Context switches are performed in hand-written assembly for each supported platform. The runtime saves and restores only the callee-saved registers required by the platform ABI:
+Cooperative switches use hand-written assembly and the platform ABI's
+nonvolatile state. Asynchronous interruption has a separate full-state
+capture/restore contract; the cooperative register set alone cannot restore an
+arbitrary interrupted instruction.
 
 | Platform | Saved registers | Mechanism |
 | --- | --- | --- |
 | Linux x86_64 | `rbx, rbp, r12-r15`, `rsp` | Direct `mov`/`ret` in `linux_context_x86_64.S` |
-| Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `linux_context_arm64.S` |
+| Linux aarch64 | `x19-x30, sp`, `d8-d15`, FP control/status | `stp`/`ldp` in `linux_context_arm64.S` |
 | Darwin x86_64 | `rbx, rbp, r12-r15`, `rsp` | Same register set as Linux x86_64 |
-| Darwin arm64 | `x19-x29, x30, sp` | Same register set as Linux aarch64 |
-| Fallback | Full register set | `ucontext` via `swapcontext()` |
+| Darwin arm64 | `x19-x30, sp`, `d8-d15`, FP control/status | Same register set as Linux aarch64 |
+| Windows x86_64 | Win64 nonvolatile GPRs, `XMM6-XMM15`, stack/control state | MASM or GNU assembly |
 
 On x86_64, the fast path is approximately:
 
@@ -1452,13 +1435,22 @@ mov rsp, [rsi]        ; restore target SP
 ret                   ; jump to target's saved return address
 ```
 
-No syscall, no privilege transition, no TLB flush. Typical cost is tens of nanoseconds versus microseconds for a kernel thread switch.
+The cooperative assembly transfer itself makes no kernel call. End-to-end cost
+also includes scheduling, validation and state handling and must be measured on
+the target host. Native asynchronous capture/restore uses the qualified
+platform's kernel transport and preserves the complete admitted state.
 
-**FP state isolation**: the runtime detects XSAVE support at init and tracks the XSAVE mask and area size. Tasks that modify x87/SSE rounding modes (MXCSR, x87 CW) are isolated from one another across context switches.
+**FP state isolation**: x86_64 builds detect XSAVE support and track its mask and
+area size, while preserving x87/SSE control state across cooperative switches.
+ARM64 contexts preserve FPCR/FPSR and the ABI-required nonvolatile SIMD state.
+Native asynchronous profiles qualify the additional full-state requirements
+before admitting capture.
 
 ### I/O Backend
 
-LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each I/O call (`llam_read`, `llam_write`, `llam_read_handle`, `llam_write_handle`, `llam_accept`, `llam_connect`, `llam_poll_fd`, `llam_poll_handle`) follows this path:
+LLAM provides scheduler-safe I/O through several completion paths. The selected
+path depends on the backend, descriptor type and execution policy. Managed
+waits park the task or offload foreign blocking work:
 
 ```
 1. Direct nonblocking fast path (try without parking)
@@ -1469,14 +1461,13 @@ LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each 
 ```
 
 `llam_close()` is the matching fd/socket ownership boundary for descriptors
-that have been used with LLAM I/O. It closes with the platform primitive and
-invalidates runtime-local descriptor state first; raw `close()`/`closesocket()`
-is still legal but gives the runtime less diagnostic context around fd reuse.
+used with LLAM I/O. Use the LLAM close functions so the runtime can retire its
+descriptor state, and synchronize other users of that descriptor around close.
 
 **Linux backend** (`src/io/linux/`): each `llam_node_t` owns an `io_uring` instance with a ring depth of 256. Features include:
 
 - One-shot and multishot poll, accept, and recv operations.
-- Provided-buffer rings (128 entries per node) for zero-copy recv.
+- Provided-buffer rings (128 entries per node) for pooled receive buffers.
 - SQPOLL mode (experimental) where the kernel polls the SQ without syscalls.
 - Completion-driven task wake: CQE processing identifies the owning shard and re-enqueues the task.
 
@@ -1522,7 +1513,10 @@ Stack mappings use `mmap(MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK)` with a guard 
 
 When a task calls `llam_enter_blocking()` or `llam_call_blocking()`, the runtime must keep the shard's scheduler running while the worker thread is pinned in foreign code.
 
-**Opaque helper thread**: each shard has a pre-spawned helper thread (`opaque_helper_thread`). When the primary worker enters a blocking region:
+**Compatibility opaque helper**: a shard creates its helper thread
+(`opaque_helper_thread`) on demand. Registered managed runtimes use blocking
+callback offload instead of this manual handoff. When a compatibility primary
+worker enters an announced blocking region:
 
 ```
 Primary worker:
