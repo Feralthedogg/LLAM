@@ -295,11 +295,12 @@ Old constructors retain current-task/default-runtime selection.
 `llam_wait_opts_init` initializes the caller-sized common wait policy.
 `llam_read_ex`, `llam_write_ex`, `llam_connect_ex`, `llam_poll_fd_ex`,
 `llam_read_handle_ex` and `llam_write_handle_ex` accept it. Stream fd operations
-also have absolute `read_until`, `write_until`, `connect_until`, `poll_fd_until`
-forms. New poll forms take an `int` mask in the short-mask range; legacy poll ABI
+also have absolute `llam_read_until`, `llam_write_until`, `llam_connect_until`
+and `llam_poll_fd_until` forms. New poll forms take an `int` mask in the short-mask range; legacy poll ABI
 is unchanged. Poll timeout returns 0; byte/connect timeout returns -1/`ETIMEDOUT`.
 
-`llam_read_exact[_ex]` and `llam_write_all[_ex]` report confirmed progress through
+`llam_read_exact`, `llam_read_exact_ex`, `llam_write_all` and
+`llam_write_all_ex` report confirmed progress through
 a required `size_t *`, including on failure. Early EOF is `EPIPE`; premature
 zero write is `EIO`. `llam_task_local_set_owned` adds nonblocking same-M exit
 cleanup and `llam_task_local_take_result` transfers the value without cleanup.

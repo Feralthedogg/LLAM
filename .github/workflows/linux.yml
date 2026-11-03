@@ -117,6 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build .artifacts/managed-ci
+          exec > >(tee .artifacts/managed-ci/toolchain-prepare.log) 2>&1
           archive="$PWD/build/llvm-managed.tar.zst"
           llvm_prefix="$PWD/build/llvm-managed"
           trap 'rm -f "$archive"' EXIT
@@ -125,7 +126,8 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' "$LLAM_LLVM_SHA256" "$archive" | sha256sum --check --strict
           mkdir -p "$llvm_prefix"
-          tar --zstd --extract --file "$archive" --strip-components=1 --directory "$llvm_prefix"
+          zstd --decompress --long=30 --stdout "$archive" | \
+            tar --extract --file - --strip-components=1 --directory "$llvm_prefix"
           test "$("$llvm_prefix/bin/llvm-config" --version)" = "$LLAM_LLVM_VERSION"
           "$llvm_prefix/bin/clang" --version | tee .artifacts/managed-ci/compiler-version.txt
           echo "LLAM_LLVM_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
