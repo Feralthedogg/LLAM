@@ -244,7 +244,8 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
                                                  unsigned target_id,
                                                  bool hot,
                                                  llam_trace_kind_t kind,
-                                                 llam_wait_reason_t reason) {
+                                                 llam_wait_reason_t reason,
+                                                 bool sampled_handoff) {
     llam_shard_t *target;
     llam_task_t *current = g_llam_tls_task;
     llam_task_state_id_t task_from;
@@ -325,6 +326,9 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     }
     llam_publish_reinject_active_g(target, task);
     g_llam_tls_task = task;
+    /* Attribute the committed handoff before the source G can migrate on its
+     * next resume. The sampling decision belongs to this attempt's frame. */
+    if (sampled_handoff) target->metrics.wake_handoff_hits += 1U;
     target->metrics.wakes += 1U;
     if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
         target->metrics.wake_reason_hist[reason] += 1U;
@@ -337,7 +341,6 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     pthread_mutex_unlock(&target->lock);
 
     llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_REINJECT);
-    llam_thread_errno_store(caller_errno);
-    llam_switch_task_to_task_hot(current, task);
+    llam_switch_task_to_task_hot(current, task, caller_errno);
     return true;
 }

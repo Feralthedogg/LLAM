@@ -944,13 +944,15 @@ void llam_worker_begin_g_run(llam_worker_t *worker, llam_task_t *task) {
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
     llam_windows_async_lifetime_first_dispatch(worker, task);
 #endif
-    (void)atomic_fetch_add_explicit(&task->run_generation,
-                                    1U,
-                                    memory_order_acq_rel);
+    /* Dispatch/lease ownership serializes writers of each G and native M.
+     * Observers only load these counters. Release stores retain the acquire
+     * readers' publication edge without a contended read-modify-write; the
+     * subsequent active-G release publishes the completed pair. */
+    uint64_t generation = atomic_load_explicit(&task->run_generation, memory_order_relaxed);
+    atomic_store_explicit(&task->run_generation, generation + 1U, memory_order_release);
     if (worker->compat_shard != NULL) {
-        (void)atomic_fetch_add_explicit(&worker->run_generation,
-                                        1U,
-                                        memory_order_acq_rel);
+        generation = atomic_load_explicit(&worker->run_generation, memory_order_relaxed);
+        atomic_store_explicit(&worker->run_generation, generation + 1U, memory_order_release);
     }
 }
 

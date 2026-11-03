@@ -156,10 +156,12 @@ LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value);
  * Direct channel, wake, and join handoffs have already validated both task
  * pointers. Keeping the errno save/restore sequence inline removes one C
  * wrapper call from every fiber-to-fiber handoff while preserving task-local
- * errno semantics.
+ * errno semantics. The caller supplies its pre-bookkeeping errno snapshot,
+ * avoiding a redundant native TLS store followed immediately by a load.
  */
-static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *to) {
-    from->saved_errno = llam_thread_errno_load();
+static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *to,
+                                                int saved_errno) {
+    from->saved_errno = saved_errno;
     llam_thread_errno_store(to->saved_errno);
     llam_ctx_switch(&from->ctx, &to->ctx);
     llam_thread_errno_store(from->saved_errno);

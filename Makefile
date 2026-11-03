@@ -2343,7 +2343,7 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_managed_catalog_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_managed_foreign_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_capsule_pool_internal; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_managed_scheduler_internal; \
+	ASAN_OPTIONS=halt_on_error=1:handle_abort=1:allow_addr2line=1 UBSAN_OPTIONS=halt_on_error=1 LLAM_MANAGED_SCHEDULER_VERBOSE=1 ./asan-test_managed_scheduler_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_watch_index || test $$? -eq 77; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_large_select || test $$? -eq 77; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_api_edges; \

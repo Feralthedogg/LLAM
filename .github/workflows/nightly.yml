@@ -319,6 +319,18 @@ jobs:
             --quick \
             --seed "$SERVER_SEED" 2>&1 | tee "$OUT_DIR/server_composite_quick.log"
 
+      - name: Repeat sanitized managed scheduler boundaries
+        run: |
+          set -o pipefail
+          {
+            for iteration in $(seq 1 50); do
+              echo "managed scheduler ASan repeat $iteration/50"
+              env ASAN_OPTIONS=halt_on_error=1:handle_abort=1:allow_addr2line=1 \
+                UBSAN_OPTIONS=halt_on_error=1 LLAM_MANAGED_SCHEDULER_VERBOSE=1 \
+                ./test_managed_scheduler_internal
+            done
+          } 2>&1 | tee "$OUT_DIR/managed_scheduler_repeat.log"
+
       - name: Upload sanitizer diagnostics
         if: always()
         uses: actions/upload-artifact@v6

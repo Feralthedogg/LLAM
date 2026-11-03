@@ -336,8 +336,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     shard->metrics.yields += 1U;
     shard->metrics.ctx_switches += 1U;
     shard->processor.direct_handoff_streak += 1U;
-    llam_thread_errno_store(caller_errno);
-    llam_switch_task_to_task_hot(current, next);
+    llam_switch_task_to_task_hot(current, next, caller_errno);
     return true;
 #else
     if (fail_reason != NULL) {
@@ -607,8 +606,7 @@ bool llam_yield_to_local_runnable(void) {
     pthread_mutex_unlock(&shard->lock);
 
     llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
-    llam_thread_errno_store(caller_errno);
-    llam_switch_task_to_task_hot(current, next);
+    llam_switch_task_to_task_hot(current, next, caller_errno);
     return true;
 #endif
 }
@@ -690,8 +688,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 
     shard->metrics.ctx_switches += 1U;
     shard->processor.direct_handoff_streak += 1U;
-    llam_thread_errno_store(caller_errno);
-    llam_switch_task_to_task_hot(current, next);
+    llam_switch_task_to_task_hot(current, next, caller_errno);
     return true;
 #else
     llam_task_t *next = NULL;
@@ -748,8 +745,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     pthread_mutex_unlock(&shard->lock);
 
     llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
-    llam_thread_errno_store(caller_errno);
-    llam_switch_task_to_task_hot(current, next);
+    llam_switch_task_to_task_hot(current, next, caller_errno);
     return true;
 #endif
 }

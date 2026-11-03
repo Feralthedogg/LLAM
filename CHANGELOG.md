@@ -99,6 +99,9 @@
   validated queue ownership within one locked FIFO commit.
 * cache Intel macOS scheduler cursors in native-thread storage while refreshing
   the cursor after worker migration; retain dyld storage and unload-safe cleanup.
+* carry validated channel pins and locks into wait preparation, coalesce managed
+  context/owner checks, and preserve captured task errno without redundant TLS
+  round trips. Attribute sampled wake handoffs before switching contexts.
 
 ## 2.2.1 - 2026-08-01
 

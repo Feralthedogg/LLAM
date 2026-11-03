@@ -358,7 +358,8 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
                                                  unsigned target_id,
                                                  bool hot,
                                                  llam_trace_kind_t kind,
-                                                 llam_wait_reason_t reason);
+                                                 llam_wait_reason_t reason,
+                                                 bool sampled_handoff);
 bool llam_yield_to_local_runnable(void);
 
 /*

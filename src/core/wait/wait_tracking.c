@@ -41,58 +41,10 @@ typedef enum llam_wake_handoff_fail {
     LLAM_WAKE_HANDOFF_FAIL_RACE,
 } llam_wake_handoff_fail_t;
 
-static void llam_wake_handoff_record_attempt(llam_shard_t *shard) {
-    llam_task_t *current = g_llam_tls_task;
-    bool sample;
-
-    if (shard == NULL) {
-        return;
-    }
-    sample = llam_runtime_should_record_handoff_stats(shard);
-    if (current != NULL) {
-        current->handoff_sample_current = sample;
-    } else {
-        shard->processor.autotune_handoff_sample_current = sample;
-    }
-    if (sample) {
-        shard->metrics.wake_handoff_attempts += 1U;
-    }
-}
-
-static void llam_wake_handoff_record_hit(llam_shard_t *shard) {
-    llam_task_t *current = g_llam_tls_task;
-    bool sample;
-
-    if (shard == NULL) {
-        return;
-    }
-    sample = current != NULL ? current->handoff_sample_current : shard->processor.autotune_handoff_sample_current;
-    if (sample) {
-        if (current != NULL) {
-            current->handoff_sample_current = false;
-        } else {
-            shard->processor.autotune_handoff_sample_current = false;
-        }
-        shard->metrics.wake_handoff_hits += 1U;
-    }
-}
-
-static void llam_wake_handoff_record_fail(llam_shard_t *shard, llam_wake_handoff_fail_t reason) {
-    llam_task_t *current = g_llam_tls_task;
-    bool sample;
-
-    if (shard == NULL) {
-        return;
-    }
-    sample = current != NULL ? current->handoff_sample_current : shard->processor.autotune_handoff_sample_current;
-    if (!sample) {
-        return;
-    }
-    if (current != NULL) {
-        current->handoff_sample_current = false;
-    } else {
-        shard->processor.autotune_handoff_sample_current = false;
-    }
+static void llam_wake_handoff_record_fail(llam_shard_t *shard,
+                                          llam_wake_handoff_fail_t reason,
+                                          bool sampled) {
+    if (!sampled) return;
 
     switch (reason) {
     case LLAM_WAKE_HANDOFF_FAIL_CONTEXT:
@@ -1398,20 +1350,21 @@ bool llam_wake_wait_node_and_maybe_handoff(llam_wait_node_t *node,
         llam_shard_t *stats_shard = g_llam_tls_shard;
         llam_wake_handoff_fail_t fail_reason = llam_wake_handoff_precheck(rt, task, parked_shard);
 
-        llam_wake_handoff_record_attempt(stats_shard);
+        bool sampled = llam_runtime_should_record_handoff_stats(stats_shard);
+        if (sampled) stats_shard->metrics.wake_handoff_attempts += 1U;
         if (fail_reason == LLAM_WAKE_HANDOFF_FAIL_NONE) {
             if (llam_reinject_task_on_shard_and_yield_current(rt,
                                                               task,
                                                               parked_shard,
                                                               hot,
                                                               LLAM_TRACE_WAKE,
-                                                              reason)) {
-                llam_wake_handoff_record_hit(stats_shard);
+                                                              reason,
+                                                              sampled)) {
                 return true;
             }
             fail_reason = LLAM_WAKE_HANDOFF_FAIL_RACE;
         }
-        llam_wake_handoff_record_fail(stats_shard, fail_reason);
+        llam_wake_handoff_record_fail(stats_shard, fail_reason, sampled);
     }
 
     llam_reinject_task_on_shard(rt, task, parked_shard, hot, LLAM_TRACE_WAKE, reason);

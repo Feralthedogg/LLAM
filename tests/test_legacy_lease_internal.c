@@ -4249,6 +4249,8 @@ static int test_direct_reinject_publication_gate(void) {
     runtime->wake_handoff_enabled = 1U;
     runtime->channel_local_handoff_enabled = 1U;
     runtime->direct_handoff_allow_timers = 1U;
+    runtime->direct_handoff_stats_enabled = 1U;
+    runtime->direct_handoff_stats_sample_mask = 0U;
     state.setup = llam_runtime_spawn_ex(runtime,
                                         direct_reinject_setup_task,
                                         &state,
@@ -4292,6 +4294,11 @@ static int test_direct_reinject_publication_gate(void) {
             before_ns == 0U || after_ns < before_ns) {
             test_fail(&state.failure,
                       "direct-reinject publication did not retain active-G or a fresh safepoint");
+        }
+        if (atomic_load_explicit(&shard->metrics.wake_handoff_attempts, memory_order_relaxed) != 1U ||
+            atomic_load_explicit(&shard->metrics.wake_handoff_hits, memory_order_relaxed) != 1U) {
+            test_fail(&state.failure,
+                      "direct-reinject handoff was not attributed before its context switch");
         }
     }
     pthread_mutex_unlock(&shard->lock);

@@ -305,8 +305,28 @@ bool llam_runtime_begin_object_owner_op_if_live(const llam_runtime_t *owner_runt
  * @brief Require both managed-task context and matching object runtime owner.
  */
 int llam_runtime_require_object_owner(const llam_runtime_t *owner_runtime) {
-    if (llam_require_task_context() != 0) {
+    LLAM_NATIVE_API_GUARD(-1);
+    llam_task_t *task = g_llam_tls_task;
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_runtime_t *runtime;
+
+    /* Both checks concern the same nonsuspending managed-context snapshot.
+     * Resolve it once instead of repeating TLS and host-owner fallback work. */
+    if (task == NULL || shard == NULL || (runtime = task->owner_runtime) == NULL ||
+        shard->runtime != runtime ||
+        !atomic_load_explicit(&runtime->initialized, memory_order_acquire)) {
+        errno = ENOTSUP;
         return -1;
     }
-    return llam_runtime_check_object_owner(owner_runtime);
+    if (LLAM_UNLIKELY(owner_runtime == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    if (LLAM_UNLIKELY(owner_runtime != runtime)) {
+        errno = EXDEV;
+        return -1;
+    }
+#endif
+    return 0;
 }

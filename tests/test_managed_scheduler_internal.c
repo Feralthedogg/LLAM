@@ -77,7 +77,11 @@ static void errno_migration_task(void) {
     errno = EDOM;
     if (test->mode == 0U) llam_switch_task_to_scheduler(&test->task, &test->source);
     else if (test->mode == 1U) llam_switch_task_to_task(&test->task, &test->peer);
-    else llam_switch_task_to_task_hot(&test->task, &test->peer);
+    else {
+        int saved = current_thread_error();
+        errno = ENOSPC;
+        llam_switch_task_to_task_hot(&test->task, &test->peer, saved);
+    }
     test->destination_error = current_thread_error();
 #if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     test->tls_cursor_ok = source_worker == (llam_worker_t *)&test->source &&
@@ -1237,17 +1241,28 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 #endif
-    if (errno_migration_cases() != 0 || dynamic_empty_processors() != 0 || run_case(true, false) != 0 ||
-        run_case(false, false) != 0 || run_case(false, true) != 0 || shutdown_without_owner() != 0) return 1;
+    bool verbose = getenv("LLAM_MANAGED_SCHEDULER_VERBOSE") != NULL;
+#define RUN_CASE(call) do { \
+    if (verbose) fprintf(stderr, "managed scheduler: %s\n", #call); \
+    if ((call) != 0) return 1; \
+} while (0)
+    RUN_CASE(errno_migration_cases());
+    RUN_CASE(dynamic_empty_processors());
+    RUN_CASE(run_case(true, false));
+    RUN_CASE(run_case(false, false));
+    RUN_CASE(run_case(false, true));
+    RUN_CASE(shutdown_without_owner());
 #if defined(LLAM_ENABLE_TEST_HOOKS)
-    if (compatibility_steal_preserves_portable_queue() != 0) return 1;
-    if (blocking_result_after_migration() != 0) return 1;
-    if (publication_before_context_save(false) != 0 || publication_before_context_save(true) != 0)
-        return 1;
-    if (wake_before_context_save() != 0) return 1;
-    if (affine_native_lifetime(false, false) != 0 || affine_native_lifetime(true, false) != 0) return 1;
-    if (isolated_compatibility_processor(false) != 0) return 1;
+    RUN_CASE(compatibility_steal_preserves_portable_queue());
+    RUN_CASE(blocking_result_after_migration());
+    RUN_CASE(publication_before_context_save(false));
+    RUN_CASE(publication_before_context_save(true));
+    RUN_CASE(wake_before_context_save());
+    RUN_CASE(affine_native_lifetime(false, false));
+    RUN_CASE(affine_native_lifetime(true, false));
+    RUN_CASE(isolated_compatibility_processor(false));
 #endif
+#undef RUN_CASE
     puts("test_managed_scheduler_internal: dispatch, publication, affine TLS lifetime and compatibility isolation passed");
     return 0;
 }
