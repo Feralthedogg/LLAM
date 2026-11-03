@@ -894,21 +894,12 @@ static inline bool llam_processor_queue_access_snapshot_pair_locked(
     }
     actor_incarnation = atomic_load_explicit(&actor->binding_incarnation,
                                               memory_order_acquire);
-    if (!llam_worker_binding_live(actor, actor_incarnation) ||
-        !llam_worker_can_own_processor(actor, &shard->processor)) {
-        return false;
-    }
     record = &shard->processor.owner_record;
     lease = llam_shard_legacy_lease_const_locked(shard);
     runtime = shard->runtime;
-    if (runtime == NULL || !llam_execution_lease_state_matches(runtime, lease->state) ||
-        !llam_processor_owner_record_well_formed(record) ||
-        record->p_generation == 0U || record->p_generation == UINT64_MAX) {
-        return false;
-    }
-
-    if (!atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire) &&
-        llam_processor_owner_ticket_snapshot_pair_locked(shard, &ticket) &&
+    /* The execute ticket already validates the composed lease/P projection and
+     * its live native binding. Reuse that proof for the same TLS actor. */
+    if (llam_processor_owner_ticket_snapshot_pair_locked(shard, &ticket) &&
         ticket.owner_m == actor && ticket.worker_incarnation == actor_incarnation) {
         access_out->processor = &shard->processor;
         access_out->actor_m = actor;
@@ -921,6 +912,14 @@ static inline bool llam_processor_queue_access_snapshot_pair_locked(
         access_out->owner_state = ticket.state;
         access_out->mode = LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION;
         return true;
+    }
+
+    if (!llam_worker_binding_live(actor, actor_incarnation) ||
+        !llam_worker_can_own_processor(actor, &shard->processor) ||
+        runtime == NULL || !llam_execution_lease_state_matches(runtime, lease->state) ||
+        !llam_processor_owner_record_well_formed(record) ||
+        record->p_generation == 0U || record->p_generation == UINT64_MAX) {
+        return false;
     }
 
     if (atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire) &&
@@ -965,13 +964,19 @@ static inline bool llam_processor_queue_access_snapshot_pair_locked(
     return false;
 }
 
-/** @brief Acquire an execute, STOPPING-drain, or redirect-release P queue access. */
-static inline bool llam_processor_queue_access_snapshot(
+/**
+ * @brief Snapshot queue authority and return with the shard queue lock held.
+ *
+ * Acquire opaque_lock before the queue lock to read the composed lease. Once
+ * the queue lock is held, releasing opaque_lock cannot change the P projection:
+ * lease writers need the same queue lock to publish it. Callers must release
+ * shard->lock and must not reacquire opaque_lock while retaining that lock.
+ */
+static inline bool llam_processor_queue_access_lock(
     llam_processor_t *processor,
     llam_processor_queue_access_t *access_out) {
     llam_shard_t *shard = processor != NULL ? processor->compat_shard : NULL;
     bool valid;
-    int shard_unlock_rc;
     int opaque_unlock_rc;
 
     if (shard == NULL || processor != &shard->processor || access_out == NULL ||
@@ -984,10 +989,25 @@ static inline bool llam_processor_queue_access_snapshot(
         return false;
     }
     valid = llam_processor_queue_access_snapshot_pair_locked(shard, access_out);
-    shard_unlock_rc = pthread_mutex_unlock(&shard->lock);
     opaque_unlock_rc = pthread_mutex_unlock(&shard->opaque_lock);
-    assert(shard_unlock_rc == 0 && opaque_unlock_rc == 0);
-    return valid && shard_unlock_rc == 0 && opaque_unlock_rc == 0;
+    assert(opaque_unlock_rc == 0);
+    if (!valid || opaque_unlock_rc != 0) {
+        int shard_unlock_rc = pthread_mutex_unlock(&shard->lock);
+        assert(shard_unlock_rc == 0);
+        (void)shard_unlock_rc;
+        return false;
+    }
+    return true;
+}
+
+/** @brief Acquire an execute, STOPPING-drain, or redirect-release P queue access. */
+static inline bool llam_processor_queue_access_snapshot(
+    llam_processor_t *processor,
+    llam_processor_queue_access_t *access_out) {
+    if (!llam_processor_queue_access_lock(processor, access_out)) return false;
+    int rc = pthread_mutex_unlock(&processor->compat_shard->lock);
+    assert(rc == 0);
+    return rc == 0;
 }
 
 /**

@@ -539,13 +539,10 @@ void llam_drain_inject_queue(llam_shard_t *shard) {
     if (atomic_load_explicit(&shard->processor.inject_depth, memory_order_acquire) == 0U) {
         return;
     }
-    if (!llam_processor_queue_access_snapshot(&shard->processor, &access)) {
+    pressure = llam_runtime_pressure_signal(shard->runtime);
+    if (!llam_processor_queue_access_lock(&shard->processor, &access)) {
         return;
     }
-
-    pressure = llam_runtime_pressure_signal(shard->runtime);
-
-    pthread_mutex_lock(&shard->lock);
     if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &access)) {
         pthread_mutex_unlock(&shard->lock);
         return;
@@ -693,11 +690,10 @@ llam_task_t *llam_take_local_task_with_pressure(llam_shard_t *shard, bool pressu
     llam_processor_queue_access_t access;
 
     if (shard == NULL ||
-        !llam_processor_queue_access_snapshot(&shard->processor, &access)) {
+        !llam_processor_queue_access_lock(&shard->processor, &access)) {
         return NULL;
     }
 
-    pthread_mutex_lock(&shard->lock);
     if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &access)) {
         pthread_mutex_unlock(&shard->lock);
         return NULL;

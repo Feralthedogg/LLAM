@@ -77,6 +77,9 @@
 * retain foreign-return mode until the matching token is consumed, preventing
   a concurrent primary detach from rejecting a returning helper; qualify Linux
   shadow-stack activation per native worker instead of rejecting CET instrumentation.
+* reuse validated queue ownership and retain the queue lock through local enqueue
+  and dequeue operations, avoiding duplicate handoff probes; align hosted Linux
+  ARM64 channel/select smoke floors with the Linux x86-64 portability gate.
 
 ## 2.2.1 - 2026-08-01
 

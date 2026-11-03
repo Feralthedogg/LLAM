@@ -202,20 +202,18 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     pressure = llam_runtime_pressure_signal(rt);
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
     direct_local = (g_llam_tls_shard == target && g_llam_tls_task != NULL);
-    if (direct_local) {
-        access_valid = llam_processor_queue_access_snapshot(&target->processor, &access) &&
-                       (access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
-                        access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN);
-        if (!access_valid) {
-            direct_local = false;
-        }
-    }
-
     llam_disarm_task_wait_deadline(task);
     // Wake ownership transfers from the wait primitive/I/O request back to the
     // scheduler queue before the task becomes runnable.
     llam_task_clear_wait_tracking_or_abort(task);
-    pthread_mutex_lock(&target->lock);
+    if (direct_local && llam_processor_queue_access_lock(&target->processor, &access)) {
+        access_valid = access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION ||
+                       access.mode == LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN;
+        direct_local = access_valid;
+    } else {
+        pthread_mutex_lock(&target->lock);
+        direct_local = false;
+    }
     effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, pressure);
     llam_mark_runnable_locked(target,
                               task,
@@ -274,12 +272,6 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     if (g_llam_tls_shard != target || current == task) {
         return false;
     }
-    if (!llam_processor_queue_access_snapshot(&target->processor, &access) ||
-        (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
-         access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
-        return false;
-    }
-
     if (rt->run_timing_enabled != 0U || rt->wake_latency_metrics_enabled != 0U ||
         llam_task_wait_deadline_active(task)) {
         return false;
@@ -291,59 +283,9 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
 
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
-#if LLAM_REINJECT_DIRECT_OWNER_HANDOFF
-    if (llam_tls_has_legacy_direct_handoff_context(target) &&
-        rt->trace_events_enabled == 0U &&
-        rt->run_timing_enabled == 0U &&
-        rt->wake_latency_metrics_enabled == 0U &&
-        llam_lockfree_normq_enabled(rt) &&
-        !target->opaque_redirect_active &&
-        (rt->direct_handoff_allow_timers != 0U ||
-         atomic_load_explicit(&target->processor.timer_count, memory_order_acquire) == 0U)) {
-    if (llam_norm_queue_push_yield_unlocked(target, current)) {
-            uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
-
-            /*
-             * This is the first point where direct handoff has committed.  The
-             * try path can still fail before this and must leave wait ownership
-             * untouched so the caller's normal reinject fallback sees a fully
-             * tracked parked task.
-             */
-            current->forced_yield_budget = rt->forced_yield_every;
-            current->state = LLAM_TASK_STATE_RUNNABLE;
-            current->wait_reason = LLAM_WAIT_NONE;
-            current->last_yield_ns = 0U;
-            current->last_runnable_ns = now_ns;
-            llam_task_clear_wait_tracking_or_abort(task);
-            task_from = task->state;
-            task->state = LLAM_TASK_STATE_RUNNING;
-            task->wait_reason = LLAM_WAIT_NONE;
-            task->enqueue_hot = effective_hot ? 1U : 0U;
-            atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
-            task->last_started_ns = 0U;
-            if (now_ns != 0U) {
-                llam_runtime_record_autotune_wake_latency(target, 0U);
-            }
-            llam_publish_reinject_active_g(target, task);
-            llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_REINJECT);
-            g_llam_tls_task = task;
-            target->metrics.wakes += 1U;
-            if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
-                target->metrics.wake_reason_hist[reason] += 1U;
-            }
-            target->metrics.yields += 1U;
-            target->metrics.ctx_switches += 1U;
-            target->processor.direct_handoff_streak += 1U;
-            (void)kind;
-            (void)task_from;
-            llam_thread_errno_store(caller_errno);
-            llam_switch_task_to_task_hot(current, task);
-            return true;
-        }
-    }
-#endif
-
-    pthread_mutex_lock(&target->lock);
+    /* Keep the validated P projection stable through enqueue and active-G
+     * publication; release the queue lock before the native context switch. */
+    if (!llam_processor_queue_access_lock(&target->processor, &access)) return false;
     if (!llam_processor_queue_access_validate_owner_mutation_locked(target, &access) ||
         target->opaque_redirect_active ||
         target->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {

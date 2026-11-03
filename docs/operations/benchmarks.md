@@ -161,3 +161,9 @@ and wider platform evidence.
 `scripts/bench_guard.py` is a catastrophic-regression gate. Keep it
 conservative. Public performance tables should come from scheduled benchmark
 artifacts, not local one-off runs.
+
+The hosted Linux ARM64 stress lane uses the same channel ping-pong and select
+park/wake smoke floors as Linux x86-64: 1,000,000 and 500,000 operations per
+second. These platform floors check basic throughput health; they do not establish
+a release performance baseline. Assess regressions with matched compiler,
+hardware, worker count and isolated workload samples.
