@@ -70,11 +70,6 @@
 #else
 #define LLAM_ASYNC_ARCH_SHSTK_STATUS 0x5005
 #endif
-#if defined(ARCH_SHSTK_SHSTK)
-#define LLAM_ASYNC_ARCH_SHSTK_ENABLED ARCH_SHSTK_SHSTK
-#else
-#define LLAM_ASYNC_ARCH_SHSTK_ENABLED 0x1UL
-#endif
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
                "async preemption requires lock-free integer atomics");
@@ -1527,17 +1522,16 @@ static int llam_async_install_signal_locked(int *out_signal) {
 }
 
 static bool llam_async_cet_disabled(void) {
-#if defined(__CET__) && (__CET__ != 0)
-    return false;
-#else
+    /* __CET__ describes compiler instrumentation, not the native thread's
+     * enabled protection. Linux enables userspace shadow stacks separately;
+     * qualify the actual state without turning any protection off. */
     unsigned long status = 0UL;
     long rc = syscall(SYS_arch_prctl, LLAM_ASYNC_ARCH_SHSTK_STATUS, &status);
 
     if (rc == 0) {
-        return (status & LLAM_ASYNC_ARCH_SHSTK_ENABLED) == 0UL;
+        return status == 0UL;
     }
     return errno == EINVAL || errno == ENOSYS;
-#endif
 }
 
 static int llam_async_state_init_xstate(llam_async_preempt_state_t *state) {
@@ -2254,6 +2248,7 @@ int llam_async_preempt_worker_ready(llam_worker_t *worker) {
     incarnation = atomic_load_explicit(&worker->binding_incarnation,
                                        memory_order_acquire);
     if (state == NULL || state->worker != worker || incarnation == 0U ||
+        !llam_async_cet_disabled() ||
         !worker->sigaltstack_installed ||
         worker->signal_stack_incarnation != incarnation ||
         !atomic_load_explicit(&worker->native_thread_live, memory_order_acquire) ||

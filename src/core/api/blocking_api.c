@@ -702,23 +702,6 @@ static bool llam_foreign_token_publish(llam_shard_t *shard,
         published = true;
     }
 
-#if defined(LLAM_ENABLE_TEST_HOOKS)
-    if (!published) {
-        llam_worker_t *helper = &shard->opaque_helper_worker;
-        fprintf(stderr, "foreign publish refused: mode=%u lease=%u handoff=%u seq=%llu/%llu "
-                "worker=%llu/%llu task=%llu/%llu exec=%u guards=%u/%u token=%u "
-                "helper_exec=%u helper_guards=%u/%u helper_token=%u helper_depth=%u\n",
-                (unsigned)mode, (unsigned)lease->state, (unsigned)lease_handoff_ready,
-                (unsigned long long)transfer_sequence, (unsigned long long)lease->transfer_sequence,
-                (unsigned long long)worker_run_generation, (unsigned long long)atomic_load(&worker->run_generation),
-                (unsigned long long)task_run_generation, (unsigned long long)atomic_load(&task->run_generation),
-                atomic_load(&worker->execution_state), atomic_load(&worker->runtime_critical_depth),
-                atomic_load(&worker->preempt_disable_depth), (unsigned)token->state,
-                atomic_load(&helper->execution_state), atomic_load(&helper->runtime_critical_depth),
-                atomic_load(&helper->preempt_disable_depth), (unsigned)helper->foreign_token.state,
-                helper->foreign_token.task != NULL ? atomic_load(&helper->foreign_token.task->opaque_blocking_depth) : 0U);
-    }
-#endif
     pthread_mutex_unlock(&shard->lock);
     pthread_mutex_unlock(&shard->opaque_lock);
     return published;
@@ -1461,8 +1444,8 @@ int llam_leave_blocking(void) {
             block_ns = now_ns - task->opaque_block_started_ns;
         }
         task->opaque_block_started_ns = 0U;
-        task->opaque_uses_helper = false;
-        task->opaque_uses_redirect = false;
+        /* The RETURNING token still exposes this mode to the primary's
+         * concurrent detach. Retire it with the token under both locks. */
         task->opaque_block_count += 1U;
         if (timing) {
             task->last_opaque_block_ns = block_ns;
@@ -1470,6 +1453,8 @@ int llam_leave_blocking(void) {
         if (timing && block_ns > task->max_opaque_block_ns) {
             task->max_opaque_block_ns = block_ns;
         }
+
+        llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_BEFORE_FOREIGN_RETURN_REQUEST);
 
         if (used_helper) {
             if (timing && !from_opaque_helper) {
@@ -1595,8 +1580,6 @@ int llam_leave_blocking(void) {
                 shard->opaque_redirect_depth += 1U;
                 pthread_mutex_unlock(&shard->opaque_lock);
             }
-            task->opaque_uses_helper = used_helper;
-            task->opaque_uses_redirect = used_redirect;
             llam_foreign_token_resume_after_failed_return(shard, worker, task);
             errno = ECANCELED;
             return -1;
@@ -1676,6 +1659,8 @@ int llam_leave_blocking(void) {
                 } else {
                     memset(&worker->foreign_token, 0,
                            sizeof(worker->foreign_token));
+                    task->opaque_uses_helper = false;
+                    task->opaque_uses_redirect = false;
                     task->state = LLAM_TASK_STATE_RUNNING;
                     task->wait_reason = LLAM_WAIT_NONE;
                     if (worker != NULL && worker->compat_shard == shard) {
@@ -1709,8 +1694,6 @@ int llam_leave_blocking(void) {
                 shard->opaque_redirect_depth += 1U;
                 pthread_mutex_unlock(&shard->opaque_lock);
             }
-            task->opaque_uses_helper = used_helper;
-            task->opaque_uses_redirect = used_redirect;
             llam_foreign_token_resume_after_failed_return(shard, worker, task);
             errno = ECANCELED;
             return -1;

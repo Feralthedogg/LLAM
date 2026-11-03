@@ -695,7 +695,7 @@ static void reset_lease_test_gates(void) {
     unsigned point;
 
     for (point = (unsigned)LLAM_LEASE_TEST_AFTER_TRANSFER_REQUEST;
-         point <= (unsigned)LLAM_LEASE_TEST_AFTER_TASK_EXIT_CLEAR;
+         point < LLAM_LEASE_TEST_POINT_COUNT;
          ++point) {
         llam_lease_test_set_gate((llam_lease_test_point_t)point, false);
     }
@@ -1113,6 +1113,62 @@ static void *gated_handoff_run(void *arg) {
                                               memory_order_acquire);
     atomic_store_explicit(&state->run_done, 1U, memory_order_release);
     return NULL;
+}
+
+static int test_helper_return_before_primary_publication(void) {
+    gated_handoff_run_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *root;
+    pthread_t runner;
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.takeover.failure.failures, 0U);
+    atomic_init(&state.takeover.root_done, 0U);
+    atomic_init(&state.takeover.helper_started, 0U);
+    atomic_init(&state.takeover.helper_done, 0U);
+    atomic_init(&state.takeover.helper_entered, 0U);
+    atomic_init(&state.takeover.release_helper, 0U);
+    atomic_init(&state.takeover.release_root_leave, 0U);
+    atomic_init(&state.run_done, 0U);
+    reset_lease_test_gates();
+    if (create_runtime(&runtime, true, false) != 0) return 1;
+    state.takeover.runtime = runtime;
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH, true);
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_FOREIGN_RETURN_REQUEST, true);
+    root = llam_runtime_spawn_ex(runtime, takeover_root_task, &state.takeover, NULL, 0U);
+    if (root == NULL || pthread_create(&runner, NULL, gated_handoff_run, &state) != 0) {
+        reset_lease_test_gates();
+        destroy_runtime(&runtime);
+        return 1;
+    }
+    if (wait_for_lease_gate_reached(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH) != 0 ||
+        wait_for_lease_gate_reached(LLAM_LEASE_TEST_BEFORE_FOREIGN_RETURN_REQUEST) != 0) {
+        test_fail(&state.takeover.failure, "helper return boundary was not reached");
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_HELPER_FOREIGN_PUBLISH, false);
+    uint64_t deadline = legacy_deadline();
+    llam_shard_t *shard = &runtime->shards[0];
+    bool published = false;
+    while (llam_now_ns() < deadline) {
+        pthread_mutex_lock(&shard->opaque_lock);
+        pthread_mutex_lock(&shard->lock);
+        published = shard->primary_worker.foreign_token.state == LLAM_FOREIGN_TOKEN_ACTIVE;
+        bool failed = atomic_load_explicit(&runtime->fatal_errno, memory_order_acquire) != 0;
+        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (published || failed) break;
+        llam_pause_cpu();
+    }
+    if (!published) test_fail(&state.takeover.failure, "helper return invalidated primary publication");
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_FOREIGN_RETURN_REQUEST, false);
+    bounded_join_thread(runner, true, &state.run_done, release_runtime_stop, runtime,
+                        "helper return publication run exceeded its deadline");
+    bounded_join_task(root, &state.takeover.root_done, "helper return publication join failed");
+    assert_no_fatal(runtime, state.run_rc, state.run_errno, &state.takeover.failure,
+                    "helper return invalidated primary foreign publication");
+    int result = failure_result(&state.takeover.failure, "helper return publication failed");
+    destroy_runtime(&runtime);
+    reset_lease_test_gates();
+    return result;
 }
 
 static int test_lease_handoff_windows(void) {
@@ -6176,6 +6232,7 @@ int main(void) {
         LLAM_LEASE_CASE(test_park_publication_cleanup),
         LLAM_LEASE_CASE(test_active_g_publication_and_cleanup),
         LLAM_LEASE_CASE(test_primary_helper_activation_and_return),
+        LLAM_LEASE_CASE(test_helper_return_before_primary_publication),
         LLAM_LEASE_CASE(test_lease_handoff_windows),
         LLAM_LEASE_CASE(test_clean_stop_completes_handback),
         LLAM_LEASE_CASE(test_failed_handback_does_not_republish),

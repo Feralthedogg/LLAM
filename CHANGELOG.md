@@ -74,6 +74,9 @@
 * preserve native SSBS and unchanged protection-key policies during asynchronous
   capture/restore, admit inactive SVE headers without dropping scalable state,
   and keep LLVM headers, libraries and installed drivers on the selected version.
+* retain foreign-return mode until the matching token is consumed, preventing
+  a concurrent primary detach from rejecting a returning helper; qualify Linux
+  shadow-stack activation per native worker instead of rejecting CET instrumentation.
 
 ## 2.2.1 - 2026-08-01
 

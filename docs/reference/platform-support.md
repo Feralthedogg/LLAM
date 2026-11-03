@@ -53,6 +53,10 @@ matches its startup baseline. Callbacks, signal handlers and other code must not
 change those native policies while continuations are saved; these profiles do
 not virtualize a separate mitigation or protection-key policy for each task.
 
+Linux x86-64 checks the kernel's shadow-stack status on each native worker.
+Compiler CET instrumentation alone does not imply that shadow stacks are active;
+an active or unknown protection status is refused without disabling protection.
+
 Legacy constructors retain boundary/safepoint preemption. The expert Windows
 caller-certified-range API remains available with its separate process-wide
 fail-fast acknowledgement; it does not qualify arbitrary C or JIT mappings.
