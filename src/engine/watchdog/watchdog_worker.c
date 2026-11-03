@@ -138,6 +138,7 @@ static void llam_watchdog_test_publish(llam_runtime_t *rt, unsigned decision) {
                                                           memory_order_acquire);
     if (gate == NULL || gate->runtime != rt || gate->record.streak == 0U ||
         atomic_load_explicit(&gate->decision_ready, memory_order_acquire) != 0U) return;
+    if (gate->expected_decision != 0U && gate->expected_decision != decision) return;
     gate->record.decision = decision;
     /* Publish AFTER the actual decision, not while fatal publication is still
      * pending. This observation never enters scheduler progress counters. */

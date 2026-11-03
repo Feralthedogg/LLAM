@@ -126,10 +126,15 @@ static void *watchdog_run(void *opaque) {
 static bool watchdog_consume_task(watchdog_probe_t *probe, llam_task_t **handle) {
     if (*handle == NULL) return false;
     if (probe->cycle) {
-        /* Existing unmanaged join reports the runtime's fatal error even for
-         * a completed G; failure releases its claim without consuming handle.
-         * Detach then consumes that same handle through its normal cleanup. */
-        if (llam_join(*handle) != -1 || errno != EDEADLK || llam_detach(*handle) != 0) return false;
+        /* Reclaim-ready completion can consume the handle immediately. A
+         * polling join interrupted by the fatal error retains it for detach. */
+        int joined = llam_join(*handle);
+        int error = errno;
+        if (joined != 0 && (joined != -1 || error != EDEADLK)) {
+            fprintf(stderr, "watchdog cycle cleanup: join=%d errno=%d\n", joined, error);
+            return false;
+        }
+        if (joined != 0 && llam_detach(*handle) != 0) return false;
     } else if (llam_join(*handle) != 0) {
         return false;
     }
@@ -351,6 +356,9 @@ int main(int argc, char **argv) {
     if (probe.task == NULL) goto cleanup;
     probe.gate.runtime = probe.runtime;
     probe.gate.point = point;
+    /* A busy resolver or changing wait graph may legitimately defer an early
+     * probe. The parked-cycle oracle requires the eventual fatal decision. */
+    probe.gate.expected_decision = probe.cycle ? LLAM_WATCHDOG_TEST_FATAL : 0U;
     llam_watchdog_test_set_gate(&probe.gate);
     if (pthread_create(&host, NULL, watchdog_run, &probe) != 0) goto cleanup;
     host_started = true;
@@ -414,6 +422,15 @@ cleanup:
     }
     /* Gate storage stays alive through destroy, which joins its controller.
      * No selected task pointer is dereferenced after the captured observation. */
+    int fatal_error = probe.runtime != NULL ? atomic_load(&probe.runtime->fatal_errno) : 0;
+    unsigned native_failure = probe.runtime != NULL
+        ? atomic_load(&probe.runtime->preempt_capability.failure_reason) : 0U;
     if (probe.runtime != NULL) llam_runtime_destroy(probe.runtime);
+    if (result != 0) {
+        fprintf(stderr, "watchdog final observation: run=%d errno=%d fatal=%d native_failure=%u ran=%u errors=%u\n",
+                probe.run_result, probe.run_error, fatal_error, native_failure,
+                atomic_load(&probe.ran), atomic_load(&probe.errors));
+        watchdog_print(&probe.gate.record);
+    }
     return result;
 }

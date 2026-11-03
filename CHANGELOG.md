@@ -84,6 +84,8 @@
   runtime completion cannot race ahead and report success.
 * make concurrency gates wake competing workers explicitly and observe actual
   P borrowing in a fixed two-P native fixture before asserting it occurred.
+* wait for the watchdog's final fatal observation in parked-cycle tests, handle
+  completed joins during cleanup and collect nine throughput rounds in CI smoke jobs.
 
 ## 2.2.1 - 2026-08-01
 

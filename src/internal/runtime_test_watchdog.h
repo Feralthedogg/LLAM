@@ -66,6 +66,7 @@ typedef struct llam_watchdog_test_gate {
     unsigned selected_state;
     unsigned selected_listed;
     llam_watchdog_test_record_t record;
+    unsigned expected_decision; /* 0 accepts the first decision; set before publishing the gate. */
 } llam_watchdog_test_gate_t;
 
 /* Test owns the gate through runtime destroy/controller join. Unregistering

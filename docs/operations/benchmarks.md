@@ -162,6 +162,10 @@ and wider platform evidence.
 conservative. Public performance tables should come from scheduled benchmark
 artifacts, not local one-off runs.
 
+CI throughput guards use nine measured rounds per case with unchanged batch sizes.
+The guard compares total operations divided by total measured time;
+the additional p50/p99 values describe batch durations.
+
 The hosted Linux ARM64 stress lane uses the same channel ping-pong and select
 park/wake smoke floors as Linux x86-64: 1,000,000 and 500,000 operations per
 second. These platform floors check basic throughput health; they do not establish
