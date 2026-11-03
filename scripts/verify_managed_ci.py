@@ -34,6 +34,7 @@ REQUIRED_TESTS = (
 BUILD_TARGETS = (
     "llam_managed_pass", "llam_runtime", "llam_runtime_shared",
     "llam_preempt_metadata_inspect", "test_managed_image_internal",
+    "demo", "stress", "bench", "server", "server_lossless", "server_flood",
 )
 
 

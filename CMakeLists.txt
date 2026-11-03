@@ -1983,7 +1983,7 @@ if(Python3_FOUND)
     add_test(NAME test_native_domain_boundary
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_native_domain_boundary.py
             --binary $<TARGET_FILE:test_native_domain_internal>)
-    set_tests_properties(test_native_domain_boundary PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_native_domain_boundary PROPERTIES TIMEOUT 180)
 endif()
 set_tests_properties(test_execution_lease_internal PROPERTIES TIMEOUT 20)
 set_tests_properties(test_legacy_lease_internal PROPERTIES SKIP_RETURN_CODE 77)

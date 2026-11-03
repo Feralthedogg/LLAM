@@ -62,14 +62,21 @@
 
 /*
  * The fuzz test intentionally pounds stackful fiber switches under TSan.
- * Access errno through tiny no-TSan wrappers so sanitizer noise stays focused
- * on LLAM shared state instead of implementation-defined errno TLS storage.
+ * Resolve errno in a fresh activation after task migration. The no-TSan
+ * wrappers also keep sanitizer noise focused on LLAM shared state.
  */
-static inline LLAM_TEST_NO_SANITIZE_THREAD int fuzz_errno_load(void) {
+#if defined(_MSC_VER)
+#define LLAM_FUZZ_ERRNO_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) && !defined(__clang__)
+#define LLAM_FUZZ_ERRNO_NOINLINE __attribute__((noinline, noipa))
+#else
+#define LLAM_FUZZ_ERRNO_NOINLINE __attribute__((noinline))
+#endif
+static LLAM_FUZZ_ERRNO_NOINLINE LLAM_TEST_NO_SANITIZE_THREAD int fuzz_errno_load(void) {
     return errno;
 }
 
-static inline LLAM_TEST_NO_SANITIZE_THREAD void fuzz_errno_store(int value) {
+static LLAM_FUZZ_ERRNO_NOINLINE LLAM_TEST_NO_SANITIZE_THREAD void fuzz_errno_store(int value) {
     errno = value;
 }
 

@@ -27,6 +27,7 @@ int main(void) {
 }
 #else
 #include "async_context_darwin.h"
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 
 #define FIXTURE_ITERATIONS UINT64_C(300000000)
@@ -143,6 +144,34 @@ static bool fixture_machine_ok(const llam_darwin_async_machine_t *m) {
     return true;
 }
 
+static void fixture_report_read_refusal(llam_darwin_async_transaction_t *tx) {
+    arm_thread_state64_t general = {0};
+    mach_msg_type_number_t general_count = ARM_THREAD_STATE64_COUNT;
+    kern_return_t general_rc = thread_get_state(tx->thread, ARM_THREAD_STATE64,
+        (thread_state_t)&general, &general_count);
+    int sme_rc = -1;
+    unsigned sme_count = 0U;
+    uint64_t svcr = 0U, tpidr2 = 0U;
+#ifdef ARM_SME_STATE
+    arm_sme_state_t sme = {0};
+    mach_msg_type_number_t count = ARM_SME_STATE_COUNT;
+    sme_rc = thread_get_state(tx->thread, ARM_SME_STATE, (thread_state_t)&sme, &count);
+    sme_count = count;
+    svcr = sme.__svcr;
+    tpidr2 = sme.__tpidr2_el0;
+#endif
+    /* Resume before sysctl or stdio can acquire host-library locks. */
+    llam_darwin_async_resume(tx);
+    int feature = -1;
+    size_t size = sizeof(feature);
+    int feature_rc = sysctlbyname("hw.optional.arm.FEAT_SME", &feature, &size, NULL, 0U);
+    fprintf(stderr, "Darwin native refusal: opaque=%d general_rc=%d count=%u "
+        "cpsr=%#" PRIx32 " SME_rc=%d count=%u svcr=%#" PRIx64
+        " tpidr2=%#" PRIx64 " feature_rc=%d feature=%d\n",
+        __DARWIN_OPAQUE_ARM_THREAD_STATE64, general_rc, general_count,
+        (uint32_t)general.__cpsr, sme_rc, sme_count, svcr, tpidr2, feature_rc, feature);
+}
+
 static int fixture_run(unsigned fail_point) {
     fixture_t f = {0};
     pthread_t worker;
@@ -200,7 +229,7 @@ static int fixture_run(unsigned fail_point) {
         }
         if (llam_darwin_async_read(&tx, &captured) != 0) {
             error = errno;
-            llam_darwin_async_resume(&tx);
+            fixture_report_read_refusal(&tx);
             break;
         }
         pc = llam_darwin_async_pc(&captured);

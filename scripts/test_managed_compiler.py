@@ -98,6 +98,15 @@ class ManagedCompilerTests(unittest.TestCase):
                 self.assertIn("unqualified", result.stderr)
                 self.assertFalse(output.exists())
 
+    def test_noreturn_native_entry_has_no_leave_witness(self) -> None:
+        entries = [entry for entry in self.entries if entry.flags & 4 and entry.native_end]
+        self.assertTrue(entries)
+        for entry in entries:
+            calls = [call for call in entry.calls if call.flags & 4]
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0].flags & 8)
+            self.assertFalse(any(call.flags & 16 for call in calls))
+
     def test_auto_keeps_unknown_code_legacy_without_safe_ranges(self) -> None:
         path = self.work / "legacy.c"
         path.write_text("extern long foreign(long);long entry(long n){return foreign(n);}\n")

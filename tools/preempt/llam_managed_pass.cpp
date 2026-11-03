@@ -498,6 +498,11 @@ public:
             CallInst *Call = B.CreateCall(Body, Args);
             Call->setCallingConv(Body->getCallingConv());
             Call->setAttributes(Body->getAttributes());
+            Call->setTailCallKind(CallInst::TCK_NoTail);
+            if (Body->hasFnAttribute(Attribute::NoReturn)) {
+                B.CreateUnreachable();
+                continue;
+            }
             EmitGuard(B, 1U);
             if (Native->getReturnType()->isVoidTy()) B.CreateRetVoid();
             else B.CreateRet(Call);

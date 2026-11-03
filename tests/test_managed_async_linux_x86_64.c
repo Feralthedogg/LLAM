@@ -170,7 +170,12 @@ static llam_runtime_t *make_runtime(bool multi) {
     if (llam_runtime_init_registered_rt(rt, &opts, sizeof(opts), true, 1U) != 0) { free(rt); return NULL; }
     if (llam_async_preempt_register_safe_range(rt, (uintptr_t)llam_async_safe_leaf_begin,
                                               (uintptr_t)llam_async_safe_leaf_end) != 0 ||
-        llam_async_preempt_enable_runtime(rt) != 0) { llam_runtime_destroy(rt); return NULL; }
+        llam_async_preempt_enable_runtime(rt) != 0) {
+        int error = errno;
+        llam_runtime_destroy(rt);
+        errno = error;
+        return NULL;
+    }
     return rt;
 }
 

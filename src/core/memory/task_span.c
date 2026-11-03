@@ -26,7 +26,7 @@
 #define LLAM_TASK_SPAN_EMPTY_LIMIT 2U
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
-static atomic_uint g_llam_task_span_fail_stage = ATOMIC_VAR_INIT(0U);
+static atomic_uint g_llam_task_span_fail_stage;
 
 void llam_task_span_test_fail_next(unsigned stage) {
     atomic_store_explicit(&g_llam_task_span_fail_stage, stage, memory_order_release);

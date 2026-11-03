@@ -238,7 +238,12 @@ class RuntimeContractTests(unittest.TestCase):
                 result = self.driver(str(objects[0]), str(output), str(consumer), "-o", str(failed))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(failed.exists())
-                if name != "native-only":
+                if name == "unverified-body" and sys.platform.startswith("linux"):
+                    # ELF's hidden identity relocation can reject this object
+                    # before the final-image verifier sees its forged body.
+                    self.assertRegex(result.stderr,
+                                     r"typed call target|undefined reference to [`']__llam_native_identity\.cross['`]")
+                elif name != "native-only":
                     self.assertIn("typed call target", result.stderr)
 
     def test_managed_marker_escape_and_unknown_target_sets_are_rejected(self) -> None:
