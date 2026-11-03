@@ -496,9 +496,15 @@ static void publication_child(void *argument) {
 
 static void publication_source(void *argument) {
     scheduler_test_t *test = argument;
+    llam_spawn_opts_t child_options;
+    int initialized = llam_spawn_opts_init(&child_options, sizeof(child_options));
+    task_check(test, initialized == 0);
+    if (initialized != 0) return;
+    child_options.flags = LLAM_SPAWN_F_NO_PREEMPT;
     atomic_store_explicit(&test->source_task, g_llam_tls_task, memory_order_release);
     for (unsigned i = 0U; i < PUBLICATION_CHILDREN; ++i) {
-        llam_task_t *child = llam_spawn(publication_child, test, NULL);
+        llam_task_t *child = llam_spawn_ex(publication_child, test,
+                                          &child_options, sizeof(child_options));
         task_check(test, child != NULL);
         if (child != NULL) task_check(test, llam_detach(child) == 0);
     }
@@ -516,6 +522,7 @@ static int publication_before_context_save(bool lockfree) {
     CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
     opts.deterministic = 0U;
     opts.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    opts.forced_yield_every = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     if (lockfree) opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     policy.policy = LLAM_PREEMPT_POLICY_COOPERATIVE;
@@ -527,7 +534,13 @@ static int publication_before_context_save(bool lockfree) {
         llam_runtime_destroy(test.runtime);
         return 0;
     }
-    llam_task_t *handle = llam_runtime_spawn_ex(test.runtime, publication_source, &test, NULL, 0U);
+    llam_spawn_opts_t source_options;
+    CHECK(llam_spawn_opts_init(&source_options, sizeof(source_options)) == 0);
+    /* Safepoints in spawn/detach must not trip the global yield gate before
+     * the complete backlog exists. The explicit yield below remains enabled. */
+    source_options.flags = LLAM_SPAWN_F_NO_PREEMPT;
+    llam_task_t *handle = llam_runtime_spawn_ex(test.runtime, publication_source, &test,
+                                               &source_options, sizeof(source_options));
     CHECK(handle != NULL);
     llam_lease_test_set_gate(LLAM_LEASE_TEST_AFTER_REGISTERED_YIELD, true);
     CHECK(pthread_create(&driver, NULL, run_runtime, &test) == 0);

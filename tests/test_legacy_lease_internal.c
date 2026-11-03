@@ -164,7 +164,6 @@ typedef struct active_shutdown_state {
     unsigned helper_active;
     int run_rc;
     int run_errno;
-    int fatal_errno;
     pthread_t helper_thread_after;
 } active_shutdown_state_t;
 
@@ -181,7 +180,6 @@ typedef struct shutdown_transfer_state {
     int enter_errno;
     int run_rc;
     int run_errno;
-    int fatal_errno;
     unsigned task_state;
     unsigned task_depth;
     uintptr_t task_identity;
@@ -216,7 +214,6 @@ typedef struct ownerless_shutdown_state {
     llam_lease_test_snapshot_t exit_snapshot;
     int run_rc;
     int run_errno;
-    int fatal_errno;
 } ownerless_shutdown_state_t;
 
 typedef struct invalid_handback_state {
@@ -497,7 +494,7 @@ static void release_runtime_stop(void *arg) {
     llam_runtime_t *runtime = arg;
 
     if (runtime != NULL) {
-        llam_request_stop(runtime);
+        (void)llam_runtime_request_stop_rt(runtime);
     }
 }
 
@@ -1651,8 +1648,7 @@ static void *shutdown_transfer_run(void *arg) {
     errno = 0;
     state->run_rc = llam_runtime_run_handle(state->runtime);
     state->run_errno = errno;
-    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
-                                              memory_order_acquire);
+    /* Concurrent destroy may reclaim runtime as soon as run returns. */
     atomic_store_explicit(&state->run_done, 1U, memory_order_release);
     return NULL;
 }
@@ -1816,7 +1812,7 @@ static int test_shutdown_raced_transfer_point(llam_lease_test_point_t gate) {
                         NULL,
                         "shutdown-raced transfer run exceeded its deadline");
     run_created = false;
-    if (state.run_rc != 0 || state.fatal_errno != 0) {
+    if (state.run_rc != 0) {
         test_fail(&state.failure,
                   "shutdown-raced transfer changed run or fatal semantics");
     }
@@ -2293,8 +2289,7 @@ static void *ownerless_shutdown_run(void *arg) {
     errno = 0;
     state->run_rc = llam_runtime_run_handle(state->runtime);
     state->run_errno = errno;
-    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
-                                              memory_order_acquire);
+    /* Concurrent destroy may reclaim runtime as soon as run returns. */
     atomic_store_explicit(&state->run_done, 1U, memory_order_release);
     return NULL;
 }
@@ -2480,7 +2475,7 @@ static int test_ownerless_redirect_active_destroy(void) {
     run_created = false;
     if (state.root_enter_rc != 0 || state.root_leave_rc != -1 ||
         state.root_leave_errno != ECANCELED || state.helper_enter_rc != 0 ||
-        state.helper_leave_rc != 0 || state.run_rc != 0 || state.fatal_errno != 0) {
+        state.helper_leave_rc != 0 || state.run_rc != 0) {
         test_fail(&state.failure,
                   "ownerless shutdown changed expected cancellation/run semantics");
     }
@@ -2779,8 +2774,7 @@ static void *active_shutdown_run(void *arg) {
     errno = 0;
     state->run_rc = llam_runtime_run_handle(state->runtime);
     state->run_errno = errno;
-    state->fatal_errno = atomic_load_explicit(&state->runtime->fatal_errno,
-                                              memory_order_acquire);
+    /* Concurrent destroy may reclaim runtime as soon as run returns. */
     atomic_store_explicit(&state->run_done, 1U, memory_order_release);
     return NULL;
 }
@@ -2951,9 +2945,7 @@ static int test_helper_shutdown_while_active(void) {
                         NULL,
                         "active helper run thread exceeded its deadline");
     run_created = false;
-    if (state.run_rc != 0 ||
-        (state.run_rc < 0 && state.run_errno == 0) ||
-        state.fatal_errno != 0) {
+    if (state.run_rc != 0) {
         test_fail(&state.failure, "active helper shutdown changed run fatal semantics");
     }
     rc = failure_result(&state.failure, "active helper shutdown characterization failed");

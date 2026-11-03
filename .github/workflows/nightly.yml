@@ -369,8 +369,10 @@ jobs:
         include:
           - name: windows-2022-deep
             runner: windows-2022
+            generator: Visual Studio 17 2022
           - name: windows-2025-deep
             runner: windows-2025
+            generator: Visual Studio 18 2026
 
     steps:
       - uses: actions/checkout@v6
@@ -379,7 +381,7 @@ jobs:
 
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build/nightly-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/nightly-windows -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         shell: pwsh

@@ -86,6 +86,9 @@
   P borrowing in a fixed two-P native fixture before asserting it occurred.
 * wait for the watchdog's final fatal observation in parked-cycle tests, handle
   completed joins during cleanup and collect nine throughput rounds in CI smoke jobs.
+* select the installed Visual Studio generation on Windows deep runners, keep
+  concurrent-destroy tests from reading reclaimed runtimes, and isolate the
+  reserved-publication fixture from incidental safepoint yields.
 
 ## 2.2.1 - 2026-08-01
 
