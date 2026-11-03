@@ -457,6 +457,7 @@ jobs:
             echo
             echo "The standard archives contain the runtime SDK. Build the LLVM 23.1.2 managed producer separately using the [managed C guide](https://github.com/${REPOSITORY}/blob/${TAG}/docs/reference/managed-runtime.md)."
             echo "Asynchronous execution requires compiler/image admission and a qualified native profile. Compatibility constructors retain boundary/safepoint preemption. See the [profile matrix](https://github.com/${REPOSITORY}/blob/${TAG}/docs/reference/platform-support.md) for platform limits."
+            echo "The macOS archives are built and tested on macOS 26 (ARM64) and macOS 15 (Intel); validate a source build's deployment target for other macOS versions."
             echo
             echo "## Downloads"
             echo

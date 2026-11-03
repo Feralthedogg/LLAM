@@ -56,12 +56,15 @@ have stopped or have observed cancellation.
 
 ## 4. CPU-Bound Tasks
 
-LLAM remains stackful and cooperative at the actual context-switch boundary.
-AUTO remains conservative: watchdog/runtime policy requests a switch at LLAM
-boundaries. Only an explicitly enabled experimental backend with registered
-safe ranges can use signal-context capture; unknown code remains cooperative.
-Watchdog/runtime policy can ask an over-budget task to give up the worker, but
-the task must still hit a LLAM boundary such as `llam_task_safepoint()`, `LLAM_PREEMPT_POLL`,
+Compiler-qualified tasks created through `llam_runtime_create_managed()` can
+use native asynchronous preemption after image admission and native-thread
+probes. Select the requested managed policy through `llam_preempt_opts_t` and
+query the effective policy with `llam_runtime_preempt_info_ex()`; see the
+[managed C guide](reference/managed-runtime.md) and its native profile limits.
+
+Compatibility constructors retain boundary/safepoint preemption. Their
+watchdog/runtime policy requests a switch, but the task must still hit a
+boundary such as `llam_task_safepoint()`, `LLAM_PREEMPT_POLL`,
 `LLAM_PREEMPT_POLL_EVERY`, `llam_yield()`, a wait, or an I/O call. Long C loops
 that never reach one of those boundaries can delay cancellation, watchdog
 progress, allocator quiescence, and runnable task handoff.
@@ -81,7 +84,7 @@ for (uint64_t i = 0; i < work_items; ++i) {
 }
 ```
 
-Operational knobs:
+Compatibility/safepoint tuning knobs:
 
 - `LLAM_PREEMPT_MODE=off|cooperative|auto|strict` selects the preemption
   policy. `auto` is the normal diagnostic-safe mode; `strict` is for finding

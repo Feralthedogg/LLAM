@@ -84,6 +84,10 @@ BSD support ended in **3.0.0**. Current builds, installers and release packages
 support Linux, macOS and Windows. Use versioned 2.x sources/tooling for legacy
 BSD deployments; earlier BSD experiments are historical evidence only.
 
+Prebuilt macOS archives are built and tested on macOS 26 for ARM64 and macOS 15
+for Intel. Use a source build and validate its deployment target for other
+macOS versions; native asynchronous qualification remains a separate check.
+
 Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 On Windows 11 policy, associated socket/HANDLE objects attempt
 `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`; synchronous overlapped successes on

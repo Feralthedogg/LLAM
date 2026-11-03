@@ -186,6 +186,17 @@ jobs:
       - name: Performance guardrail
         run: |
           set -o pipefail
+          # Match Stress's catastrophic platform floors. Deep runtime/fuzz and
+          # standard server workloads provide this workflow's extra coverage.
+          if [ "${{ matrix.name }}" = "linux-x86_64-deep" ]; then
+            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,channel_pingpong=1000000,select_recv_ready=3000000,select_park_wake=500000,select_timeout=4000000,io_echo=100000,poll_wake=100000"
+          fi
+          if [ "${{ matrix.name }}" = "linux-aarch64-deep" ]; then
+            export LLAM_BENCH_GUARD_MIN_OPS="channel_pingpong=1000000,select_recv_ready=3000000,select_park_wake=500000,select_timeout=6000000"
+          fi
+          if [ "${{ matrix.name }}" = "macos-aarch64-deep" ]; then
+            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,channel_pingpong=1000000,select_recv_ready=1500000,io_echo=100000,poll_wake=100000"
+          fi
           if [ "${{ matrix.name }}" = "macos-x86_64-deep" ]; then
             # Hosted Intel macOS is a stability lane and varies much more than
             # Linux/macOS arm64. Keep a catastrophic guard without failing on
@@ -194,7 +205,7 @@ jobs:
           fi
           python3 scripts/bench_guard.py \
             --bench ./build/nightly/bench \
-            --rounds 5 \
+            --rounds 9 \
             --select-ops 1024 \
             --out "$OUT_DIR/perf_guard.json" 2>&1 | tee "$OUT_DIR/perf_guard.log"
 
@@ -441,7 +452,7 @@ jobs:
             # numbers are tracked by scheduled benchmark artifacts, while this
             # guard catches catastrophic runtime regressions.
             $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=350000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=80000,poll_wake=30000"
-            python scripts\bench_guard.py --bench ".\build\nightly-windows\Release\bench.exe" --rounds 5 --select-ops 1024 --out "$artifactDir\perf_guard.json"
+            python scripts\bench_guard.py --bench ".\build\nightly-windows\Release\bench.exe" --rounds 9 --select-ops 1024 --out "$artifactDir\perf_guard.json"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
