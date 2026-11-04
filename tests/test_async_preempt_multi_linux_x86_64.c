@@ -1578,6 +1578,29 @@ cleanup:
 
 int main(void) {
     (void)setvbuf(stdout, NULL, _IONBF, 0);
+#if defined(LLAM_TSAN_BUILD)
+    /* The interceptor can deliver a copied ucontext on every M. Verify the
+     * refusal at enable time instead of starting a workload that requires
+     * kernel sigreturn redirection. Ordinary/ASan builds run all cases below. */
+    llam_runtime_t *runtime = NULL;
+    if (make_runtime(&runtime) != 0) {
+        return 1;
+    }
+    errno = 0;
+    int enable_rc = llam_async_preempt_enable_runtime(runtime);
+    bool refused = enable_rc == -1 && errno == ENOTSUP &&
+        atomic_load_explicit(&runtime->async_preempt_enabled, memory_order_acquire) == 0U &&
+        runtime->async_preempt_control == NULL &&
+        atomic_load_explicit(&runtime->preempt_capability.failure_reason,
+                             memory_order_acquire) == LLAM_PREEMPT_FAILURE_CONTEXT_UNSUPPORTED;
+    llam_runtime_destroy(runtime);
+    if (!refused) {
+        fputs("test_async_preempt_multi_linux_x86_64: intercepted context was not refused\n", stderr);
+        return 1;
+    }
+    puts("test_async_preempt_multi_linux_x86_64: intercepted contexts refused before M startup");
+    return 0;
+#endif
     int rc = run_multi(2U);
     if (rc == 0) {
         rc = run_multi(4U);
