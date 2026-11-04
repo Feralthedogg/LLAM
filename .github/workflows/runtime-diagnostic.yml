@@ -100,7 +100,9 @@ jobs:
                       frame.select()
                       expression = '((llam_runtime_t*)%#x)' % address
                       for field in ('exec_started', 'stop_requested', 'shutdown_requested',
-                                    'live_tasks', 'active_io_waiters', 'shards[0].legacy_lease',
+                                    'live_tasks', 'live_task_shards', 'fatal_errno',
+                                    'active_io_waiters', 'shards[0].live_tasks',
+                                    'shards[0].legacy_lease',
                                     'shards[0].processor.inject_q', 'shards[0].processor.hot_q',
                                     'shards[0].processor.norm_q', 'nodes[0].pending_ops',
                                     'nodes[0].submit_head', 'nodes[0].control_head',
@@ -109,14 +111,14 @@ jobs:
                               gdb.execute('p ' + expression + '->' + field)
                           except gdb.error:
                               pass
-                      task = runtime['all_tasks']
+                      task = runtime['shards'][0]['all_tasks']
                       for _ in range(4):
                           if not task:
                               break
                           gdb.execute('p *(llam_task_t*)%#x' % int(task))
                           task = task['all_next']
                   frame = frame.older()
-          end'''
+          '''
           arguments = ['./tsan-test_multi_runtime_core', '--through-case',
                        'destroyed_runtime_io_cancel_does_not_stop_peer_runtime']
           for iteration in range(1, 51):
