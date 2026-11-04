@@ -206,7 +206,7 @@ jobs:
           python3 scripts/bench_guard.py \
             --bench ./build/nightly/bench \
             --rounds 31 \
-            --select-ops 1024 \
+            --select-ops 16384 \
             --out "$OUT_DIR/perf_guard.json" 2>&1 | tee "$OUT_DIR/perf_guard.log"
 
       - name: Server composite
@@ -501,7 +501,7 @@ jobs:
             # numbers are tracked by scheduled benchmark artifacts, while this
             # guard catches catastrophic runtime regressions.
             $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=350000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=80000,poll_wake=30000"
-            python scripts\bench_guard.py --bench ".\build\nightly-windows\Release\bench.exe" --rounds 31 --select-ops 1024 --out "$artifactDir\perf_guard.json"
+            python scripts\bench_guard.py --bench ".\build\nightly-windows\Release\bench.exe" --rounds 31 --select-ops 16384 --out "$artifactDir\perf_guard.json"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }

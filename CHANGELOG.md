@@ -127,6 +127,8 @@
 
 * hand parked cooperative selects directly to local work, and keep a lone cooperative
   task running across at most 64 idle direct yields instead of requeueing it.
+* use 16,384-operation select batches in CI throughput guards to reduce sensitivity
+  to isolated host scheduling pauses while retaining the same mean and floors.
 
 ## 2.2.1 - 2026-08-01
 

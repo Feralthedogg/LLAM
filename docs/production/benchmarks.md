@@ -181,7 +181,9 @@ and wider platform evidence.
 conservative. Public performance tables should come from scheduled benchmark
 artifacts, not local one-off runs.
 
-CI throughput guards use 31 measured rounds per case with unchanged batch sizes.
+CI throughput guards use 31 measured rounds per case and 16,384 select operations
+per batch, so a short select case measures sustained work instead of a few microseconds.
+Other batch sizes and every throughput floor remain unchanged.
 The guard compares total operations divided by total measured time;
 the additional p50/p99 values describe batch durations.
 
