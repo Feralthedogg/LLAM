@@ -485,13 +485,14 @@ static void llam_dump_runtime_state_impl(llam_runtime_t *rt, int fd) {
 
         if (pthread_mutex_trylock(&node->submit_lock) == 0) {
             submit_depth = llam_io_req_list_count_diag(node->submit_head);
-            control_depth = llam_io_control_list_count_diag(node->control_head);
             pthread_mutex_unlock(&node->submit_lock);
         } else {
             submit_lock_state = "busy";
         }
 
         if (pthread_mutex_trylock(&node->watch_lock) == 0) {
+            /* Control publication and detachment use watch_lock too. */
+            control_depth = llam_io_control_list_count_diag(node->control_head);
             for (llam_poll_watch_t *watch = node->poll_watches; watch != NULL; watch = watch->next) {
                 poll_watch_count += 1U;
                 poll_waiters += llam_io_req_list_count_diag(watch->wait_head);
