@@ -326,6 +326,25 @@ static void direct_yield_no_work_task(void *arg) {
                   EINVAL);
         return;
     }
+    /* A lone cooperative task may retain its M between yields, but it must
+     * still return to the scheduler periodically. Check liveness together
+     * with errno and RUNNING publication across both kinds of yield. */
+    uint64_t switches_before = g_llam_tls_shard->metrics.ctx_switches;
+    for (unsigned i = 0U; i < 1024U; ++i) {
+        errno = EAGAIN;
+        llam_yield();
+        if (errno != EAGAIN ||
+            atomic_load_explicit(&g_llam_tls_task->state, memory_order_acquire) !=
+                LLAM_TASK_STATE_RUNNING ||
+            llam_worker_load_active_g(g_llam_tls_worker) != g_llam_tls_task) {
+            task_fail(state, "solo yield lost task state or errno", errno);
+            return;
+        }
+    }
+    if (g_llam_tls_shard->metrics.ctx_switches == switches_before) {
+        task_fail(state, "solo yields never returned to the scheduler", EINVAL);
+        return;
+    }
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 

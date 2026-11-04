@@ -446,13 +446,11 @@ bool llam_norm_queue_push_yield_unlocked(llam_shard_t *shard, llam_task_t *task)
  * @param shard           Owner shard.
  * @param current         Running task to requeue on the FIFO yield lane.
  * @param out_next        Receives the runnable task to switch into.
- * @param out_push_failed Receives whether failure was caused by no FIFO space.
- * @return true when @p current was queued and @p out_next owns a runnable task.
+ * @return SELECTED after queueing current, or the reason no exchange occurred.
+ * EMPTY is returned only after the owner's queue authority was validated.
  */
-bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
-                                             llam_task_t *current,
-                                             llam_task_t **out_next,
-                                             bool *out_push_failed) {
+llam_yield_exchange_result_t llam_norm_queue_exchange_yield_unlocked(
+    llam_shard_t *shard, llam_task_t *current, llam_task_t **out_next) {
     llam_task_t *next = NULL;
     bool prefer_owner_deque;
     llam_processor_queue_access_t access;
@@ -460,16 +458,13 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
     if (out_next != NULL) {
         *out_next = NULL;
     }
-    if (out_push_failed != NULL) {
-        *out_push_failed = false;
-    }
     if (shard == NULL || current == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
-        return false;
+        return LLAM_YIELD_EXCHANGE_UNAVAILABLE;
     }
     if (!llam_processor_queue_access_snapshot(&shard->processor, &access) ||
         (access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_EXECUTION &&
          access.mode != LLAM_PROCESSOR_QUEUE_ACCESS_STOPPING_DRAIN)) {
-        return false;
+        return LLAM_YIELD_EXCHANGE_UNAVAILABLE;
     }
 
     /*
@@ -490,14 +485,11 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
     }
     if (next == NULL) {
         if (shard->processor.norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
-            if (out_push_failed != NULL) {
-                *out_push_failed = true;
-            }
-            return false;
+            return LLAM_YIELD_EXCHANGE_FULL;
         }
         next = llam_cldeque_pop_bottom(&shard->processor.norm_cldeque);
         if (next == NULL) {
-            return false;
+            return LLAM_YIELD_EXCHANGE_EMPTY;
         }
     }
     if (prefer_owner_deque) {
@@ -512,7 +504,7 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
         if (out_next != NULL) {
             *out_next = current;
         }
-        return false;
+        return LLAM_YIELD_EXCHANGE_SELF;
     }
 
     llam_queue_push_tail(&shard->processor.norm_q, current);
@@ -520,7 +512,7 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
     if (out_next != NULL) {
         *out_next = next;
     }
-    return true;
+    return LLAM_YIELD_EXCHANGE_SELECTED;
 }
 
 /* Dereferencing a Chase-Lev payload before winning its index CAS would race

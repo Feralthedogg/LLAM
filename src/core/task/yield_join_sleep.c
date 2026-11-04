@@ -254,7 +254,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     llam_task_t *current = g_llam_tls_task;
     llam_task_t *next;
     llam_runtime_t *rt;
-    bool push_failed = false;
+    llam_yield_exchange_result_t exchange;
     int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || !llam_tls_has_legacy_direct_handoff_context(shard)) {
@@ -297,9 +297,18 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
             return false;
         }
     }
-    if (!llam_norm_queue_exchange_yield_unlocked(shard, current, &next, &push_failed)) {
+    exchange = llam_norm_queue_exchange_yield_unlocked(shard, current, &next);
+    if (exchange != LLAM_YIELD_EXCHANGE_SELECTED) {
         if (fail_reason != NULL) {
-            *fail_reason = push_failed ? LLAM_YIELD_DIRECT_FAIL_PUSH : LLAM_YIELD_DIRECT_FAIL_NO_WORK;
+            if (exchange == LLAM_YIELD_EXCHANGE_EMPTY) {
+                *fail_reason = LLAM_YIELD_DIRECT_FAIL_NO_WORK;
+            } else if (exchange == LLAM_YIELD_EXCHANGE_FULL) {
+                *fail_reason = LLAM_YIELD_DIRECT_FAIL_PUSH;
+            } else if (exchange == LLAM_YIELD_EXCHANGE_SELF) {
+                *fail_reason = LLAM_YIELD_DIRECT_FAIL_SELF;
+            } else {
+                *fail_reason = LLAM_YIELD_DIRECT_FAIL_CONTEXT;
+            }
         }
         return false;
     }
@@ -346,13 +355,44 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
 #endif
 }
 
+/* A validated, empty owner lane needs no enqueue/dequeue of the same G. Keep
+ * this narrower than direct handoff: timers, remote injects, stop, preemption,
+ * pressure and controller pauses all require the scheduler. A hard 64-turn
+ * cap also bounds arrival races and policies with an unlimited handoff burst.
+ * This observes queue state only; it grants no queue mutation authority. */
+static bool llam_yield_keep_running_if_idle(llam_shard_t *shard) {
+    llam_runtime_t *rt = shard->runtime;
+    llam_task_t *task = g_llam_tls_task;
+    llam_worker_t *worker = g_llam_tls_worker;
+
+    if (task == NULL || worker == NULL || rt->forced_yield_every != 0U ||
+        shard->processor.direct_handoff_streak >= 64U ||
+        atomic_load_explicit(&task->preempt_requested, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&rt->stop_requested, memory_order_acquire) ||
+        atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) ||
+        atomic_load_explicit(&shard->merge_pause_requested, memory_order_acquire) != 0U ||
+        llam_runtime_steal_pause_active(rt) ||
+        atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&shard->processor.inject_depth, memory_order_acquire) != 0U ||
+        shard->processor.hot_q.depth != 0U ||
+        llam_runtime_pressure_signal(rt)) {
+        return false;
+    }
+    shard->processor.direct_handoff_streak += 1U;
+    shard->metrics.yields += 1U;
+    task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    if (rt->preempt_mode >= LLAM_PREEMPT_AUTO) {
+        atomic_store_explicit(&worker->last_safepoint_ns, llam_now_ns(), memory_order_release);
+    }
+    return true;
+}
+
 /**
  * @brief Try the ordinary-yield direct path selected by the platform policy.
  *
- * Platforms with a lock-free owner-lane exchange should fall back to the normal
- * scheduler path after a failed fast attempt instead of taking the shard lock
- * just to rediscover the same no-work or timer guard. Other platforms keep the
- * older locked direct path when the user explicitly opts in.
+ * A validated empty lane can retain the current task within the bounded idle
+ * policy. Other failed attempts use the normal scheduler path. Platforms
+ * without the owner-lane exchange keep the explicitly enabled locked path.
  */
 static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
 #if LLAM_DIRECT_OWNER_HANDOFF
@@ -365,6 +405,11 @@ static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
     }
     if (fail_reason == LLAM_YIELD_DIRECT_FAIL_NONE) {
         fail_reason = LLAM_YIELD_DIRECT_FAIL_NO_WORK;
+    }
+    if (fail_reason == LLAM_YIELD_DIRECT_FAIL_NO_WORK &&
+        llam_yield_keep_running_if_idle(shard)) {
+        llam_yield_direct_record_fail(shard, fail_reason);
+        return true;
     }
     if (shard != NULL) {
         shard->processor.direct_handoff_streak = 0U;
@@ -380,9 +425,9 @@ static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
 /**
  * @brief Yield the current managed task back to its scheduler shard.
  *
- * The task is requeued as runnable on the local normal queue and execution
- * switches to the current scheduler context. Calls outside a runtime task are
- * no-ops because there is no cooperative scheduler frame to return to.
+ * The ordinary path requeues the task and switches to the scheduler. Qualified
+ * legacy paths can hand off to a peer or briefly retain a lone task. Calls
+ * outside a runtime task are no-ops.
  */
 void llam_yield(void) {
     LLAM_NATIVE_API_GUARD();

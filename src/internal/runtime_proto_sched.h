@@ -294,10 +294,15 @@ llam_task_t *llam_norm_queue_pop_owner_locked(
     const llam_processor_queue_access_t *access);
 llam_task_t *llam_norm_queue_pop_merge_locked(llam_shard_t *shard);
 llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard);
-bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
-                                           llam_task_t *current,
-                                           llam_task_t **out_next,
-                                           bool *out_push_failed);
+typedef enum llam_yield_exchange_result {
+    LLAM_YIELD_EXCHANGE_UNAVAILABLE = 0,
+    LLAM_YIELD_EXCHANGE_EMPTY,
+    LLAM_YIELD_EXCHANGE_FULL,
+    LLAM_YIELD_EXCHANGE_SELF,
+    LLAM_YIELD_EXCHANGE_SELECTED,
+} llam_yield_exchange_result_t;
+llam_yield_exchange_result_t llam_norm_queue_exchange_yield_unlocked(
+    llam_shard_t *shard, llam_task_t *current, llam_task_t **out_next);
 bool llam_norm_queue_push_owner_locked(llam_shard_t *shard,
                                        const llam_processor_queue_access_t *access,
                                        llam_task_t *task);
