@@ -34,10 +34,21 @@ jobs:
       - name: Install native diagnostic dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential clang gdb liburing-dev
+          sudo apt-get install -y --no-install-recommends build-essential clang gdb ca-certificates git python3
+      - name: Build matching liburing
+        run: |
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin e3d35ea59d3ba09075ed4d7751e4bb9049cce64a
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          make -C "$liburing_dir" -j4
+          sudo make -C "$liburing_dir" install
+          sudo ldconfig
       - name: Build the failing native preemption target
         run: |
-          make -j4 CC=clang tsan-test_async_preempt_linux_x86_64 \
+          make -j4 CC=clang tsan-test_async_preempt_linux_x86_64 tsan-test_multi_runtime_core \
             OBJDIR=object-tsan SANITIZER_TARGETS_ENABLED=1 \
             CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
             LDLIBS="-pthread -luring -lm -ldl -fsanitize=thread"
@@ -54,6 +65,85 @@ jobs:
             -ex 'python if gdb.selected_inferior().pid: gdb.execute("frame 4"); gdb.execute("info locals"); gdb.execute("p *task"); gdb.execute("p *(llam_async_task_state_t*)task->async_preempt_task")' \
             --args ./tsan-test_async_preempt_linux_x86_64 2>&1 | \
             tee .artifacts/runtime-tsan/preemption-stack.log
+      - name: Capture TSan multi-runtime waits
+        run: |
+          python3 - <<'PY'
+          import ctypes
+          import os
+          from pathlib import Path
+          import subprocess
+
+          output_dir = Path('.artifacts/runtime-tsan')
+          prctl = ctypes.CDLL(None, use_errno=True).prctl
+          prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+
+          def allow_parent_debugger():
+              if prctl(0x59616d61, os.getppid(), 0, 0, 0) != 0:
+                  raise OSError(ctypes.get_errno(), 'PR_SET_PTRACER failed')
+
+          inspect = '''python
+          import gdb
+          seen = set()
+          for thread in gdb.selected_inferior().threads():
+              thread.switch()
+              frame = gdb.newest_frame()
+              while frame:
+                  for name in ('rt', 'runtime_a', 'runtime_b'):
+                      try:
+                          runtime = frame.read_var(name)
+                          address = int(runtime)
+                      except (gdb.error, ValueError, TypeError):
+                          continue
+                      if not address or address in seen:
+                          continue
+                      seen.add(address)
+                      frame.select()
+                      expression = '((llam_runtime_t*)%#x)' % address
+                      for field in ('exec_started', 'stop_requested', 'shutdown_requested',
+                                    'live_tasks', 'active_io_waiters', 'shards[0].legacy_lease',
+                                    'shards[0].processor.inject_q', 'shards[0].processor.hot_q',
+                                    'shards[0].processor.norm_q', 'nodes[0].pending_ops',
+                                    'nodes[0].submit_head', 'nodes[0].control_head',
+                                    'nodes[0].linux_submit_terminal'):
+                          try:
+                              gdb.execute('p ' + expression + '->' + field)
+                          except gdb.error:
+                              pass
+                      task = runtime['all_tasks']
+                      for _ in range(4):
+                          if not task:
+                              break
+                          gdb.execute('p *(llam_task_t*)%#x' % int(task))
+                          task = task['all_next']
+                  frame = frame.older()
+          end'''
+          arguments = ['./tsan-test_multi_runtime_core', '--through-case',
+                       'destroyed_runtime_io_cancel_does_not_stop_peer_runtime']
+          for iteration in range(1, 51):
+              process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         text=True, env=dict(os.environ, TSAN_OPTIONS='halt_on_error=1'),
+                                         preexec_fn=allow_parent_debugger)
+              try:
+                  output, _ = process.communicate(timeout=20)
+              except subprocess.TimeoutExpired:
+                  try:
+                      debug = subprocess.run(['gdb', '--batch', '-ex', 'set pagination off',
+                                              '-ex', 'thread apply all bt 40', '-ex', inspect,
+                                              '-p', str(process.pid)], stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, text=True, timeout=30)
+                  finally:
+                      process.kill()
+                      output, _ = process.communicate()
+                  report = output + '\n' + debug.stdout
+                  (output_dir / 'multi-runtime-hang.log').write_text(report)
+                  print(report, flush=True)
+                  raise SystemExit('TSan multi-runtime wait exceeded diagnostic deadline')
+              print(f'TSan multi-runtime repeat {iteration}/50: {process.returncode}', flush=True)
+              if process.returncode:
+                  (output_dir / 'multi-runtime-failure.log').write_text(output)
+                  print(output, flush=True)
+                  raise SystemExit(1)
+          PY
       - uses: actions/upload-artifact@v6
         if: always()
         with:
