@@ -493,55 +493,23 @@ static int llam_prepare_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wait_mod
  * @return 0 when the request completed successfully, -1 when the wake reason
  *         carried an errno-style error.
  */
-int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns, llam_node_t *wake_node) {
+static int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns, llam_node_t *wake_node) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
-    unsigned wait_mode;
-    bool already_prepared;
 
-    if (shard == NULL || task == NULL) {
+    if (shard == NULL || task == NULL || req == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
+    llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_BEFORE_IO_WAIT_CONSUME);
     /*
-     * One-shot submit and shared-watch paths prepare the task before exposing
-     * req to backend threads.  If an immediate backend completion wins before
-     * this function runs, wait_mode is already NONE and the completion path has
-     * queued this task; do not reinitialize the result or wait ownership.
+     * Every caller prepares the G before publishing req to a backend. A
+     * completion can clear active_io_req after a wait_mode load, so probing
+     * those fields separately cannot establish whether preparation happened.
+     * Consume the prepared wait exactly once; never reset its completed result
+     * or overwrite a wake that was already queued before this G switched out.
      */
-    already_prepared = (req->task == task &&
-                        ((llam_task_active_io_req_load(task) == req &&
-                          task->state == LLAM_TASK_STATE_PARKED &&
-                          (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) ==
-                              LLAM_WAIT_IO) ||
-                         wait_mode == LLAM_IO_WAIT_MODE_NONE));
-    if (!already_prepared) {
-        req->task = task;
-        req->result = -1;
-        req->error_code = 0;
-        atomic_store_explicit(&req->owner_shard,
-                              shard->id,
-                              memory_order_release);
-        req->submit_ts_ns = llam_now_ns();
-        req->deadline_ns = has_deadline ? deadline_ns : 0U;
-
-        llam_task_ensure_listed(task);
-        if (!llam_task_set_io_tracking(task, req, shard->id)) {
-            int saved_errno = errno;
-
-            atomic_store_explicit(&req->wait_mode,
-                                  LLAM_IO_WAIT_MODE_NONE,
-                                  memory_order_release);
-            req->task = NULL;
-            errno = saved_errno;
-            return -1;
-        }
-        shard->metrics.io_submits += 1U;
-        shard->metrics.parks += 1U;
-        llam_trace_shard(shard, task, LLAM_TRACE_IO_SUBMIT, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_IO);
-    }
     if (has_deadline && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
         if (llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
             int saved_errno = errno;

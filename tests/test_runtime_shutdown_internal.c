@@ -5103,7 +5103,146 @@ static int exercise_io_worker_outlives_active_run(void) {
     return 0;
 }
 
+#if LLAM_RUNTIME_BACKEND_LINUX && defined(LLAM_ENABLE_TEST_HOOKS)
+typedef struct io_early_completion_state {
+    llam_runtime_t *runtime;
+    int fd;
+    atomic_bool done;
+    int run_rc;
+    ssize_t result;
+    int error;
+} io_early_completion_state_t;
+
+static void io_early_completion_task(void *argument) {
+    io_early_completion_state_t *state = argument;
+    unsigned char byte;
+
+    errno = 0;
+    state->result = llam_read(state->fd, &byte, 1U);
+    state->error = errno;
+}
+
+static void *io_early_completion_run(void *argument) {
+    io_early_completion_state_t *state = argument;
+
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    atomic_store_explicit(&state->done, true, memory_order_release);
+    return NULL;
+}
+#endif
+
+static int exercise_io_completion_before_park(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX && defined(LLAM_ENABLE_TEST_HOOKS)
+    io_early_completion_state_t state = {0};
+    llam_runtime_opts_t options;
+    llam_task_t *handle = NULL;
+    llam_task_t *task;
+    llam_io_req_t *request;
+    pthread_t driver;
+    bool started = false;
+    int descriptors[2] = {-1, -1};
+    int rc = 1;
+    unsigned phase = 0U;
+    uint64_t deadline;
+
+    atomic_init(&state.done, false);
+    if (llam_runtime_opts_init(&options, sizeof(options)) != 0) {
+        return fail_errno("early I/O completion options");
+    }
+    options.deterministic = 1U;
+    options.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) != 0 ||
+        llam_runtime_create_compat(&options, sizeof(options), &state.runtime) != 0) {
+        goto cleanup;
+    }
+    state.fd = descriptors[0];
+    handle = llam_runtime_spawn_ex(state.runtime, io_early_completion_task, &state, NULL, 0U);
+    if (handle == NULL) {
+        goto cleanup;
+    }
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_IO_WAIT_CONSUME, true);
+    if (pthread_create(&driver, NULL, io_early_completion_run, &state) != 0) {
+        goto cleanup;
+    }
+    started = true;
+    phase = 1U;
+    deadline = llam_now_ns() + UINT64_C(5000000000);
+    while (!llam_lease_test_gate_reached(LLAM_LEASE_TEST_BEFORE_IO_WAIT_CONSUME) &&
+           !atomic_load_explicit(&state.done, memory_order_acquire) && llam_now_ns() < deadline) {
+        llam_pause_cpu();
+    }
+    if (!llam_lease_test_gate_reached(LLAM_LEASE_TEST_BEFORE_IO_WAIT_CONSUME)) {
+        goto cleanup;
+    }
+    phase = 2U;
+
+    pthread_mutex_lock(&state.runtime->shards[0].lock);
+    task = state.runtime->shards[0].all_tasks;
+    pthread_mutex_unlock(&state.runtime->shards[0].lock);
+    request = llam_task_active_io_req_load(task);
+    if (request == NULL ||
+        atomic_load_explicit(&request->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE ||
+        llam_runtime_request_stop_rt(state.runtime) != 0) {
+        goto cleanup;
+    }
+    phase = 3U;
+
+    /* Complete and enqueue the prepared wait while its G is still inside the
+     * park setup. A stale wait-mode sample must never initialize it again. */
+    deadline = llam_now_ns() + UINT64_C(5000000000);
+    while ((atomic_load_explicit(&task->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNABLE ||
+            llam_task_active_io_req_load(task) != NULL) && llam_now_ns() < deadline) {
+        llam_pause_cpu();
+    }
+    if (atomic_load_explicit(&task->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNABLE ||
+        llam_task_active_io_req_load(task) != NULL) {
+        goto cleanup;
+    }
+    rc = 0;
+    phase = 4U;
+
+cleanup:
+    llam_lease_test_set_gate(LLAM_LEASE_TEST_BEFORE_IO_WAIT_CONSUME, false);
+    if (started) {
+        (void)llam_runtime_request_stop_rt(state.runtime);
+        deadline = llam_now_ns() + UINT64_C(5000000000);
+        while (!atomic_load_explicit(&state.done, memory_order_acquire) && llam_now_ns() < deadline) {
+            llam_pause_cpu();
+        }
+        if (!atomic_load_explicit(&state.done, memory_order_acquire)) {
+            fputs("test_runtime_shutdown_internal: completed I/O wait was parked again\n", stderr);
+            fflush(stderr);
+            _Exit(EXIT_FAILURE);
+        }
+        pthread_join(driver, NULL);
+        if (state.run_rc != 0 || state.result != -1 || state.error != ECANCELED) {
+            rc = 1;
+        }
+    }
+    if (handle != NULL && rc == 0 && llam_join(handle) != 0) {
+        rc = 1;
+    }
+    if (descriptors[0] >= 0) {
+        close(descriptors[0]);
+    }
+    if (descriptors[1] >= 0) {
+        close(descriptors[1]);
+    }
+    llam_runtime_destroy(state.runtime);
+    if (rc != 0) {
+        fprintf(stderr, "early completion: phase=%u run=%d read=%lld errno=%d\n",
+                phase, state.run_rc, (long long)state.result, state.error);
+        return fail_msg("I/O completion before park was not preserved");
+    }
+#endif
+    return 0;
+}
+
 int main(void) {
+    if (exercise_io_completion_before_park() != 0) {
+        return 1;
+    }
     if (exercise_io_worker_outlives_active_run() != 0) {
         return 1;
     }

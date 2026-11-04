@@ -116,6 +116,8 @@
   drain authority and cover that exact boundary with a deterministic gate.
 * keep I/O workers serving requests until the run driver exits, so a task still
   running through shutdown can publish a final request while its node is briefly empty.
+* consume prepared I/O waits exactly once when completion wins before parking,
+  preserving the published result and queued wake instead of initializing them again.
 * refuse native asynchronous preparation in Linux ThreadSanitizer builds with
   `ENOTSUP` before user dispatch, because TSan may deliver a copied signal context.
 * retain terminal Windows broker responses within the existing frame deadline

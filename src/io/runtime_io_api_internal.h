@@ -520,7 +520,6 @@ int llam_positional_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req);
 
 /* Cooperative I/O parking and backend issue paths. */
 void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req);
-int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns, llam_node_t *wake_node);
 int llam_issue_multishot_poll(llam_io_req_t *req);
 int llam_issue_multishot_accept(llam_io_req_t *req);
 int llam_issue_multishot_recv(llam_io_req_t *req);

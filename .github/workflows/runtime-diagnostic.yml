@@ -48,7 +48,7 @@ jobs:
           sudo ldconfig
       - name: Build the failing native preemption target
         run: |
-          make -j4 CC=clang tsan-test_async_preempt_linux_x86_64 tsan-test_multi_runtime_core \
+          make -j4 CC=clang tsan-test_async_preempt_linux_x86_64 tsan-test_multi_runtime_core tsan-test_runtime_shutdown_internal \
             OBJDIR=object-tsan SANITIZER_TARGETS_ENABLED=1 \
             CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
             LDLIBS="-pthread -luring -lm -ldl -fsanitize=thread"
@@ -67,6 +67,9 @@ jobs:
             tee .artifacts/runtime-tsan/preemption-stack.log
       - name: Capture TSan multi-runtime waits
         run: |
+          set -o pipefail
+          TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal 2>&1 | \
+            tee .artifacts/runtime-tsan/shutdown-regressions.log
           python3 - <<'PY'
           import ctypes
           import os

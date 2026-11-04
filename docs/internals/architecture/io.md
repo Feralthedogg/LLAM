@@ -53,6 +53,11 @@ An I/O worker keeps serving its node through shutdown until the run driver exits
 when the node is briefly empty, because a running task can still publish a final
 request.
 
+Wait tracking is prepared before a request reaches its backend. Parking consumes
+that preparation exactly once: completion may already have cleared active wait
+ownership and queued the task, so those mutable fields cannot be used to decide
+whether to initialize the wait again.
+
 On Linux, each `llam_node_t` owns an `io_uring` instance with a ring depth of 256. It
 uses one-shot and multishot poll, accept, and recv, provided-buffer rings of 128
 entries per node, and experimental SQPOLL. CQE processing identifies the owning shard
