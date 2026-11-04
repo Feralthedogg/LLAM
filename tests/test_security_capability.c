@@ -619,7 +619,7 @@ static int test_delayed_io_cancel_rejects_reused_embedded_generation(void) {
     shard.processor.cpu_id = 0U;
     shard.processor.node_index = 0U;
     shard.processor.io_node_index = 0U;
-    shard.processor.event_fd = LLAM_INVALID_FD;
+    shard.processor.event_fd = -1;
     atomic_init(&shard.processor.online, 1U);
     atomic_init(&shard.processor.event_pending, 0U);
     node.runtime = &runtime;
@@ -13744,9 +13744,12 @@ static int test_broker_pipe_slow_frame_has_absolute_deadline(void) {
                 InterlockedCompareExchange(&slow.chunks_sent, 0L, 0L));
         goto done;
     }
-    if (broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_PING) != 0 ||
-        broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_STOP) != 0) {
-        fprintf(stderr, "[test_security_capability] slow-frame victim exchange failed errno=%d\n", errno);
+    if (broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_PING) != 0) {
+        fprintf(stderr, "[test_security_capability] slow-frame victim ping failed errno=%d\n", errno);
+        goto done;
+    }
+    if (broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_STOP) != 0) {
+        fprintf(stderr, "[test_security_capability] slow-frame victim stop failed errno=%d\n", errno);
         goto done;
     }
     if (WaitForSingleObject(slow_thread, 5000U) != WAIT_OBJECT_0) {
@@ -13801,6 +13804,78 @@ done:
         CloseHandle(server_thread);
     }
     if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_pipe_terminal_response_survives_delayed_reader(void) {
+    char name[128];
+    llam_runtime_opts_t options;
+    llam_broker_t broker;
+    broker_pipe_local_server_state_t server;
+    llam_broker_wire_request_t request;
+    llam_broker_wire_response_t response;
+    llam_handle_t client = LLAM_INVALID_HANDLE;
+    HANDLE thread = NULL;
+    bool initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&options, sizeof(options)) != 0) {
+        return -1;
+    }
+    options.deterministic = 1U;
+    options.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &options, sizeof(options)) != 0) {
+        return -1;
+    }
+    initialized = true;
+    (void)snprintf(name, sizeof(name), "llam-broker-terminal-%lu-%llu",
+                   (unsigned long)GetCurrentProcessId(),
+                   (unsigned long long)GetTickCount64());
+    memset(&server, 0, sizeof(server));
+    server.broker = &broker;
+    server.name = name;
+    server.max_connections = 1U;
+    server.rc = -1;
+    thread = CreateThread(NULL, 0U, broker_pipe_local_server_thread, &server, 0U, NULL);
+    if (thread == NULL || llam_broker_connect_pipe(name, &client) != 0) {
+        goto done;
+    }
+    request_init(&request, LLAM_BROKER_WIRE_OP_STOP);
+    if (broker_windows_overlapped_exact((HANDLE)client, true, &request,
+                                        (DWORD)sizeof(request)) != 0) {
+        goto done;
+    }
+    /* Let the server finish its write while no response read is pending.
+     * Immediate disconnect used to discard this valid terminal response. */
+    Sleep(50U);
+    memset(&response, 0, sizeof(response));
+    if (broker_windows_overlapped_exact((HANDLE)client, false, &response,
+                                        (DWORD)sizeof(response)) != 0 ||
+        response.magic != LLAM_BROKER_WIRE_MAGIC ||
+        response.version != LLAM_BROKER_WIRE_VERSION || response.status != 0) {
+        fprintf(stderr, "[test_security_capability] delayed terminal response lost errno=%d\n", errno);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (!llam_handle_is_invalid(client)) {
+        llam_broker_close_handle(client);
+    }
+    if (thread != NULL) {
+        if (WaitForSingleObject(thread, 5000U) != WAIT_OBJECT_0) {
+            /* A failed fixture must not free broker state still in use. */
+            (void)TerminateThread(thread, 1U);
+            initialized = false;
+            rc = -1;
+        } else if (server.rc != 0) {
+            rc = -1;
+        }
+        CloseHandle(thread);
+    }
+    if (initialized) {
         llam_broker_destroy(&broker);
     }
     return rc;
@@ -15325,6 +15400,7 @@ int main(int argc, char **argv) {
         LLAM_RUN_SECURITY_TEST(test_broker_pipe_serve_local_n_survives_malformed_session);
         LLAM_RUN_SECURITY_TEST(test_broker_pipe_session_request_budget_returns_to_listener);
         LLAM_RUN_SECURITY_TEST(test_broker_pipe_slow_frame_has_absolute_deadline);
+        LLAM_RUN_SECURITY_TEST(test_broker_pipe_terminal_response_survives_delayed_reader);
 #else
         LLAM_RUN_SECURITY_TEST(test_broker_subject_disconnect_reclaims_grants);
         LLAM_RUN_SECURITY_TEST(test_broker_revoke_response_failure_reclaims_rotated_grant);
@@ -15489,6 +15565,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_pipe_serve_local_n_survives_malformed_session);
     LLAM_RUN_SECURITY_TEST(test_broker_pipe_session_request_budget_returns_to_listener);
     LLAM_RUN_SECURITY_TEST(test_broker_pipe_slow_frame_has_absolute_deadline);
+    LLAM_RUN_SECURITY_TEST(test_broker_pipe_terminal_response_survives_delayed_reader);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_mapping_has_restricted_dacl);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_mapping_authority);
 #endif

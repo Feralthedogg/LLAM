@@ -439,6 +439,18 @@ int llam_broker_serve_handle(llam_broker_t *broker, llam_handle_t handle) {
         ++request_count;
     }
     llam_broker_forget_transport_subject(broker, transport_id);
+    if (rc == 0 && request_count != 0U) {
+        unsigned char terminal_byte;
+        int saved_errno = errno;
+
+        /* DisconnectNamedPipe discards unread replies. Give a terminal peer
+         * time to consume the response and close before the listener reuses
+         * this instance. The existing absolute frame deadline bounds this
+         * wait; FlushFileBuffers would let a non-reading client block forever.
+         * Extra input is irrelevant after STOP or the session budget. */
+        (void)llam_broker_read_exact_handle((HANDLE)handle, &terminal_byte, 1U);
+        errno = saved_errno;
+    }
     return rc;
 }
 
