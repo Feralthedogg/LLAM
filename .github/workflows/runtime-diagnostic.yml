@@ -20,13 +20,48 @@ on:
       scope:
         type: choice
         default: all
-        options: [all, linux, macos]
+        options: [all, linux, macos, tsan]
 permissions:
   contents: read
 
 jobs:
+  linux-tsan-debug:
+    if: inputs.scope == 'tsan'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install native diagnostic dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang gdb liburing-dev
+      - name: Build the failing native preemption target
+        run: |
+          make -j4 CC=clang tsan-test_async_preempt_linux_x86_64 \
+            OBJDIR=object-tsan SANITIZER_TARGETS_ENABLED=1 \
+            CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
+            LDLIBS="-pthread -luring -lm -ldl -fsanitize=thread"
+      - name: Capture the failure with ASLR preserved
+        run: |
+          set -o pipefail
+          mkdir -p .artifacts/runtime-tsan
+          gdb --batch --return-child-result \
+            -ex 'set pagination off' -ex 'set disable-randomization off' \
+            -ex 'handle SIGUSR1 SIGUSR2 SIGURG SIGALRM SIGILL nostop noprint pass' \
+            -ex 'handle SIG34 SIG35 SIG36 SIG37 SIG38 SIG39 SIG40 nostop noprint pass' \
+            -ex 'set environment TSAN_OPTIONS=halt_on_error=1' \
+            -ex run -ex 'thread apply all bt 40' \
+            --args ./tsan-test_async_preempt_linux_x86_64 2>&1 | \
+            tee .artifacts/runtime-tsan/preemption-stack.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: runtime-tsan-failure-stack
+          path: .artifacts/runtime-tsan
+          if-no-files-found: ignore
+
   linux-sanitizer-debug:
-    if: inputs.scope != 'macos'
+    if: inputs.scope == 'all' || inputs.scope == 'linux'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -155,7 +190,7 @@ jobs:
           if-no-files-found: ignore
 
   macos-intel-performance:
-    if: inputs.scope != 'linux'
+    if: inputs.scope == 'all' || inputs.scope == 'macos'
     runs-on: macos-15-intel
     timeout-minutes: 20
     steps:
