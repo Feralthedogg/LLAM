@@ -937,8 +937,8 @@ int main(void) {
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_init(&opts) != 0) {
-        return test_fail_errno("llam_runtime_init failed");
+    if (llam_runtime_init_compat(&opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat failed");
     }
     if (init_sync_state(&state) != 0) {
         llam_runtime_shutdown();

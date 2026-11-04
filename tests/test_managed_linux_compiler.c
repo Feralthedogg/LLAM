@@ -64,7 +64,11 @@ int main(int argc, char **argv) {
     options.preempt_quantum_ns = 1000000U;
     policy.policy = LLAM_PREEMPT_POLICY_ASYNC_REQUIRED;
     policy.native_affine_capacity = 1U;
-    CHECK(llam_runtime_create_managed(&options, sizeof(options), &policy, sizeof(policy), &runtime) == 0);
+    if (affine) {
+        CHECK(llam_runtime_create_managed(&options, sizeof(options), &policy, sizeof(policy), &runtime) == 0);
+    } else {
+        CHECK(llam_runtime_create(&options, sizeof(options), &runtime) == 0);
+    }
     CHECK(dlclose(module) == 0);
     module = NULL;
     tasks[0] = llam_runtime_spawn_ex(runtime, first, &work[0], NULL, 0U);

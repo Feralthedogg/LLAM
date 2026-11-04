@@ -470,16 +470,19 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,
                          bool heap_allocated);
+bool llam_runtime_init_cleanup_here(const llam_runtime_t *runtime);
 /* Storage/lease bootstrap only; it does not qualify managed code or native contexts. */
 int llam_runtime_init_registered_rt(llam_runtime_t *rt,
                                     const llam_runtime_opts_t *opts,
                                     size_t opts_size,
                                     bool heap_allocated,
                                     size_t managed_worker_count);
+struct llam_preempt_opts;
 int llam_runtime_init_managed_rt(llam_runtime_t *runtime,
                                  const llam_runtime_opts_t *opts,
                                  size_t opts_size, bool heap_allocated,
-                                 size_t affine_capacity, unsigned compatibility_processors);
+                                 const struct llam_preempt_opts *managed_opts);
+int llam_managed_catalog_prepare(llam_runtime_t *runtime, const struct llam_preempt_opts *opts);
 
 int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated);
 int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated);
@@ -539,6 +542,7 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 void llam_runtime_test_fail_after_stack_cache_prewarm(void);
 void llam_runtime_test_fail_ctrl_thread_start(void);
+void llam_runtime_test_before_managed_prepare(void (*hook)(llam_runtime_t *, void *), void *arg);
 #endif
 int llam_task_group_join_child_handle(llam_task_t *task,
                                       llam_task_group_t *group,

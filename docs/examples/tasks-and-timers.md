@@ -1,10 +1,12 @@
-# Tasks And Timers
+# Tasks and timers
 
 Start with this shape when one task needs to create work and wait for it.
 
-## Spawn And Join
+## Spawn and join
 
-```c
+**Complete program.** One task creates a child, joins it, and prints its result.
+
+```c title="main.c"
 #include <llam/runtime.h>
 
 #include <stdio.h>
@@ -32,7 +34,7 @@ static void root(void *arg) {
 }
 
 int main(void) {
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return 1;
     }
 
@@ -48,9 +50,13 @@ int main(void) {
 }
 ```
 
-## Sleep Until A Deadline
+```text title="Output"
+result=144
+```
 
-Use absolute deadlines from `llam_now_ns()`:
+## Sleep until a deadline
+
+**Focused snippet.** Use absolute deadlines from `llam_now_ns()`:
 
 ```c
 uint64_t deadline = llam_now_ns() + 10ULL * 1000ULL * 1000ULL;
@@ -60,9 +66,9 @@ if (llam_sleep_until(deadline) != 0) {
 }
 ```
 
-## Interval Timer
+## Interval timer
 
-Use a waitable timer when a task needs repeated ticks:
+**Focused snippet.** Use a waitable timer when a task needs repeated ticks:
 
 ```c
 static void ticker(void *arg) {
@@ -85,9 +91,9 @@ static void ticker(void *arg) {
 }
 ```
 
-## CPU-Bound Loop
+## CPU-bound loop
 
-Long loops should expose safepoints:
+**Focused snippet.** Long loops on a compatibility runtime should expose safepoints:
 
 ```c
 size_t poll_counter = 0;

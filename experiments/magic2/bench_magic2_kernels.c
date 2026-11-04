@@ -460,7 +460,7 @@ int main(int argc, char **argv) {
     llam_runtime_opts_t opts;
     if (llam_runtime_opts_init(&opts, sizeof(opts)) != 0) goto done;
     opts.deterministic = 1U; opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST; opts.preempt_mode = LLAM_PREEMPT_OFF;
-    if (llam_runtime_create(&opts, sizeof(opts), &s.runtime) != 0) goto done;
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &s.runtime) != 0) goto done;
     llam_task_t *root = llam_runtime_spawn_ex(s.runtime, controller, &s, NULL, 0U);
     llam_runtime_stats_t stats;
     if (root == NULL || llam_runtime_run_handle(s.runtime) != 0 || llam_join(root) != 0 || s.failed ||

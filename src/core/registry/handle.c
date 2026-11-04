@@ -27,6 +27,7 @@
  */
 
 #include "runtime_internal.h"
+#include "llam/managed.h"
 
 /**
  * @brief Return the legacy default runtime handle.
@@ -54,6 +55,15 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
         errno = ENOTSUP;
         return -1;
     }
+    return llam_runtime_create_managed(opts, opts_size, NULL, 0U, out);
+}
+
+int llam_runtime_create_compat(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
 
     llam_runtime_t *runtime;
 
@@ -70,7 +80,9 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
     }
 
     if (llam_runtime_init_rt(runtime, opts, opts_size, true) != 0) {
+        int error = errno;
         free(runtime);
+        errno = error;
         return -1;
     }
     *out = runtime;

@@ -1,30 +1,33 @@
-# Runtime Handles
+# Runtime handles
 
 Explicit runtime handles are the canonical embedding boundary for LLAM 3.0 (ABI 2.x).
 They let hosts create independent scheduler instances and attach root tasks to
 the intended runtime.
 
-## Default Runtime
+## Default runtime
 
-The legacy wrappers use the process-default runtime:
-
-`llam_runtime_init`, `llam_spawn`, `llam_run` and `llam_runtime_shutdown`
-retain their process-default compatibility behavior.
+The legacy wrappers `llam_runtime_init`, `llam_spawn`, `llam_run` and
+`llam_runtime_shutdown` use the process-default runtime. `llam_runtime_init` requires
+asynchronous preemption, like `llam_runtime_create`. `llam_runtime_init_compat`
+selects compatibility execution instead.
 
 This is convenient for a single LLAM-owned application, but it is a poor fit for
 embedding multiple independent subsystems in one process.
 
-## Explicit Runtime
+## Explicit runtime
 
-Use explicit handles for embedding and for any host-owned lifecycle:
+Use explicit handles for embedding and for any host-owned lifecycle. Choose the
+constructor by how the task code is built: `llam_runtime_create()` runs tasks from the
+[managed C toolchain](../guides/managed-c.md), and `llam_runtime_create_compat()` runs
+plain C. Both return the same kind of handle.
 
-Follow the checked [minimal program](../getting-started.md#minimal-program)
+Follow the checked [minimal program](../start/quickstart.md#run-a-minimal-program)
 and [complete group example](../examples/embedding.md). A failed spawn must not
 become a successful empty run, and host joins require another active driver or
 already-completed tasks. A successful `llam_join_result` consumes a normal task
 handle. Group child handles are borrowed and are consumed by group join.
 
-## Ownership Rules
+## Ownership rules
 
 Runtime-aware objects are bound to the runtime that created them. Managed use
 from another runtime fails with `EXDEV`. Destroy can fail with `EBUSY` while
@@ -44,7 +47,7 @@ objects with the intended runtime. The matching stop, statistics, dump and resou
 query forms accept that same runtime handle. `llam_runtime_drain_until` closes
 admission and bounds host waiting while preserving all handles on timeout.
 
-## FFI Guidance
+## FFI guidance
 
 Bindings should prefer size-aware entry points and public size macros:
 
@@ -56,4 +59,8 @@ llam_runtime_t *rt = NULL;
 if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &rt) != 0) return 1;
 ```
 
-The ABI rules are documented in [ABI Contract](../abi.md).
+A binding whose task entries come from another compiler or language needs
+`llam_runtime_create_compat()`, which takes the same arguments. The symbol exists from
+ABI 2.4, so check the loaded ABI minor before resolving it.
+
+The ABI rules are documented in [ABI contract](../reference/abi/index.md).

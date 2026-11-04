@@ -99,6 +99,7 @@ int llam_channel_register_live(llam_channel_t *channel);
 void llam_channel_tls_cache_drain(void);
 void llam_channel_global_cache_drain(void);
 void llam_channel_hot_safepoint(void);
+void llam_channel_finish_buffered_send(bool single_slot);
 /* Fallback storage carries one active-op pin and its channel lock. */
 int llam_channel_try_send_buffered_fast(llam_channel_t *handle,
                                         void *value,

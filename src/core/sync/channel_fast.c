@@ -116,7 +116,8 @@ int llam_channel_try_send_buffered_fast(llam_channel_t *handle,
         llam_channel_public_registry_unlock();
         return LLAM_CHANNEL_FAST_FALLBACK;
     }
-    if (channel->capacity == 1U) {
+    bool single_slot = channel->capacity == 1U;
+    if (single_slot) {
         channel->buffer[0] = value;
     } else {
         channel->buffer[channel->tail] = value;
@@ -125,6 +126,6 @@ int llam_channel_try_send_buffered_fast(llam_channel_t *handle,
     channel->count += 1U;
     pthread_mutex_unlock(&channel->lock);
     llam_channel_public_registry_unlock();
-    llam_channel_hot_safepoint();
+    llam_channel_finish_buffered_send(single_slot);
     return LLAM_CHANNEL_FAST_DONE;
 }

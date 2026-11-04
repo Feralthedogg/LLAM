@@ -240,7 +240,7 @@ static int cpu_runtime_create(llam_runtime_t **runtime) {
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    return llam_runtime_create(&options, sizeof(options), runtime);
+    return llam_runtime_create_compat(&options, sizeof(options), runtime);
 }
 
 static void cpu_request(void *arg) {

@@ -94,7 +94,7 @@ static int init_runtime(void) {
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         fprintf(stderr, "[test_runtime_unmanaged_join] runtime init failed: %s\n", strerror(errno));
         return -1;
     }

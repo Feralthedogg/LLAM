@@ -1,0 +1,39 @@
+{#
+  Copyright 2026 Feralthedogg
+  SPDX-License-Identifier: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  See LICENSE.
+#}
+{% extends "main.html" %}
+{% from "partials/icons.html" import icon %}
+{% block title %}<title>Page not found, LLAM docs</title>{% endblock %}
+{% block page %}
+<body class="llam lost-page">
+{%- with tab = '', search_button = false %}
+{%- include "partials/header.html" %}
+{%- endwith %}
+<main class="lost">
+  <div class="lost-in">
+    <h1>404</h1>
+    <p>This page moved or never existed. The docs were reorganized for {{ config.extra.llam_version }}, so an old link may land here.</p>
+    <button class="srch" type="button" data-search>{{ icon('search', 's') }}<span>Search the docs and API</span><kbd data-mod>⌘K</kbd></button>
+    <nav class="lost-links" aria-label="Popular pages">
+      <a href="{{ 'start/quickstart/'|url }}">Quickstart{{ icon('chevron', 's') }}</a>
+      <a href="{{ 'examples/'|url }}">Examples{{ icon('chevron', 's') }}</a>
+      <a href="{{ 'reference/api/'|url }}">API reference{{ icon('chevron', 's') }}</a>
+    </nav>
+  </div>
+</main>
+{%- include "partials/palette.html" %}
+</body>
+{% endblock %}

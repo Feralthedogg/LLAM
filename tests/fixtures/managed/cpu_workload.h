@@ -25,6 +25,7 @@ typedef struct llam_managed_cpu_workload {
     unsigned long long result;
     unsigned started;
     unsigned finished;
+    unsigned capture_release; /* Refill fixture waits for a witnessed capture. */
 } llam_managed_cpu_workload_t;
 
 typedef struct llam_managed_cpu_observation {

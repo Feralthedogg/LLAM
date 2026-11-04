@@ -225,8 +225,8 @@ int main(void) {
     accept_state.port = ntohs(listener_addr.sin_port);
     connect_a.port = accept_state.port;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        perror("llam_runtime_init");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        perror("llam_runtime_init_compat");
         close(listener_fd);
         close(sv[0]);
         close(sv[1]);

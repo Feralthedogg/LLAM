@@ -66,7 +66,7 @@ int main(void) {
     }
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         fprintf(stderr, "llam-g-exception-control: runtime init failed: %d\n", errno);
         return 1;
     }

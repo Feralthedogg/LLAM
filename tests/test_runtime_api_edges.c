@@ -427,7 +427,7 @@ static int init_runtime(void) {
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    return llam_runtime_init(&opts);
+    return llam_runtime_init_compat(&opts);
 }
 
 static unsigned cancel_token_destroy_race_rounds(void) {
@@ -666,7 +666,7 @@ static int test_task_group_capacity_overflow_guard(void) {
         return fail_errno("task group overflow runtime opts init failed");
     }
     runtime_opts.deterministic = 1U;
-    if (llam_runtime_init(&runtime_opts) != 0) {
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
         return fail_errno("task group overflow runtime init failed");
     }
 
@@ -747,7 +747,7 @@ static int test_task_group_active_spawn_overflow_guard(void) {
         return fail_errno("task group active-spawn overflow runtime opts init failed");
     }
     runtime_opts.deterministic = 1U;
-    if (llam_runtime_init(&runtime_opts) != 0) {
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
         return fail_errno("task group active-spawn overflow runtime init failed");
     }
 
@@ -881,7 +881,7 @@ static int test_fault_boundary_contracts(void) {
     }
     runtime_opts.profile = UINT32_MAX;
     errno = 0;
-    if (llam_runtime_init_ex(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
+    if (llam_runtime_init_compat_ex(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
         llam_runtime_shutdown();
         return fail_msg("runtime invalid profile did not fail with EINVAL");
     }
@@ -3768,7 +3768,7 @@ static int test_timer_heap_capacity_overflow_guard(void) {
         return fail_errno("timer heap overflow opts init failed");
     }
     opts.deterministic = 1U;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         return fail_errno("timer heap overflow runtime init failed");
     }
     task = llam_spawn(timer_heap_overflow_task, &state, NULL);
@@ -5433,7 +5433,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         void *out = NULL;
 
         (void)alarm(2U);
-        if (llam_runtime_init(NULL) != 0) {
+        if (llam_runtime_init_compat(NULL) != 0) {
             _exit(10);
         }
         channel = llam_channel_create(1U);
@@ -5752,7 +5752,7 @@ static int test_public_channel_forged_initial_handle_rejected(void) {
     void *out = NULL;
     int rc = 1;
 
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return fail_errno("forged channel handle runtime init failed");
     }
 
@@ -5960,7 +5960,7 @@ static int test_public_sync_forged_initial_handles_rejected(void) {
     llam_task_group_t *group = NULL;
     int rc = 1;
 
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return fail_errno("forged sync/control handle runtime init failed");
     }
 
@@ -6031,7 +6031,7 @@ static int test_public_task_forged_initial_handle_rejected(void) {
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
     atomic_init(&state.ran, 0U);
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return fail_errno("forged task handle runtime init failed");
     }
 

@@ -53,7 +53,7 @@ NEGATIVE_TEST_FILES = frozenset({
 })
 REQUIRED_FILES = (
     APACHE_LICENSE, Path("NOTICE"), Path("THIRD_PARTY_NOTICES.md"),
-    Path("README.md"), Path("CONTRIBUTING.md"), Path("docs/licensing.md"),
+    Path("README.md"), Path("CONTRIBUTING.md"), Path("docs/project/licensing.md"),
     Path(".github/SECURITY.md"), Path(".github/ISSUE_TEMPLATE/config.yml"),
     Path(".github/ISSUE_TEMPLATE/defect-report.yml"),
     Path("scripts/package_release.sh"), Path("scripts/package_release_windows.ps1"),
@@ -164,9 +164,9 @@ def check(root: Path, include_untracked: bool = False) -> list[str]:
         errors.append(".github/ISSUE_TEMPLATE/config.yml: private security route is missing")
     if "Apache License" not in read("NOTICE") or "Copyright" not in read("NOTICE"):
         errors.append("NOTICE: Apache attribution is missing")
-    licensing = read("docs/licensing.md")
+    licensing = read("docs/project/licensing.md")
     if not all(marker in licensing for marker in ("Apache", "first-party", "Third-party", "Historical")):
-        errors.append("docs/licensing.md: current scope or historical boundary is missing")
+        errors.append("docs/project/licensing.md: current scope or historical boundary is missing")
     for relative in ("scripts/package_release.sh", "scripts/package_release_windows.ps1"):
         text = read(relative).replace("\\", "/")
         for marker in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "third_party/magic2/LICENSE"):

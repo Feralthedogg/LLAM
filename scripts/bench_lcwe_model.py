@@ -128,7 +128,8 @@ def _parse_float(name: str, value: str) -> float:
     if FIXED_FLOAT_RE.fullmatch(value) is None:
         raise ValueError(f"invalid fixed-point field {name}")
     parsed = float(value)
-    if not math.isfinite(parsed) or parsed <= 0.0:
+    if (not math.isfinite(parsed) or parsed < 0.0 or
+            (parsed == 0.0 and name != "cpu_ns_per_op")):
         raise ValueError(f"non-positive or non-finite field {name}")
     return parsed
 
@@ -165,8 +166,10 @@ def parse_output(output: str) -> ModelRow:
     expected_ops = integers["instances"] * measured_rounds
     if integers["ops"] != expected_ops:
         raise ValueError("operation count mismatch")
-    if integers["wall_ns"] <= 0 or integers["cpu_ns"] <= 0:
+    if integers["wall_ns"] <= 0:
         raise ValueError("non-positive aggregate time")
+    if integers["cpu_ns"] == 0 and floats["cpu_ns_per_op"] != 0.0:
+        raise ValueError("unresolved CPU time must have zero ns/op")
     if abs(
         floats["wall_ns_per_op"]
         - integers["wall_ns"] / integers["ops"]
@@ -220,6 +223,7 @@ class SummaryRow:
     p99_ns_per_op: float
     spread: float
     checksum: str
+    cpu_resolved: bool = True
 
 
 def select_median(rows: list[ModelRow]) -> SummaryRow:
@@ -265,6 +269,7 @@ def select_median(rows: list[ModelRow]) -> SummaryRow:
         p99_ns_per_op=selected.p99_ns_per_op,
         spread=ordered[-1].wall_ns_per_op / ordered[0].wall_ns_per_op,
         checksum=selected.checksum if len(checksums) == 1 else "MISMATCH",
+        cpu_resolved=all(row.cpu_ns > 0 and row.cpu_ns_per_op > 0.0 for row in rows),
     )
 
 
@@ -289,6 +294,8 @@ def _integrity_reasons(summary: list[SummaryRow]) -> list[str]:
         return ["no summary rows were produced"]
     for row in summary:
         key = _cell_key(row)
+        if not row.cpu_resolved or row.cpu_ns_per_op <= 0.0:
+            reasons.append(f"CPU time below clock resolution for {key}")
         if key in seen:
             reasons.append(f"duplicate summary cell: {key}")
         seen.add(key)
@@ -467,6 +474,7 @@ def write_summary_csv(path: Path, rows: list[SummaryRow]) -> None:
         "p99_ns_per_op",
         "spread",
         "checksum",
+        "cpu_resolved",
     ]
     with open_text_for_write(path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -485,6 +493,7 @@ def write_summary_csv(path: Path, rows: list[SummaryRow]) -> None:
                     "p99_ns_per_op": f"{row.p99_ns_per_op:.2f}",
                     "spread": f"{row.spread:.6f}",
                     "checksum": row.checksum,
+                    "cpu_resolved": row.cpu_resolved,
                 }
             )
 
@@ -519,12 +528,15 @@ def _performance_table(rows: list[SummaryRow]) -> list[str]:
             cpu_reduction = "n/a"
         else:
             speedup = f"{scalar.wall_ns_per_op / row.wall_ns_per_op:.2f}x"
-            cpu_reduction = (
-                f"{(1.0 - row.cpu_ns_per_op / scalar.cpu_ns_per_op) * 100.0:.1f}%"
-            )
+            cpu_reduction = "n/a"
+            if (scalar.cpu_resolved and row.cpu_resolved and
+                    scalar.cpu_ns_per_op > 0.0 and row.cpu_ns_per_op > 0.0):
+                cpu_reduction = f"{(1.0 - row.cpu_ns_per_op / scalar.cpu_ns_per_op) * 100.0:.1f}%"
+        cpu_time = (f"{row.cpu_ns_per_op:.2f}" if row.cpu_resolved and row.cpu_ns_per_op > 0.0
+                    else "below clock resolution")
         lines.append(
             f"| {row.mode} | {row.lanes} | {_layout_class(row.mode)} | "
-            f"{row.wall_ns_per_op:.2f} | {row.cpu_ns_per_op:.2f} | "
+            f"{row.wall_ns_per_op:.2f} | {cpu_time} | "
             f"{speedup} | {cpu_reduction} | {row.p99_ns_per_op:.2f} | "
             f"{row.spread:.3f}x |"
         )
@@ -601,10 +613,12 @@ def write_markdown(
             ]
         )
         for row in sorted(mixed, key=lambda item: _cell_key(item)):
+            cpu_time = (f"{row.cpu_ns_per_op:.2f}" if row.cpu_resolved and row.cpu_ns_per_op > 0.0
+                        else "below clock resolution")
             lines.append(
                 f"| {row.workload} | {row.sites} | {row.mode} | "
                 f"{row.lanes} | {_layout_class(row.mode)} | "
-                f"{row.wall_ns_per_op:.2f} | {row.cpu_ns_per_op:.2f} | "
+                f"{row.wall_ns_per_op:.2f} | {cpu_time} | "
                 f"{row.p99_ns_per_op:.2f} | {row.spread:.3f}x |"
             )
         lines.append("")

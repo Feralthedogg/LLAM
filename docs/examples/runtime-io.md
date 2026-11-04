@@ -3,11 +3,12 @@
 Runtime I/O lets task code look blocking while LLAM parks the task on the
 platform backend.
 
-## POSIX Socketpair Echo
+## POSIX socketpair echo
 
-This example is POSIX-only because it uses `socketpair()`.
+**Complete program, POSIX only.** It uses `socketpair()`, so it does not build on
+Windows.
 
-```c
+```c title="main.c"
 #include <llam/runtime.h>
 
 #include <stdio.h>
@@ -62,11 +63,31 @@ static void root(void *arg) {
     (void)llam_close(sv[0]);
     (void)llam_close(sv[1]);
 }
+
+int main(void) {
+    if (llam_runtime_init_compat(NULL) != 0) {
+        return 1;
+    }
+
+    llam_task_t *task = llam_spawn(root, NULL, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return 1;
+    }
+    int rc = llam_run();
+    if (rc == 0 && llam_join(task) != 0) rc = -1;
+    llam_runtime_shutdown();
+    return rc;
+}
 ```
 
-## Owned Buffer Read
+```text title="Output"
+read=hello
+```
 
-Use owned buffers when the runtime should allocate storage:
+## Owned buffer read
+
+**Focused snippet.** Use owned buffers when the runtime should allocate storage:
 
 ```c
 llam_io_buffer_t *buffer = NULL;
@@ -84,7 +105,9 @@ llam_io_buffer_release(buffer);
 `llam_io_buffer_data()` returns a borrowed pointer. It is valid only until
 `llam_io_buffer_release()`.
 
-## Datagram Receive
+## Datagram receive
+
+**Focused snippet.** Receive a datagram and its sender address:
 
 ```c
 struct sockaddr_storage peer;
@@ -101,9 +124,9 @@ ssize_t n = llam_recvfrom(fd,
 
 Use `llam_recvfrom_owned()` when you also want runtime-owned packet storage.
 
-## Windows HANDLE File I/O
+## Windows HANDLE file I/O
 
-On Windows, use HANDLE variants for file I/O:
+**Platform-specific, Windows.** Use HANDLE variants for file I/O:
 
 ```c
 ssize_t n = llam_pread_handle(handle, buf, sizeof(buf), offset);

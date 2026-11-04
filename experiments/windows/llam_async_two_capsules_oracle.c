@@ -691,7 +691,7 @@ int main(void) {
     }
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         pair_fail("runtime init", (unsigned)errno);
     }
     state.runtime = llam_runtime_default_storage();

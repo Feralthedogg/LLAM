@@ -278,7 +278,7 @@ int test_magic2_auto_internal(void) {
         options.deterministic = 1U;
         options.preempt_mode = LLAM_PREEMPT_OFF;
         options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-        check(&fixture, llam_runtime_create(&options, sizeof(options), &fixture.runtime) == 0,
+        check(&fixture, llam_runtime_create_compat(&options, sizeof(options), &fixture.runtime) == 0,
               "runtime create");
         if (fixture.failures != 0U) {
             return 1;

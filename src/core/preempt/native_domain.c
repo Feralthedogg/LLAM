@@ -64,10 +64,12 @@ static uint64_t llam_native_domain_id(void) {
 #elif defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__))
     register uint64_t result __asm__("x0");
 #if defined(__APPLE__)
-    register uint64_t number __asm__("x16") = SYS_thread_selfid;
+    register uint64_t number __asm__("x16");
+    number = SYS_thread_selfid;
     __asm__ volatile("svc #0x80" : "=r"(result), "+r"(number) : : "x1", "memory", "cc");
 #else
-    register uint64_t number __asm__("x8") = SYS_gettid;
+    register uint64_t number __asm__("x8");
+    number = SYS_gettid;
     __asm__ volatile("svc #0" : "=r"(result), "+r"(number) : : "memory", "cc");
 #endif
     return result;

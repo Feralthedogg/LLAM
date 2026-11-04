@@ -74,7 +74,7 @@ def main():
             "static void task(void *arg) { *(int *)arg = 1; }\n"
             "int main(void) { llam_runtime_opts_t opts; llam_runtime_t *rt; llam_task_t *t; int ran = 0; "
             "if (llam_runtime_opts_init(&opts, sizeof(opts))) return 1; opts.deterministic = 1; "
-            "if (llam_runtime_create(&opts, sizeof(opts), &rt)) return 2; "
+            "if (llam_runtime_create_compat(&opts, sizeof(opts), &rt)) return 2; "
             "t = llam_runtime_spawn_ex(rt, task, &ran, 0, 0); "
             "if (!t || llam_runtime_run_handle(rt) || llam_join(t)) return 3; "
             "llam_runtime_destroy(rt); return ran != 1; }\n",

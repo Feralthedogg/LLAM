@@ -237,7 +237,7 @@ static int pe_handoff(HMODULE module) {
     }
     runtime_options.deterministic = 1U;
     runtime_options.preempt_mode = LLAM_PREEMPT_STRICT;
-    if (llam_runtime_create(&runtime_options,
+    if (llam_runtime_create_compat(&runtime_options,
                             LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &runtime) != 0) {
         pe_fail("handoff runtime create");

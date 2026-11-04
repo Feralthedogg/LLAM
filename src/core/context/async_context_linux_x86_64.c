@@ -1946,7 +1946,7 @@ finish:
     return result;
 }
 
-int llam_async_preempt_enable_runtime(llam_runtime_t *runtime) {
+static int llam_async_preempt_enable_configured(llam_runtime_t *runtime, bool preparing) {
     llam_runtime_t *pinned_runtime = NULL;
     llam_worker_t *worker = NULL;
     llam_async_runtime_control_t *control = NULL;
@@ -1959,15 +1959,16 @@ int llam_async_preempt_enable_runtime(llam_runtime_t *runtime) {
     int saved_errno;
     llam_preempt_failure_reason_t capability_failure = LLAM_PREEMPT_FAILURE_NONE;
 
-    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
-        return -1;
-    }
+    /* Construction owns unpublished storage; public pins/destroy cannot enter.
+     * Public opt-in retains its registry pin and initialized-state checks. */
+    if (preparing) pinned_runtime = runtime;
+    else if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) return -1;
     if (!atomic_compare_exchange_strong_explicit(&pinned_runtime->exec_started,
                                                  &expected_exec_started,
                                                  true,
                                                  memory_order_acq_rel,
                                                  memory_order_acquire)) {
-        llam_runtime_end_public_op(pinned_runtime);
+        if (!preparing) llam_runtime_end_public_op(pinned_runtime);
         errno = EBUSY;
         return -1;
     }
@@ -2005,7 +2006,7 @@ int llam_async_preempt_enable_runtime(llam_runtime_t *runtime) {
             goto unlock;
         }
     }
-    if (!atomic_load_explicit(&pinned_runtime->initialized, memory_order_acquire) ||
+    if ((!preparing && !atomic_load_explicit(&pinned_runtime->initialized, memory_order_acquire)) ||
         pinned_runtime->active_shards == 0U ||
         atomic_load_explicit(&pinned_runtime->async_preempt_enabled, memory_order_acquire) != 0U) {
         capability_failure = LLAM_PREEMPT_FAILURE_CAPTURE_SLOT_BUSY;
@@ -2138,11 +2139,15 @@ unlock:
         atomic_store_explicit(&pinned_runtime->preempt_capability.async_state,
                               LLAM_PREEMPT_ASYNC_PREPARED, memory_order_release);
     }
-    llam_runtime_end_public_op(pinned_runtime);
+    if (!preparing) llam_runtime_end_public_op(pinned_runtime);
     if (result != 0) {
         errno = saved_errno;
     }
     return result;
+}
+
+int llam_async_preempt_enable_runtime(llam_runtime_t *runtime) {
+    return llam_async_preempt_enable_configured(runtime, false);
 }
 
 void llam_async_preempt_shutdown_runtime(llam_runtime_t *runtime) {
@@ -3121,7 +3126,7 @@ bool llam_async_preempt_resume_task(llam_ctx_t *scheduler_ctx, llam_task_t *task
 int llam_async_preempt_prepare_registered(llam_runtime_t *runtime) {
     if (runtime == NULL || runtime->execution_lease_mode != LLAM_EXECUTION_LEASE_REGISTERED ||
         runtime->managed_catalog == NULL) { errno = EINVAL; return -1; }
-    return llam_async_preempt_enable_runtime(runtime);
+    return llam_async_preempt_enable_configured(runtime, true);
 }
 
 bool llam_async_preempt_memory_info(const llam_runtime_t *runtime,

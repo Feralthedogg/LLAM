@@ -88,7 +88,7 @@ static int compiler_refill(const char *fixture) {
     };
     llam_task_t *keepalive_task = NULL;
     module = dlopen(fixture, RTLD_NOW | RTLD_LOCAL);
-    CHECK(module != NULL && task_symbol(module, "managed_image_affine_task", &affine) &&
+    CHECK(module != NULL && task_symbol(module, "managed_image_affine_refill_task", &affine) &&
           task_symbol(module, "managed_image_keepalive", &keepalive_entry));
     CHECK(llam_runtime_opts_init(&options, sizeof(options)) == 0 &&
           llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
@@ -129,7 +129,18 @@ static int compiler_refill(const char *fixture) {
                 (void)nanosleep(&delay, NULL);
             }
         } while (task == NULL && llam_now_ns() < deadline);
-        CHECK(task != NULL && llam_join(task) == 0);
+        CHECK(task != NULL);
+        /* Hold this incarnation alive until its native capture is observed.
+         * A fixed iteration count can finish between request samples. */
+        llam_async_shared_stats_t observed = {0};
+        do {
+            CHECK(llam_async_shared_worker_stats(&runtime->managed_workers[0], &observed));
+            if (observed.captures > captures) break;
+            const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
+            (void)nanosleep(&delay, NULL);
+        } while (llam_now_ns() < deadline);
+        __atomic_store_n(&work[i].capture_release, 1U, __ATOMIC_RELEASE);
+        CHECK(observed.captures > captures && llam_join(task) == 0);
         llam_async_shared_stats_t stats = {0};
         CHECK(llam_async_shared_worker_stats(&runtime->managed_workers[0], &stats));
         if (current <= incarnation || stats.captures <= captures ||
@@ -158,6 +169,8 @@ static int compiler_refill(const char *fixture) {
     puts("managed compiler refill: three captured TLS tasks, one affine slot, fresh native incarnations and exact results passed");
     result = 0;
 done:
+    for (unsigned i = 0U; i < 3U; ++i)
+        __atomic_store_n(&work[i].capture_release, 1U, __ATOMIC_RELEASE);
     __atomic_store_n(&keepalive.finished, 1U, __ATOMIC_RELEASE);
     if (driver_started) {
         llam_request_stop(runtime);
@@ -263,6 +276,10 @@ int main(int argc, char **argv) {
     llam_task_t *tasks[3] = {0};
     llam_task_fn cpu, first_cpu, observer;
     bool affine = argc == 3 && strcmp(argv[2], "--affine") == 0;
+    bool default_runtime = argc == 3 && strcmp(argv[2], "--default") == 0;
+    bool default_global_prefix = argc == 3 && strcmp(argv[2], "--default-global-prefix") == 0;
+    bool default_global = default_global_prefix ||
+                          (argc == 3 && strcmp(argv[2], "--default-global") == 0);
     llam_managed_cpu_workload_t work[2] = {
         /* Finite native-capture oracle, including time spent sampling unsafe
          * call prologues/epilogues. Completion before capture is not a pass. */
@@ -273,7 +290,7 @@ int main(int argc, char **argv) {
     void *module = NULL;
     int result = 1;
 
-    if (argc != 2 && !affine) return 2;
+    if (argc != 2 && !affine && !default_runtime && !default_global) return 2;
     module = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (module == NULL) fprintf(stderr, "compiler fixture load: %s\n", dlerror());
     CHECK(module != NULL);
@@ -283,27 +300,49 @@ int main(int argc, char **argv) {
     CHECK(llam_runtime_opts_init(&runtime_opts, sizeof(runtime_opts)) == 0);
     CHECK(llam_preempt_opts_init(&preempt_opts, sizeof(preempt_opts)) == 0);
     runtime_opts.deterministic = 1U;
-    runtime_opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    runtime_opts.preempt_mode = LLAM_PREEMPT_AUTO;
-    runtime_opts.preempt_quantum_ns = UINT64_C(1000000);
-    preempt_opts.policy = LLAM_PREEMPT_POLICY_ASYNC_REQUIRED;
-    preempt_opts.native_affine_capacity = 1U;
-    CHECK(llam_runtime_create_managed(&runtime_opts, sizeof(runtime_opts),
-        &preempt_opts, sizeof(preempt_opts), &runtime) == 0);
+    if (default_global) {
+        if (default_global_prefix) {
+            runtime_opts.worker_count = UINT32_MAX;
+            runtime_opts.blocking_worker_count = UINT32_MAX;
+            CHECK(llam_runtime_init_ex(&runtime_opts, offsetof(llam_runtime_opts_t, worker_count)) == 0);
+        } else CHECK(llam_runtime_init(&runtime_opts) == 0);
+        runtime = llam_runtime_default();
+    } else if (default_runtime) {
+        CHECK(llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &runtime) == 0);
+    } else {
+        runtime_opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+        runtime_opts.preempt_mode = LLAM_PREEMPT_AUTO;
+        runtime_opts.preempt_quantum_ns = UINT64_C(1000000);
+        preempt_opts.policy = LLAM_PREEMPT_POLICY_ASYNC_REQUIRED;
+        preempt_opts.native_affine_capacity = 1U;
+        CHECK(llam_runtime_create_managed(&runtime_opts, sizeof(runtime_opts),
+            &preempt_opts, sizeof(preempt_opts), &runtime) == 0);
+    }
     CHECK(llam_runtime_preempt_info_ex(runtime, &info, sizeof(info)) == 0);
     CHECK(info.registered_modules != 0U && info.registered_entries >= 3U &&
           info.conservative_task_charge_bytes != 0U && info.maximum_charged_tasks != 0U);
     /* Automatic discovery owns the image independently before host unload. */
     CHECK(dlclose(module) == 0);
     module = NULL;
-    tasks[0] = llam_runtime_spawn_ex(runtime, first_cpu, &work[0], NULL, 0U);
-    tasks[1] = llam_runtime_spawn_ex(runtime, cpu, &work[1], NULL, 0U);
-    tasks[2] = llam_runtime_spawn_ex(runtime, observer, &observation, NULL, 0U);
+    tasks[0] = default_global ? llam_spawn(first_cpu, &work[0], NULL)
+                              : llam_runtime_spawn_ex(runtime, first_cpu, &work[0], NULL, 0U);
+    tasks[1] = default_global ? llam_spawn(cpu, &work[1], NULL)
+                              : llam_runtime_spawn_ex(runtime, cpu, &work[1], NULL, 0U);
+    tasks[2] = default_global ? llam_spawn(observer, &observation, NULL)
+                              : llam_runtime_spawn_ex(runtime, observer, &observation, NULL, 0U);
     CHECK(tasks[0] != NULL && tasks[1] != NULL && tasks[2] != NULL);
     CHECK(llam_runtime_preempt_info_ex(runtime, &info, sizeof(info)) == 0 &&
           info.capsule_charge_bytes == 3U * info.conservative_task_charge_bytes);
-    CHECK(llam_runtime_run_handle(runtime) == 0);
+    CHECK((default_global ? llam_run() : llam_runtime_run_handle(runtime)) == 0);
     CHECK(llam_async_shared_stats(runtime, &stats));
+    if (default_runtime || default_global) {
+        llam_runtime_stats_t execution;
+        CHECK(llam_runtime_collect_stats_ex_handle(runtime, &execution, sizeof(execution)) == 0);
+        /* Shared native capture itself counts as a preempt yield. No user
+         * yield or park may account for progress in this poll-free workload. */
+        CHECK(execution.yields == stats.captures && execution.preempt_yields == stats.captures &&
+              execution.parks == 0U);
+    }
     if (!observation.both_started || !observation.both_unfinished) {
         fprintf(stderr, "ordinary C observer: started=%u unfinished=%u first_unfinished=%u requests=%" PRIu64
             " captures=%" PRIu64 " restores=%" PRIu64 " witnesses=%" PRIu64 "\n",

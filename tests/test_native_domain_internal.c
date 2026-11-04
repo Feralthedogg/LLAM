@@ -203,8 +203,8 @@ int main(int argc, char **argv) {
     if (sigaction(SIGUSR2, &action, &old_action) != 0) return 1;
 #endif
     g_domain_test = &s;
-    if (llam_runtime_create(&opts, sizeof(opts), &s.runtime) != 0 ||
-        llam_runtime_create(&opts, sizeof(opts), &s.peer) != 0) return 1;
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &s.runtime) != 0 ||
+        llam_runtime_create_compat(&opts, sizeof(opts), &s.peer) != 0) return 1;
     other = llam_runtime_spawn_ex(s.peer, peer_task, &s, NULL, 0U);
     root = llam_runtime_spawn_ex(s.runtime, root_task, &s, NULL, 0U);
     if (root == NULL || other == NULL || pthread_create(&peer, NULL, peer_driver, &s) != 0) return 1;

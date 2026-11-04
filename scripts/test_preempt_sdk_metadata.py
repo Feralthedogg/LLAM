@@ -89,7 +89,7 @@ def main() -> int:
         required_bin.mkdir()
         for tool_name in ("llam-clang", "llam_preempt_metadata_inspect"):
             tool = required_bin / tool_name
-            tool.write_bytes(b"test tool placeholder")
+            tool.write_bytes(b"#!/bin/sh\nexit 0\n")
             tool.chmod(0o755)
         generate(required_stage, "linux-x86_64", "required", success=True)
         required_config = (required_stage / "share/llam/preempt/tooling.conf").read_text(encoding="utf-8")

@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
         image_pin_fail("runtime opts");
     }
     options.deterministic = 1U;
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         image_pin_fail("runtime init");
     }
     runtime = llam_runtime_default_storage();
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
     jit_code = VirtualAlloc(NULL, 4096U, MEM_COMMIT | MEM_RESERVE,
                             PAGE_EXECUTE_READWRITE);
     if (jit_code == NULL ||
-        llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         image_pin_fail("JIT control init");
     }
     runtime = llam_runtime_default_storage();

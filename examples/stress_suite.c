@@ -648,8 +648,8 @@ int stress_run_phase(const char *phase_name,
            stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC),
            stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL),
            opts->sqpoll_cpu);
-    if (llam_runtime_init(opts) != 0) {
-        perror("llam_runtime_init");
+    if (llam_runtime_init_compat(opts) != 0) {
+        perror("llam_runtime_init_compat");
         return 1;
     }
     if (llam_spawn(task_fn,

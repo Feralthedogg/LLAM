@@ -29,17 +29,16 @@ concern. Reading every document is not a prerequisite for a small edit.
 
 | Concern | Reference |
 | --- | --- |
-| Public API, FFI, struct layouts, errors, handle semantics | [Public headers](include/llam/), [ABI contract](docs/abi.md), [API reference](docs/reference/api.md) |
-| Scheduling, lifecycle, synchronization, I/O ownership | [Architecture](docs/internals/architecture.md); implementation in `src/core/`, `src/engine/`, `src/io/`, and private declarations in `src/internal/` |
-| Platform setup and build registration | [Build guide](docs/build.md), [Platform support](docs/reference/platform-support.md), `Makefile`, `CMakeLists.txt`, and the affected workflow in `.github/workflows/` |
-| Test selection, platform gates, release verification | [Testing strategy](docs/internals/testing-strategy.md), [Verification](docs/operations/verification.md) |
-| Public-handle hardening or broker boundaries | [Security model](docs/security.md) |
-| Performance measurements and comparisons | [Benchmarks](docs/operations/benchmarks.md) |
-| New files, file moves, contributions, licensing | [Contributing](CONTRIBUTING.md), [Licensing](docs/licensing.md) |
+| Public API, FFI, struct layouts, errors, handle semantics | [Public headers](include/llam/), [ABI contract](docs/reference/abi/index.md), [API reference](docs/reference/api/index.md) |
+| Scheduling, lifecycle, synchronization, I/O ownership | [Architecture](docs/internals/architecture/index.md); implementation in `src/core/`, `src/engine/`, `src/io/`, and private declarations in `src/internal/` |
+| Platform setup and build registration | [Build guide](docs/start/build.md), [Platform support](docs/start/platforms.md), `Makefile`, `CMakeLists.txt`, and the affected workflow in `.github/workflows/` |
+| Test selection, platform gates, release verification | [Testing strategy](docs/internals/testing.md), [Verification](docs/production/verification.md) |
+| Public-handle hardening or broker boundaries | [Security model](docs/reference/security/index.md) |
+| Performance measurements and comparisons | [Benchmarks](docs/production/benchmarks.md) |
+| Documentation site theme, search, and page bundles | [Documentation guide](docs/project/documentation-guide.md), `website/` |
+| New files, file moves, contributions, licensing | [Contributing](CONTRIBUTING.md), [Licensing](docs/project/licensing.md) |
 
-`experiments/lcwe/` contains a standalone cost model. Research plans and reports
-under `docs/research/` describe experiments, not the implemented public contract.
-Keep experimental code outside the production runtime unless integrating it is
+`experiments/lcwe/` contains a standalone cost model. Keep experimental code outside the production runtime unless integrating it is
 part of the requested work.
 
 ## Runtime constraints

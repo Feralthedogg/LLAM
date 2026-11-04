@@ -324,8 +324,8 @@ static int test_managed_close_handle_purges_peer_runtime_assoc(void) {
         return fail_errno("cross-runtime close handle opts init failed");
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &closer_runtime) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &assoc_runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &closer_runtime) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &assoc_runtime) != 0) {
         failed = fail_errno("cross-runtime close handle runtime create failed");
         goto cleanup;
     }
@@ -413,7 +413,7 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         return fail_errno("host close handle opts init failed");
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &assoc_runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &assoc_runtime) != 0) {
         failed = fail_errno("host close handle runtime create failed");
         goto cleanup;
     }
@@ -517,7 +517,7 @@ static int test_pending_handle_read_cancel(void) {
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     spawn_opts.cancel_token = state.token;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         failed = fail_errno("pending cancel runtime init failed");
         goto cleanup;
     }
@@ -622,7 +622,7 @@ static int test_pending_handle_read_close(void) {
         goto cleanup;
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         failed = fail_errno("pending close runtime init failed");
         goto cleanup;
     }
@@ -703,8 +703,8 @@ int main(void) {
         goto cleanup;
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        failed = fail_errno("llam_runtime_init_ex failed");
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        failed = fail_errno("llam_runtime_init_compat_ex failed");
         goto cleanup;
     }
 

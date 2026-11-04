@@ -47,7 +47,7 @@ static int create_runtime(llam_runtime_t **out) {
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_poll_period = 1U;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 int main(void) {

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -80,6 +81,21 @@ def invoke(
 
 
 def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="llam-clang-default-") as temporary:
+        root = Path(temporary)
+        wrapper = root / "llam-clang"
+        shutil.copyfile(WRAPPER, wrapper)
+        wrapper.chmod(0o755)
+        capture = root / "managed-arguments.txt"
+        write_executable(root / "llam-managed-clang",
+                         '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$LLAM_DEFAULT_CAPTURE"\n')
+        env = dict(os.environ, LLAM_DEFAULT_CAPTURE=str(capture))
+        result = subprocess.run([str(wrapper), "-c", "tasks.c", "-o", "tasks.o"],
+                                env=env, capture_output=True, text=True, check=False)
+        if result.returncode != 0 or capture.read_text().splitlines() != [
+                "--llam-managed=required", "-c", "tasks.c", "-o", "tasks.o"]:
+            raise SystemExit("default compiler invocation did not require managed admission")
+
     rc, forwarded, required = invoke("off", "app.c", "-DVALUE=7", "-o", "app")
     if rc != 0 or forwarded != ["app.c", "-DVALUE=7", "-o", "app"] or required:
         raise SystemExit("off mode did not forward the original arguments unchanged")

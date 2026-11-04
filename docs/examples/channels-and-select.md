@@ -1,11 +1,14 @@
-# Channels And Select
+# Channels and select
 
 Use channels to move pointer values between tasks without blocking worker
 threads.
 
-## Producer And Consumer
+## Producer and consumer
 
-```c
+**Complete program.** One task sends two values and closes the channel. Another
+task receives them until the channel closes.
+
+```c title="main.c"
 #include <llam/runtime.h>
 
 #include <stdio.h>
@@ -53,12 +56,35 @@ static void root(void *arg) {
 
     (void)llam_channel_destroy(state.channel);
 }
+
+int main(void) {
+    if (llam_runtime_init_compat(NULL) != 0) {
+        return 1;
+    }
+
+    llam_task_t *task = llam_spawn(root, NULL, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return 1;
+    }
+    int rc = llam_run();
+    if (rc == 0 && llam_join(task) != 0) rc = -1;
+    llam_runtime_shutdown();
+    return rc;
+}
+```
+
+```text title="Output"
+recv=ping
+recv=pong
 ```
 
 Use result-style receive APIs when `NULL` is a valid payload. Convenience
 `llam_channel_recv()` returns `NULL` for both payload and failure.
 
-## Select Between Channels
+## Select between channels
+
+**Focused snippet.** This block belongs inside a task that owns both channels.
 
 ```c
 void *left_value = NULL;

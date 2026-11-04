@@ -97,6 +97,29 @@ def test_result_row_cardinality() -> None:
     expect_rejected(f"noise on stdout\n{SAMPLE_ROW}")
 
 
+def test_unresolved_cpu_time() -> None:
+    unresolved = SAMPLE_ROW.replace("cpu_ns=120000000", "cpu_ns=0").replace(
+        "cpu_ns_per_op=70.42", "cpu_ns_per_op=0.00"
+    )
+    row = parse_output(unresolved)
+    assert row.cpu_ns == 0 and row.cpu_ns_per_op == 0.0
+    expect_rejected(unresolved.replace("cpu_ns_per_op=0.00", "cpu_ns_per_op=1.00"))
+    expect_rejected(SAMPLE_ROW.replace("wall_ns_per_op=72.45", "wall_ns_per_op=0.00"))
+
+    resolved = parse_output(SAMPLE_ROW)
+    summary = select_median([row, resolved, resolved])
+    assert summary.cpu_ns_per_op == resolved.cpu_ns_per_op
+    assert not summary.cpu_resolved
+    verdict, reasons = classify([summary])
+    assert verdict == "INCONCLUSIVE"
+    assert any("clock resolution" in reason for reason in reasons)
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "report.md"
+        write_markdown(path, [summary], verdict, reasons, {})
+        text = path.read_text(encoding="utf-8")
+        assert "below clock resolution" in text and "n/a" in text
+
+
 def test_binary_smoke() -> None:
     binary = os.environ.get("LCWE_MODEL_TEST_BINARY")
     if not binary:
@@ -339,6 +362,7 @@ def main() -> int:
     test_missing_duplicate_and_extra_fields()
     test_invalid_numbers_and_checksum()
     test_result_row_cardinality()
+    test_unresolved_cpu_time()
     test_binary_smoke()
     test_verdicts()
     test_inconclusive_integrity_gates()

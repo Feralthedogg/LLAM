@@ -1,9 +1,9 @@
-# Embedding LLAM
+# Embed LLAM
 
 This guide is for applications, plugins, and language runtimes that host LLAM
 instead of treating it as the whole process runtime.
 
-## Link From CMake
+## Link from CMake
 
 Installed SDK:
 
@@ -25,11 +25,12 @@ target_link_libraries(my_app PRIVATE llam_runtime)
 
 Use `llam_runtime_shared` when a host loads LLAM dynamically.
 
-## Own The Runtime
+## Own the runtime
 
 The official embedding path is the explicit runtime-handle lifecycle:
 
-1. Create a handle with `llam_runtime_create()`.
+1. Create a handle with `llam_runtime_create_compat()` for plain C tasks, as below, or
+   `llam_runtime_create()` for task code from the [managed C toolchain](managed-c.md).
 2. Attach root work with `llam_runtime_spawn_ex()`.
 3. Drive only that handle with `llam_runtime_run_handle()`.
 4. Join or detach returned task handles.
@@ -37,7 +38,7 @@ The official embedding path is the explicit runtime-handle lifecycle:
 
 ```c
 llam_runtime_t *rt = NULL;
-if (llam_runtime_create(NULL, 0, &rt) != 0) {
+if (llam_runtime_create_compat(NULL, 0, &rt) != 0) {
     return 1;
 }
 
@@ -60,7 +61,7 @@ process-default lifecycle remains a convenience path for simple LLAM-owned
 programs, but hosts should not repeatedly initialize and shut it down from
 concurrent embedding threads.
 
-## Create Objects For The Same Runtime
+## Create objects for the same runtime
 
 A host should use `llam_runtime_channel_create(rt, capacity)`,
 `llam_runtime_mutex_create(rt)`, `llam_runtime_cond_create(rt)`,
@@ -75,10 +76,11 @@ Detached I/O buffers are owner-neutral and can be transferred between runtimes.
 Use `llam_runtime_request_stop_handle`, `llam_runtime_write_stats_json_handle`
 and `llam_dump_runtime_state_handle` to target the same runtime for control and
 diagnostics. Dump writes remain best effort. The preemption query in
-`<llam/managed.h>` exposes requested and effective policy separately; constructor
-success does not make an unqualified C function asynchronously interruptible.
+`<llam/managed.h>` exposes requested and effective policy separately. A compatibility
+runtime or the `ASYNC_AUTO` policy accepts an unqualified C function, but that does not
+make it asynchronously interruptible.
 
-## Compose Cancellation And Request Budgets
+## Compose cancellation and budgets
 
 Create groups with `LLAM_TASK_GROUP_F_LINK_CANCEL` to make each child observe
 group cancellation OR its explicit token. Cancelling a group never cancels that
@@ -121,13 +123,13 @@ read/write/connect also return `ENOTSUP`; host poll supports deadlines/tokens.
 Queued/running blocking callbacks retain their argument/buffer lifetime until
 callback completion; cancellation never permits the caller to free memory early.
 
-## Bound Resources And Shutdown Waiting
+## Bound resources and shutdown
 
 The ABI 2.3 runtime-options tail supplies `worker_count`,
 `blocking_worker_count`, `max_tasks` and `max_blocking_jobs`. Zero retains prior
-automatic/unlimited defaults. Worker count selects portable/legacy processors;
-managed compatibility processors reserved by preemption policy are additional.
-Explicit values take precedence over automatic pool sizing. `worker_count` must
+automatic/unlimited defaults. Worker count selects portable/legacy processors; the
+`ASYNC_AUTO` and `COOPERATIVE` managed policies reserve one more compatibility
+processor, and `ASYNC_REQUIRED` reserves none. Explicit values take precedence over automatic pool sizing. `worker_count` must
 fit available CPUs after an SQPOLL reservation; deterministic mode permits at
 most one. Blocking pool size accepts 1..1024. `max_tasks` includes completed,
 unjoined objects until reclamation; join/detach releases capacity after all
@@ -149,7 +151,7 @@ native-thread destruction. Pending tasks without an active driver yield
 `EBUSY`/`NEEDS_RUNNER` before admission closes: start the driver and retry.
 Host joins and drain do not implicitly drive the scheduler.
 
-## Results And Local Ownership
+## Results and local ownership
 
 A task can call `llam_task_set_result(value, application_error)`. A successful
 `llam_join_result` consumes a normal handle and copies the result before
@@ -171,13 +173,13 @@ transfer ownership without cleanup; plain set cannot overwrite an owned entry.
 Cleanup runs before task completion/result publication and outside runtime locks.
 
 The complete explicit-runtime example linked from
-[Getting Started](../getting-started.md#minimal-program) shows the recommended
+[Quickstart](../start/quickstart.md#run-a-minimal-program) shows the recommended
 group/result flow. Close a channel and drain all queued values before destroying
 it. After a fatal runtime failure, destroy the runtime to retire accepted tasks;
 caller-owned handles still require cleanup. A group containing only invalidated
 children can then be destroyed without attempting a stale join.
 
-## Dynamic Loading
+## Dynamic loading
 
 Resolve ABI symbols first:
 
@@ -191,7 +193,7 @@ llam_abi_get_info(&info, LLAM_ABI_INFO_CURRENT_SIZE);
 Reject libraries whose `abi_major` differs from the binding. Minor ABI changes
 are additive.
 
-## Struct Size Handshakes
+## Struct size handshakes
 
 Use the public size macros:
 
@@ -203,13 +205,13 @@ llam_runtime_spawn_ex(rt, fn, arg, &opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
 ```
 
 Bindings should model ABI-facing enum values and flags as fixed-width integers,
-as described in [ABI Contract](../abi.md).
+as described in [ABI contract](../reference/abi/index.md).
 
-## Boundary Choice
+## Choose a boundary
 
 In-process opaque handles harden against stale use, wrong-family casts, simple
 forgery, and owner mismatch. They are not a sandbox against arbitrary
 same-process memory read/write.
 
 Use a process boundary and broker-mode isolation when untrusted code must not
-read runtime internals. See [Security Model](../security.md).
+read runtime internals. See [Security model](../reference/security/index.md).

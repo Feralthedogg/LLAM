@@ -50,7 +50,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_registered_native_service_preserves_all_processor_lock_order(self) -> None:
         path = "src/core/context/async_context_shared.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         self.assert_clean(path, source)
         start = source.index("static void llam_shared_lock(")
         end = source.index("static LLAM_NORETURN", start)
@@ -68,7 +68,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_windows_registered_service_preserves_all_processor_lock_order(self) -> None:
         path = "src/core/context/windows_async_lifetime.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         self.assert_clean(path, source)
         for before, after in (
             ("&rt->shards[i].opaque_lock", "&rt->shards[i].lock"),
@@ -82,7 +82,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_dispatch_reservation_cannot_publish_unfinished_context(self) -> None:
         path = "src/core/sched/managed_scheduler.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         start = source.index("static bool llam_managed_reserve_task(")
         end = source.index("static void llam_managed_release_task(", start)
         body = source[start:end]
@@ -99,7 +99,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_cold_confirmation_keeps_the_bounded_trylock_protocol(self) -> None:
         path = "src/engine/watchdog/watchdog_deadlock.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         self.assert_clean(path, source)
         for before, after in (
             ("pthread_mutex_trylock(&shard->lock)", "pthread_mutex_lock(&shard->lock)"),
@@ -120,7 +120,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_wait_dependency_snapshot_keeps_the_lifetime_proof(self) -> None:
         path = "src/core/wait/wait_tracking.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         self.assert_clean(path, source)
         begin = source.index("bool llam_task_wait_dependency_read_locked(")
         end = source.index("bool llam_task_wait_dependency_matches(", begin)
@@ -137,7 +137,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_registered_protocols_keep_their_native_ownership_proof(self) -> None:
         path = "src/core/sched/execution_lease.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         self.assert_clean(path, source)
         mutations = (
             ("g_llam_tls_worker == worker", "g_llam_tls_worker != worker"),
@@ -162,7 +162,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_registered_worker_initialization_is_closed(self) -> None:
         path = "src/core/sched/worker_registry.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         self.assert_clean(path, source)
         self.assert_error(
             path, source.replace("atomic_init(&worker->active_g, NULL)",
@@ -176,7 +176,7 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
 
     def test_registered_shutdown_drain_is_not_an_ordinary_grant(self) -> None:
         path = "src/core/sched/execution_lease.c"
-        source = (ROOT / path).read_text()
+        source = (ROOT / path).read_text(encoding="utf-8")
         begin = source.index("bool llam_execution_lease_claim_drain_locked(")
         end = source.index("bool llam_execution_lease_return_locked(", begin)
         body = source[begin:end]
@@ -376,12 +376,16 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
         compiler = shutil.which("cc")
         if compiler is None:
             self.skipTest("typed boundary fixtures require cc")
+        platform_flags = []
+        if sys.platform == "win32":
+            platform_flags = ["-DLLAM_ENABLE_WINDOWS_BACKEND=1", "-D_WIN32_WINNT=0x0A00"]
         result = subprocess.run(
             [
-            compiler,
-            "-std=c11",
-            "-D_GNU_SOURCE",
-            "-Wall",
+                compiler,
+                "-std=c11",
+                "-D_GNU_SOURCE",
+                *platform_flags,
+                "-Wall",
                 "-Wextra",
                 "-Wpedantic",
                 "-Werror",

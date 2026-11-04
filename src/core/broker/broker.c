@@ -148,7 +148,9 @@ int llam_broker_init(llam_broker_t *broker, const llam_runtime_opts_t *opts, siz
         }
     }
     broker->idle_cond_initialized = true;
-    if (llam_runtime_create(opts, opts_size, &runtime) != 0) {
+    /* This private broker transport invokes native callback entries; image
+     * admission belongs to the managed runtime API, not a callback address. */
+    if (llam_runtime_create_compat(opts, opts_size, &runtime) != 0) {
         (void)pthread_cond_destroy(&broker->idle_cond);
         broker->idle_cond_initialized = false;
         (void)pthread_mutex_destroy(&broker->lock);

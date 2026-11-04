@@ -1,9 +1,11 @@
-# Blocking Work
+# Blocking work
 
 Use LLAM blocking helpers when a managed task needs to call code that can block
 an OS thread.
 
-## Blocking Callback
+## Blocking callback
+
+**Focused snippet.** Hand a blocking call to a helper thread and read its result:
 
 ```c
 #include <llam/runtime.h>
@@ -34,9 +36,9 @@ static void task(void *arg) {
 Prefer `llam_call_blocking_result()` for FFI and bindings because it separates
 LLAM submission errors from a callback that legitimately returns `NULL`.
 
-## Manual Blocking Region
+## Manual blocking region
 
-Use a manual region when an external API must run on the current OS thread:
+**Focused snippet.** Use a manual region when an external API must run on the current OS thread:
 
 ```c
 if (llam_enter_blocking() == 0) {
@@ -48,9 +50,9 @@ if (llam_enter_blocking() == 0) {
 The runtime compensates so the shard can keep scheduling other tasks while the
 current worker is pinned in foreign code.
 
-## DNS And Filesystem Wrappers
+## DNS and filesystem wrappers
 
-Prefer LLAM wrappers for common blocking syscalls:
+**Focused snippet.** Prefer LLAM wrappers for common blocking syscalls:
 
 ```c
 struct addrinfo *result = NULL;

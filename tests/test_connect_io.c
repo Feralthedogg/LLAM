@@ -557,9 +557,9 @@ static int test_managed_connect_success_and_invalid(void) {
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         close_if_valid(&state.listener_fd);
-        return test_fail_errno("llam_runtime_init failed");
+        return test_fail_errno("llam_runtime_init_compat failed");
     }
 
     accept_task = llam_spawn(accept_echo_task, &state, NULL);
@@ -742,7 +742,7 @@ static int test_managed_datagram_send_recv(void) {
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         close_if_valid(&state.recv_fd);
         close_if_valid(&state.send_fd);
         return test_fail_errno("datagram runtime init failed");
@@ -893,7 +893,7 @@ static int test_managed_datagram_shared_readiness_retry(void) {
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         rc = test_fail_errno("shared datagram runtime init failed");
         goto cleanup;
     }
@@ -963,7 +963,7 @@ static int test_managed_accept_watch_rejects_reused_listener_fd(void) {
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         return test_fail_errno("accept-reuse runtime init failed");
     }
 

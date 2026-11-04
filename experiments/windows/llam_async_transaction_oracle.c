@@ -405,7 +405,7 @@ int main(void) {
     if (state.automatic && !state.automatic_stop) {
         options.preempt_quantum_ns = 1000000U;
     }
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 1;
     }
     state.runtime = llam_runtime_default_storage();

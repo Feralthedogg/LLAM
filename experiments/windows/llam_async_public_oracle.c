@@ -52,7 +52,7 @@ static void public_create(public_state_t *state, uint32_t mode) {
     options.deterministic = 1U;
     options.preempt_mode = mode;
     options.preempt_quantum_ns = 1000000U;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &state->runtime) != 0 || state->runtime == NULL) {
         public_fail("runtime create");
     }

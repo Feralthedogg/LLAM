@@ -146,7 +146,7 @@ int main(void) {
               "public unsupported options init failed");
         runtime_options.deterministic = 1U;
         runtime_options.preempt_mode = LLAM_PREEMPT_STRICT;
-        check(llam_runtime_create(&runtime_options,
+        check(llam_runtime_create_compat(&runtime_options,
                                   LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                                   &public_runtime) == 0 && public_runtime != NULL,
               "public unsupported runtime create failed");

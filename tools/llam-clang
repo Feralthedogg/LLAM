@@ -81,6 +81,10 @@ for llam_argument in "$@"; do
     esac
 done
 
+if [ -z "$llam_managed_mode" ] && [ "$llam_preempt_requested" -eq 0 ]; then
+    llam_managed_mode="required"
+fi
+
 if [ -n "$llam_managed_mode" ]; then
     if [ "$llam_preempt_requested" -ne 0 ]; then
         printf 'llam-clang: --llam-managed and --llam-preempt select different compiler contracts\n' >&2

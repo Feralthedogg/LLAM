@@ -45,11 +45,77 @@ static void ordinary_task(void *argument) {
     *calls += 1U;
 }
 
+typedef struct construction_probe {
+    llam_runtime_t *pending;
+    unsigned visits;
+    int result;
+} construction_probe_t;
+
+static void count_pending_runtime(llam_runtime_t *runtime, void *arg) {
+    construction_probe_t *probe = arg;
+    if (runtime == probe->pending) ++probe->visits;
+}
+
+static void *create_peer_during_prepare(void *arg) {
+    construction_probe_t *probe = arg;
+    llam_runtime_opts_t opts;
+    llam_runtime_t *peer = NULL;
+    probe->result = llam_runtime_opts_init(&opts, sizeof(opts));
+    opts.deterministic = 1U;
+    if (probe->result == 0)
+        probe->result = llam_runtime_create_compat(&opts, sizeof(opts), &peer);
+    llam_runtime_destroy(peer);
+    return NULL;
+}
+
+static void probe_unpublished_runtime(llam_runtime_t *runtime, void *arg) {
+    construction_probe_t *probe = arg;
+    llam_preempt_info_t info;
+    probe->pending = runtime;
+    probe->result = -1;
+    if (llam_runtime_preempt_info_ex(runtime, &info, sizeof(info)) != -1 || errno != EINVAL) return;
+    if (llam_runtime_init_compat(NULL) != -1 || errno != EBUSY) return;
+    errno = 0;
+    llam_runtime_destroy(runtime);
+    if (errno != EBUSY || llam_runtime_check_handle(runtime) != 0) return;
+    if (llam_runtime_for_each_live(count_pending_runtime, probe) != 0 || probe->visits != 0U) return;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, create_peer_during_prepare, probe) != 0) return;
+    if (pthread_join(thread, NULL) != 0) probe->result = -1;
+}
+
+static int check_construction_publication(void) {
+    construction_probe_t probe = {0};
+    llam_runtime_opts_t opts;
+    CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
+    opts.deterministic = 1U;
+    llam_runtime_test_before_managed_prepare(probe_unpublished_runtime, &probe);
+    int created = llam_runtime_init(&opts);
+    int error = errno;
+    CHECK(probe.pending == llam_runtime_default_storage() && probe.result == 0 && probe.visits == 0U);
+    CHECK(created == 0 || (created == -1 && error == ENOTSUP));
+    if (created == 0) llam_runtime_shutdown();
+
+    /* Even an error after catalog/image preparation must retire everything and
+     * leave the process-default storage available for another constructor. */
+    llam_preempt_opts_t policy;
+    CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
+    policy.policy = LLAM_PREEMPT_POLICY_COOPERATIVE;
+    llam_runtime_test_fail_ctrl_thread_start();
+    CHECK(llam_runtime_init_managed_rt(llam_runtime_default_storage(), &opts, sizeof(opts),
+                                       false, &policy) == -1 && errno == EAGAIN);
+    CHECK(llam_runtime_check_handle(llam_runtime_default_storage()) == -1 && errno == EINVAL);
+    CHECK(llam_runtime_init_managed_rt(llam_runtime_default_storage(), &opts, sizeof(opts),
+                                       false, &policy) == 0);
+    llam_runtime_shutdown();
+    return 0;
+}
+
 static int check_options(void) {
     struct { llam_preempt_opts_t options; unsigned char tail[8]; } extended;
     memset(&extended, 0xa5, sizeof(extended));
     CHECK(llam_preempt_opts_init(&extended.options, sizeof(extended)) == 0);
-    CHECK(extended.options.policy == LLAM_PREEMPT_POLICY_ASYNC_AUTO);
+    CHECK(extended.options.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED);
     CHECK(extended.options.flags == 0U && extended.options.reserved0 == 0U);
     CHECK(extended.options.native_affine_capacity == 4U);
     CHECK(extended.options.capsule_budget_bytes == UINT64_C(64) * 1024U * 1024U);
@@ -93,6 +159,7 @@ static int check_admission_rollback_and_flags(const llam_runtime_opts_t *runtime
     llam_preempt_info_t before, after;
     llam_runtime_t *runtime = NULL;
     CHECK(llam_preempt_opts_init(&opts, sizeof(opts)) == 0);
+    opts.policy = LLAM_PREEMPT_POLICY_ASYNC_AUTO;
     CHECK(llam_runtime_create_managed(runtime_opts, sizeof(*runtime_opts), &opts, sizeof(opts), &runtime) == 0);
     CHECK(llam_runtime_preempt_info_ex(runtime, &before, sizeof(before)) == 0);
     union { llam_preempt_info_t alignment; unsigned char bytes[sizeof(llam_preempt_info_t)]; } prefix;
@@ -154,7 +221,7 @@ static int check_admission_rollback_and_flags(const llam_runtime_opts_t *runtime
                                           : LLAM_PREEMPT_REASON_ADAPTER_UNAVAILABLE));
     llam_runtime_destroy(runtime);
     runtime = NULL;
-    CHECK(llam_runtime_create(runtime_opts, sizeof(*runtime_opts), &runtime) == 0);
+    CHECK(llam_runtime_create_compat(runtime_opts, sizeof(*runtime_opts), &runtime) == 0);
     spawn.flags = LLAM_SPAWN_F_NATIVE_AFFINE;
     spawn.cancel_token = NULL;
     CHECK(llam_runtime_spawn_ex(runtime, ordinary_task, &calls, &spawn, sizeof(spawn)) == NULL && errno == ENOTSUP);
@@ -415,7 +482,8 @@ int main(int argc, char **argv) {
     llam_preempt_opts_t preempt_opts;
     llam_runtime_t *runtime = NULL;
     llam_runtime_t *peer = NULL;
-    if (check_options() != 0 || llam_runtime_opts_init(&runtime_opts, sizeof(runtime_opts)) != 0 ||
+    if (check_options() != 0 || check_construction_publication() != 0 ||
+        llam_runtime_opts_init(&runtime_opts, sizeof(runtime_opts)) != 0 ||
         llam_preempt_opts_init(&preempt_opts, sizeof(preempt_opts)) != 0) return 1;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     runtime_opts.deterministic = 1U;

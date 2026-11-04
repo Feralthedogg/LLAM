@@ -1,0 +1,24 @@
+{#
+  Copyright 2026 Feralthedogg
+  SPDX-License-Identifier: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  See LICENSE.
+#}
+{% from "partials/icons.html" import icon %}
+<dialog class="pal-d" id="search" aria-label="Search the docs">
+  <div class="pal">
+    <label class="pal-in">{{ icon('search') }}<input type="text" id="search-q" placeholder="Search docs and API symbols" aria-label="Search docs and API symbols" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="search-list"><button class="pal-x" type="button" id="search-clear" aria-label="Clear search" hidden>{{ icon('x', 's') }}</button><kbd>esc</kbd></label>
+    <div class="pal-b" id="search-list" role="listbox" aria-label="Results"></div>
+    <div class="pal-ft"><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open</span><span><kbd>esc</kbd> Close</span><span style="margin-left: auto">Searching the {{ config.extra.llam_version }} docs</span></div>
+  </div>
+</dialog>

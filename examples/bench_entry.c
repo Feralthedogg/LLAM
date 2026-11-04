@@ -40,8 +40,8 @@ static int bench_run_case(const char *name,
     bench_async_evidence_t async_evidence = {0};
 #endif
 
-    if (llam_runtime_create(opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
-        perror("llam_runtime_create");
+    if (llam_runtime_create_compat(opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        perror("llam_runtime_create_compat");
         return -1;
     }
 #if defined(LLAM_BENCH_ASYNC_COMPARE)

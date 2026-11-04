@@ -103,12 +103,12 @@ def main() -> int:
         consumer = work / "consumer.c"
         consumer.write_text('#include "llam/managed.h"\n#include <stdio.h>\n'
             'void sdk_task(void *);void *sdk_block(void *arg){++*(unsigned long*)arg;return arg;}\n'
-            'int main(void){llam_runtime_opts_t ro;llam_preempt_opts_t po;llam_preempt_info_t info;\n'
+            'int main(void){llam_runtime_opts_t ro;llam_preempt_info_t info;\n'
             'llam_runtime_t *rt=0;unsigned long value=7;\n'
-            'if(llam_runtime_opts_init(&ro,sizeof(ro))||llam_preempt_opts_init(&po,sizeof(po)))return 1;\n'
-            'ro.deterministic=1;po.policy=LLAM_PREEMPT_POLICY_COOPERATIVE;\n'
-            'if(llam_runtime_create_managed(&ro,sizeof(ro),&po,sizeof(po),&rt)){perror("managed_create");return 2;}\n'
+            'if(llam_runtime_opts_init(&ro,sizeof(ro)))return 1;ro.deterministic=1;\n'
+            'if(llam_runtime_create(&ro,sizeof(ro),&rt)){perror("runtime_create");return 2;}\n'
             'if(llam_runtime_preempt_info_ex(rt,&info,sizeof(info))||!info.registered_modules||info.registered_entries<2)return 3;\n'
+            'if(info.requested_policy!=LLAM_PREEMPT_POLICY_ASYNC_REQUIRED||info.compatibility_processors)return 7;\n'
             'llam_task_t *task=llam_runtime_spawn_ex(rt,sdk_task,&value,0,0);\n'
             'if(!task){perror("managed_spawn");return 4;}\n'
             'if(llam_runtime_run_handle(rt)){perror("managed_run");return 5;}\n'
@@ -123,10 +123,10 @@ def main() -> int:
         objects = []
         for source in (task, helper):
             output = source.with_suffix(".o")
-            run([driver, "--llam-managed=required", *include, "-c", str(source), "-o", str(output)], env=env)
+            run([driver, *include, "-c", str(source), "-o", str(output)], env=env)
             objects.append(str(output))
         image = work / "sdk-consumer"
-        run([driver, "--llam-managed=required", *objects, str(host_object), str(runtime),
+        run([driver, *objects, str(host_object), str(runtime),
              "-Wl,-rpath," + str(runtime.parent), "-o", str(image)], env=env)
         run([sys.executable, str(verifiers[0]), str(image), "--objdump", str(args.llvm_bin.resolve() / "llvm-objdump")], env=env)
         run([str(image)], env=env)
@@ -134,7 +134,7 @@ def main() -> int:
         unknown = work / "unknown.c"
         unknown.write_text('extern long unknown_native(long);long entry(long n){return unknown_native(n);}\n')
         rejected = unknown.with_suffix(".o")
-        failure = run([driver, "--llam-managed=required", "-c", str(unknown), "-o", str(rejected)], env=env, success=False)
+        failure = run([driver, "-c", str(unknown), "-o", str(rejected)], env=env, success=False)
         if "unqualified" not in failure.stderr or rejected.exists():
             raise AssertionError("installed required mode failed without preserving the effect rejection contract")
         legacy = work / "legacy.o"

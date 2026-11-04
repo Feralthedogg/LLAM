@@ -35,9 +35,6 @@
 #ifndef LLAM_PLATFORM_H
 #define LLAM_PLATFORM_H
 
-#include <stddef.h>
-#include <stdint.h>
-
 /** @brief Non-zero when compiling for Windows. */
 #if defined(_WIN32)
 #define LLAM_PLATFORM_WINDOWS 1
@@ -97,6 +94,10 @@
 #if LLAM_PLATFORM_BSD
 #error "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling."
 #endif
+
+/* Reject retired targets before their macros can alter host libc headers. */
+#include <stddef.h>
+#include <stdint.h>
 
 /** @brief Non-zero when the platform exposes kqueue as the native readiness backend. */
 #if LLAM_PLATFORM_DARWIN

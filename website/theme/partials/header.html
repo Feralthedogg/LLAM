@@ -1,0 +1,50 @@
+{#
+  Copyright 2026 Feralthedogg
+  SPDX-License-Identifier: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  See LICENSE.
+#}
+{% from "partials/icons.html" import icon %}
+{% set home_url = nav.homepage.url|url if nav.homepage else '.'|url %}
+<header class="hd">
+  <div class="brand">
+    <a class="brand-home" href="{{ home_url }}"><img src="{{ 'assets/img/llam-mark-dark.svg'|url }}" alt="" width="30" height="30"><span>LLAM</span></a>
+    <a class="brand-ver" href="{{ 'project/changelog/'|url }}" title="What's new in {{ config.extra.llam_version }}">v{{ config.extra.llam_version }}</a>
+  </div>
+  <nav class="nav" aria-label="Main">
+    {%- for item in nav.items if item.is_section %}
+    <a class="{{ 'on' if tab == item.title }}" href="{{ first_page(item).url|url }}"{% if tab == item.title %} aria-current="true"{% endif %}>{{ item.title }}</a>
+    {%- endfor %}
+  </nav>
+  <div class="hd-act">
+    {%- if search_button is not defined or search_button %}
+    <button class="srch" type="button" data-search aria-label="Search the docs">{{ icon('search', 's') }}<span>Search</span><kbd data-mod>⌘K</kbd></button>
+    {%- endif %}
+    {%- if show_theme %}
+    <button class="ico m-hide" type="button" data-theme-toggle aria-label="Change theme"><span class="t-theme-moon">{{ icon('moon') }}</span><span class="t-theme-sun">{{ icon('sun') }}</span></button>
+    {%- endif %}
+    <a class="ico m-hide" href="{{ config.repo_url }}" aria-label="LLAM on GitHub">{{ icon('github') }}</a>
+    {%- if show_cta %}
+    <a class="btn sm pill-hd" href="{{ quickstart_url }}" style="margin-left: 6px">Get started</a>
+    {%- endif %}
+    <button class="ico ham" type="button" data-menu aria-label="Menu" aria-expanded="false" aria-controls="{{ 'side' if tab else 'm-menu' }}"><span class="ham-open">{{ icon('menu') }}</span><span class="ham-close">{{ icon('x') }}</span></button>
+  </div>
+  {%- if not tab %}
+  <nav class="m-menu" id="m-menu" aria-label="Main, small screens" hidden>
+    {%- for item in nav.items if item.is_section %}
+    <a href="{{ first_page(item).url|url }}">{{ item.title }}</a>
+    {%- endfor %}
+    <a href="{{ config.repo_url }}">GitHub</a>
+  </nav>
+  {%- endif %}
+</header>

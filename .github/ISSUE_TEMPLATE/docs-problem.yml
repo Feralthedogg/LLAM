@@ -1,0 +1,49 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# See LICENSE.
+
+name: Documentation problem
+description: Report a wrong, missing, or confusing page on the LLAM site.
+title: "[Docs] "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security defects here.** Submit them privately at
+        https://github.com/Feralthedogg/LLAM/security/advisories/new.
+
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: The address of the page. The page's Report a problem link fills this in.
+      placeholder: https://feralthedogg.github.io/LLAM/start/quickstart/
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong
+      description: Quote the text or code that is wrong, missing, or hard to follow.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What it should say
+      description: Optional. A correction, or what you expected to find.

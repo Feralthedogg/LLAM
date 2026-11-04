@@ -402,7 +402,7 @@ static int test_runtime_run_handle_rejects_null(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("default runtime init failed for NULL handle check");
     }
 
@@ -433,7 +433,7 @@ static int test_idle_block_workers_destroy_repeat(void) {
     for (unsigned i = 0U; i < 32U; ++i) {
         llam_runtime_t *runtime = NULL;
 
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
             return test_fail_errno("runtime create for idle block-worker destroy failed");
         }
         llam_runtime_destroy(runtime);
@@ -1416,7 +1416,7 @@ static void *default_runtime_toggle_thread(void *arg) {
     for (unsigned i = 0U;
          i < HOST_TRY_RACE_ITERS && atomic_load_explicit(&state->failures, memory_order_acquire) == 0U;
          ++i) {
-        if (llam_runtime_init_ex(&state->opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        if (llam_runtime_init_compat_ex(&state->opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
             break;
         }
@@ -1648,8 +1648,8 @@ static int test_concurrent_spawn_join(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create failed");
         goto cleanup;
     }
@@ -1711,8 +1711,8 @@ static int test_sequential_runtime_host_join_owner_cleanup(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for sequential run failed");
         goto cleanup;
     }
@@ -1776,8 +1776,8 @@ static int test_cross_runtime_task_owner(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for cross-owner test failed");
         goto cleanup;
     }
@@ -1839,8 +1839,8 @@ static int test_cross_runtime_object_owner(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for cross-object test failed");
         goto cleanup;
     }
@@ -1929,8 +1929,8 @@ static int test_cross_runtime_spawn_cancel_token_owner(void) {
         llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("cross-token spawn opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for cross-token spawn failed");
         goto cleanup;
     }
@@ -2008,8 +2008,8 @@ static int test_task_group_spawn_rejects_foreign_cancel_token(void) {
         llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("group foreign-token opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for group foreign-token test failed");
         goto cleanup;
     }
@@ -2097,8 +2097,8 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("cross-allocator opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for cross-allocator test failed");
         goto cleanup;
     }
@@ -2183,7 +2183,7 @@ static int test_task_group_host_spawn_uses_group_runtime(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("explicit group opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         rc = test_fail_errno("runtime create for explicit group failed");
         goto cleanup;
     }
@@ -2273,8 +2273,8 @@ static int test_concurrent_runtime_io(void) {
     state_b.left_fd = fds_b[0];
     state_b.right_fd = fds_b[1];
 
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for multi-runtime I/O failed");
         goto cleanup;
     }
@@ -2377,8 +2377,8 @@ static int test_explicit_owned_buffers_survive_runtime_destroy(void) {
     state_a.fd = pipe_a[0];
     state_b.fd = pipe_b[0];
 
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("owned-buffer explicit runtime create failed");
         goto cleanup;
     }
@@ -2500,8 +2500,8 @@ static int test_destroyed_runtime_io_cancel_does_not_stop_peer_runtime(void) {
     state.cancel_read_fd = cancel_sv[0];
     state.live_read_fd = live_sv[0];
 
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime destroy I/O isolation runtime create failed");
         goto cleanup;
     }
@@ -2617,8 +2617,8 @@ static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
         if (init_runtime_opts(&opts) != 0) {
             _exit(10);
         }
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-            llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+            llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
             _exit(11);
         }
 
@@ -2685,8 +2685,8 @@ static int test_process_fp_globals_survive_peer_runtime_destroy(void) {
         rc = test_fail_errno("FP global isolation opts init failed");
         goto cleanup;
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("FP global isolation runtime create failed");
         goto cleanup;
     }
@@ -2741,7 +2741,7 @@ static int test_host_try_ops_ignore_default_runtime_race(void) {
     if (init_runtime_opts(&state.opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&state.opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+    if (llam_runtime_create_compat(&state.opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
         return test_fail_errno("runtime create for host try/default race failed");
     }
 
@@ -2809,7 +2809,7 @@ static int test_explicit_channel_host_try_races_runtime_destroy(void) {
     if (init_runtime_opts(&state.opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&state.opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+    if (llam_runtime_create_compat(&state.opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
         return test_fail_errno("runtime create for explicit channel destroy race failed");
     }
 
@@ -2928,7 +2928,7 @@ static int test_concurrent_runtime_destroy_is_single_owner(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
         return test_fail_errno("runtime create for destroy race failed");
     }
     err = pthread_mutex_init(&state.lock, NULL);
@@ -3002,7 +3002,7 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
          * waiting for the permanent sentinel to become zero.
          */
         (void)alarm(2U);
-        if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+        if (llam_runtime_create_compat(NULL, 0U, &runtime) != 0 || runtime == NULL) {
             _exit(10);
         }
         atomic_store_explicit(&runtime->active_ops, SIZE_MAX, memory_order_release);
@@ -3065,7 +3065,7 @@ static int test_runtime_destroy_detects_sentinel_after_claim(void) {
          */
         (void)alarm(2U);
         memset(&state, 0, sizeof(state));
-        if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+        if (llam_runtime_create_compat(NULL, 0U, &runtime) != 0 || runtime == NULL) {
             _exit(10);
         }
         if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0 ||
@@ -3145,7 +3145,7 @@ static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
     size_t active_ops;
     int saved_errno;
 
-    if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+    if (llam_runtime_create_compat(NULL, 0U, &runtime) != 0 || runtime == NULL) {
         return test_fail_errno("runtime active-op near-sentinel setup failed");
     }
 
@@ -3188,7 +3188,7 @@ static int test_default_spawn_respects_runtime_public_op_gate(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("default runtime init for spawn gate failed");
     }
 
@@ -3234,7 +3234,7 @@ static int test_runtime_destroy_waits_for_active_run(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("runtime create for active destroy failed");
     }
     task = llam_runtime_spawn_ex(runtime, stop_wait_task, &state, NULL, 0U);
@@ -3301,7 +3301,7 @@ static int test_unmanaged_join_races_runtime_destroy(void) {
         atomic_init(&state.join_started, 0U);
         state.join_rc = 0;
         state.join_errno = 0;
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
             return test_fail_errno("runtime create for unmanaged join/destroy race failed");
         }
         state.task = llam_runtime_spawn_ex(state.runtime, idle_never_run_task, NULL, NULL, 0U);
@@ -3363,7 +3363,7 @@ static int test_runtime_run_start_destroy_race(void) {
 
         memset(&state, 0, sizeof(state));
         state.run_rc = -1;
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
             return test_fail_errno("runtime create for run/destroy start race failed");
         }
         err = pthread_mutex_init(&state.lock, NULL);
@@ -3447,7 +3447,7 @@ static int test_runtime_stats_destroy_race(void) {
 
         memset(&state, 0, sizeof(state));
         atomic_init(&state.failures, 0U);
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
             return test_fail_errno("runtime create for stats/destroy race failed");
         }
         err = pthread_mutex_init(&state.lock, NULL);
@@ -3515,7 +3515,7 @@ static int test_destroyed_runtime_handle_address_not_reused(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &stale) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &stale) != 0) {
         return test_fail_errno("runtime create for stale-address guard failed");
     }
     llam_runtime_destroy(stale);
@@ -3523,7 +3523,7 @@ static int test_destroyed_runtime_handle_address_not_reused(void) {
     for (unsigned i = 0U; i < 128U; ++i) {
         llam_runtime_t *runtime = NULL;
 
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
             return test_fail_errno("runtime recreate for stale-address guard failed");
         }
         if (runtime == stale) {
@@ -3549,7 +3549,7 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("runtime create for post-destroy cleanup failed");
     }
     task = llam_runtime_spawn_ex(runtime, post_destroy_cleanup_task, &state, NULL, 0U);
@@ -3676,7 +3676,7 @@ static int test_explicit_channel_drain_after_owner_runtime_destroy(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("runtime create for post-destroy channel drain failed");
     }
     task = llam_runtime_spawn_ex(runtime, post_destroy_channel_drain_task, &state, NULL, 0U);
@@ -3753,7 +3753,7 @@ static int run_legacy_stop_wrapper_case(bool use_shutdown_wrapper) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("runtime create for legacy stop wrapper failed");
     }
     sleeper = llam_runtime_spawn_ex(runtime, legacy_stop_sleeper_task, &state, NULL, 0U);
@@ -3832,8 +3832,8 @@ static int test_managed_destroy_foreign_runtime_does_not_stop_peer(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for managed foreign destroy failed");
         goto cleanup;
     }
@@ -3893,7 +3893,7 @@ static int test_explicit_embedding_shutdown_path(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("explicit embedding shutdown runtime create failed");
     }
     sleeper = llam_runtime_spawn_ex(runtime, explicit_embedding_shutdown_sleeper_task, &state, NULL, 0U);
@@ -3955,7 +3955,7 @@ static int test_explicit_embedding_cancellation_path(void) {
         llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("explicit embedding cancellation opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("explicit embedding cancellation runtime create failed");
     }
     creator = llam_runtime_spawn_ex(runtime, explicit_embedding_cancel_token_creator_task, &state, NULL, 0U);
@@ -4038,7 +4038,7 @@ static int test_explicit_embedding_channel_lost_wakeup(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("explicit embedding wakeup runtime create failed");
     }
     creator = llam_runtime_spawn_ex(runtime, explicit_embedding_channel_creator_task, &state, NULL, 0U);
@@ -4118,7 +4118,7 @@ static int test_explicit_embedding_select_fanout(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("explicit embedding select runtime create failed");
     }
     creator = llam_runtime_spawn_ex(runtime, explicit_embedding_select_creator_task, &state, NULL, 0U);
@@ -4202,7 +4202,7 @@ static int test_explicit_embedding_blocking_helper(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("explicit embedding blocking runtime create failed");
     }
     task = llam_runtime_spawn_ex(runtime, explicit_embedding_blocking_task, &state, NULL, 0U);
@@ -4260,7 +4260,7 @@ static int test_explicit_embedding_io_ownership(void) {
     }
     state.read_fd = sv[0];
     state.write_fd = sv[1];
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         rc = test_fail_errno("explicit embedding I/O runtime create failed");
         goto cleanup;
     }
@@ -4329,8 +4329,8 @@ static int test_concurrent_blocking_pool_isolation(void) {
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = test_fail_errno("runtime create for blocking isolation failed");
         goto cleanup;
     }

@@ -1592,14 +1592,14 @@ static int test_managed_io_paths(void) {
     opts.forced_yield_every = 1U;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     opts.profile = LLAM_RUNTIME_PROFILE_IO_LATENCY;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         close_if_valid(&state.stream_sv[0]);
         close_if_valid(&state.stream_sv[1]);
         close_if_valid(&state.peek_sv[0]);
         close_if_valid(&state.peek_sv[1]);
         close_if_valid(&state.null_fd);
         close_if_valid(&state.read_null_fd);
-        return test_fail_errno("llam_runtime_init failed");
+        return test_fail_errno("llam_runtime_init_compat failed");
     }
     if (llam_spawn(io_reader_task, &state, NULL) == NULL ||
         llam_spawn(io_writer_task, &state, NULL) == NULL) {
@@ -1680,7 +1680,7 @@ static int test_owned_buffer_release_after_shutdown(void) {
     }
     close_if_valid(&state.pipe_fds[1]);
 
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         close_if_valid(&state.pipe_fds[0]);
         return test_fail_errno("escaped owned runtime init failed");
     }
@@ -2265,7 +2265,7 @@ static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("provided-buffer detach opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("provided-buffer detach runtime create failed");
     }
     backend_storage = malloc(LLAM_IO_BUFFER_INLINE_BYTES);
@@ -2341,7 +2341,7 @@ static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("provided-buffer accessor opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("provided-buffer accessor runtime create failed");
     }
     backend_storage = malloc(LLAM_IO_BUFFER_INLINE_BYTES);
@@ -2428,7 +2428,7 @@ static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("provided-buffer clamp opts init failed");
     }
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("provided-buffer clamp runtime create failed");
     }
     backend_storage = malloc(payload_len);

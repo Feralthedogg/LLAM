@@ -77,7 +77,7 @@ static kern_return_t llam_darwin_async_set_state(
 }
 
 int llam_darwin_async_suspend(thread_t thread, llam_darwin_async_transaction_t *tx) {
-    thread_basic_info_data_t info;
+    thread_basic_info_data_t info = {0};
     mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
     kern_return_t rc;
 
@@ -302,7 +302,7 @@ static int llam_darwin_runtime_read(void *opaque, void *context) {
 
 static int llam_darwin_runtime_observe_sp(void *opaque, uintptr_t *sp) {
     llam_darwin_runtime_binding_t *binding = opaque;
-    arm_thread_state64_t general;
+    arm_thread_state64_t general = {0};
     mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
     if (binding == NULL || sp == NULL || !binding->transaction.suspended || binding->transaction.mutated)
         return llam_darwin_async_error(EINVAL);

@@ -1,0 +1,210 @@
+{#
+  Copyright 2026 Feralthedogg
+  SPDX-License-Identifier: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  See LICENSE.
+#}
+{#    The landing page. It is always black and white, whatever the docs theme is. #}
+{% extends "main.html" %}
+{% from "partials/icons.html" import icon %}
+{% block title %}<title>LLAM: write blocking C, run it concurrently</title>{% endblock %}
+{% block head_extra %}
+<script>try{var d=document.documentElement,o=localStorage.getItem("llam-os");if(o==="Windows"||(!o&&/Win/.test(navigator.platform)))d.classList.add("os-win");if(localStorage.getItem("llam-ann")==="{{ config.extra.llam_version }}")d.classList.add("ann-off")}catch(e){}</script>
+<link rel="preload" href="{{ 'assets/img/hero.webp'|url }}" as="image" media="(min-width: 561px)">
+<script type="module" src="{{ 'assets/js/home.js'|url }}"></script>
+{% endblock %}
+{% block page %}
+{%- set quickstart_url = 'start/quickstart/'|url %}
+{%- set samples = [
+  {'id': 'tasks', 'label': 'Tasks', 'out': 'result=144', 'note': 'A task is a function with its own stack. <code>llam_join</code> parks the caller until the child is done.', 'to': 'examples/tasks-and-timers/'},
+  {'id': 'channels', 'label': 'Channels', 'out': 'recv=ping\nrecv=pong', 'note': 'Channels move pointers between tasks. <code>recv_result</code> parks until a value arrives and tells a NULL payload apart from failure.', 'to': 'examples/channels-and-select/'},
+  {'id': 'deadlines', 'label': 'Deadlines', 'out': 'read timed out', 'note': 'Deadlines are absolute, in <code>llam_now_ns()</code> units. A timeout resumes the task with <code>ETIMEDOUT</code>. No worker waited.', 'to': 'concepts/io-model/'},
+  {'id': 'embed', 'label': 'Embedding', 'out': 'exit status 0', 'note': 'Use an explicit runtime when the host owns the lifecycle. Stopping one runtime never stops a peer.', 'to': 'examples/embedding/'},
+] %}
+<body class="llam home">
+<a class="skip" href="#content">Skip to content</a>
+<div class="ann" data-key="{{ config.extra.llam_version }}"><a href="{{ 'project/changelog/'|url }}">LLAM {{ config.extra.llam_version }}: compiler-qualified managed C and asynchronous preemption →</a><button type="button" data-ann-close aria-label="Dismiss announcement">{{ icon('x', 's') }}</button></div>
+{%- with tab = '', show_cta = true %}
+{%- include "partials/header.html" %}
+{%- endwith %}
+<div class="hero">
+  <div class="hero-top">
+    <canvas id="glass" aria-hidden="true"></canvas>
+    <section class="hero-in" id="content" aria-labelledby="llam-name">
+      <div>
+        <h1 class="h-name" id="llam-name">LLAM</h1>
+        <p class="h-full"><b>L</b>ow <b>L</b>evel <b>A</b>synchronous <b>M</b>achine</p>
+        <p class="h-tag">Write blocking C.<br>Run it concurrently.</p>
+        <p class="h-sub">Stackful user threads for C11, parked on io_uring, kqueue, and IOCP.</p>
+        <div class="h-cta">
+          <a class="btn" href="{{ quickstart_url }}">Get started</a>
+          <button class="inst" type="button" data-copy-install data-key="hero" aria-label="Copy install command"><span class="only-posix"><b>$</b> curl -fsSL …/install.sh | sh</span><span class="only-win"><b>&gt;</b> Invoke-WebRequest …/install.ps1</span><span class="cp">{{ icon('copy', 's') }}</span></button>
+          <div class="os-note"><span class="only-posix">Linux and macOS</span><span class="only-win">Windows, PowerShell</span><span aria-hidden="true">·</span><button type="button" data-os-toggle><span class="only-posix">Use Windows</span><span class="only-win">Use Linux or macOS</span></button></div>
+        </div>
+      </div>
+      <nav class="tiles" aria-label="Choose your path">
+        <a class="tile" href="{{ quickstart_url }}">{{ icon('rocket', 'l') }}<span>Start a new app</span>{{ icon('arrow', 'ar') }}</a>
+        <a class="tile" href="{{ 'guides/embedding/'|url }}">{{ icon('package', 'l') }}<span>Embed in a host</span>{{ icon('arrow', 'ar') }}</a>
+        <a class="tile" href="{{ 'reference/abi/'|url }}">{{ icon('plug', 'l') }}<span>Bind from another language</span>{{ icon('arrow', 'ar') }}</a>
+        <a class="tile" href="{{ 'production/checklist/'|url }}">{{ icon('server', 'l') }}<span>Run in production</span>{{ icon('arrow', 'ar') }}</a>
+        <a class="tile hi" href="{{ 'examples/'|url }}">{{ icon('code', 'l') }}<span>Tour the examples</span>{{ icon('arrow', 'ar') }}</a>
+      </nav>
+    </section>
+  </div>
+
+  <section class="why" aria-labelledby="why-llam">
+    <div class="wrap">
+      <h2 class="h2" id="why-llam">Why LLAM?</h2>
+      <div class="panel t-code" id="why">
+        <div class="panel-bar">
+          <div class="tabs" role="tablist" aria-label="Code samples">
+            <button class="tab on" type="button" role="tab" id="tab-io" aria-controls="pane-io" aria-selected="true" data-to="{{ 'examples/runtime-io/'|url }}">Blocking I/O</button>
+            {%- for sample in samples %}
+            <button class="tab" type="button" role="tab" id="tab-{{ sample.id }}" aria-controls="pane-{{ sample.id }}" aria-selected="false" tabindex="-1" data-to="{{ sample.to|url }}">{{ sample.label }}</button>
+            {%- endfor %}
+          </div>
+          <div class="acts">
+            <a class="act" id="open-example" href="{{ 'examples/runtime-io/'|url }}">{{ icon('code', 's') }}<span class="lbl">Open example</span></a>
+            <button class="act" type="button" id="play" aria-pressed="false"><span class="ic-pause">{{ icon('pause', 's') }}</span><span class="ic-play">{{ icon('play', 's') }}</span><span class="lbl">Pause</span></button>
+            <button class="act" type="button" id="copy-code" hidden>{{ icon('copy', 's') }}<span class="lbl">Copy</span></button>
+          </div>
+        </div>
+        <div class="pane" id="pane-io" role="tabpanel" aria-labelledby="tab-io">
+          <div class="demo-slot" id="park">
+            <img class="demo demo-w" src="{{ 'assets/img/llam-park-poster.webp'|url }}" width="1120" height="400" alt="A connection handler beside a scheduler trace. conn 1 reaches llam_read and parks on io_uring while worker 0 keeps running other tasks. When the fd is readable conn 1 continues on worker 1. Workers blocked: 0.">
+            <img class="demo demo-n" src="{{ 'assets/img/llam-park-phone-poster.webp'|url }}" width="358" height="492" alt="The same handler and trace, stacked for a phone." loading="lazy">
+            <div class="park-root"></div>
+          </div>
+        </div>
+        {%- for sample in samples %}
+        {%- set code = home_sample(sample.id) %}
+        <div class="pane split" id="pane-{{ sample.id }}" role="tabpanel" aria-labelledby="tab-{{ sample.id }}" hidden>
+          <div class="code" data-code>
+            {{ code.head }}
+            {%- if code.tail %}
+            <button class="fold" type="button" aria-expanded="false">{{ icon('chevron', 's') }}{{ code.tail_first }} {{ '{' }} … {{ '}' }} {{ code.tail_count }} lines</button>
+            <div class="tail" hidden>{{ code.tail }}</div>
+            {%- endif %}
+          </div>
+          <div class="out">
+            <div class="out-h"><span>Output</span><i>Captured on macOS arm64</i></div>
+            <pre><code>{{ sample.out }}</code></pre>
+            <p>{{ sample.note }}</p>
+          </div>
+        </div>
+        {%- endfor %}
+      </div>
+      <p class="cap" id="why-cap" data-io="The trace is an illustration, not a measurement. The handler is real C and runs against the {{ config.extra.llam_version }} runtime." data-code="Real output from this code, compiled against the {{ config.extra.llam_version }} headers. Copy takes the whole program, including what is folded.">The trace is an illustration, not a measurement. The handler is real C and runs against the {{ config.extra.llam_version }} runtime.</p>
+      <div class="below"><a class="btn line-d" href="{{ quickstart_url }}">Get started</a></div>
+    </div>
+  </section>
+</div>
+
+<section class="band" aria-labelledby="band-title">
+  <div class="band-in">
+    <h2 id="band-title">New in {{ config.extra.llam_version }}: managed C</h2>
+    <p><code>llam_runtime_create()</code> runs task code from the LLVM 23.1.2 managed producer on qualified native profiles and preempts its CPU loops without application polls.</p>
+    <div class="row">
+      <a class="btn" href="{{ 'guides/managed-c/'|url }}">Read the managed C guide</a>
+      <a class="btn line-d" href="{{ 'start/platforms/'|url }}">See native profiles</a>
+    </div>
+  </div>
+</section>
+
+<section class="sec first" aria-labelledby="verified">
+  <div class="wrap">
+    <h2 class="h2" id="verified">Built to be verified</h2>
+    <p class="intro">Verification is platform-local. A green Linux run does not prove the kqueue or Windows IOCP backend, so each one runs its own gates.</p>
+    <div class="vcards">
+      <article class="vcard"><h3>Platform gates</h3><p>Every backend verifies on its own operating system, against its own kernel contract.</p><code class="cmd">make verify-linux CC=gcc</code></article>
+      <article class="vcard"><h3>Stress and soak</h3><p>Long runs exercise core runtime behavior without depending on the example chat server.</p><code class="cmd">make test-runtime-soak</code></article>
+      <article class="vcard"><h3>Hardening</h3><p>Static analysis, dependency audit, and heavy fuzzing before release candidates and security-sensitive changes.</p><code class="cmd">make test-hardening</code></article>
+      <article class="vcard"><h3>Sanitizers</h3><p>ASan and TSan builds keep their objects separate from ordinary builds.</p><code class="cmd">make test-asan</code></article>
+      <article class="vcard"><h3>ABI contract</h3><p>Struct handshakes, compatible prefixes, and shared-library exports stay under test within an ABI major.</p><code class="cmd">make audit-shared-exports</code></article>
+      <article class="vcard"><h3>Managed compiler and SDK</h3><p>A pinned LLVM 23.1.2 job must execute all four stages. A missing or skipped stage is a failure.</p><code class="cmd">scripts/verify_managed_ci.py</code></article>
+    </div>
+    <div class="row-btn">
+      <a class="btn black" href="{{ 'production/verification/'|url }}">See every gate</a>
+      <a class="btn line-l" href="{{ 'reference/security/'|url }}">Security model</a>
+    </div>
+  </div>
+</section>
+
+<section class="sec" aria-labelledby="backends">
+  <div class="wrap duo">
+    <div>
+      <h2 class="h2" id="backends">One API. Three native backends.</h2>
+      <p>The same <code>llam_read()</code> parks on the native backend for each platform. Unsupported descriptors fall back to a blocking helper, so a scheduler worker is not pinned.</p>
+      <a class="go-l" href="{{ 'start/platforms/'|url }}">See platform support{{ icon('arrow', 's') }}</a>
+    </div>
+    <div class="matrix">
+      <div class="matrix-call">ssize_t n = llam_read(fd, buf, sizeof buf);</div>
+      <div class="mrow"><div><b>Linux</b><small>x86_64, aarch64</small></div><code>io_uring</code><span class="state p">Primary</span></div>
+      <div class="mrow"><div><b>macOS</b><small>arm64, x86_64</small></div><code>kqueue</code><span class="state">Supported</span></div>
+      <div class="mrow"><div><b>Windows</b><small>10 and 11, x86_64</small></div><code>IOCP</code><span class="state">Supported</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" style="padding-top: 0" aria-labelledby="debug">
+  <div class="wrap duo">
+    <div>
+      <h2 class="h2" id="debug">See why a task is stuck</h2>
+      <p>A runtime dump shows lifecycle state, live tasks, I/O waiters, blocking jobs, and who owns each wait. Capture it when a task appears stuck.</p>
+      <a class="go-l" href="{{ 'guides/diagnostics/'|url }}">Read the diagnostics guide{{ icon('arrow', 's') }}</a>
+    </div>
+    <div class="term" role="img" aria-label="An excerpt of a real runtime dump: one task in state PARKED, with wait_owner blocking_job.">
+      <div class="term-h"><span>llam_dump_runtime_state_handle(runtime, fd)</span><span>excerpt</span></div>
+      <div class="term-b">
+        <div class="hd2">lifecycle:</div>
+        <div>  initialized=1 exec_started=1 stop_requested=0 shutdown_requested=0 live_tasks=1</div>
+        <div class="hd2">block:</div>
+        <div>  workers=10 pending=1 active=1 queued=0 peak_active=1 wake_seq=1</div>
+        <div class="hd2">tasks:</div>
+        <div>  id=1 <em>state=PARKED</em> class=1 flags=0x0 home=unavailable live=0 last=0 parked=0</div>
+        <div>  wait=blocking <em>wait_owner=blocking_job</em> wait_node=0x0 select=0x0 join_target=0</div>
+        <div>    io_req=none</div>
+        <div>    block_job=0x769ac0dfc0 state=running errno=0 result=0x0</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="start" aria-labelledby="start">
+  <div class="wrap">
+    <h2 class="h2" id="start">Start using LLAM today</h2>
+    <div class="ipanel t-code">
+      <div class="ipanel-h">
+        <div class="tabs" role="tablist" aria-label="Install command" style="min-height: 52px">
+          <button class="tab" type="button" role="tab" data-os-pick="posix">Linux and macOS</button>
+          <button class="tab" type="button" role="tab" data-os-pick="win">Windows</button>
+        </div>
+        <span class="rel" id="release">Latest release <span id="release-v"></span></span>
+      </div>
+      <div class="cmdbox">
+        <div class="only-posix" data-install><div><span class="pr">$ </span><span data-cmd>curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh |</span></div><div><span data-cmd>    sh -s -- --prefix "$HOME/.local"</span></div></div>
+        <div class="only-win" data-install><div><span class="pr">&gt; </span><span data-cmd>Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/latest/download/install.ps1" -OutFile install.ps1</span></div><div><span class="pr">&gt; </span><span data-cmd>.\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"</span></div></div>
+        <button class="copy" type="button" data-copy-install data-key="panel" aria-label="Copy install command">{{ icon('copy', 's') }}</button>
+      </div>
+    </div>
+    <div class="hsteps">
+      <a class="hstep" href="{{ quickstart_url }}#install-the-release"><i>1</i><b>Install</b><span>Put headers, libraries, CMake config, and pkg-config metadata in a prefix.</span></a>
+      <a class="hstep" href="{{ quickstart_url }}#use-from-cmake"><i>2</i><b>Link</b><span>Use the installed llam::runtime CMake target.</span></a>
+      <a class="hstep" href="{{ quickstart_url }}#run-a-minimal-program"><i>3</i><b>Run</b><span>Create a runtime, spawn work, drive it, then destroy it.</span></a>
+    </div>
+  </div>
+</section>
+{%- include "partials/footer.html" %}
+{%- include "partials/palette.html" %}
+</body>
+{% endblock %}

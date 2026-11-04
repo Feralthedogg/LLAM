@@ -439,7 +439,7 @@ static int init_runtime(void) {
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    return llam_runtime_init(&opts);
+    return llam_runtime_init_compat(&opts);
 }
 
 static int init_explicit_runtime_opts(llam_runtime_opts_t *opts, bool deterministic) {
@@ -519,8 +519,8 @@ static int run_multi_runtime_scenario(uint64_t seed, unsigned index) {
         init_explicit_runtime_opts(&opts_b, deterministic_b) != 0) {
         return fail_errno("multi-runtime fuzz opts init failed");
     }
-    if (llam_runtime_create(&opts_a, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
-        llam_runtime_create(&opts_b, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+    if (llam_runtime_create_compat(&opts_a, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create_compat(&opts_b, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
         rc = fail_errno("multi-runtime fuzz create failed");
         goto cleanup;
     }

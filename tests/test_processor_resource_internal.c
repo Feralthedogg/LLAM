@@ -1062,7 +1062,7 @@ static int test_processor_resources(void) {
     }
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&opts, sizeof(opts), &runtime) != 0 || runtime == NULL ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &runtime) != 0 || runtime == NULL ||
         runtime->shards == NULL || runtime->active_shards != 1U) {
         llam_runtime_destroy(runtime);
         return fail("could not create one-shard test runtime");

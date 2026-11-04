@@ -57,7 +57,7 @@ class ManagedCompilerTests(unittest.TestCase):
         subprocess.run([str(cls.llvm / "clang"), *cls.native_flags, "-O2", "-c",
                         str(ROOT / "tests/fixtures/managed/native_consumer.c"), "-o", str(cls.consumer)], check=True)
         cls.binary = cls.work / ("native.exe" if os.name == "nt" else "native")
-        result = cls.driver("--llam-managed=required", str(ROOT / "tests/fixtures/managed/kernels.c"),
+        result = cls.driver(str(ROOT / "tests/fixtures/managed/kernels.c"),
                             str(cls.consumer), "-o", str(cls.binary))
         if result.returncode:
             raise AssertionError(result.stderr[:6000])
@@ -118,6 +118,15 @@ class ManagedCompilerTests(unittest.TestCase):
         for suffix in (".so.debug", ".so.3x"):
             with self.subTest(suffix=suffix), self.assertRaises(VerificationError):
                 parse_invocation([*options, "libllam_runtime" + suffix])
+
+    def test_default_rejects_unqualified_code(self) -> None:
+        path = self.work / "default-unqualified.c"
+        path.write_text("extern long foreign(long);long entry(long n){return foreign(n); }\n")
+        output = path.with_suffix(".o")
+        result = self.driver("-c", str(path), "-o", str(output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unqualified", result.stderr)
+        self.assertFalse(output.exists())
 
     def test_auto_keeps_unknown_code_legacy_without_safe_ranges(self) -> None:
         path = self.work / "legacy.c"

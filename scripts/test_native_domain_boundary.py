@@ -22,6 +22,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import check_native_domain_boundary as boundary
@@ -42,6 +43,24 @@ class NativeBoundaryTests(unittest.TestCase):
 
     def test_repository(self) -> None:
         self.assertEqual(boundary.audit(self.sources, self.headers), [])
+
+    def test_source_inventory_uses_utf8_and_portable_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("src/core/example.c", "src/internal/runtime_state.h",
+                         "src/internal/managed_domain.h"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("/* native → managed */\n", encoding="utf-8")
+            for name in boundary.exports.PUBLIC_HEADERS:
+                path = root / "include/llam" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("/* public → ABI */\n", encoding="utf-8")
+            sources, headers = boundary.load_sources(root)
+            self.assertEqual(set(sources), {"src/core/example.c", "src/internal/runtime_state.h",
+                                            "src/internal/managed_domain.h"})
+            self.assertIn("→", sources["src/core/example.c"])
+            self.assertTrue(all("→" in source for source in headers.values()))
 
     def test_removed_entry_gate(self) -> None:
         self.assertTrue(self.mutated("src/core/task/yield_join_sleep.c", "LLAM_NATIVE_API_GUARD();", ""))

@@ -1,0 +1,14 @@
+{
+  "name": "llam-site-diagrams",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Draws the Mermaid fences in docs/ to SVG. Run this when a diagram changes, and commit the drawings.",
+  "scripts": {
+    "draw": "node draw.mjs"
+  },
+  "devDependencies": {
+    "mermaid": "11.12.1",
+    "playwright-core": "1.56.1"
+  }
+}

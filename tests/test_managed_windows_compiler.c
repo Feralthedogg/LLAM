@@ -110,7 +110,11 @@ int main(int argc, char **argv) {
     options.preempt_quantum_ns = UINT64_C(1000000);
     preemption.policy = automatic ? LLAM_PREEMPT_POLICY_ASYNC_AUTO : LLAM_PREEMPT_POLICY_ASYNC_REQUIRED;
     preemption.native_affine_capacity = 2U;
-    CHECK(llam_runtime_create_managed(&options, sizeof(options), &preemption, sizeof(preemption), &runtime) == 0);
+    if (affine || automatic) {
+        CHECK(llam_runtime_create_managed(&options, sizeof(options), &preemption, sizeof(preemption), &runtime) == 0);
+    } else {
+        CHECK(llam_runtime_create(&options, sizeof(options), &runtime) == 0);
+    }
     CHECK(llam_runtime_preempt_info_ex(runtime, &info, sizeof(info)) == 0);
     CHECK(info.registered_modules != 0U && info.registered_entries >= 3U &&
           info.conservative_task_charge_bytes != 0U && info.maximum_charged_tasks != 0U &&

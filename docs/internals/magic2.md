@@ -15,7 +15,7 @@ limitations under the License.
 See LICENSE.
 -->
 
-# Internal magic2 Integration
+# magic2 integration
 
 `src/internal/magic2.h` supplies adaptive kernel dispatch, immutable execution
 plans, owned bindings, prepared batches, and graphs. LLAM builds one private
@@ -26,7 +26,7 @@ CPU work. Neither header is installed, and raw `magic2*` functions have
 translation-unit-local linkage. The LLAM public headers, ABI version, exports,
 and default scheduling policy are unchanged.
 
-## Tagged Dispatch and Results
+## Tagged dispatch and results
 
 Inside a managed task, the bridge submits the request through
 `llam_call_blocking_result()`. The G parks, and LLAM's existing blocking worker
@@ -62,7 +62,7 @@ magic2's serialization and ownership contracts. A request waiting indefinitely
 inside native code can delay cancellation and shutdown, just like another
 blocking-pool callback.
 
-## Direct Managed CPU Plans
+## Direct managed CPU plans
 
 `llam_magic2_cpu_plan_create()`, `llam_magic2_cpu_plan_get_info()`,
 `llam_magic2_cpu_plan_retain()`, and `llam_magic2_cpu_plan_release()` make the
@@ -137,7 +137,7 @@ fill can delay other Gs, cancellation, and shutdown. A host destroy waits for
 an executing tile and its G to drain; it does not interrupt arbitrary C code.
 Plan owner retain/release callbacks also need to support their calling domain.
 
-## Selective Automatic Policy for Internal Work
+## Selective automatic policy
 
 `llam_magic2_cpu_work_create()` and `llam_magic2_cpu_auto()` provide a private
 execution-policy hook for explicitly described internal buffer transforms or
@@ -192,7 +192,7 @@ be measured before using this path. The benchmark currently has one equivalent
 family member; it measures policy overhead and admission, not an optimized
 kernel search. Regression tests also exercise a two-member family.
 
-## Relationship to G–P–M and Preemption
+## Relationship to G-P-M
 
 Magic2's owning plan leases retain kernel environments; they do not grant LLAM
 P ownership. The existing versioned execution lease, P ticket, and task run
@@ -249,7 +249,7 @@ selection. The `llam_magic2_cpu_*` names are private, non-installed plumbing,
 not public API additions. The selective route above accepts only an internal
 work descriptor whose kernel and lifetime contract are already known.
 
-## Source and Verification
+## Source and verification
 
 The current `magic2.h` snapshot comes from the user-supplied attachment received
 on 2026-09-21. Its contents match except for one final LF added by the repository

@@ -213,7 +213,7 @@ static void config_create_impl(config_state_t *state, uint32_t preempt_mode,
     options.deterministic = 1U;
     options.preempt_mode = preempt_mode;
     options.preempt_quantum_ns = 1000000U;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &state->runtime) != 0 || state->runtime == NULL) {
         config_fail("create");
     }
@@ -458,7 +458,7 @@ static void config_foreign_trylock(void) {
     }
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &source_runtime) != 0) {
         config_fail("foreign runtime create");
     }
@@ -722,7 +722,7 @@ static void config_public_managed_refusal(void) {
         config_fail("public managed source options");
     }
     options.deterministic = 1U;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &source) != 0) {
         config_fail("public managed source create");
     }
@@ -755,7 +755,7 @@ static void config_start_failure(void) {
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
     llam_runtime_test_fail_ctrl_thread_start();
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &failed_runtime) != -1 || failed_runtime != NULL) {
         config_fail("injected control startup failure");
     }

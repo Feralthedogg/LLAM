@@ -44,7 +44,7 @@ class Invocation:
 
 
 def parse(arguments: list[str]) -> Invocation:
-    mode = "auto"
+    mode = "required"
     llvm = Path(os.environ.get("LLAM_LLVM_BIN", ""))
     plugin_value = os.environ.get("LLAM_MANAGED_PLUGIN", "")
     output = None

@@ -88,8 +88,8 @@ static int explicit_objects(void) {
 
     CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
     opts.deterministic = 1U;
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &runtime) == 0);
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &peer) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &runtime) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &peer) == 0);
     state.peer = peer;
     state.channel = llam_runtime_channel_create(runtime, 2U);
     state.mutex = llam_runtime_mutex_create(runtime);
@@ -181,7 +181,7 @@ static int group_cancellation(bool linked) {
     llam_runtime_opts_t opts;
     CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
     opts.deterministic = 1U;
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &runtime) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &runtime) == 0);
     external = llam_runtime_cancel_token_create(runtime);
     CHECK(external != NULL);
     llam_task_group_opts_t group_opts = {.flags = linked ? LLAM_TASK_GROUP_F_LINK_CANCEL : 0U};
@@ -312,7 +312,7 @@ static int io_wait_options(bool cancel) {
     int result = 1;
     CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
     opts.deterministic = 1U;
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &runtime) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &runtime) == 0);
     CHECK(byte_pair(state.pair) == 0);
     CHECK(send(state.pair[1], "abc", 3, 0) == 3);
     if (cancel) {
@@ -357,7 +357,7 @@ static int resource_admission(void) {
     opts.worker_count = 1U;
     opts.blocking_worker_count = 1U;
     opts.max_tasks = 1U;
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &runtime) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &runtime) == 0);
     task = llam_runtime_spawn_ex(runtime, no_work, NULL, NULL, 0U);
     CHECK(task != NULL);
     CHECK(llam_runtime_drain_until(runtime, llam_now_ns(), &info, sizeof(info)) == -1 && errno == EBUSY);
@@ -447,7 +447,7 @@ static int bounded_drain(void) {
     opts.worker_count = 1U;
     opts.blocking_worker_count = 1U;
     opts.max_blocking_jobs = 1U;
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &state.runtime) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &state.runtime) == 0);
     held = llam_runtime_spawn_ex(state.runtime, held_task, &state, NULL, 0U);
     other = llam_runtime_spawn_ex(state.runtime, admission_task, &state, NULL, 0U);
     CHECK(held != NULL && other != NULL);
@@ -510,7 +510,7 @@ static int task_results_cleanup(void) {
     llam_task_result_t value = {(void *)(uintptr_t)1U, -1, UINT32_MAX};
     CHECK(llam_task_local_key_create(&state.owned_key) == 0);
     CHECK(llam_task_local_key_create(&state.taken_key) == 0);
-    CHECK(llam_runtime_create(NULL, 0U, &runtime) == 0);
+    CHECK(llam_runtime_create_compat(NULL, 0U, &runtime) == 0);
     task = llam_runtime_spawn_ex(runtime, result_task, &state, NULL, 0U);
     CHECK(task != NULL);
     CHECK(llam_task_get_result(task, &value, sizeof(value)) == -1 && errno == EAGAIN);
@@ -535,7 +535,7 @@ static int group_cleanup_after_destroy(void) {
     int result = 1;
     llam_runtime_t *runtime = NULL;
     llam_task_group_t *group = NULL;
-    CHECK(llam_runtime_create(NULL, 0U, &runtime) == 0);
+    CHECK(llam_runtime_create_compat(NULL, 0U, &runtime) == 0);
     group = llam_runtime_task_group_create(runtime);
     CHECK(group != NULL && llam_task_group_spawn_ex(group, no_work, NULL, NULL, 0U) != NULL);
     CHECK(llam_task_group_destroy(group) == -1 && errno == EBUSY);
@@ -579,8 +579,8 @@ static int transfer_edges(void) {
     llam_runtime_t *runtime = NULL, *peer = NULL;
     transfer_case_t state = {.pair = {LLAM_INVALID_FD, LLAM_INVALID_FD}};
     llam_task_t *task = NULL;
-    CHECK(llam_runtime_create(NULL, 0U, &runtime) == 0);
-    CHECK(llam_runtime_create(NULL, 0U, &peer) == 0);
+    CHECK(llam_runtime_create_compat(NULL, 0U, &runtime) == 0);
+    CHECK(llam_runtime_create_compat(NULL, 0U, &peer) == 0);
     state.foreign_token = llam_runtime_cancel_token_create(peer);
     CHECK(state.foreign_token != NULL && byte_pair(state.pair) == 0);
     CHECK(send(state.pair[1], "abc", 3, 0) == 3);

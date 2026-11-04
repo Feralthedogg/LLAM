@@ -135,8 +135,8 @@ int main(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.forced_yield_every = 4U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init_ex(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        return fail_errno("llam_runtime_init_ex failed");
+    if (llam_runtime_init_compat_ex(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("llam_runtime_init_compat_ex failed");
     }
 
     for (i = 0U; i < WINDOWS_SMOKE_TASKS; ++i) {

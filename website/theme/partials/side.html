@@ -1,0 +1,52 @@
+{#
+  Copyright 2026 Feralthedogg
+  SPDX-License-Identifier: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  See LICENSE.
+#}
+{#    The sidebar shows one tab's pages. A page outside a group sits at the top
+   level; the group holding the current page starts open. #}
+{% from "partials/icons.html" import icon %}
+<nav class="side" id="side" data-open="0" aria-label="{{ tab }}">
+  <div class="side-in{{ ' grouped' if tab_item.children|selectattr('is_section')|list }}">
+    <div class="m-tabs">
+      {%- for item in nav.items if item.is_section %}
+      <a class="{{ 'on' if tab == item.title }}" href="{{ first_page(item).url|url }}">{{ item.title }}</a>
+      {%- endfor %}
+    </div>
+    {%- if tab in ('Docs', 'Examples') %}
+    <p class="seg-l">Your platform</p>
+    <div class="seg" role="group" aria-label="Show commands for" data-platforms>
+      <button type="button" data-os="Linux" aria-pressed="false">Linux</button>
+      <button type="button" data-os="macOS" aria-pressed="false">macOS</button>
+      <button type="button" data-os="Windows" aria-pressed="false">Windows</button>
+    </div>
+    {%- endif %}
+    {%- for entry in tab_item.children %}
+    {%- if entry.is_page %}
+    <a class="side-l top{{ ' on' if entry.is_page and entry == page }}" href="{{ entry.url|url }}"{% if entry == page %} aria-current="page"{% endif %}>{{ entry.title }}</a>
+    {%- else %}
+    <details{% if entry.active %} open{% endif %}>
+      <summary class="ng">{{ icon('chevron', 's') }}{{ entry.title }}</summary>
+      {%- for child in entry.children %}
+      <a class="side-l{{ ' on' if child == page }}" href="{{ child.url|url }}"{% if child == page %} aria-current="page"{% endif %}>{{ child.title }}</a>
+      {%- endfor %}
+    </details>
+    {%- endif %}
+    {%- endfor %}
+    <div class="side-foot">
+      <button class="side-act" type="button" data-theme-toggle aria-label="Change theme"><span class="t-theme-moon">{{ icon('moon', 's') }}</span><span class="t-theme-sun">{{ icon('sun', 's') }}</span><span class="lbl">Change theme</span></button>
+      <a class="side-act" href="{{ config.repo_url }}">{{ icon('github', 's') }}GitHub</a>
+    </div>
+  </div>
+</nav>

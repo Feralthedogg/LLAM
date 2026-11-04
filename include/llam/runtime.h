@@ -60,7 +60,7 @@ extern "C" {
 #define LLAM_VERSION_PATCH 0U
 
 #define LLAM_ABI_VERSION_MAJOR 2U
-#define LLAM_ABI_VERSION_MINOR 3U
+#define LLAM_ABI_VERSION_MINOR 4U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 
@@ -201,7 +201,7 @@ typedef enum llam_runtime_profile {
     LLAM_RUNTIME_PROFILE_IO_LATENCY = 3,   /**< Favor I/O wakeup latency. */
 } llam_runtime_profile_t;
 
-/** @brief Cooperative automatic preemption policy. */
+/** @brief Preemption request policy; constructor policy selects the backend. */
 typedef enum llam_preempt_mode {
     LLAM_PREEMPT_OFF = 0,         /**< Disable automatic preemption requests. */
     LLAM_PREEMPT_COOPERATIVE = 1, /**< Honor explicit safepoints, but do not auto-request preemption. */
@@ -272,7 +272,7 @@ typedef struct llam_runtime_opts {
     int32_t sqpoll_cpu;                             /**< Requested SQPOLL CPU, or -1 for automatic selection. */
     uint32_t profile;                               /**< High-level policy; one of ::llam_runtime_profile_t. */
     uint32_t reserved0;                             /**< Reserved for future fixed-width fields; initialize to 0. */
-    uint32_t preempt_mode;                          /**< Cooperative preemption policy; one of ::llam_preempt_mode_t. */
+    uint32_t preempt_mode;                          /**< Request policy; backend/admission is selected by the constructor. */
     uint32_t preempt_poll_period;                   /**< Safepoint flag-poll period; 0 selects a profile default. */
     uint64_t preempt_quantum_ns;                    /**< Global preempt slice override; 0 uses task-class budgets. */
     uint32_t worker_count;                          /**< Portable/legacy processors; 0 selects CPU/profile defaults. */
@@ -408,7 +408,7 @@ LLAM_API int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size)
 LLAM_API int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size);
 
 /**
- * @brief Initialize the process-default runtime with an explicit option size.
+ * @brief Initialize the process-default runtime with required asynchronous preemption.
  *
  * @details
  * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
@@ -427,13 +427,18 @@ LLAM_API int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size);
 LLAM_API int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size);
 
 /**
- * @brief Initialize the process-default runtime.
+ * @brief Initialize the process-default asynchronous runtime.
  * @param opts Optional runtime options; pass NULL for defaults.
  * @details Convenience wrapper around ::llam_runtime_init_ex. New embedding
  * code should prefer ::llam_runtime_create and drive the returned handle.
  * @return 0 on success, -1 on failure with errno set.
  */
 LLAM_API int llam_runtime_init(const llam_runtime_opts_t *opts);
+
+/** Explicit compatibility runtime: boundary/safepoint preemption, including
+ * AUTO/STRICT request policies. These functions do not require managed images. */
+LLAM_API int llam_runtime_init_compat_ex(const llam_runtime_opts_t *opts, size_t opts_size);
+LLAM_API int llam_runtime_init_compat(const llam_runtime_opts_t *opts);
 
 /**
  * @brief Request cooperative runtime stop and wake all workers.
@@ -523,7 +528,7 @@ LLAM_API int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
 LLAM_API llam_runtime_t *llam_runtime_default(void);
 
 /**
- * @brief Create an explicit runtime handle.
+ * @brief Create an explicit runtime with required asynchronous preemption.
  *
  * @details
  * Canonical embedding entry point. Allocates and initializes an independent
@@ -532,6 +537,10 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
  * without exposing raw storage addresses. Multiple explicit runtimes may run
  * concurrently on different host threads. Cross-runtime object use fails with
  * @c EXDEV.
+ * Compiler-qualified task images and a supported native profile are required.
+ * Unqualified task entries fail admission with ENOTSUP; unsupported native
+ * profiles fail creation or startup with ENOTSUP. No cooperative fallback is
+ * selected. Use llam_runtime_create_compat for native C compatibility execution.
  *
  * @param opts Optional runtime options; pass NULL for defaults.
  * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
@@ -539,6 +548,13 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
  * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out);
+
+/** Create an explicit compatibility runtime without asynchronous admission.
+ * Ownership and handle lifetime rules match llam_runtime_create. It accepts every
+ * preemption mode, needs no native asynchronous profile, and does not refuse a
+ * call from a managed task. */
+LLAM_API int llam_runtime_create_compat(const llam_runtime_opts_t *opts, size_t opts_size,
+                                       llam_runtime_t **out);
 
 /**
  * @brief Atomically enable the experimental fixed-primary Windows async backend.
@@ -598,9 +614,12 @@ LLAM_API int llam_runtime_enable_experimental_windows_async_preempt_ex(
  * still target the current managed runtime when called from a task, otherwise
  * the default runtime. If @p opts supplies a cancellation token, that token
  * must belong to @p runtime; a foreign-runtime token is rejected with
- * @c EXDEV before the task is published.
+ * @c EXDEV before the task is published. A runtime that requires asynchronous
+ * preemption rejects an unqualified entry with @c ENOTSUP and
+ * ::LLAM_SPAWN_F_NO_PREEMPT with @c EINVAL.
  *
- * @param runtime Runtime returned by ::llam_runtime_create or ::llam_runtime_default; not NULL.
+ * @param runtime Runtime returned by ::llam_runtime_create,
+ * ::llam_runtime_create_compat or ::llam_runtime_default; not NULL.
  * @param fn Task entry point. Must not be NULL.
  * @param arg User pointer passed to @p fn.
  * @param opts Optional spawn policy.
@@ -726,7 +745,9 @@ LLAM_API int llam_runtime_write_stats_json(int fd);
  * libraries that appended fields to ::llam_spawn_opts_t. If @p opts supplies a
  * cancellation token, it must belong to the target runtime selected by this
  * wrapper. Calls from unmanaged host threads target the default runtime and are
- * rejected if that runtime is not initialized or is already in teardown.
+ * rejected if that runtime is not initialized or is already in teardown. A
+ * runtime that requires asynchronous preemption rejects an unqualified entry
+ * with @c ENOTSUP and ::LLAM_SPAWN_F_NO_PREEMPT with @c EINVAL.
  *
  * @param fn Task entry point. Must not be NULL.
  * @param arg User pointer passed to fn.
@@ -1341,9 +1362,9 @@ LLAM_API int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
  * arguments, @c EBUSY when the public handle is already being torn down,
- * @c EXDEV for cross-runtime managed use, or @c ENOTSUP when an unmanaged host
- * caller touches a condition whose owner runtime can no longer service waiter
- * wakeups.
+ * @c EXDEV for cross-runtime managed use or a destroyed explicit owner runtime,
+ * or @c ENOTSUP when an unmanaged host caller touches a condition after the
+ * default owner runtime has shut down.
  */
 LLAM_API int llam_cond_signal(llam_cond_t *cond);
 
@@ -1355,9 +1376,9 @@ LLAM_API int llam_cond_signal(llam_cond_t *cond);
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
  * arguments, @c EBUSY when the public handle is already being torn down,
- * @c EXDEV for cross-runtime managed use, or @c ENOTSUP when an unmanaged host
- * caller touches a condition whose owner runtime can no longer service waiter
- * wakeups.
+ * @c EXDEV for cross-runtime managed use or a destroyed explicit owner runtime,
+ * or @c ENOTSUP when an unmanaged host caller touches a condition after the
+ * default owner runtime has shut down.
  */
 LLAM_API int llam_cond_broadcast(llam_cond_t *cond);
 

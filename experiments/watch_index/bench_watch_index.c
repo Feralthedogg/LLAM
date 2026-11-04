@@ -141,7 +141,7 @@ int main(int argc, char **argv) {
         die("options");
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_create(&options, sizeof(options), &state.runtime))
+    if (llam_runtime_create_compat(&options, sizeof(options), &state.runtime))
         die("runtime");
     if (state.runtime->active_nodes != 1U || !state.runtime->nodes[0].supports_multishot_poll) {
         die("benchmark requires one native multishot poll node");

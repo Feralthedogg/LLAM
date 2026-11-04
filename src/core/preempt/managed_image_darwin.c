@@ -51,7 +51,7 @@ static bool region_readonly(uintptr_t address, size_t bytes) {
         mach_vm_address_t region = address;
         mach_vm_size_t size = 0U;
         natural_t depth = 0U;
-        vm_region_submap_info_data_64_t info;
+        vm_region_submap_info_data_64_t info = {0};
         for (;;) {
             mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
             if (depth > 16U || mach_vm_region_recurse(mach_task_self(), &region, &size, &depth,

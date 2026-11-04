@@ -136,6 +136,13 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
         errno = EINVAL;
         return -1;
     }
+    if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
+        !llam_runtime_init_cleanup_here(rt)) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        llam_runtime_lifecycle_unlock();
+        errno = EBUSY;
+        return -1;
+    }
     active_ops = atomic_load_explicit(&rt->active_ops, memory_order_acquire);
     if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(active_ops))) {
         /*
@@ -260,6 +267,7 @@ int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_r
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
     registered = llam_runtime_find_registered_locked(runtime);
     if (registered == NULL ||
+        !atomic_load_explicit(&registered->initialized, memory_order_acquire) ||
         atomic_load_explicit(&registered->destroy_claimed, memory_order_acquire)) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
         errno = EINVAL;
@@ -316,7 +324,8 @@ int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
     for (llam_runtime_t *iter = g_llam_runtime_registry; iter != NULL; iter = iter->registry_next) {
         llam_runtime_t **next_items;
 
-        if (atomic_load_explicit(&iter->destroy_claimed, memory_order_acquire)) {
+        if (!atomic_load_explicit(&iter->initialized, memory_order_acquire) ||
+            atomic_load_explicit(&iter->destroy_claimed, memory_order_acquire)) {
             continue;
         }
         if (count == capacity) {

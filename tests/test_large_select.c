@@ -219,7 +219,7 @@ int main(void) {
     CHECK(llam_runtime_opts_init(&options, sizeof(options)) == 0);
     options.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     options.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    CHECK(llam_runtime_init_ex(&options, sizeof(options)) == 0);
+    CHECK(llam_runtime_init_compat_ex(&options, sizeof(options)) == 0);
     for (unsigned index = 0; index < sizeof(widths) / sizeof(*widths); ++index) {
         unsigned count = widths[index];
         unsigned unique_counts[] = {count, 3U, 8U, 9U, 64U, 65U};

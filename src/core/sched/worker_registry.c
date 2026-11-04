@@ -260,6 +260,7 @@ int llam_managed_reserve_execution(llam_runtime_t *runtime, uint32_t execution_c
     }
     if (execution_class == LLAM_MANAGED_EXECUTION_PORTABLE) return 0;
     if (execution_class == LLAM_MANAGED_EXECUTION_LEGACY) {
+        if (runtime->compatibility_processor_count == 0U) { errno = ENOTSUP; return -1; }
         *out = &runtime->shards[runtime->portable_processor_count].primary_worker;
         return 0;
     }

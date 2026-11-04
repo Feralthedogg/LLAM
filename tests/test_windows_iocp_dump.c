@@ -254,8 +254,8 @@ int main(void) {
         return fail_errno("llam_runtime_opts_init failed");
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        return fail_errno("llam_runtime_init_ex failed");
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("llam_runtime_init_compat_ex failed");
     }
     if (setup_listener(&state) != 0) {
         failed = fail_errno("listener setup failed");

@@ -184,7 +184,7 @@ static int init_runtime(void) {
         return -1;
     }
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+    return llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
@@ -420,7 +420,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     int watch_ready_fd = -1;
     int lock_rc;
 
-    if (llam_runtime_create(NULL, 0U, &runtime) != 0) {
+    if (llam_runtime_create_compat(NULL, 0U, &runtime) != 0) {
         return fail_errno("explicit runtime init failed for host close watch purge");
     }
     if (runtime == NULL || runtime->nodes == NULL || runtime->active_nodes == 0U) {
@@ -527,8 +527,8 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
     memset(&close_state, 0, sizeof(close_state));
     close_state.fd = -1;
     close_state.rc = -1;
-    if (llam_runtime_create(NULL, 0U, &closer_runtime) != 0 ||
-        llam_runtime_create(NULL, 0U, &watch_runtime) != 0) {
+    if (llam_runtime_create_compat(NULL, 0U, &closer_runtime) != 0 ||
+        llam_runtime_create_compat(NULL, 0U, &watch_runtime) != 0) {
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("explicit runtime init failed for managed peer close purge");

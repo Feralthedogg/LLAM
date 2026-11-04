@@ -39,7 +39,7 @@ static int create_runtime(uint64_t experimental_flags, llam_runtime_t **out) {
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     opts.experimental_flags = experimental_flags;
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 static int test_unbound_m_cannot_mutate_owner_deque(void) {
@@ -260,7 +260,7 @@ static int test_timer_rehome_generation_and_ownership(void) {
         return fail("timer-rehome options initialization failed");
     }
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&opts, sizeof(opts), &runtime) != 0 || runtime == NULL ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &runtime) != 0 || runtime == NULL ||
         runtime->shards == NULL) {
         llam_runtime_destroy(runtime);
         return fail("could not create timer-rehome test runtime");
@@ -449,7 +449,7 @@ static int test_cancel_retries_after_timer_rehome(void) {
         return fail("cancel/rehome options initialization failed");
     }
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&opts, sizeof(opts), &runtime) != 0 || runtime == NULL ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &runtime) != 0 || runtime == NULL ||
         runtime->shards == NULL) {
         llam_runtime_destroy(runtime);
         return fail("could not create cancel/rehome runtime");

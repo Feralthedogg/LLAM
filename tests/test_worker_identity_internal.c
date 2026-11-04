@@ -194,7 +194,7 @@ static int create_deterministic_runtime(llam_runtime_t **out) {
     }
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 static void observe_legacy_worker(legacy_worker_observation_t *out) {
@@ -1537,7 +1537,7 @@ static void nested_runtime_identity_task(void *arg) {
     }
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&opts, sizeof(opts), &state->nested_runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &state->nested_runtime) != 0) {
         test_fail(&state->failure,
                   "nested runtime create failed from a managed task");
         return;

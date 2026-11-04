@@ -623,9 +623,9 @@ static int test_preinit_contracts(void) {
 #endif
     memset(&stats, 0xA5, sizeof(stats));
     errno = 0;
-    if (llam_runtime_init_ex((const llam_runtime_opts_t *)(const void *)&stats, 0U) != -1 ||
+    if (llam_runtime_init_compat_ex((const llam_runtime_opts_t *)(const void *)&stats, 0U) != -1 ||
         errno != EINVAL) {
-        return test_fail("llam_runtime_init_ex zero-sized opts did not fail with EINVAL");
+        return test_fail("llam_runtime_init_compat_ex zero-sized opts did not fail with EINVAL");
     }
     {
         llam_runtime_opts_t invalid_opts;
@@ -633,15 +633,15 @@ static int test_preinit_contracts(void) {
         memset(&invalid_opts, 0, sizeof(invalid_opts));
         invalid_opts.profile = 999U;
         errno = 0;
-        if (llam_runtime_init_ex(&invalid_opts, sizeof(invalid_opts)) != -1 || errno != EINVAL) {
-            return test_fail("llam_runtime_init_ex invalid profile did not fail with EINVAL");
+        if (llam_runtime_init_compat_ex(&invalid_opts, sizeof(invalid_opts)) != -1 || errno != EINVAL) {
+            return test_fail("llam_runtime_init_compat_ex invalid profile did not fail with EINVAL");
         }
         memset(&invalid_opts, 0, sizeof(invalid_opts));
         invalid_opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
         invalid_opts.preempt_mode = 999U;
         errno = 0;
-        if (llam_runtime_init_ex(&invalid_opts, sizeof(invalid_opts)) != -1 || errno != EINVAL) {
-            return test_fail("llam_runtime_init_ex invalid preempt mode did not fail with EINVAL");
+        if (llam_runtime_init_compat_ex(&invalid_opts, sizeof(invalid_opts)) != -1 || errno != EINVAL) {
+            return test_fail("llam_runtime_init_compat_ex invalid preempt mode did not fail with EINVAL");
         }
     }
     errno = 0;
@@ -697,7 +697,7 @@ static int test_runtime_registered_init_failure_rolls_back(void) {
      * backend resources are released and later init/create calls remain valid.
      */
     errno = 0;
-    if (llam_runtime_init_ex(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 ||
+    if (llam_runtime_init_compat_ex(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 ||
         errno != EINVAL) {
         llam_runtime_shutdown();
         return test_fail("registered default-runtime init failure did not report EINVAL");
@@ -706,19 +706,19 @@ static int test_runtime_registered_init_failure_rolls_back(void) {
     memset(&good_opts, 0, sizeof(good_opts));
     good_opts.deterministic = 1U;
     good_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init_ex(&good_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&good_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("default runtime did not reinitialize after registered init failure");
     }
     llam_runtime_shutdown();
 
     errno = 0;
-    if (llam_runtime_create(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != -1 ||
+    if (llam_runtime_create_compat(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != -1 ||
         errno != EINVAL ||
         runtime != NULL) {
         llam_runtime_destroy(runtime);
         return test_fail("registered explicit-runtime init failure did not clear output/report EINVAL");
     }
-    if (llam_runtime_create(&good_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    if (llam_runtime_create_compat(&good_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("explicit runtime did not create after registered init failure");
     }
     llam_runtime_destroy(runtime);
@@ -739,8 +739,8 @@ static void nested_runtime_create_task(void *arg) {
     memset(&opts, 0, sizeof(opts));
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state->created_runtime) != 0) {
-        task_fail(&state->core, "llam_runtime_create from managed task failed", errno);
+    if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state->created_runtime) != 0) {
+        task_fail(&state->core, "llam_runtime_create_compat from managed task failed", errno);
         return;
     }
     if (state->created_runtime == NULL || state->created_runtime == llam_runtime_default()) {
@@ -755,7 +755,7 @@ static void nested_runtime_create_task(void *arg) {
      */
     self_after = llam_current_task();
     if (self_after == NULL || self_after != self_before) {
-        task_fail(&state->core, "llam_runtime_create corrupted managed task TLS", EINVAL);
+        task_fail(&state->core, "llam_runtime_create_compat corrupted managed task TLS", EINVAL);
         return;
     }
     llam_yield();
@@ -781,7 +781,7 @@ static int test_runtime_create_preserves_managed_tls(void) {
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("default runtime init for nested create test failed");
     }
     task = llam_spawn(nested_runtime_create_task, &state, NULL);
@@ -830,12 +830,12 @@ static int test_runtime_handle_api(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &runtime) != 0) {
-        return test_fail_errno("llam_runtime_create failed");
+    if (llam_runtime_create_compat(&runtime_opts, sizeof(runtime_opts), &runtime) != 0) {
+        return test_fail_errno("llam_runtime_create_compat failed");
     }
     if (runtime == NULL || runtime == llam_runtime_default()) {
         llam_runtime_destroy(runtime);
-        return test_fail("llam_runtime_create returned unexpected handle");
+        return test_fail("llam_runtime_create_compat returned unexpected handle");
     }
     errno = 0;
     if (llam_runtime_run_handle(NULL) != -1 || errno != EINVAL) {
@@ -871,12 +871,12 @@ static int test_runtime_handle_api(void) {
         llam_runtime_destroy(runtime);
         return test_fail_errno("llam_runtime_collect_stats_ex_rt(default) failed");
     }
-    if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &second_runtime) != 0 ||
+    if (llam_runtime_create_compat(&runtime_opts, sizeof(runtime_opts), &second_runtime) != 0 ||
         second_runtime == NULL ||
         second_runtime == runtime ||
         second_runtime == llam_runtime_default()) {
         llam_runtime_destroy(runtime);
-        return test_fail("second llam_runtime_create did not return an independent handle");
+        return test_fail("second llam_runtime_create_compat did not return an independent handle");
     }
     llam_runtime_destroy(second_runtime);
     second_runtime = NULL;
@@ -923,13 +923,13 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
     runtime_opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat failed");
     }
     errno = 0;
-    if (llam_runtime_init(&runtime_opts) != -1 || errno != EBUSY) {
+    if (llam_runtime_init_compat(&runtime_opts) != -1 || errno != EBUSY) {
         llam_runtime_shutdown();
-        return test_fail("second llam_runtime_init did not fail with EBUSY");
+        return test_fail("second llam_runtime_init_compat did not fail with EBUSY");
     }
     errno = 0;
     if (llam_spawn(NULL, NULL, NULL) != NULL || errno != EINVAL) {
@@ -1146,8 +1146,8 @@ static int test_request_stop_returns_success(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for request_stop failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for request_stop failed");
     }
     if (llam_spawn(request_stop_task, &state, NULL) == NULL) {
         llam_runtime_shutdown();
@@ -1180,8 +1180,8 @@ static int test_shutdown_from_task_requests_stop(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for task shutdown failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for task shutdown failed");
     }
     if (llam_spawn(shutdown_from_task_task, &state, NULL) == NULL) {
         llam_runtime_shutdown();
@@ -1220,8 +1220,8 @@ static int test_runtime_dump_while_blocking_job_active(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for concurrent dump failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for concurrent dump failed");
     }
     if (llam_spawn(dump_blocking_task, &state, NULL) == NULL) {
         llam_runtime_shutdown();
@@ -1307,8 +1307,8 @@ static int test_detach_contract(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for detach failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for detach failed");
     }
     before_run = llam_spawn(detached_task, &state, NULL);
     after_run = llam_spawn(detached_task, &state, NULL);
@@ -1476,8 +1476,8 @@ static int test_runtime_owner_mismatch_diagnostics(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for owner diagnostics failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for owner diagnostics failed");
     }
     state.channel = llam_channel_create(1U);
     state.mutex = llam_mutex_create();
@@ -1604,8 +1604,8 @@ static int test_ex_option_prefixes(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.forced_yield_every = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_init_ex(&runtime_opts, offsetof(llam_runtime_opts_t, experimental_flags)) != 0) {
-        return test_fail_errno("llam_runtime_init_ex prefix opts failed");
+    if (llam_runtime_init_compat_ex(&runtime_opts, offsetof(llam_runtime_opts_t, experimental_flags)) != 0) {
+        return test_fail_errno("llam_runtime_init_compat_ex prefix opts failed");
     }
 
     memset(&spawn_opts, 0, sizeof(spawn_opts));
@@ -1698,7 +1698,7 @@ static int test_waitable_timer_api(void) {
     atomic_init(&state.failures, 0U);
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         return test_fail_errno("timer runtime init failed");
     }
     if (llam_spawn(timer_api_task, &state, NULL) == NULL) {
@@ -1861,7 +1861,7 @@ static int test_blocking_wrappers_api(void) {
     atomic_init(&state.failures, 0U);
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         return test_fail_errno("blocking wrappers runtime init failed");
     }
     if (llam_spawn(blocking_wrapper_task, &state, NULL) == NULL) {
@@ -1933,7 +1933,7 @@ static int test_signal_wait_api(void) {
     }
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         (void)llam_signal_set_destroy(state.set);
         return test_fail_errno("signal runtime init failed");
     }
@@ -2004,8 +2004,8 @@ static int test_errno_is_task_local_across_switches(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for errno isolation failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for errno isolation failed");
     }
     if (llam_spawn(errno_isolation_task, &task_a, NULL) == NULL ||
         llam_spawn(errno_isolation_task, &task_b, NULL) == NULL) {
@@ -2048,8 +2048,8 @@ static int test_direct_yield_failure_keeps_task_running(void) {
     runtime_opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for direct yield failure failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for direct yield failure failed");
     }
     if (llam_spawn(direct_yield_no_work_task, &state, NULL) == NULL) {
         llam_runtime_shutdown();
@@ -2098,8 +2098,8 @@ static int test_aarch64_simd_is_preserved_across_switches(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for AArch64 SIMD preservation failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for AArch64 SIMD preservation failed");
     }
     if (llam_spawn(aarch64_simd_preservation_task, &task_a, NULL) == NULL ||
         llam_spawn(aarch64_simd_preservation_task, &task_b, NULL) == NULL) {
@@ -2149,8 +2149,8 @@ static int test_concurrent_join_contract(void) {
     runtime_opts.deterministic = 1U;
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return test_fail_errno("llam_runtime_init for concurrent join failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for concurrent join failed");
     }
     state.target = llam_spawn(double_join_target_task, &state, NULL);
     if (state.target == NULL ||
@@ -2221,7 +2221,7 @@ static void *init_race_thread(void *arg) {
     llam_runtime_t *runtime = NULL;
 
     init_race_barrier_wait(state->barrier);
-    if (llam_runtime_create(NULL, 0U, &runtime) == 0) {
+    if (llam_runtime_create_compat(NULL, 0U, &runtime) == 0) {
         /*
          * Explicit runtime handles are independent. Destroy the handle inside
          * the creating thread so this race test does not leave heap runtimes in
@@ -2335,7 +2335,7 @@ static int collect_runtime_env_snapshot(runtime_env_snapshot_t *snapshot) {
         return test_fail_errno("runtime env snapshot opts init failed");
     }
     opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("runtime env snapshot init failed");
     }
     memset(&stats, 0, sizeof(stats));
@@ -2448,7 +2448,7 @@ static int run_profile_yield_stats(uint32_t profile, llam_runtime_stats_t *stats
     opts.deterministic = 1U;
     opts.profile = profile;
 
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("runtime init for profile yield stats failed");
     }
     task = llam_spawn(detached_task, &state, NULL);
@@ -2547,7 +2547,7 @@ static int test_direct_yield_timer_policy_is_bounded(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
 
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         rc = test_fail_errno("timer direct-yield runtime init failed");
         goto cleanup_env;
     }
@@ -2677,7 +2677,7 @@ static int test_autotune_handoff_budget_actuates(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
 
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         rc = test_fail_errno("autotune handoff runtime init failed");
         goto cleanup_env;
     }
@@ -3046,7 +3046,7 @@ static int test_autotune_handoff_wake_guardrail_rolls_back(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
 
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         rc = test_fail_errno("autotune handoff wake guardrail runtime init failed");
         goto cleanup_env;
     }
@@ -3413,7 +3413,7 @@ static void *init_shutdown_race_init_thread(void *arg) {
     opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     init_race_barrier_wait(state->barrier);
     errno = 0;
-    state->init_rc = llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+    state->init_rc = llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
     state->init_errno = errno;
     atomic_store_explicit(&state->init_done, 1U, memory_order_release);
     return NULL;
@@ -3670,12 +3670,12 @@ static int test_concurrent_init_stats_contract(void) {
             return test_fail_errno("pthread_create for init/stats race failed");
         }
         atomic_store_explicit(&state.start, 1U, memory_order_release);
-        if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             atomic_store_explicit(&state.stop, 1U, memory_order_release);
             pthread_join(stats_thread, NULL);
             test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
             test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
-            return test_fail_errno("llam_runtime_init for init/stats race failed");
+            return test_fail_errno("llam_runtime_init_compat for init/stats race failed");
         }
         atomic_store_explicit(&state.stop, 1U, memory_order_release);
         pthread_join(stats_thread, NULL);
@@ -3733,12 +3733,12 @@ static int test_concurrent_init_dump_contract(void) {
             return test_fail_errno("pthread_create for init/dump race failed");
         }
         atomic_store_explicit(&state.start, 1U, memory_order_release);
-        if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             atomic_store_explicit(&state.stop, 1U, memory_order_release);
             pthread_join(dump_thread, NULL);
             test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
             test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
-            return test_fail_errno("llam_runtime_init for init/dump race failed");
+            return test_fail_errno("llam_runtime_init_compat for init/dump race failed");
         }
         atomic_store_explicit(&state.stop, 1U, memory_order_release);
         pthread_join(dump_thread, NULL);
@@ -3796,12 +3796,12 @@ static int test_concurrent_init_sleep_contract(void) {
             return test_fail_errno("pthread_create for init/sleep race failed");
         }
         atomic_store_explicit(&state.start, 1U, memory_order_release);
-        if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        if (llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             atomic_store_explicit(&state.stop, 1U, memory_order_release);
             pthread_join(sleep_thread, NULL);
             test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
             test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
-            return test_fail_errno("llam_runtime_init for init/sleep race failed");
+            return test_fail_errno("llam_runtime_init_compat for init/sleep race failed");
         }
         atomic_store_explicit(&state.stop, 1U, memory_order_release);
         pthread_join(sleep_thread, NULL);
@@ -3848,9 +3848,9 @@ static int test_concurrent_trace_ring_contract(void) {
     }
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init(&opts) != 0) {
+    if (llam_runtime_init_compat(&opts) != 0) {
         test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
-        return test_fail_errno("llam_runtime_init for trace race failed");
+        return test_fail_errno("llam_runtime_init_compat for trace race failed");
     }
     state.shard = &g_llam_runtime.shards[0];
     for (started = 0U; started < TRACE_RACE_THREADS; ++started) {
@@ -3905,8 +3905,8 @@ static int test_concurrent_run_contract(void) {
     memset(&opts, 0, sizeof(opts));
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init(&opts) != 0) {
-        return test_fail_errno("llam_runtime_init for concurrent run failed");
+    if (llam_runtime_init_compat(&opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for concurrent run failed");
     }
     for (unsigned round = 0U; round < 128U; ++round) {
         init_race_barrier_t barrier = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0U, 0U};
@@ -3998,8 +3998,8 @@ static int test_concurrent_spawn_contract(void) {
     atomic_init(&state.failures, 0U);
     opts.deterministic = 0U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_init(&opts) != 0) {
-        return test_fail_errno("llam_runtime_init for concurrent spawn failed");
+    if (llam_runtime_init_compat(&opts) != 0) {
+        return test_fail_errno("llam_runtime_init_compat for concurrent spawn failed");
     }
     for (started = 0U; started < SPAWN_RACE_THREADS; ++started) {
         int rc = pthread_create(&threads[started], NULL, spawn_race_thread, &state);
@@ -4168,7 +4168,7 @@ static int test_task_group_unique_spawn_reservations(void) {
     memset(calls, 0, sizeof(calls));
     atomic_init(&ready, 0U);
     atomic_init(&start, 0U);
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return test_fail_errno("group promise runtime init failed");
     }
     group = llam_task_group_create();
@@ -4372,7 +4372,7 @@ static int test_timer_wait_ownership_contract(void) {
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return test_fail_errno("timer ownership runtime init failed");
     }
     state.channel = llam_channel_create(1U);
@@ -4901,7 +4901,7 @@ static int test_wait_tracking_caller_rolls_back_saturation(void) {
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return test_fail_errno("wait saturation caller runtime init failed");
     }
     state.channel = llam_channel_create(1U);
@@ -5046,7 +5046,7 @@ static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
     atomic_init(&state.raw_waiter, NULL);
     atomic_init(&state.helper_failed, 0U);
     atomic_init(&state.fallback_stop, 0U);
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return test_fail_errno("deferred fatal runtime init failed");
     }
     rt = llam_runtime_default_storage();
@@ -5177,7 +5177,7 @@ static int test_deferred_fatal_rewakes_prestopped_runtime(void) {
     atomic_init(&state.raw_waiter, NULL);
     atomic_init(&state.helper_failed, 0U);
     atomic_init(&state.fallback_wake, 0U);
-    if (llam_runtime_init(NULL) != 0) {
+    if (llam_runtime_init_compat(NULL) != 0) {
         return test_fail_errno("pre-stopped deferred fatal runtime init failed");
     }
     rt = llam_runtime_default_storage();

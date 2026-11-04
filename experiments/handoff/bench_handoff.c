@@ -279,7 +279,7 @@ int main(int argc, char **argv) {
     options.deterministic = 1U; /* Isolate same-P wake/handoff; native races are a separate test. */
     options.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     options.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0) {
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) {
         goto cleanup;
     }
     root = llam_runtime_spawn_ex(runtime, controller, &state, NULL, 0U);

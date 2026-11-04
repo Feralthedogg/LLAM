@@ -110,9 +110,9 @@ static int test_partial_runtime_opts_prefix_defaults(void) {
      * Keep the initialized default instead of interpreting the low byte as a
      * caller-provided value.
      */
-    if (llam_runtime_init_ex((const llam_runtime_opts_t *)(const void *)partial_opts,
+    if (llam_runtime_init_compat_ex((const llam_runtime_opts_t *)(const void *)partial_opts,
                              sizeof(partial_opts)) != 0) {
-        return fail_errno("llam_runtime_init_ex partial-prefix call failed");
+        return fail_errno("llam_runtime_init_compat_ex partial-prefix call failed");
     }
     if (g_llam_runtime.deterministic != 0U) {
         llam_runtime_shutdown();
@@ -137,8 +137,8 @@ static int test_partial_spawn_opts_prefix_defaults(void) {
     }
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     atomic_store_explicit(&g_compat_task_ran, 0U, memory_order_relaxed);
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return fail_errno("llam_runtime_init partial-prefix setup failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return fail_errno("llam_runtime_init_compat partial-prefix setup failed");
     }
 
     task = llam_spawn_ex(compat_task,
@@ -182,8 +182,8 @@ static int test_partial_group_spawn_opts_prefix_defaults(void) {
     }
     runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     atomic_store_explicit(&g_compat_task_ran, 0U, memory_order_relaxed);
-    if (llam_runtime_init(&runtime_opts) != 0) {
-        return fail_errno("llam_runtime_init group partial-prefix setup failed");
+    if (llam_runtime_init_compat(&runtime_opts) != 0) {
+        return fail_errno("llam_runtime_init_compat group partial-prefix setup failed");
     }
 
     group = llam_task_group_create();
@@ -243,8 +243,8 @@ static int test_old_binding_runtime_roundtrip(void) {
     llam_task_t *task;
 
     atomic_store_explicit(&g_compat_task_ran, 0U, memory_order_relaxed);
-    if (llam_runtime_init_ex((const llam_runtime_opts_t *)(const void *)&runtime_opts, sizeof(runtime_opts)) != 0) {
-        return fail_errno("llam_runtime_init_ex old-prefix call failed");
+    if (llam_runtime_init_compat_ex((const llam_runtime_opts_t *)(const void *)&runtime_opts, sizeof(runtime_opts)) != 0) {
+        return fail_errno("llam_runtime_init_compat_ex old-prefix call failed");
     }
 
     task = llam_spawn_ex(compat_task,

@@ -47,7 +47,7 @@ static int create_runtime(uint64_t experimental_flags, llam_runtime_t **out) {
     }
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     opts.experimental_flags = experimental_flags;
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 static int test_io_request_uses_processor_route_and_allocator(uint64_t flags) {
@@ -316,7 +316,7 @@ static int test_partial_init_drains_p_stack_caches(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     llam_runtime_test_fail_after_stack_cache_prewarm();
     errno = 0;
-    rc = llam_runtime_create(&opts, sizeof(opts), &failed_runtime);
+    rc = llam_runtime_create_compat(&opts, sizeof(opts), &failed_runtime);
     if (rc == 0 || failed_runtime != NULL || errno != ENOMEM) {
         llam_runtime_destroy(failed_runtime);
         return fail("test hook did not fail after processor stack-cache prewarm");

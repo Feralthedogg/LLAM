@@ -124,7 +124,7 @@ int main(void) {
     }
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_AUTO;
-    check(llam_runtime_create(&options, sizeof(options), &runtime) == 0 && runtime != NULL,
+    check(llam_runtime_create_compat(&options, sizeof(options), &runtime) == 0 && runtime != NULL,
           "runtime creation failed");
     if (runtime == NULL) {
         return 1;

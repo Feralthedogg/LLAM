@@ -173,7 +173,7 @@ static uint64_t engine_run_once(uint64_t *submissions_out,
     }
     options.deterministic = 1U;
     options.experimental_flags = 0U;
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         engine_fail("runtime init", (unsigned)errno);
     }
     state.runtime = llam_runtime_default_storage();

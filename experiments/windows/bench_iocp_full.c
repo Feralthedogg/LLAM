@@ -206,7 +206,7 @@ static uint64_t full_run_once(llam_runtime_stats_t *stats_out, bool dump,
     }
     options.deterministic = 1U;
     options.experimental_flags = 0U;
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         full_fail("runtime init", errno);
     }
     server_task = llam_spawn(minimal ? full_minimal_server_task : full_server_task,

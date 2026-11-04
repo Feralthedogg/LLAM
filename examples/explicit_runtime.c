@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
     options.worker_count = 1U;
     options.blocking_worker_count = 1U;
     options.max_tasks = 16U;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0) goto cleanup;
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) goto cleanup;
     request.channel = llam_runtime_channel_create(runtime, 1U);
     external = llam_runtime_cancel_token_create(runtime);
     group = llam_runtime_task_group_create_ex(runtime, &group_options, sizeof(group_options));

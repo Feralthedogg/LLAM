@@ -561,7 +561,7 @@ static int create_runtime_with_preempt(llam_runtime_t **out,
     if (dynamic_workers) {
         opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
     }
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 static int create_runtime(llam_runtime_t **out, bool deterministic, bool dynamic_workers) {
@@ -791,7 +791,7 @@ static int create_release_fast_runtime(llam_runtime_t **out) {
     opts.preempt_mode = LLAM_PREEMPT_STRICT;
     opts.preempt_quantum_ns = 1U;
     opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 static int wait_for_lease_state(llam_runtime_t *runtime,

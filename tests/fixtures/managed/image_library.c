@@ -84,8 +84,7 @@ void managed_image_keepalive(void *argument) {
 static _Thread_local volatile u64 managed_image_thread_sum;
 static _Thread_local unsigned managed_image_thread_cookie;
 
-void managed_image_affine_task(void *argument) {
-    llam_managed_cpu_workload_t *work = argument;
+static void managed_image_affine_work(llam_managed_cpu_workload_t *work, unsigned await_capture) {
     if (managed_image_thread_cookie != 0U) {
         work->result = ~(u64)0;
         __atomic_store_n(&work->finished, 1U, __ATOMIC_RELEASE);
@@ -96,8 +95,21 @@ void managed_image_affine_task(void *argument) {
     __atomic_store_n(&work->started, 1U, __ATOMIC_RELEASE);
     for (u64 i = 0U; i < work->iterations; ++i)
         managed_image_thread_sum += managed_cpu_linear(work->seed + i);
+    if (await_capture) {
+        u64 value = work->seed;
+        while (!__atomic_load_n(&work->capture_release, __ATOMIC_ACQUIRE))
+            value = managed_cpu_linear(value);
+    }
     work->result = managed_image_thread_sum;
     __atomic_store_n(&work->finished, 1U, __ATOMIC_RELEASE);
+}
+
+void managed_image_affine_task(void *argument) {
+    managed_image_affine_work(argument, 0U);
+}
+
+void managed_image_affine_refill_task(void *argument) {
+    managed_image_affine_work(argument, 1U);
 }
 
 /* Scalar declarations deliberately mirror the public ABI. Compiler contract

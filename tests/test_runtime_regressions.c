@@ -64,7 +64,7 @@ static bool mapping_present(void *mapping) {
 #if LLAM_PLATFORM_DARWIN
     mach_vm_address_t address = (mach_vm_address_t)(uintptr_t)mapping;
     mach_vm_size_t size = 0U;
-    vm_region_basic_info_data_64_t info;
+    vm_region_basic_info_data_64_t info = {0};
     mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
     mach_port_t object = MACH_PORT_NULL;
     kern_return_t rc = mach_vm_region(mach_task_self(), &address, &size,
@@ -99,7 +99,7 @@ static int shutdown_unlisted_pending(void) {
 #endif
 
     CHECK(runtime_opts(&opts) == 0);
-    CHECK(llam_runtime_init_ex(&opts, sizeof(opts)) == 0);
+    CHECK(llam_runtime_init_compat_ex(&opts, sizeof(opts)) == 0);
     g_llam_runtime.task_list_eager = 0U;
     token = llam_cancel_token_create();
     CHECK(token != NULL);
@@ -152,7 +152,7 @@ static int shutdown_unlisted_completed(void) {
     child_state_t state = {0};
 
     CHECK(runtime_opts(&opts) == 0);
-    CHECK(llam_runtime_init_ex(&opts, sizeof(opts)) == 0);
+    CHECK(llam_runtime_init_compat_ex(&opts, sizeof(opts)) == 0);
     g_llam_runtime.task_list_eager = 0U;
     state.token = llam_cancel_token_create();
     CHECK(state.token != NULL);
@@ -190,7 +190,7 @@ static int explicit_timer_host_wait(void) {
     uint64_t ticks;
 
     CHECK(runtime_opts(&opts) == 0);
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &rt) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &rt) == 0);
     task = llam_runtime_spawn_ex(rt, create_timer, &state, NULL, 0U);
     CHECK(task != NULL && llam_runtime_run_handle(rt) == 0 && llam_join(task) == 0);
     CHECK(state.error == 0 && state.timer != NULL);
@@ -224,7 +224,7 @@ static void create_during_destroy_task(void *arg) {
         llam_pause_cpu();
     }
     if (runtime_opts(&opts) != 0 ||
-        llam_runtime_create(&opts, sizeof(opts), &state->created) != 0) {
+        llam_runtime_create_compat(&opts, sizeof(opts), &state->created) != 0) {
         state->error = errno;
     }
 }
@@ -241,7 +241,7 @@ static int create_during_destroy(void) {
     pthread_t runner;
 
     CHECK(runtime_opts(&opts) == 0);
-    CHECK(llam_runtime_create(&opts, sizeof(opts), &state.rt) == 0);
+    CHECK(llam_runtime_create_compat(&opts, sizeof(opts), &state.rt) == 0);
     CHECK(llam_runtime_spawn_ex(state.rt, create_during_destroy_task, &state, NULL, 0U) != NULL);
     CHECK(pthread_create(&runner, NULL, run_during_destroy, &state) == 0);
     while (!atomic_load_explicit(&state.started, memory_order_acquire)) {
@@ -386,7 +386,7 @@ static int signal_wait_cancellation(void) {
     llam_task_t *waiter, *canceler;
 
     CHECK(llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &state.set) == 0);
-    CHECK(runtime_opts(&opts) == 0 && llam_runtime_init_ex(&opts, sizeof(opts)) == 0);
+    CHECK(runtime_opts(&opts) == 0 && llam_runtime_init_compat_ex(&opts, sizeof(opts)) == 0);
     state.token = llam_cancel_token_create();
     CHECK(state.token != NULL);
     CHECK(llam_spawn_opts_init(&spawn_opts, sizeof(spawn_opts)) == 0);
@@ -502,7 +502,7 @@ static int windows_file_io(void) {
             CHECK(ReadFile(handle, &byte, 1U, &transferred, NULL) && transferred == 1U && byte == 'd');
             CHECK(SetFilePointerEx(handle, position, NULL, FILE_BEGIN));
         }
-        CHECK(runtime_opts(&opts) == 0 && llam_runtime_init_ex(&opts, sizeof(opts)) == 0);
+        CHECK(runtime_opts(&opts) == 0 && llam_runtime_init_compat_ex(&opts, sizeof(opts)) == 0);
         state.handle = handle;
         state.result = -1;
         task = llam_spawn(positional_file_task, &state, NULL);

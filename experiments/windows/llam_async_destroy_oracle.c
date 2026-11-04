@@ -287,7 +287,7 @@ int main(void) {
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_STRICT;
     options.preempt_quantum_ns = 1000000U;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &state.runtime) != 0 ||
         llam_windows_async_lifetime_register_safe_range(
             state.runtime, (uintptr_t)win_llam_async_leaf_begin,

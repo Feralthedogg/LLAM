@@ -36,15 +36,30 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Each page shows its last change, which needs the history
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: pip
-          cache-dependency-path: docs/requirements.txt
+          cache-dependency-path: website/requirements.txt
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/package-lock.json
 
       - name: Install documentation dependencies
-        run: python -m pip install -r docs/requirements.txt
+        run: python -m pip install -r website/requirements.txt
+
+      - name: Build site bundles and fonts
+        working-directory: website
+        run: |
+          npm ci --ignore-scripts
+          npm run build
 
       - name: Build documentation
         run: mkdocs build --strict
@@ -61,7 +76,9 @@ jobs:
           import sys
 
           root = pathlib.Path(".")
-          api_doc = (root / "docs/reference/api.md").read_text(encoding="utf-8")
+          read_pages = lambda folder: "\n".join(path.read_text(encoding="utf-8") for path in sorted((root / folder).glob("*.md")))
+          api_doc = read_pages("docs/reference/api")
+          options_doc = read_pages("docs/reference/options")
           headers = "\n".join(
               (root / path).read_text(encoding="utf-8")
               for path in ("include/llam/runtime.h", "include/llam/io.h")
@@ -78,7 +95,7 @@ jobs:
               "LLAM_FILE_STAT_CURRENT_SIZE",
               "LLAM_RUNTIME_STATS_CURRENT_SIZE",
           ]
-          missing_macros = [name for name in required_macros if name not in api_doc and name not in (root / "docs/reference/options.md").read_text(encoding="utf-8")]
+          missing_macros = [name for name in required_macros if name not in api_doc and name not in options_doc]
           missing = missing_symbols + missing_macros
           if missing:
               print("Public API docs are missing:")

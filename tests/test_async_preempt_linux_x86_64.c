@@ -209,7 +209,7 @@ static int async_test_preparation_failures(void) {
     }
     opts.deterministic = 1U;
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
-    if (llam_runtime_create(&opts, sizeof(opts), &runtime) != 0 ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &runtime) != 0 ||
         llam_async_preempt_register_safe_range(runtime,
             (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) != 0) {
         goto cleanup;
@@ -426,7 +426,7 @@ static int async_test_transition(bool stop_before_ready) {
     opts.deterministic = 1U;
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&opts, sizeof(opts), &state.base.runtime) != 0 ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &state.base.runtime) != 0 ||
         llam_async_preempt_register_safe_range(state.base.runtime,
             (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) != 0 ||
         llam_async_preempt_enable_runtime(state.base.runtime) != 0) {
@@ -524,7 +524,7 @@ static int async_test_unsafe_pc_defers(void) {
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_poll_period = 1U;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&opts, sizeof(opts), &state.runtime) != 0 ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &state.runtime) != 0 ||
         state.runtime == NULL) {
         return 1;
     }
@@ -734,7 +734,7 @@ static int async_test_multiple_capsules(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&opts, sizeof(opts), &runtime) != 0 ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &runtime) != 0 ||
         llam_async_preempt_register_safe_range(runtime,
             (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) != 0 ||
         llam_async_preempt_register_safe_range(runtime,
@@ -867,9 +867,9 @@ static int async_test_signal_namespace(void) {
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
-    if (llam_runtime_create(&opts, sizeof(opts), &waiter_runtime) != 0 ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &waiter_runtime) != 0 ||
         async_namespace_run_waiter(waiter_runtime, &call) != 0 || call.set == NULL ||
-        llam_runtime_create(&opts, sizeof(opts), &async_runtime) != 0 ||
+        llam_runtime_create_compat(&opts, sizeof(opts), &async_runtime) != 0 ||
         llam_async_preempt_register_safe_range(async_runtime,
             (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) != 0) {
         goto cleanup;
@@ -983,7 +983,7 @@ static int async_signal_fault_child(unsigned fault) {
     if (llam_runtime_opts_init(&options, sizeof(options)) != 0) return 1;
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0 ||
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0 ||
         llam_async_preempt_register_safe_range(runtime,
             (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) != 0) goto cleanup;
     async_signal_fault = fault;
@@ -1100,7 +1100,7 @@ int main(int argc, char **argv) {
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_poll_period = 1U;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&opts, sizeof(opts), &state.runtime) != 0 ||
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &state.runtime) != 0 ||
         state.runtime == NULL) {
         fprintf(stderr, "test_async_preempt_linux_x86_64: runtime create failed: %d\n", errno);
         goto cleanup;

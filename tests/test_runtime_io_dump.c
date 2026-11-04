@@ -249,7 +249,7 @@ int main(void) {
     }
 
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0 ||
-        llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        llam_runtime_init_compat_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         (void)close(state.read_fd);
         (void)close(state.write_fd);
         return fail_now("runtime init failed");

@@ -56,3 +56,21 @@ by these algorithm papers:
 
 These citations identify algorithmic references. LLAM does not vendor source
 code from either paper.
+
+## Documentation site
+
+The documentation site uses the material below. None of it is part of the
+runtime, the public ABI, or release packages. `website/build.mjs` writes the
+bundles and fonts to `website/theme/assets/vendor/`, which is not committed, and
+publishes each license at `assets/vendor/licenses/` on the site.
+
+| Material | Use | License |
+| --- | --- | --- |
+| [Stageshow](https://benji.org/stageshow) kit, Benji Taylor | Home page scheduler demo. Vendored in `third_party/stageshow/`. | MIT |
+| [Skullet](https://www.npmjs.com/package/skullet), Lochie Axon | Loading skeletons | MIT |
+| [GlassRender](https://github.com/Feralthedogg/GlassRender), Feralthedogg | Home page glass tiles | MIT |
+| [React and React DOM](https://react.dev), Meta Platforms, Inc. | Runs the demo | MIT |
+| [Inter](https://rsms.me/inter/), The Inter Project Authors | Site text | SIL OFL 1.1 |
+| [JetBrains Mono](https://www.jetbrains.com/lp/mono/), The JetBrains Mono Project Authors | Site code | SIL OFL 1.1 |
+| [Lucide](https://lucide.dev), Lucide Contributors | Icon paths in `website/theme/partials/icons.html` and `website/hooks.py` | ISC |
+| [Mermaid](https://mermaid.js.org), Knut Sveidqvist and contributors | Draws `website/diagrams/*.svg` when a diagram changes. Not shipped. | MIT |

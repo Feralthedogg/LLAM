@@ -1,0 +1,448 @@
+/*
+ * Copyright 2026 Feralthedogg
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * See LICENSE.
+ */
+
+.lp {
+  & .ss-stage {
+    --lp-travel: cubic-bezier(0.45, 0, 0.1, 1);
+    --ss-surface: #0f0f14;
+    --ss-raised: #1c1c24;
+    --ss-text: #a6a6b3;
+    --ss-text-strong: #f2f2f7;
+    --ss-text-faint: #83838f;
+    --lp-lit: #4d5bff;
+    --lp-lit-text: #aeb6ff;
+    --lp-rule: rgb(255 255 255 / 0.08);
+    overflow: hidden;
+    background: var(--ss-surface);
+    color: var(--ss-text-strong);
+    font: 13px/1.4 var(--ss-font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .lp-panel {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: 560px minmax(0, 1fr);
+  }
+
+  /* One header height across both panes, so their rules line up */
+  .lp-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    height: 44px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--lp-rule);
+  }
+
+  .lp-bar__title {
+    color: var(--ss-text);
+    font-size: 13px;
+  }
+
+  /* The code's link to the trace: the same chip, smaller */
+  .lp-tag {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 6px;
+    background: var(--lp-lit);
+    color: #fff;
+    font: 500 11.5px/1 var(--ss-mono);
+  }
+
+  .lp-code {
+    border-right: 1px solid var(--lp-rule);
+    min-width: 0;
+  }
+
+  .lp-lines {
+    position: relative;
+    padding: 18px 0 0;
+  }
+
+  .lp-hl {
+    position: absolute;
+    top: 18px;
+    left: 8px;
+    right: 8px;
+    height: var(--lh);
+    border-radius: 6px;
+    background: rgb(255 255 255 / 0.06);
+    transition: transform 0.26s cubic-bezier(0.25, 0.8, 0.25, 1);
+  }
+
+  .lp-line {
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: var(--lh);
+    white-space: pre;
+    font: 13.5px/1 var(--ss-mono);
+    /* <= stays two characters: a reader copies this as C, not as math */
+    font-variant-ligatures: none;
+    color: #d6d6e0;
+  }
+
+  .lp-gutter {
+    flex: none;
+    width: 44px;
+    padding-right: 14px;
+    text-align: right;
+    color: #5f5f6c;
+    font-size: 12px;
+  }
+
+  .lp-line code {
+    font: inherit;
+  }
+
+  .lp-key { color: #d99a6c; }
+  .lp-type { color: #8fa2d9; }
+  .lp-num { color: #8fb6e0; }
+  .lp-fn { color: #ffffff; }
+
+  /* The status sits on the line that caused it and changes on one pill */
+  .lp-pill {
+    position: absolute;
+    top: 50%;
+    right: 14px;
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 6px;
+    background: var(--ss-raised);
+    color: var(--ss-text);
+    font: 500 11.5px/1 var(--ss-mono);
+    opacity: 0;
+    transform: translateY(calc(-50% - 2px));
+    transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.25, 0.8, 0.25, 1), color 0.2s ease;
+  }
+
+  .lp-pill[data-on] {
+    opacity: 1;
+    transform: translateY(-50%);
+  }
+
+  .lp-pill[data-tone='done'] {
+    color: var(--lp-lit-text);
+  }
+
+  .lp-pill__row {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    /* An even box, both states the same footprint, so the spinner never lands
+       on a half pixel */
+    width: 58px;
+    height: 12px;
+  }
+
+  .lp-trace {
+    position: relative;
+    min-width: 0;
+  }
+
+  .lp-now {
+    /* Sits over the now line: slots 92 + inset 20 from the right edge */
+    margin-right: 76px;
+    color: var(--ss-text-faint);
+    font-size: 12px;
+  }
+
+  .lp-lanes {
+    position: relative;
+    margin: 20px 20px 0;
+  }
+
+  .lp-name {
+    position: absolute;
+    left: 0;
+    display: flex;
+    align-items: center;
+    width: 72px;
+    color: var(--ss-text);
+    font-size: 12.5px;
+  }
+
+  .lp-name--mono {
+    font-family: var(--ss-mono);
+    font-size: 12px;
+  }
+
+  /* The window on the trace: its right edge is now, and the past fades out */
+  .lp-view {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    left: 76px;
+    right: 92px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 56px);
+    mask-image: linear-gradient(90deg, transparent 0, #000 56px);
+  }
+
+  .lp-track {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 100%;
+    width: 0;
+    will-change: transform;
+  }
+
+  .lp-track[data-run] {
+    transition: transform 14000ms linear;
+  }
+
+  .lp-lane {
+    position: absolute;
+    left: 0;
+    width: 0;
+  }
+
+  .lp-seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 5px;
+    background: #23232d;
+  }
+
+  .lp-seg[data-tone='1'] { background: #1e1e27; }
+  .lp-seg[data-tone='2'] { background: #272732; }
+  .lp-seg[data-tone='3'] { background: #2d2d39; }
+
+  .lp-seg[data-lit] {
+    background: var(--lp-lit);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+  }
+
+  /* The same task, waiting: its color held, not filled */
+  .lp-seg[data-wait] {
+    background:
+      repeating-linear-gradient(135deg, rgb(120 134 255 / 0.5) 0 2px, transparent 2px 7px),
+      rgb(77 91 255 / 0.12);
+    box-shadow: inset 0 0 0 1px rgb(120 134 255 / 0.55);
+  }
+
+  .lp-hop {
+    position: absolute;
+    width: 2px;
+    background: repeating-linear-gradient(180deg, #8c97ff 0 3px, transparent 3px 6px);
+  }
+
+  .lp-nowline {
+    position: absolute;
+    top: -8px;
+    bottom: -8px;
+    right: 92px;
+    width: 1px;
+    background: rgb(255 255 255 / 0.28);
+  }
+
+  .lp-slots {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 80px;
+  }
+
+  .lp-chip {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+    border-radius: 8px;
+    font: 500 12.5px/1 var(--ss-mono);
+  }
+
+  .lp-chip--lit {
+    z-index: 1;
+    background: var(--lp-lit);
+    color: #fff;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18), 0 6px 16px -6px rgb(0 0 0 / 0.7);
+    transition: transform 0.7s var(--lp-travel);
+    will-change: transform;
+  }
+
+  /* Another task taking the worker: arrives as conn 1 leaves */
+  .lp-chip--idle {
+    background: var(--ss-raised);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .lp-chip--idle[data-on] {
+    opacity: 1;
+  }
+
+  .lp-chip--idle i {
+    width: 40px;
+    height: 6px;
+    border-radius: 3px;
+    background: rgb(255 255 255 / 0.13);
+  }
+
+  /* Why conn 1 wakes */
+  .lp-note {
+    position: absolute;
+    right: 104px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    border-radius: 6px;
+    background: var(--ss-surface);
+    color: var(--ss-text-strong);
+    font: 500 11.5px/1 var(--ss-mono);
+    opacity: 0;
+    transition: opacity 0.22s ease;
+  }
+
+  .lp-note[data-on] {
+    opacity: 1;
+  }
+
+  .lp-foot {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+    padding: 0 20px;
+    border-top: 1px solid var(--lp-rule);
+    color: var(--ss-text);
+    font-size: 13px;
+  }
+
+  .lp-foot b {
+    color: var(--ss-text-strong);
+    font: 600 24px/1 var(--ss-font);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The phone column: the loop on top, the trace below */
+  .ss-stage[data-layout='compact'] {
+    .lp-panel {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    .lp-bar {
+      height: 38px;
+      padding: 0 12px;
+    }
+
+    .lp-code {
+      border-right: 0;
+      border-bottom: 1px solid var(--lp-rule);
+    }
+
+    .lp-lines {
+      padding: 8px 0 8px;
+    }
+
+    /* Edge to edge: an inset fill would crowd the longest line */
+    .lp-hl {
+      top: 8px;
+      left: 0;
+      right: 0;
+      border-radius: 0;
+    }
+
+    .lp-line {
+      padding-left: 12px;
+      font-size: 11.5px;
+    }
+
+    .lp-pill {
+      right: 8px;
+      height: 18px;
+      padding: 0 6px;
+      font-size: 10.5px;
+    }
+
+    .lp-now {
+      margin-right: 50px;
+    }
+
+    .lp-lanes {
+      margin: 16px 12px 0;
+    }
+
+    .lp-name {
+      width: 56px;
+      font-size: 11px;
+    }
+
+    .lp-name--mono {
+      font-size: 10.5px;
+    }
+
+    .lp-view {
+      left: 58px;
+      right: 66px;
+      -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px);
+      mask-image: linear-gradient(90deg, transparent 0, #000 28px);
+    }
+
+    .lp-nowline {
+      right: 66px;
+    }
+
+    .lp-slots {
+      width: 58px;
+    }
+
+    .lp-chip {
+      width: 58px;
+      font-size: 11px;
+      border-radius: 6px;
+    }
+
+    .lp-chip--idle i {
+      width: 28px;
+    }
+
+    .lp-note {
+      right: 74px;
+      font-size: 10.5px;
+    }
+
+    .lp-foot {
+      height: 48px;
+      padding: 0 12px;
+      font-size: 12px;
+    }
+
+    .lp-foot b {
+      font-size: 20px;
+    }
+  }
+}

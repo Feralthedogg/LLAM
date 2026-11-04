@@ -415,7 +415,7 @@ static void r8_run(HMODULE module,
     options.deterministic = 1U;
     options.preempt_mode = adversary ? LLAM_PREEMPT_STRICT : LLAM_PREEMPT_AUTO;
     options.preempt_quantum_ns = 1000000U;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &runtime) != 0) {
         r8_fail("runtime create");
     }
@@ -587,7 +587,7 @@ static void r8_precommit_failure(HMODULE module,
     }
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_AUTO;
-    if (llam_runtime_create(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+    if (llam_runtime_create_compat(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE,
                             &runtime) != 0) {
         r8_fail("failure-control runtime create");
     }

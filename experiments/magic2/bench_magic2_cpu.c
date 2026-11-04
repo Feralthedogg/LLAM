@@ -370,7 +370,7 @@ int main(int argc, char **argv) {
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
     options.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    if (llam_runtime_create(&options, sizeof(options), &state.runtime) != 0) {
+    if (llam_runtime_create_compat(&options, sizeof(options), &state.runtime) != 0) {
         goto done;
     }
     root = llam_runtime_spawn_ex(state.runtime, controller, &state, NULL, 0U);

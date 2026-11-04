@@ -20,40 +20,62 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "llam/managed.h"
+
+static void unqualified_task(void *argument) {
+    (void)argument;
+}
+
+static int fail(int line) {
+    fprintf(stderr, "test_default_policy_internal:%d: errno=%d (%s)\n", line, errno, strerror(errno));
+    return 1;
+}
+
 int main(void) {
     llam_runtime_opts_t options;
-    int failures = 0;
+    llam_preempt_opts_t policy;
+    llam_runtime_t *runtime = NULL;
+    llam_preempt_info_t info;
 
-    memset(&options, 0xa5, sizeof(options));
-    if (llam_runtime_opts_init(&options, sizeof(options)) != 0) {
-        fprintf(stderr, "test_default_policy_internal: default options init failed\n");
-        return 1;
-    }
-    if (options.preempt_mode != LLAM_PREEMPT_AUTO) {
-        fprintf(stderr,
-                "test_default_policy_internal: default preempt mode changed to %u\n",
-                options.preempt_mode);
-        failures += 1;
-    }
-    if (llam_preempt_effective_policy_for(options.preempt_mode,
-                                          LLAM_PREEMPT_BACKEND_COOPERATIVE,
-                                          false,
-                                          0U) != LLAM_PREEMPT_EFFECTIVE_COOPERATIVE) {
-        fprintf(stderr,
-                "test_default_policy_internal: AUTO did not preserve cooperative fallback\n");
-        failures += 1;
-    }
-    if (llam_preempt_effective_policy_for(LLAM_PREEMPT_COOPERATIVE,
-                                          LLAM_PREEMPT_BACKEND_ASYNC_CONTEXT,
-                                          true,
-                                          4U) != LLAM_PREEMPT_EFFECTIVE_COOPERATIVE) {
-        fprintf(stderr,
-                "test_default_policy_internal: COOPERATIVE was not permanent\n");
-        failures += 1;
-    }
-    if (failures != 0) {
-        return 1;
-    }
-    puts("test_default_policy_internal: AUTO default and permanent cooperative mode passed");
+    if (llam_runtime_opts_init(&options, sizeof(options)) != 0 ||
+        llam_preempt_opts_init(&policy, sizeof(policy)) != 0 ||
+        options.preempt_mode != LLAM_PREEMPT_AUTO ||
+        policy.policy != LLAM_PREEMPT_POLICY_ASYNC_REQUIRED) return fail(__LINE__);
+    options.deterministic = 1U;
+    int created = llam_runtime_create(&options, sizeof(options), &runtime);
+    int create_error = errno;
+#if !LLAM_ASYNC_CONTEXT_COMPILED
+    if (created != -1 || errno != ENOTSUP || runtime != NULL) return fail(__LINE__);
+    if (llam_runtime_init(NULL) != -1 || errno != ENOTSUP) return fail(__LINE__);
+    if (llam_runtime_preempt_info_ex(llam_runtime_default(), &info, sizeof(info)) != -1 || errno != EINVAL)
+        return fail(__LINE__);
+#endif
+    if (created == 0) {
+        if (runtime->execution_lease_mode != LLAM_EXECUTION_LEASE_REGISTERED ||
+            llam_runtime_preempt_info_ex(runtime, &info, sizeof(info)) != 0 ||
+            info.requested_policy != LLAM_PREEMPT_POLICY_ASYNC_REQUIRED ||
+            info.compatibility_processors != 0U || info.legacy_tasks != 0U ||
+            info.reason == LLAM_PREEMPT_REASON_LEGACY_RUNTIME ||
+            llam_runtime_spawn_ex(runtime, unqualified_task, NULL, NULL, 0U) != NULL ||
+            errno != ENOTSUP) return fail(__LINE__);
+        llam_runtime_destroy(runtime);
+    } else if (create_error != ENOTSUP || runtime != NULL) return fail(__LINE__);
+
+    /* Explicit cooperative choices must not masquerade as the async default. */
+    options.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    if (llam_runtime_create(&options, sizeof(options), &runtime) != -1 ||
+        errno != EINVAL || runtime != NULL) return fail(__LINE__);
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0 ||
+        llam_runtime_preempt_info_ex(runtime, &info, sizeof(info)) != 0 ||
+        info.requested_policy != LLAM_PREEMPT_POLICY_COOPERATIVE ||
+        info.reason != LLAM_PREEMPT_REASON_LEGACY_RUNTIME) return fail(__LINE__);
+    llam_task_t *task = llam_runtime_spawn_ex(runtime, unqualified_task, NULL, NULL, 0U);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) return fail(__LINE__);
+    llam_runtime_destroy(runtime);
+    if (llam_runtime_init_compat(&options) != 0) return fail(__LINE__);
+    task = llam_spawn(unqualified_task, NULL, NULL);
+    if (task == NULL || llam_run() != 0 || llam_join(task) != 0) return fail(__LINE__);
+    llam_runtime_shutdown();
+    puts("test_default_policy_internal: required async defaults, unqualified refusal and explicit compatibility passed");
     return 0;
 }

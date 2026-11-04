@@ -354,7 +354,7 @@ static void *real_monitor(void *opaque) {
             (void)nanosleep(&delay, NULL);
         }
     }
-    if (!matched) fprintf(stderr, "real adversary checkpoint timed out: mode=%u\n", state->mode);
+    if (!matched) fprintf(stderr, "real adversary checkpoint timed out: mode=%d\n", state->mode);
     real_check(state, matched);
     atomic_store_explicit(&state->peer_release, 1U, memory_order_release);
     atomic_store_explicit(&state->tail_release, 1U, memory_order_release);
@@ -412,7 +412,7 @@ static int real_run(bool enabled, unsigned repetitions, enum real_mode mode) {
         (mode >= REAL_SIGNAL_CAPTURE_HANDLER && mode <= REAL_SIGNAL_CAPTURE_ARMED)
             ? LLAM_PREEMPT_STRICT : LLAM_PREEMPT_AUTO;
     options.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0) goto done;
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) goto done;
     if (enabled) {
         const llam_async_preempt_range_t range = {
             (uintptr_t)llam_async_darwin_leaf_begin, (uintptr_t)llam_async_darwin_leaf_end
@@ -564,7 +564,7 @@ static int real_startup_abort(void) {
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = LLAM_PREEMPT_AUTO;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0) return 1;
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) return 1;
     if (llam_async_shared_enable(runtime, &range, 1U, true) != 0) goto done;
     state.runtime = runtime;
     state.items[0].state = &state;
@@ -622,7 +622,7 @@ static int real_probe_publication(void) {
     if (llam_runtime_opts_init(&options, sizeof(options)) != 0) return 1;
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_AUTO;
-    if (llam_runtime_create(&options, sizeof(options), &state.runtime) != 0) return 1;
+    if (llam_runtime_create_compat(&options, sizeof(options), &state.runtime) != 0) return 1;
     if (llam_async_shared_enable(state.runtime, &range, 1U, true) != 0) goto done;
     llam_task_t *task = llam_runtime_spawn_ex(state.runtime, real_probe_task, &state, NULL, 0U);
     if (task == NULL) goto done;
@@ -677,7 +677,7 @@ static int real_configuration(void) {
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = LLAM_PREEMPT_AUTO;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0) return 1;
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) return 1;
     if (llam_async_shared_enable(runtime, &range, 1U, false) != -1 || errno != EINVAL ||
         llam_async_shared_enable(runtime, &invalid, 1U, true) != -1 || errno != EINVAL) goto done;
     runtime->shards[0].scheduler_ctx.simd_flags = LLAM_CTX_SIMD_F_SKIP_RESTORE;
@@ -762,11 +762,11 @@ static int real_signal_namespace(void) {
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = LLAM_PREEMPT_STRICT;
-    if (llam_runtime_create(&options, sizeof(options), &waiter_runtime) != 0) goto done;
+    if (llam_runtime_create_compat(&options, sizeof(options), &waiter_runtime) != 0) goto done;
     task = llam_runtime_spawn_ex(waiter_runtime, real_signal_conflict_task, &conflict, NULL, 0U);
     if (task == NULL || llam_runtime_run_handle(waiter_runtime) != 0 || llam_join(task) != 0 ||
         atomic_load(&conflict.state.errors) != 0U || conflict.set == NULL) goto done;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0 ||
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0 ||
         llam_async_shared_enable(runtime, &range, 1U, true) != 0 ||
         runtime->async_preempt_signal == conflict.occupied) goto done;
     conflict.reserve_waiter = false;
@@ -805,7 +805,7 @@ static int real_signal_blocked_start(void) {
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = LLAM_PREEMPT_STRICT;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0 ||
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0 ||
         llam_async_shared_enable(runtime, &range, 1U, true) != 0) goto done;
     state.runtime = runtime;
     state.items[0].state = &state;
@@ -887,7 +887,7 @@ static int real_signal_process_owners(void) {
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = LLAM_PREEMPT_STRICT;
-    if (llam_runtime_create(&options, sizeof(options), &runtime) != 0 ||
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0 ||
         llam_async_shared_enable(runtime, &range, 1U, true) != 0) goto done;
     signal_number = runtime->async_preempt_signal;
     if (sigaction(signal_number, NULL, &retained) != 0) goto done;

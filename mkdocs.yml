@@ -5,57 +5,54 @@ repo_url: https://github.com/Feralthedogg/LLAM
 repo_name: Feralthedogg/LLAM
 edit_uri: edit/main/docs/
 
+validation:
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+  omitted_files: warn
+
 theme:
-  name: material
-  language: en
-  logo: assets/llam.png
-  favicon: assets/llam.png
-  features:
-    - navigation.instant
-    - navigation.sections
-    - navigation.tabs
-    - navigation.footer
-    - navigation.top
-    - navigation.tracking
-    - search.highlight
-    - search.share
-    - toc.follow
-    - content.code.copy
-    - content.action.edit
-  palette:
-    - scheme: slate
-      primary: indigo
-      accent: cyan
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to light mode
-    - scheme: default
-      primary: indigo
-      accent: cyan
-      toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
+  name: null
+  custom_dir: website/theme
+  static_templates:
+    - 404.html
+  search_index_only: true
 
-extra_css:
-  - stylesheets/extra.css
+hooks:
+  - website/hooks.py
 
-extra_javascript:
-  - https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js
-  - javascripts/mermaid.js
-  - javascripts/install-copy.js
+plugins:
+  - search
+  - redirects:
+      redirect_maps:
+        getting-started.md: start/quickstart.md
+        build.md: start/build.md
+        reference/platform-support.md: start/platforms.md
+        reference/managed-runtime.md: guides/managed-c.md
+        tooling/preempt-metadata.md: guides/preempt-metadata.md
+        operations.md: production/checklist.md
+        operations/verification.md: production/verification.md
+        operations/benchmarks.md: production/benchmarks.md
+        operations/troubleshooting.md: production/troubleshooting.md
+        reference/options.md: reference/options/runtime.md
+        reference/cli-tools.md: reference/cli/index.md
+        abi.md: reference/abi/index.md
+        security.md: reference/security/index.md
+        internals/testing-strategy.md: internals/testing.md
+        superpowers/specs/2026-09-15-phase7-capability-policy.md: internals/capability-policy.md
+        licensing.md: project/licensing.md
+        roadmap.md: project/roadmap.md
 
 markdown_extensions:
-  - admonition
   - attr_list
   - def_list
   - md_in_html
   - toc:
-      permalink: true
-  - pymdownx.details
+      permalink: "#"
   - pymdownx.highlight:
-      anchor_linenums: true
-  - pymdownx.inlinehilite
-  - pymdownx.snippets
+      pygments_lang_class: true
+  - pymdownx.snippets:
+      check_paths: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -63,50 +60,94 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+      clickable_checkbox: true
 
 nav:
   - Home: index.md
-  - Getting Started:
-      - Quickstart: getting-started.md
-      - Build From Source: build.md
-      - Platform Support: reference/platform-support.md
+  - Docs:
+      - Overview: overview.md
+      - Get started:
+          - Quickstart: start/quickstart.md
+          - Build from source: start/build.md
+          - Platform support: start/platforms.md
+      - Concepts:
+          - Execution model: concepts/execution-model.md
+          - Runtime handles: concepts/runtime-handles.md
+          - Synchronization: concepts/synchronization.md
+          - I/O model: concepts/io-model.md
+      - Guides:
+          - Embed LLAM: guides/embedding.md
+          - Managed C: guides/managed-c.md
+          - Preemption metadata: guides/preempt-metadata.md
+          - Diagnostics: guides/diagnostics.md
+          - Performance tuning: guides/performance-tuning.md
+      - Production:
+          - Checklist: production/checklist.md
+          - Limits and memory: production/limits.md
+          - Timeouts and FD reuse: production/timeouts.md
+          - CPU-bound tasks: production/cpu-bound.md
+          - Platform differences: production/platforms.md
+          - Handle boundaries: production/handles.md
+          - Verification: production/verification.md
+          - Benchmarks: production/benchmarks.md
+          - Troubleshooting: production/troubleshooting.md
   - Examples:
       - Overview: examples/index.md
-      - Tasks And Timers: examples/tasks-and-timers.md
-      - Channels And Select: examples/channels-and-select.md
+      - Tasks and timers: examples/tasks-and-timers.md
+      - Channels and select: examples/channels-and-select.md
       - Runtime I/O: examples/runtime-io.md
       - Embedding: examples/embedding.md
-      - Blocking Work: examples/blocking-work.md
-  - Concepts:
-      - Execution Model: concepts/execution-model.md
-      - Runtime Handles: concepts/runtime-handles.md
-      - Synchronization: concepts/synchronization.md
-      - I/O Model: concepts/io-model.md
-  - Guides:
-      - Embedding LLAM: guides/embedding.md
-      - Diagnostics: guides/diagnostics.md
-      - Performance Tuning: guides/performance-tuning.md
+      - Blocking work: examples/blocking-work.md
   - Reference:
-      - Public API: reference/api.md
-      - Managed C and Async Preemption: reference/managed-runtime.md
-      - Options: reference/options.md
-      - CLI And Tools: reference/cli-tools.md
-      - ABI Contract: abi.md
-      - Environment Variables: reference/environment.md
-      - Security Model: security.md
-  - Tooling:
-      - Compiler Preemption Metadata: tooling/preempt-metadata.md
-  - Operations:
-      - Verification: operations/verification.md
-      - Benchmarks: operations/benchmarks.md
-      - Troubleshooting: operations/troubleshooting.md
-      - Production Checklist: operations.md
+      - Public API:
+          - API overview: reference/api/index.md
+          - Lifecycle: reference/api/lifecycle.md
+          - Tasks: reference/api/tasks.md
+          - Time and cancellation: reference/api/time.md
+          - Sync and channels: reference/api/sync.md
+          - I/O: reference/api/io.md
+          - Blocking and diagnostics: reference/api/blocking.md
+          - Platform types: reference/api/platform.md
+      - Options:
+          - Build and install: reference/options/build.md
+          - Runtime and spawn: reference/options/runtime.md
+          - Environment variables: reference/environment.md
+      - CLI tools:
+          - Tool map: reference/cli/index.md
+          - Servers: reference/cli/servers.md
+          - Benchmarks: reference/cli/benchmarks.md
+          - Soak, broker, release: reference/cli/operations.md
+      - ABI contract:
+          - Stability: reference/abi/index.md
+          - Handles: reference/abi/handles.md
+          - Structs and enums: reference/abi/structs.md
+          - Threading and deadlines: reference/abi/threading.md
+          - Shared libraries: reference/abi/libraries.md
+          - Lifecycle and tasks: reference/abi/lifecycle-tasks.md
+          - Synchronization: reference/abi/sync.md
+          - I/O: reference/abi/io.md
+          - Errors: reference/abi/errors.md
+      - Security model:
+          - Overview: reference/security/index.md
+          - Broker tokens and keys: reference/security/tokens.md
+          - Broker transport: reference/security/transport.md
+          - Shared ring: reference/security/ring.md
+          - Rights and revocation: reference/security/rights.md
   - Internals:
-      - Architecture: internals/architecture.md
-      - Internal magic2 Integration: internals/magic2.md
-      - Testing Strategy: internals/testing-strategy.md
-      - Capability and Fallback Policy: superpowers/specs/2026-09-15-phase7-capability-policy.md
+      - Architecture:
+          - Overview: internals/architecture/index.md
+          - Scheduler: internals/architecture/scheduler.md
+          - Context switching: internals/architecture/context.md
+          - Worker identity and leases: internals/architecture/leases.md
+          - Wakeups and watchdog: internals/architecture/wakeups.md
+          - I/O, blocking, diagnostics: internals/architecture/io.md
+      - magic2 integration: internals/magic2.md
+      - Testing strategy: internals/testing.md
+      - Capability policy: internals/capability-policy.md
   - Project:
-      - Licensing: licensing.md
-      - Documentation Guide: project/documentation-guide.md
-      - Roadmap: roadmap.md
+      - Changelog: project/changelog.md
+      - Roadmap: project/roadmap.md
+      - Licensing: project/licensing.md
+      - Documentation guide: project/documentation-guide.md

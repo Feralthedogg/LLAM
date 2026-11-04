@@ -239,7 +239,7 @@ static int watchdog_test_wait_reference(void) {
     if (llam_runtime_opts_init(&options, sizeof(options)) != 0) return 1;
     options.deterministic = 1U;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&options, sizeof(options), &probe.runtime) != 0) return 1;
+    if (llam_runtime_create_compat(&options, sizeof(options), &probe.runtime) != 0) return 1;
     probe.root = llam_runtime_spawn_ex(probe.runtime, wait_reference_owner, &probe, NULL, 0U);
     if (probe.root == NULL) goto cleanup;
     if (pthread_create(&canceller, NULL, wait_reference_cancel, &probe) != 0) goto cleanup;
@@ -375,7 +375,7 @@ int main(int argc, char **argv) {
     options.deterministic = 1U;
     options.profile = lazy ? LLAM_RUNTIME_PROFILE_RELEASE_FAST : LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     options.preempt_mode = LLAM_PREEMPT_STRICT;
-    if (llam_runtime_create(&options, sizeof(options), &probe.runtime) != 0) goto cleanup;
+    if (llam_runtime_create_compat(&options, sizeof(options), &probe.runtime) != 0) goto cleanup;
 #if (LLAM_ASYNC_CONTEXT_SHARED && LLAM_ARCH_AARCH64)
     if (enabled) {
         const llam_async_preempt_range_t range = {

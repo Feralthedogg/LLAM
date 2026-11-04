@@ -1,0 +1,116 @@
+{#
+  Copyright 2026 Feralthedogg
+  SPDX-License-Identifier: Apache-2.0
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  See LICENSE.
+#}
+{%- from "partials/icons.html" import icon -%}
+{%- set tab_item = nav.items|selectattr('is_section')|selectattr('active')|first -%}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>try{var t=localStorage.getItem("llam-theme");if(t)document.documentElement.className="t-"+t}catch(e){}</script>
+{%- block title %}
+<title>{% if page and page.title and not page.is_homepage %}{{ page.title }}, {% endif %}{{ config.site_name }}{% if not (page and page.is_homepage) %} docs{% endif %}</title>
+{%- endblock %}
+{%- if page and page.canonical_url %}
+<link rel="canonical" href="{{ page.canonical_url }}">
+{%- endif %}
+<meta name="description" content="{{ (page.meta.description if page and page.meta and page.meta.description else config.site_description)|e }}">
+<meta name="theme-color" content="#111114">
+<meta property="og:site_name" content="{{ config.site_name }}">
+<meta property="og:title" content="{{ (page.title if page and page.title and not page.is_homepage else 'LLAM: write blocking C, run it concurrently')|e }}">
+<meta property="og:description" content="{{ (page.meta.description if page and page.meta and page.meta.description else config.site_description)|e }}">
+<link rel="icon" href="{{ 'assets/img/favicon.png'|url }}" type="image/png">
+<link rel="apple-touch-icon" href="{{ 'assets/img/apple-touch-icon.png'|url }}">
+<link rel="preload" href="{{ 'assets/vendor/fonts/inter.woff2'|url }}" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{{ 'assets/css/llam.css'|url }}">
+{%- block head_extra %}{% endblock %}
+<script type="module" src="{{ 'assets/js/site.js'|url }}"></script>
+</head>
+{%- block page %}
+<body class="llam doc">
+<a class="skip" href="#content">Skip to content</a>
+{%- with tab = tab_item.title if tab_item else '', show_theme = true %}
+{%- include "partials/header.html" %}
+{%- endwith %}
+{%- set wide = page.meta and page.meta.hide and 'toc' in page.meta.hide %}
+{%- set root = page.toc|first if page.toc|length == 1 else none %}
+{%- set entries = root.children if root else page.toc %}
+{%- set show_toc = not wide and entries|length > 1 %}
+{%- set toc_links %}
+  {#- A first section named like the page would read as the same entry twice -#}
+  {%- if root and not (entries and entries[0].title == root.title) %}<a href="{{ root.url }}">{{ root.title }}</a>{% endif %}
+  {%- for h2 in entries %}
+  <a href="{{ h2.url }}">{{ h2.title }}</a>
+  {%- if not page.meta.toc_flat %}
+  {%- for h3 in h2.children %}
+  <a class="sub" href="{{ h3.url }}">{{ h3.title }}</a>
+  {%- endfor %}
+  {%- endif %}
+  {%- endfor %}
+{%- endset %}
+{%- set toc_small %}<details class="toc-m"><summary>On this page{{ icon('chevron', 's') }}</summary><nav aria-label="On this page, small screens">{{ toc_links }}</nav></details>{% endset %}
+<div class="doc-grid">
+  {%- with tab = tab_item.title if tab_item else '' %}
+  {%- include "partials/side.html" %}
+  {%- endwith %}
+  <main class="main" id="content" data-tab="{{ tab_item.title if tab_item else '' }}">
+    <article class="art">
+      <div class="art-in{{ ' wide' if wide }}"{% if page.meta.filter %} data-filter="{{ page.meta.filter }}"{% endif %}>
+        {%- if not wide %}
+        <nav class="crumb" aria-label="Breadcrumb">
+          {%- for parent in page.ancestors|reverse %}
+          <a href="{{ first_page(parent).url|url }}">{{ parent.title }}</a><i>/</i>
+          {%- endfor %}
+          <span>{{ page.title }}</span>
+        </nav>
+        {%- endif %}
+        <h1 class="d1"{% if root %} id="{{ root.id }}"{% endif %}>{{ page.meta.h1 or page.title }}</h1>
+        {%- if not wide %}
+        <div class="meta">
+          {%- if page.edit_url %}<a href="{{ page.edit_url }}">{{ icon('edit', 's') }}Edit page</a>{% endif %}
+          {%- if page.meta.report_url %}<a href="{{ page.meta.report_url|e }}">{{ icon('flag', 's') }}Report a problem</a>{% endif %}
+          {%- if page.meta.last_modified %}<span>Last modified: {{ page.meta.last_modified }}</span>{% endif %}
+          {%- if page.meta.declared %}<span>Declared in {{ page.meta.declared|e }}</span>{% endif %}
+        </div>
+        {%- endif %}
+        <div class="prose">
+{{ page.content|replace('<!--toc-m-->', toc_small if show_toc else '') }}
+        </div>
+        {%- set prev = page.previous_page if page.previous_page and not page.previous_page.is_homepage else none %}
+        {%- if prev or page.next_page %}
+        <nav class="pn" aria-label="Previous and next page">
+          {%- if prev %}<a href="{{ prev.url|url }}"><i>Previous</i><b>{{ prev.title }}</b></a>{% else %}<span></span>{% endif %}
+          {%- if page.next_page %}<a href="{{ page.next_page.url|url }}"><i>Next</i><b>{{ page.next_page.title }}</b></a>{% endif %}
+        </nav>
+        {%- endif %}
+      </div>
+    </article>
+    {%- if show_toc %}
+    <nav class="toc" aria-label="On this page">
+      <b>On this page</b>
+      {{ toc_links }}
+    </nav>
+    {%- else %}
+    <nav class="toc" aria-label="On this page" hidden></nav>
+    {%- endif %}
+  </main>
+</div>
+{%- include "partials/footer.html" %}
+{%- include "partials/palette.html" %}
+</body>
+{%- endblock %}
+</html>

@@ -206,7 +206,7 @@ static int fixture_run(unsigned fail_point) {
     }
     port = atomic_load_explicit(&f.port, memory_order_acquire);
     {
-        thread_basic_info_data_t info;
+        thread_basic_info_data_t info = {0};
         mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
 
         if (thread_suspend(port) != KERN_SUCCESS) abort();

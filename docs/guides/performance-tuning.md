@@ -1,9 +1,9 @@
-# Performance Tuning
+# Performance tuning
 
 Performance work should be platform-local and benchmark-gated. Tune only after
 you can reproduce a workload with stable numbers.
 
-## Start With Profiles
+## Start with profiles
 
 The default profile is balanced. For release-oriented measurements, prefer:
 
@@ -19,13 +19,16 @@ Environment override:
 LLAM_RUNTIME_PROFILE=release-fast ./service
 ```
 
-## Prewarm High-Fanout Services
+## Prewarm high-fanout services
 
 ```sh
-LLAM_TASK_CACHE_PREWARM=65536 \
-LLAM_STACK_CACHE_PREWARM=8192 \
+LLAM_TASK_CACHE_PREWARM=4096 \
+LLAM_STACK_CACHE_PREWARM=4096 \
 ./service
 ```
+
+Both values are capped at 4096. Task prewarm applies to each processor, while stack
+prewarm is the total for the runtime.
 
 Enable stack sampling in staging when validating stack class choices:
 
@@ -33,9 +36,10 @@ Enable stack sampling in staging when validating stack class choices:
 LLAM_STACK_SAMPLING=1 ./service
 ```
 
-## CPU-Bound Work
+## CPU-bound work
 
-Add safepoints to long loops:
+Task code from the [managed C toolchain](managed-c.md) is preempted without polls. On
+a compatibility runtime, add safepoints to long loops:
 
 ```c
 size_t poll_counter = 0;
@@ -48,7 +52,7 @@ for (uint64_t i = 0; i < count; ++i) {
 
 Use `LLAM_PREEMPT_MODE=strict` to find loops that do not poll often enough.
 
-## Experimental Flags
+## Experimental flags
 
 Treat these as release-gated:
 
@@ -61,7 +65,7 @@ Treat these as release-gated:
 
 Every change needs before/after data and stress logs on the target kernel.
 
-## Benchmark Discipline
+## Benchmark discipline
 
 Use isolated benchmark case execution for release-quality comparisons:
 

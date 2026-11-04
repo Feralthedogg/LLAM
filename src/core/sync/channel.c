@@ -137,18 +137,31 @@ static bool llam_channel_has_local_runnable_hint(void) {
 }
 
 static bool llam_channel_buffered_handoff_enabled(void) {
-#if LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t *rt = llam_runtime_tls_owner_fast();
+    llam_task_t *task = g_llam_tls_task;
+    llam_worker_t *worker = g_llam_tls_worker;
 
-    if (rt == NULL) {
+    if (rt == NULL || task == NULL || worker == NULL ||
+        rt->execution_lease_mode != LLAM_EXECUTION_LEASE_LEGACY ||
+        rt->channel_local_handoff_enabled == 0U ||
+        (task->flags & LLAM_TASK_FLAG_NO_PREEMPT) != 0U ||
+        llam_task_request_deadline(task) != 0U ||
+        atomic_load_explicit(&worker->preempt_disable_depth, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&worker->runtime_critical_depth, memory_order_acquire) != 0U) {
         return false;
     }
 
-    return rt->channel_local_handoff_enabled != 0U &&
-           llam_channel_has_local_runnable_hint();
-#else
-    return false;
-#endif
+    return llam_channel_has_local_runnable_hint();
+}
+
+/* The buffered commit is complete and no channel storage is touched here.
+ * A local peer can consume it without publishing a wait node and returning
+ * through the scheduler. The direct-yield path retains its authority, timer,
+ * tracing and bounded-fairness checks before any context switch. */
+void llam_channel_finish_buffered_send(bool single_slot) {
+    if (single_slot && llam_channel_buffered_handoff_enabled() &&
+        llam_yield_to_local_runnable()) return;
+    llam_channel_hot_safepoint();
 }
 
 /**
@@ -410,9 +423,7 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
     }
 
     if (channel->count < channel->capacity) {
-        bool buffered_handoff = !has_deadline &&
-                                channel->capacity == 1U &&
-                                llam_channel_buffered_handoff_enabled();
+        bool single_slot = !has_deadline && channel->capacity == 1U;
 
         if (channel->capacity == 1U) {
             channel->buffer[0] = value;
@@ -422,13 +433,7 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
         }
         channel->count += 1U;
         pthread_mutex_unlock(&channel->lock);
-        if (buffered_handoff &&
-            llam_channel_has_local_runnable_hint() &&
-            llam_yield_to_local_runnable()) {
-            llam_channel_end_public_op(channel);
-            return 0;
-        }
-        llam_channel_hot_safepoint();
+        llam_channel_finish_buffered_send(single_slot);
         llam_channel_end_public_op(channel);
         return 0;
     }

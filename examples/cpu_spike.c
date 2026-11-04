@@ -329,7 +329,7 @@ static int run_round(unsigned spike_ms,
         goto cleanup;
     }
     state.read_fd = fds[0];
-    if (llam_runtime_create(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+    if (llam_runtime_create_compat(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
         (void)fail_errno("runtime create failed");
         goto cleanup;
     }

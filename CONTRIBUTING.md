@@ -122,7 +122,7 @@ make check-license-policy
 ```
 
 For platform-specific setup and the extended verification matrix, see
-[docs/getting-started.md](docs/getting-started.md) and the workflows under
+[docs/start/quickstart.md](docs/start/quickstart.md) and the workflows under
 `.github/workflows/`.
 
 ## Defect reports
@@ -130,6 +130,7 @@ For platform-specific setup and the extended verification matrix, see
 Use the structured defect issue form for non-security problems. Include the
 affected version, environment, backend, modification status, expected and
 observed behavior, a reproducer when available, impact, and a follow-up contact.
-Reporting is voluntary, not a condition of the software license. The private
+For a wrong, missing, or confusing page on the documentation site, use the
+documentation problem form instead. Reporting is voluntary, not a condition of the software license. The private
 reporting route and sensitive-data guidance are described in
 [.github/SECURITY.md](.github/SECURITY.md).

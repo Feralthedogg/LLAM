@@ -58,7 +58,7 @@ static int create_runtime(llam_runtime_t **out) {
         return -1;
     }
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    return llam_runtime_create(&opts, sizeof(opts), out);
+    return llam_runtime_create_compat(&opts, sizeof(opts), out);
 }
 
 static void *cross_thread_leave(void *arg) {
@@ -502,7 +502,7 @@ static int test_foreign_join_wait_contract(void) {
     }
     opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&opts, sizeof(opts), &probe.runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &probe.runtime) != 0) {
         return 1;
     }
     root = llam_runtime_spawn_ex(probe.runtime, foreign_join_supervisor, &probe, NULL, 0U);

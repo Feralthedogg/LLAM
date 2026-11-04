@@ -91,7 +91,7 @@ static int make_runtime(llam_runtime_t **runtime) {
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&opts, sizeof(opts), runtime) != 0) {
+    if (llam_runtime_create_compat(&opts, sizeof(opts), runtime) != 0) {
         return -1;
     }
     if (llam_async_preempt_register_safe_range(*runtime,
@@ -112,7 +112,7 @@ static int make_dynamic_runtime(llam_runtime_t **runtime) {
                               LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.preempt_quantum_ns = UINT64_C(1000000);
-    if (llam_runtime_create(&opts, sizeof(opts), runtime) != 0) return -1;
+    if (llam_runtime_create_compat(&opts, sizeof(opts), runtime) != 0) return -1;
     if (llam_async_preempt_register_safe_range(*runtime,
         (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) != 0) {
         return -1;

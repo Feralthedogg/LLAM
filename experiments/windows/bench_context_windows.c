@@ -76,7 +76,7 @@ static void context_round(unsigned tasks, unsigned round) {
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
     options.experimental_flags = 0U;
-    if (llam_runtime_init_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_runtime_init_compat_ex(&options, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         context_fail("runtime init", errno);
     }
     for (index = 0U; index < tasks; ++index) {

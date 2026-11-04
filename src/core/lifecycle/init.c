@@ -34,6 +34,7 @@
  */
 
 #include "runtime_internal.h"
+#include "llam/managed.h"
 
 #include <assert.h>
 
@@ -41,6 +42,13 @@
 /* Static zero initialization is also accepted by MSVC's C11 atomic implementation. */
 static atomic_bool g_llam_runtime_test_fail_after_stack_cache_prewarm;
 static atomic_bool g_llam_runtime_test_fail_ctrl_thread_start;
+static _Thread_local void (*g_llam_runtime_test_before_prepare)(llam_runtime_t *, void *);
+static _Thread_local void *g_llam_runtime_test_before_prepare_arg;
+
+void llam_runtime_test_before_managed_prepare(void (*hook)(llam_runtime_t *, void *), void *arg) {
+    g_llam_runtime_test_before_prepare = hook;
+    g_llam_runtime_test_before_prepare_arg = arg;
+}
 
 void llam_runtime_test_fail_after_stack_cache_prewarm(void) {
     atomic_store_explicit(&g_llam_runtime_test_fail_after_stack_cache_prewarm,
@@ -159,6 +167,23 @@ static void llam_metrics_init(llam_metrics_t *metrics) {
     }
 }
 
+/* Only an explicit initialization rollback may destroy unpublished storage.
+ * Loader callbacks on the initializing thread must obey public lifetime gates. */
+static _Thread_local llam_runtime_t *g_llam_init_cleanup_runtime;
+
+bool llam_runtime_init_cleanup_here(const llam_runtime_t *runtime) {
+    return g_llam_init_cleanup_runtime == runtime;
+}
+
+static void llam_runtime_abort_init(llam_runtime_t *runtime) {
+    int saved_errno = errno;
+    llam_runtime_t *previous = g_llam_init_cleanup_runtime;
+    g_llam_init_cleanup_runtime = runtime;
+    llam_runtime_shutdown_rt(runtime);
+    g_llam_init_cleanup_runtime = previous;
+    errno = saved_errno;
+}
+
 /**
  * @brief Tear down a registered partially-initialized runtime and preserve errno.
  *
@@ -175,7 +200,7 @@ static int llam_runtime_init_fail_registered(llam_runtime_t *rt, int error_code)
         error_code = EINVAL;
     }
     errno = error_code;
-    llam_runtime_shutdown_rt(rt);
+    llam_runtime_abort_init(rt);
     errno = error_code;
     return -1;
 }
@@ -466,6 +491,26 @@ static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_i
     return 0;
 }
 
+/* Caller owns the lifecycle gate and all unpublished runtime storage. */
+static int llam_runtime_finish_init(llam_runtime_t *rt) {
+    int rc;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (atomic_exchange_explicit(&g_llam_runtime_test_fail_ctrl_thread_start,
+                                 false, memory_order_acq_rel)) {
+        errno = EAGAIN;
+        return -1;
+    }
+#endif
+    rc = pthread_create(&rt->ctrl_thread, NULL, llam_ctrl_worker_main, rt);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    rt->ctrl_thread_started = true;
+    atomic_store_explicit(&rt->initialized, true, memory_order_release);
+    return 0;
+}
+
 /**
  * @brief Initialize one LLAM runtime instance.
  *
@@ -493,7 +538,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                                             bool heap_allocated,
                                             llam_execution_lease_mode_t lease_mode,
                                             size_t managed_worker_count,
-                                            unsigned compatibility_processors) {
+                                            unsigned compatibility_processors,
+                                            const llam_preempt_opts_t *managed_opts) {
     llam_runtime_opts_t raw_opts;
     llam_runtime_opts_t opts_storage;
     unsigned i;
@@ -604,14 +650,15 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         }
     }
 
-    if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+    if (atomic_load_explicit(&rt->initialized, memory_order_acquire) ||
+        llam_runtime_check_handle(rt) == 0) {
         errno = EBUSY;
         return -1;
     }
 
     memset(rt, 0, sizeof(*rt));
     rt->execution_lease_mode = lease_mode;
-    rt->managed_policy_pools = compatibility_processors != 0U;
+    rt->managed_policy_pools = managed_opts != NULL || compatibility_processors != 0U;
     rt->compatibility_processor_count = compatibility_processors;
     atomic_init(&rt->async_preempt_enabled, 0U);
     llam_preempt_capabilities_init(rt);
@@ -919,7 +966,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
          * Let shutdown consume it exactly once; freeing @c cpus directly here
          * leaves a dangling runtime pointer and makes caller cleanup double-free.
          */
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -945,7 +992,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 
     if (llam_worker_registry_init(rt, managed_worker_count) != 0) {
         int saved_errno = errno;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         errno = saved_errno;
         return -1;
     }
@@ -957,7 +1004,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
          * Reuse normal partial-init teardown so the live handle registry cannot
          * retain a pointer to zeroed storage.
          */
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -965,7 +1012,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         io_node_ids = calloc(rt->active_shards, sizeof(*io_node_ids));
         if (io_node_ids == NULL) {
             free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             errno = ENOMEM;
             return -1;
         }
@@ -1090,7 +1137,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                 free(io_node_ids);
                 free(locality_node_ids);
                 errno = ENOMEM;
-                llam_runtime_shutdown_rt(rt);
+                llam_runtime_abort_init(rt);
                 return -1;
             }
             rt->shards[i].processor.timer_heap_cap = timer_heap_prewarm;
@@ -1110,7 +1157,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         if (rt->shards[i].processor.event_fd < 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rc = pthread_mutex_init(&rt->shards[i].lock, NULL);
@@ -1118,7 +1165,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->shards[i].lock_initialized = true;
@@ -1127,7 +1174,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->shards[i].processor.stack_cache_lock_initialized = true;
@@ -1136,7 +1183,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->shards[i].opaque_lock_initialized = true;
@@ -1145,14 +1192,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->shards[i].opaque_cv_initialized = true;
         if (llam_opaque_wake_init(&rt->shards[i]) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         {
@@ -1172,7 +1219,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                 mapping = NULL;
                 free(io_node_ids);
                 free(locality_node_ids);
-                llam_runtime_shutdown_rt(rt);
+                llam_runtime_abort_init(rt);
                 return -1;
             }
             mapping_base = (uintptr_t)mapping;
@@ -1220,14 +1267,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         if (llam_allocator_init(&rt->shards[i].processor.allocator) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         if (llam_ctx_init_fp_state(&rt->shards[i].scheduler_ctx, rt) != 0 ||
             llam_ctx_init_fp_state(&rt->shards[i].opaque_scheduler_ctx, rt) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
@@ -1265,7 +1312,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     if (rt->kernel_node_ids == NULL) {
         free(io_node_ids);
         free(locality_node_ids);
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -1273,7 +1320,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     if (rt->nodes == NULL) {
         free(io_node_ids);
         free(locality_node_ids);
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -1293,7 +1340,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         if (node_ids == NULL) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             errno = ENOMEM;
             return -1;
         }
@@ -1324,34 +1371,34 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->nodes[i].provided_buf_returns, 0U);
         rt->nodes[i].event_fd = llam_wake_handle_create();
         if (rt->nodes[i].event_fd < 0) {
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rc = pthread_mutex_init(&rt->nodes[i].submit_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->nodes[i].submit_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].windows_assoc_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->nodes[i].windows_assoc_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].watch_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->nodes[i].watch_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].recv_buf_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         rt->nodes[i].recv_buf_lock_initialized = true;
@@ -1376,14 +1423,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rc = pthread_mutex_init(&rt->task_list_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
     rt->task_list_lock_initialized = true;
     rc = pthread_mutex_init(&rt->stack_cache_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
     rt->stack_cache_lock_initialized = true;
@@ -1399,14 +1446,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rc = pthread_mutex_init(&rt->block_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
     rt->block_lock_initialized = true;
     rc = pthread_cond_init(&rt->block_cv, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
     rt->block_cv_initialized = true;
@@ -1416,7 +1463,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rc = pthread_mutex_init(&rt->overflow_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
     rt->overflow_lock_initialized = true;
@@ -1426,7 +1473,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rc = pthread_mutex_init(&rt->windows_async_config_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
     rt->windows_async_config_lock_initialized = true;
@@ -1449,7 +1496,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->block_worker_count = opts->blocking_worker_count;
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -1458,7 +1505,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rc = pthread_create(&rt->block_threads[i], NULL, llam_block_worker_main, rt);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown_rt(rt);
+            llam_runtime_abort_init(rt);
             return -1;
         }
         // pthread_create does not promise to leave the output slot untouched on
@@ -1467,27 +1514,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     }
 
     if (llam_install_process_signal_handlers(rt) != 0) {
-        llam_runtime_shutdown_rt(rt);
+        llam_runtime_abort_init(rt);
         return -1;
     }
 
-#if defined(LLAM_ENABLE_TEST_HOOKS)
-    if (atomic_exchange_explicit(&g_llam_runtime_test_fail_ctrl_thread_start,
-                                 false, memory_order_acq_rel)) {
-        errno = EAGAIN;
-        llam_runtime_shutdown_rt(rt);
-        return -1;
-    }
-#endif
-    rc = pthread_create(&rt->ctrl_thread, NULL, llam_ctrl_worker_main, rt);
-    if (rc != 0) {
-        errno = rc;
-        llam_runtime_shutdown_rt(rt);
-        return -1;
-    }
-    rt->ctrl_thread_started = true;
-    atomic_store_explicit(&rt->initialized, true, memory_order_release);
-    return 0;
+    /* Managed initialization remains unpublished while loader images are
+     * inspected. The serialized wrapper completes that phase without holding
+     * the process lifecycle lock across native loader operations. */
+    if (managed_opts != NULL) return 0;
+    rc = llam_runtime_finish_init(rt);
+    if (rc != 0) llam_runtime_abort_init(rt);
+    return rc;
 }
 
 static int llam_runtime_init_configured_rt(llam_runtime_t *rt,
@@ -1496,7 +1533,8 @@ static int llam_runtime_init_configured_rt(llam_runtime_t *rt,
                                            bool heap_allocated,
                                            llam_execution_lease_mode_t lease_mode,
                                            size_t managed_worker_count,
-                                           unsigned compatibility_processors) {
+                                           unsigned compatibility_processors,
+                                           const llam_preempt_opts_t *managed_opts) {
     LLAM_NATIVE_API_GUARD(-1);
     llam_shard_t *saved_tls_shard = g_llam_tls_shard;
     llam_worker_t *saved_tls_worker = g_llam_tls_worker;
@@ -1517,7 +1555,28 @@ static int llam_runtime_init_configured_rt(llam_runtime_t *rt,
         return -1;
     }
     rc = llam_runtime_init_ex_rt_unlocked(rt, opts, opts_size, heap_allocated,
-                                         lease_mode, managed_worker_count, compatibility_processors);
+                                         lease_mode, managed_worker_count, compatibility_processors, managed_opts);
+    llam_runtime_lifecycle_unlock();
+    if (rc == 0 && managed_opts != NULL) {
+        /* Native image callbacks may create peer runtimes. Keep both loader
+         * operations and catalog retirement outside the lifecycle gate.
+         * initialized stays false, so public operations/destroy cannot enter. */
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        void (*hook)(llam_runtime_t *, void *) = g_llam_runtime_test_before_prepare;
+        void *hook_arg = g_llam_runtime_test_before_prepare_arg;
+        g_llam_runtime_test_before_prepare = NULL;
+        g_llam_runtime_test_before_prepare_arg = NULL;
+        if (hook != NULL) hook(rt, hook_arg);
+#endif
+        rc = llam_managed_catalog_prepare(rt, managed_opts);
+        if (rc == 0) {
+            llam_runtime_lifecycle_lock();
+            rc = llam_runtime_finish_init(rt);
+            llam_runtime_lifecycle_unlock();
+        }
+        if (rc != 0) llam_runtime_abort_init(rt);
+    }
+
     /*
      * The init body clears TLS while constructing a runtime so partial-init
      * cleanup can use host-side teardown paths.  If an embedder creates an
@@ -1533,7 +1592,6 @@ static int llam_runtime_init_configured_rt(llam_runtime_t *rt,
         g_llam_tls_task = saved_tls_task;
         g_llam_tls_scheduler_ctx = saved_tls_scheduler_ctx;
     }
-    llam_runtime_lifecycle_unlock();
     return rc;
 }
 
@@ -1542,7 +1600,7 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          size_t opts_size,
                          bool heap_allocated) {
     return llam_runtime_init_configured_rt(rt, opts, opts_size, heap_allocated,
-                                           LLAM_EXECUTION_LEASE_LEGACY, 0U, 0U);
+                                           LLAM_EXECUTION_LEASE_LEGACY, 0U, 0U, NULL);
 }
 
 int llam_runtime_init_registered_rt(llam_runtime_t *rt,
@@ -1552,28 +1610,43 @@ int llam_runtime_init_registered_rt(llam_runtime_t *rt,
                                     size_t managed_worker_count) {
     return llam_runtime_init_configured_rt(rt, opts, opts_size, heap_allocated,
                                            LLAM_EXECUTION_LEASE_REGISTERED,
-                                           managed_worker_count, 0U);
+                                           managed_worker_count, 0U, NULL);
 }
 
 int llam_runtime_init_managed_rt(llam_runtime_t *rt,
                                  const llam_runtime_opts_t *opts,
                                  size_t opts_size, bool heap_allocated,
-                                 size_t affine_capacity, unsigned compatibility_processors) {
-    if (compatibility_processors == 0U || affine_capacity > 1024U) {
+                                 const llam_preempt_opts_t *managed_opts) {
+    if (managed_opts == NULL || managed_opts->native_affine_capacity > 1024U) {
         errno = EINVAL;
         return -1;
     }
     return llam_runtime_init_configured_rt(rt, opts, opts_size, heap_allocated,
                                            LLAM_EXECUTION_LEASE_REGISTERED,
-                                           affine_capacity, compatibility_processors);
+                                           managed_opts->native_affine_capacity,
+                                           managed_opts->policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED ? 0U : 1U,
+                                           managed_opts);
 }
 
 int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     LLAM_NATIVE_API_GUARD(-1);
-    return llam_runtime_init_rt(llam_runtime_default_storage(), opts, opts_size, false);
+    if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) { errno = EBUSY; return -1; }
+    llam_preempt_opts_t policy;
+    if (llam_preempt_opts_init(&policy, sizeof(policy)) != 0) return -1;
+    return llam_runtime_init_managed_rt(llam_runtime_default_storage(), opts, opts_size, false, &policy);
 }
 
 int llam_runtime_init(const llam_runtime_opts_t *opts) {
     LLAM_NATIVE_API_GUARD(-1);
     return llam_runtime_init_ex(opts, opts != NULL ? sizeof(*opts) : 0U);
+}
+
+int llam_runtime_init_compat_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
+    LLAM_NATIVE_API_GUARD(-1);
+    return llam_runtime_init_rt(llam_runtime_default_storage(), opts, opts_size, false);
+}
+
+int llam_runtime_init_compat(const llam_runtime_opts_t *opts) {
+    LLAM_NATIVE_API_GUARD(-1);
+    return llam_runtime_init_compat_ex(opts, opts != NULL ? sizeof(*opts) : 0U);
 }

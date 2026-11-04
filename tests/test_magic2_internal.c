@@ -289,7 +289,7 @@ static int test_case(bool cancel_before, bool cancel_running, int kernel_result)
     options.deterministic = 1U;
     options.preempt_mode = LLAM_PREEMPT_OFF;
     options.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    if (llam_runtime_create(&options, sizeof(options), &state.runtime) != 0) {
+    if (llam_runtime_create_compat(&options, sizeof(options), &state.runtime) != 0) {
         fail(&state, "runtime creation failed");
         goto done;
     }

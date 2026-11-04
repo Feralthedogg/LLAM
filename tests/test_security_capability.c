@@ -182,7 +182,7 @@ static int test_runtime_live_iter_alloc_failure_releases_pins(void) {
 
     memset(runtimes, 0, sizeof(runtimes));
     for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
-        if (llam_runtime_create(NULL, 0U, &runtimes[i]) != 0 || runtimes[i] == NULL) {
+        if (llam_runtime_create_compat(NULL, 0U, &runtimes[i]) != 0 || runtimes[i] == NULL) {
             (void)fprintf(stderr,
                           "[test_security_capability] live runtime iterator setup failed errno=%d\n",
                           errno);
@@ -1608,7 +1608,7 @@ static int test_in_process_runtime_does_not_require_broker_entropy(void) {
      */
     llam_capability_test_force_entropy_failure(true);
     errno = 0;
-    rc = llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime);
+    rc = llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime);
     saved_errno = errno;
     llam_capability_test_force_entropy_failure(false);
 
@@ -9892,7 +9892,7 @@ static int test_runtime_destroy_cancels_signal_wait_active_op(void) {
         }
         opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+        if (llam_runtime_create_compat(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
             _exit(11);
         }
         creator = llam_runtime_spawn_ex(state.runtime, runtime_signal_set_creator_task, &state, NULL, 0U);

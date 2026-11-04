@@ -6,6 +6,9 @@ build/
 build-*/
 target/
 site/
+website/node_modules/
+website/diagrams/node_modules/
+website/theme/assets/vendor/
 .artifacts/
 CMakeFiles/
 CMakeCache.txt
@@ -110,18 +113,6 @@ scripts/bench_tokio_compare/target/
 scripts/__pycache__/
 **/.superpowers/
 **/superpowers/
-
-# Reviewed architecture specs are repository deliverables, not local SDD notes.
-!docs/superpowers/
-!docs/superpowers/specs/
-docs/superpowers/*
-!docs/superpowers/specs/
-docs/superpowers/specs/*
-!docs/superpowers/specs/2026-09-09-phase1b-processor-resources.md
-!docs/superpowers/specs/2026-09-09-phase2-foreign-detach.md
-!docs/superpowers/specs/2026-09-09-phase3-async-context.md
-!docs/superpowers/specs/2026-09-15-phase7-capability-policy.md
-!docs/superpowers/specs/2026-10-28-async-preemption-mainline-design.md
 
 # API usability example/tests and generated compiler-tool bytecode.
 /example_explicit_runtime

@@ -42,10 +42,16 @@
   and release artifacts and reject retired targets in builds/install/package/SDK
   tooling. macOS kqueue remains supported; earlier BSD sources/reports are history.
 * update product, installer, packaging, workflow, shared-library and documentation
-  metadata to `3.0.0`; advance the additive ABI to 2.3 while retaining ABI major 2
-  and the 56-byte runtime-options prefix, with fixed-width resource limits appended.
-* retain existing constructors and legacy group token override semantics;
-  document managed defaults and requested/effective preemption policy separately.
+  metadata to `3.0.0`; advance the ABI to 2.4 while retaining ABI major 2 and the
+  56-byte runtime-options prefix, with fixed-width resource limits appended.
+* make `llam_runtime_create()`, `llam_runtime_init()` and `llam_runtime_init_ex()`
+  require asynchronous preemption: unqualified task entries and unavailable native
+  profiles fail with `ENOTSUP`, `OFF` and `COOPERATIVE` modes fail with `EINVAL`, and
+  a call from a managed task fails with `EBUSY`. Add `llam_runtime_create_compat()`,
+  `llam_runtime_init_compat()` and `llam_runtime_init_compat_ex()` for the former
+  boundary/safepoint behavior.
+* make `ASYNC_REQUIRED` the managed policy default and retain legacy group token
+  override semantics; document requested/effective preemption policy separately.
 * license all current first-party LLAM files under Apache License 2.0; remove
   the custom-license selection manifest and mandatory defect-reporting terms,
   and update notices, contribution terms, policy checks and release/install

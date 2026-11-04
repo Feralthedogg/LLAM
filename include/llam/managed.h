@@ -137,8 +137,10 @@ typedef struct llam_preempt_info {
 #define LLAM_PREEMPT_INFO_CURRENT_SIZE ((size_t)sizeof(llam_preempt_info_t))
 
 LLAM_API int llam_preempt_opts_init(llam_preempt_opts_t *out, size_t out_size);
-/* Host context only: creation may inspect and pin native loader images.
- * Calling from a LLAM task returns EBUSY. Existing constructors are unchanged. */
+/* Advanced host-only policy constructor. The default policy is ASYNC_REQUIRED,
+ * as for the ordinary constructors. ASYNC_AUTO and COOPERATIVE are explicit
+ * alternatives. Creation may inspect and pin native loader images; calling
+ * from a LLAM task returns EBUSY. */
 LLAM_API int llam_runtime_create_managed(
     const llam_runtime_opts_t *runtime_opts, size_t runtime_opts_size,
     const llam_preempt_opts_t *preempt_opts, size_t preempt_opts_size,

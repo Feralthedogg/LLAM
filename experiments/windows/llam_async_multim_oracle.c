@@ -943,7 +943,7 @@ int main(int argc, char **argv) {
     options.deterministic = 0U;
     options.preempt_mode = LLAM_PREEMPT_AUTO;
     options.preempt_quantum_ns = 1000000U;
-    if (llam_runtime_create(&options, sizeof(options), &state.runtime) != 0 ||
+    if (llam_runtime_create_compat(&options, sizeof(options), &state.runtime) != 0 ||
         state.runtime->active_shards != workers) { mm_fail("process-affinity fixed worker count"); }
     for (unsigned i = 0U; i < workers; ++i) {
         if (state.runtime->allowed_cpus[i] >= sizeof(DWORD_PTR) * CHAR_BIT ||

@@ -23,12 +23,14 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'mkdocs.yml'
+      - 'website/**'
       - 'README.md'
       - '.github/workflows/docs.yml'
   pull_request:
     paths-ignore:
       - 'docs/**'
       - 'mkdocs.yml'
+      - 'website/**'
       - 'README.md'
       - '.github/workflows/docs.yml'
   workflow_dispatch:

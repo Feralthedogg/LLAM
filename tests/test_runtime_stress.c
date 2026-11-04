@@ -152,7 +152,7 @@ static int init_runtime(void) {
     memset(&opts, 0, sizeof(opts));
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
-    return llam_runtime_init(&opts);
+    return llam_runtime_init_compat(&opts);
 }
 
 static int spawn_detached(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
@@ -700,7 +700,7 @@ static int init_preempt_runtime(void) {
     opts.preempt_mode = LLAM_PREEMPT_STRICT;
     opts.preempt_poll_period = 1U;
     opts.preempt_quantum_ns = 1000U;
-    return llam_runtime_init(&opts);
+    return llam_runtime_init_compat(&opts);
 }
 
 static void preempt_hog_task(void *arg) {

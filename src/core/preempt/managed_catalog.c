@@ -317,7 +317,7 @@ static int llam_managed_discover_image(const void *address, void *opaque) {
 static int llam_managed_options(const llam_preempt_opts_t *input, size_t size,
                                   llam_preempt_opts_t *out) {
     memset(out, 0, sizeof(*out));
-    out->policy = LLAM_PREEMPT_POLICY_ASYNC_AUTO;
+    out->policy = LLAM_PREEMPT_POLICY_ASYNC_REQUIRED;
     out->capsule_budget_bytes = LLAM_MANAGED_DEFAULT_BUDGET;
     out->native_affine_capacity = LLAM_MANAGED_DEFAULT_AFFINE_CAPACITY;
     if (input == NULL) {
@@ -364,46 +364,16 @@ int llam_preempt_opts_init(llam_preempt_opts_t *out, size_t out_size) {
     return 0;
 }
 
-int llam_runtime_create_managed(const llam_runtime_opts_t *runtime_opts, size_t runtime_opts_size,
-                                 const llam_preempt_opts_t *preempt_opts, size_t preempt_opts_size,
-                                 llam_runtime_t **out) {
-    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
-        if (out != NULL) *out = NULL;
-        errno = ENOTSUP;
-        return -1;
-    }
-    if (out != NULL) *out = NULL;
-    llam_preempt_opts_t opts;
-    llam_runtime_t *runtime;
-    llam_managed_catalog_t *catalog;
-    if (out == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (g_llam_tls_task != NULL) {
-        errno = EBUSY;
-        return -1;
-    }
-    if (llam_managed_options(preempt_opts, preempt_opts_size, &opts) != 0) return -1;
-    runtime = calloc(1U, sizeof(*runtime));
-    catalog = calloc(1U, sizeof(*catalog));
-    if (runtime == NULL || catalog == NULL) {
-        free(runtime);
-        free(catalog);
-        errno = ENOMEM;
-        return -1;
-    }
-    if (llam_runtime_init_managed_rt(runtime, runtime_opts, runtime_opts_size, true,
-                                      opts.native_affine_capacity, 1U) != 0) {
-        free(catalog);
-        free(runtime);
-        return -1;
-    }
+/* The constructor owns registered but unpublished storage. Loader operations
+ * run outside the lifecycle gate; failure cleanup owns the attached catalog. */
+int llam_managed_catalog_prepare(llam_runtime_t *runtime, const llam_preempt_opts_t *opts) {
+    llam_managed_catalog_t *catalog = calloc(1U, sizeof(*catalog));
+    if (catalog == NULL) return -1;
     catalog->runtime = runtime;
-    catalog->opts = opts;
+    catalog->opts = *opts;
     atomic_init(&catalog->effective_policy, LLAM_PREEMPT_POLICY_COOPERATIVE);
     atomic_init(&catalog->committed, false);
-    catalog->reason = opts.policy == LLAM_PREEMPT_POLICY_COOPERATIVE
+    catalog->reason = opts->policy == LLAM_PREEMPT_POLICY_COOPERATIVE
                           ? LLAM_PREEMPT_REASON_COOPERATIVE_POLICY
                           : LLAM_PREEMPT_REASON_ADAPTER_UNAVAILABLE;
     if (runtime->preempt_mode == LLAM_PREEMPT_OFF || runtime->preempt_mode == LLAM_PREEMPT_COOPERATIVE) {
@@ -413,25 +383,47 @@ int llam_runtime_create_managed(const llam_runtime_opts_t *runtime_opts, size_t 
     atomic_init(&catalog->legacy_references, 0U);
     atomic_init(&catalog->excluded_references, 0U);
     atomic_init(&catalog->affine_references, 0U);
+    pthread_mutex_lock(&g_managed_catalog_lock);
     runtime->managed_catalog = catalog;
-    if (opts.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED &&
+    pthread_mutex_unlock(&g_managed_catalog_lock);
+    if (opts->policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED &&
         (runtime->preempt_mode == LLAM_PREEMPT_OFF || runtime->preempt_mode == LLAM_PREEMPT_COOPERATIVE)) {
         errno = EINVAL;
-        goto fail;
+        return -1;
     }
-    if (llam_managed_image_discover(llam_managed_discover_image, catalog) != 0) goto fail;
+    if (llam_managed_image_discover(llam_managed_discover_image, catalog) != 0) return -1;
     int prepared = llam_managed_async_prepare(runtime);
-    if (prepared != 0 && (errno != ENOTSUP || opts.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED)) goto fail;
+    if (prepared != 0 && (errno != ENOTSUP || opts->policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED)) return -1;
     llam_managed_catalog_invalidate_profile(catalog);
+    return 0;
+}
+
+int llam_runtime_create_managed(const llam_runtime_opts_t *runtime_opts, size_t runtime_opts_size,
+                                 const llam_preempt_opts_t *preempt_opts, size_t preempt_opts_size,
+                                 llam_runtime_t **out) {
+    if (LLAM_UNLIKELY(llam_native_domain_blocked())) {
+        if (out != NULL) *out = NULL;
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (out == NULL) { errno = EINVAL; return -1; }
+    *out = NULL;
+    if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
+        errno = EBUSY;
+        return -1;
+    }
+    llam_preempt_opts_t opts;
+    if (llam_managed_options(preempt_opts, preempt_opts_size, &opts) != 0) return -1;
+    llam_runtime_t *runtime = calloc(1U, sizeof(*runtime));
+    if (runtime == NULL) return -1;
+    if (llam_runtime_init_managed_rt(runtime, runtime_opts, runtime_opts_size, true, &opts) != 0) {
+        int error = errno;
+        free(runtime);
+        errno = error;
+        return -1;
+    }
     *out = runtime;
     return 0;
-fail: {
-    int saved = errno;
-    /* Shutdown drains any partially prepared native adapter before image pins. */
-    llam_runtime_destroy_rt(runtime);
-    errno = saved;
-    return -1;
-}
 }
 
 int llam_runtime_preempt_info_ex(llam_runtime_t *runtime, llam_preempt_info_t *out, size_t out_size) {

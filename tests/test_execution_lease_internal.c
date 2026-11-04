@@ -452,7 +452,7 @@ int main(void) {
         return 1;
     }
     opts.deterministic = 1U;
-    if (llam_runtime_create(&opts, sizeof(opts), &peer) != 0) {
+    if (llam_runtime_create_compat(&opts, sizeof(opts), &peer) != 0) {
         llam_runtime_destroy(runtime);
         return 1;
     }

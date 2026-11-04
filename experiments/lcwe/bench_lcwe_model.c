@@ -296,17 +296,33 @@ static int wall_now_ns(uint64_t *out) {
 #endif
 }
 
-static int cpu_elapsed_ns(clock_t start, clock_t end, uint64_t *out) {
-    uint64_t ticks;
+static int cpu_now_ns(uint64_t *out) {
+#if defined(_WIN32)
+    FILETIME created, exited, kernel, user;
+    uint64_t kernel_ticks;
+    uint64_t user_ticks;
 
-    if (start == (clock_t)-1 || end == (clock_t)-1 || end < start) {
+    /* Windows clock() measures wall time. Process accounting uses 100-ns
+     * units but may not advance for a short sample; preserve that zero. */
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
         return EIO;
     }
-    ticks = (uint64_t)(end - start);
-    return scaled_ticks_to_ns(ticks,
+    kernel_ticks = ((uint64_t)kernel.dwHighDateTime << 32U) | kernel.dwLowDateTime;
+    user_ticks = ((uint64_t)user.dwHighDateTime << 32U) | user.dwLowDateTime;
+    if (user_ticks > UINT64_MAX - kernel_ticks) {
+        return EOVERFLOW;
+    }
+    return scaled_ticks_to_ns(kernel_ticks + user_ticks, 100U, 1U, out);
+#else
+    const clock_t ticks = clock();
+    if (ticks == (clock_t)-1 || ticks < 0) {
+        return EIO;
+    }
+    return scaled_ticks_to_ns((uint64_t)ticks,
                               UINT64_C(1000000000),
                               (uint64_t)CLOCKS_PER_SEC,
                               out);
+#endif
 }
 
 static int add_u64(uint64_t *total, uint64_t value) {
@@ -372,26 +388,30 @@ static int run_benchmark(const bench_config_t *config) {
         uint64_t wall_start;
         uint64_t wall_end;
         uint64_t cpu_ns;
-        clock_t cpu_start;
-        clock_t cpu_end;
+        uint64_t cpu_start;
+        uint64_t cpu_end;
 
         rc = wall_now_ns(&wall_start);
         if (rc != 0) {
             goto out;
         }
-        cpu_start = clock();
-        rc = lcwe_model_run_round(batch, config->lanes, &metrics);
-        cpu_end = clock();
+        rc = cpu_now_ns(&cpu_start);
         if (rc != 0) {
             goto out;
         }
-        rc = wall_now_ns(&wall_end);
-        if (rc != 0 || wall_end < wall_start) {
+        rc = lcwe_model_run_round(batch, config->lanes, &metrics);
+        if (rc != 0) {
+            goto out;
+        }
+        rc = cpu_now_ns(&cpu_end);
+        if (rc != 0 || cpu_end < cpu_start) {
             rc = EIO;
             goto out;
         }
-        rc = cpu_elapsed_ns(cpu_start, cpu_end, &cpu_ns);
-        if (rc != 0) {
+        cpu_ns = cpu_end - cpu_start;
+        rc = wall_now_ns(&wall_end);
+        if (rc != 0 || wall_end < wall_start) {
+            rc = EIO;
             goto out;
         }
         wall_samples[round] = wall_end - wall_start;
@@ -403,8 +423,8 @@ static int run_benchmark(const bench_config_t *config) {
         }
     }
     if (total_cpu == 0U) {
-        rc = ERANGE;
-        goto out;
+        fprintf(stderr, "bench_lcwe_model: CPU time below clock resolution; "
+                        "CPU comparisons are inconclusive\n");
     }
     rc = multiply_u64((uint64_t)config->instances,
                       (uint64_t)measured_rounds,
