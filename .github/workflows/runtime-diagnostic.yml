@@ -51,6 +51,7 @@ jobs:
             -ex 'handle SIG34 SIG35 SIG36 SIG37 SIG38 SIG39 SIG40 nostop noprint pass' \
             -ex 'set environment TSAN_OPTIONS=halt_on_error=1' \
             -ex run -ex 'thread apply all bt 40' \
+            -ex 'python if gdb.selected_inferior().pid: gdb.execute("frame 4"); gdb.execute("info locals"); gdb.execute("p *task"); gdb.execute("p *(llam_async_task_state_t*)task->async_preempt_task")' \
             --args ./tsan-test_async_preempt_linux_x86_64 2>&1 | \
             tee .artifacts/runtime-tsan/preemption-stack.log
       - uses: actions/upload-artifact@v6
