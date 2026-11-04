@@ -48,6 +48,10 @@ HANDLEs cross the boundary, and how the broker shuts down.
   connection. Malformed control clients fail only their accepted session; they
   cannot terminate a long-running broker process that is serving later
   sessions.
+- Windows terminal responses allow the peer to read and close within the
+  existing absolute frame deadline before the pipe instance is disconnected.
+  The wait is bounded even if the peer stops reading; session authority is
+  already revoked before this final transport wait.
 - The local control transport can create bounded broker-owned buffer and byte
   channel grants, then exercise fixed-size buffer read/write, byte-channel
   send/receive/close, and predefined task spawn/join/detach requests through

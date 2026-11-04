@@ -70,3 +70,6 @@ ASan/UBSan are hard gates. Linux TSan is diagnostic because stackful fiber
 runtimes can interact differently with sanitizer runtimes across hosted
 environments. Treat TSan output as triage input, not an automatic release
 blocker unless reproduced by a focused test.
+
+A Linux TSan build makes `llam_runtime_create()` and `llam_runtime_init()` fail with
+`ENOTSUP`, so run race diagnostics on a `*_compat` constructor.

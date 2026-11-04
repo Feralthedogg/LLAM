@@ -141,15 +141,16 @@ The hot queue is reserved for latency-class tasks and I/O completions. The injec
 queue receives cross-shard work and is drained with a budget cap to prevent
 starvation.
 
-[Context switching](context.md) uses the platform context path. Managed
-constructors default to required asynchronous preemption: admitted compiler
+[Context switching](context.md) uses the platform context path. The ordinary and
+managed constructors default to required asynchronous preemption: admitted compiler
 images and native M probes must qualify before user code runs. Captured
 continuations return through scheduler dispatch and a fresh registered lease.
 Explicit compatibility constructors retain request-based preemption at LLAM
 boundaries such as yields, waits, I/O and safepoints.
 
-Cooperative legacy tasks can hand off directly to local work when joining or
-parking a select. A yield with no runnable peer can retain the current task for
+With `LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ`, cooperative legacy tasks can hand
+off directly to local work when joining or parking a select. A direct yield with no
+runnable peer can retain the current task for
 at most 64 consecutive local turns. Timers, remote injections, stop requests,
 preemption requests, controller pauses and pressure force the scheduler path;
 the configured handoff budget can shorten that bound. Asynchronous and

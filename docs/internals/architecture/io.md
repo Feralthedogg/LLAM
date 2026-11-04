@@ -49,6 +49,10 @@ Backends are runtime-owned:
 - Windows nodes own IOCP ports, Winsock overlapped operations, HANDLE
   `ReadFile`/`WriteFile`, and version-specific batching policy.
 
+An I/O worker keeps serving its node through shutdown until the run driver exits, even
+when the node is briefly empty, because a running task can still publish a final
+request.
+
 On Linux, each `llam_node_t` owns an `io_uring` instance with a ring depth of 256. It
 uses one-shot and multishot poll, accept, and recv, provided-buffer rings of 128
 entries per node, and experimental SQPOLL. CQE processing identifies the owning shard

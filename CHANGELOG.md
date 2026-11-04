@@ -113,6 +113,17 @@
 * retry a registered P return through STOPPING drain when shutdown revokes the
   ordinary ticket after its initial flag check; retain fatal refusal of invalid
   drain authority and cover that exact boundary with a deterministic gate.
+* keep I/O workers serving requests until the run driver exits, so a task still
+  running through shutdown can publish a final request while its node is briefly empty.
+* refuse native asynchronous preparation in Linux ThreadSanitizer builds with
+  `ENOTSUP` before user dispatch, because TSan may deliver a copied signal context.
+* retain terminal Windows broker responses within the existing frame deadline
+  before disconnecting and reusing a named-pipe instance.
+
+### Performance
+
+* hand parked cooperative selects directly to local work, and keep a lone cooperative
+  task running across at most 64 idle direct yields instead of requeueing it.
 
 ## 2.2.1 - 2026-08-01
 

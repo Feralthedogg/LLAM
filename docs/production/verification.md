@@ -130,7 +130,8 @@ cooperative fallback or `ENOTSUP`.
 
 `test_default_policy_internal` also checks the ordinary constructors. They default to
 `ASYNC_REQUIRED`, refuse an unqualified task entry and the `COOPERATIVE` mode, and
-return `ENOTSUP` in a build without a native backend, while the `*_compat` constructors
+return `ENOTSUP` in a build without a native backend and in a Linux TSan build, while
+the `*_compat` constructors
 keep running plain C.
 
 ## Bug-hunter validation profile
@@ -174,7 +175,8 @@ edge tests. In GitHub Actions, the Linux TSan nightly job is intentionally
 allowed-failure and diagnostic-only because stackful fiber switching can produce
 environment-dependent sanitizer reports. Treat its uploaded logs as required
 triage input, but keep ASan/UBSan, direct runtime tests, and regular stress CI
-as the hard gates.
+as the hard gates. Linux TSan builds refuse native asynchronous preparation, so
+focused race tests select a `*_compat` constructor.
 
 ```sh
 make OBJDIR=object-tsan-hunt CC=clang \

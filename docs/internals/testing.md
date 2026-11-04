@@ -36,7 +36,7 @@ tests.
 | `test_runtime_select_edges` | `llam_channel_select()` send, close, and cancel races, for lost-wakeup attribution outside the example server. |
 | `test_runtime_io_dump` | A parked fd-readiness wait appears in `llam_dump_runtime_state()` as native request ownership or as an explicit blocking fallback job. |
 | `test_runtime_group_local_edges` | Task-local isolation and structured task-group join, cancel, and destroy ownership. |
-| `test_runtime_shutdown_internal` | Partial initialization, stop-time wakeup, and internal resource cleanup. |
+| `test_runtime_shutdown_internal` | Partial initialization, stop-time wakeup, internal resource cleanup, and I/O workers that outlive an active run. |
 | `test_runtime_stress` | Direct scheduler, cancel, channel, condvar, nested spawn, and I/O cancel stress. |
 | `test_runtime_fuzz` | Deterministic randomized scheduler, cancel, and channel scenarios. `make test-fuzz-heavy` raises it to the maximum built-in scenario counts, and `make test-runtime-soak` repeats it with changing seeds. |
 | `test_sync_primitives` | Mutex, condition variable, channel, timeout, and close semantics. |
@@ -66,6 +66,7 @@ but those drops must be accounted for by server-side stats.
 | Nightly deep CI | `nightly.yml`: longer POSIX and Windows stress, deterministic fuzz, ASan/UBSan, allowed-failure Linux TSan diagnostics, benchmark guardrails. |
 | Weekly soak | `soak.yml`: direct runtime soak plus the hour-long composite profile on Linux x86_64 and macOS arm64. |
 | Runtime benchmarks | `benchmarks.yml`: scheduled LLAM/Go/Tokio comparisons with CSV/PNG artifacts. |
+| Runtime diagnostic | `runtime-diagnostic.yml`: manually dispatched failure capture, with `scope` set to `all`, `linux`, `macos`, or `tsan`. |
 
 Linux TSan is intentionally diagnostic rather than a hard push gate, because
 stackful fiber runtimes can expose sanitizer-runtime interaction differences across

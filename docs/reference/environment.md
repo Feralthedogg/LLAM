@@ -18,7 +18,7 @@ section says a bundled program reads them instead. Where a variable and an
 | `LLAM_PREEMPT_POLL_PERIOD` | `0`-`4096` | Override the task-local safepoint flag-poll period. Unset uses the profile default; `0` and `1` check at every safepoint. `strict` mode forces `1`. |
 | `LLAM_PREEMPT_QUANTUM_NS` | nanoseconds | Override the global preemption slice, capped at one second. `0` uses task-class defaults. |
 | `LLAM_SAFEPOINT_CLOCK_PERIOD` | `0`-`4096` | Bound cheap-safepoint clock sampling. `0` samples every safepoint. |
-| `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, `2`, unset | Let a yield switch directly to same-shard runnable work. `0` disables it, `1` limits it to the handoff after a socket write, and `2` (or `full`, `ordinary`) also covers ordinary yields. Unset selects `2` on Linux and macOS, except in `debug-safe`, and on Windows only in `release-fast`. |
+| `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, `2`, unset | Let a yield switch directly to same-shard runnable work. `0` disables it, `1` limits it to the handoff after a socket write, and `2` (or `full`, `ordinary`) also covers ordinary yields. Unset selects `2` on Linux and macOS, except in `debug-safe`, and on Windows only in `release-fast`. Direct yields need `LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ` on a compatibility runtime. With no runnable peer, a direct yield keeps the current task running for up to 64 consecutive turns. |
 
 `auto` and `strict` do not by themselves enable asynchronous capture on a
 compatibility constructor. Native async support compiles by default on qualified
@@ -124,8 +124,8 @@ and keep the defaults in production.
 | `LLAM_WAKE_HANDOFF` | `0`, `1` | Let a wake hand off directly to a same-shard waiter; default is enabled except in debug-safe. |
 | `LLAM_CHANNEL_LOCAL_HANDOFF` | `0`, `1` | Apply that handoff to channel wakes; defaults to the `LLAM_WAKE_HANDOFF` value. |
 | `LLAM_CHANNEL_SAFEPOINT_INTERVAL` | `0`-`65536` | Channel operations between safepoints; default 1 in debug-safe, 64 in release-fast, and 32 otherwise. `0` is treated as `1`. |
-| `LLAM_YIELD_DIRECT_HANDOFF_BURST` | `0`-`65535` | Starting budget for consecutive direct handoffs; default 64. |
-| `LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS` | `0`, `1` | Allow a direct handoff while timers are armed; default is enabled on macOS except in debug-safe, and disabled elsewhere. |
+| `LLAM_YIELD_DIRECT_HANDOFF_BURST` | `0`-`65535` | Starting budget for consecutive direct handoffs; default 64. `0` removes the budget. A direct yield with no runnable peer stops at 64 turns whatever this value is. |
+| `LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS` | `0`, `1` | Allow a direct yield handoff to a peer while timers are armed; default is enabled on macOS except in debug-safe, and disabled elsewhere. A yield with no peer and a parked join or select always stop at an armed timer. |
 | `LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT` | `0`-`1048576` | Live-task limit above which direct handoff stops applying; `0` means no limit. Default is `0`, or `16` on Windows above two processors. |
 | `LLAM_SPAWN_FANOUT_WAKE_INTERVAL` | `0`-`65535` | Wake other workers when a spawn finds this many tasks in the target's normal queue. `0` disables it. Default is `0`, or `128` on Windows except in debug-safe. |
 | `LLAM_SPAWN_FANOUT_ADAPTIVE` | `0`, `1` | On Windows, raise that threshold while no I/O or timers are active, unless `LLAM_SPAWN_FANOUT_WAKE_INTERVAL` is set. Default is disabled. |

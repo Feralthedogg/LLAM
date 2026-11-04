@@ -42,6 +42,11 @@ This is the compatibility fast path. Registered managed execution returns throug
 its scheduler to preserve reservations and native continuation lifetime. The
 runtime-local `direct_handoff_budget` starts from `LLAM_YIELD_DIRECT_HANDOFF_BURST`.
 
+Parked joins and selects use the same budget and live-task limit, but they stop at any
+armed timer and do not read `LLAM_YIELD_DIRECT_HANDOFF`. A direct yield with no runnable
+peer keeps its task running instead, within the limits in
+[Scheduler loop](scheduler.md#scheduler-loop).
+
 ## Watchdog and autotune
 
 The watchdog thread runs every 1ms (`LLAM_WATCHDOG_INTERVAL_NS`):

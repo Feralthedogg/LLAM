@@ -82,7 +82,7 @@ Experimental flags:
 | `LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS` | Give workers their own I/O rings/queues where supported. |
 | `LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT` | Allow multishot watches in worker-ring mode. |
 | `LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS` | Soft-park idle workers and reactivate on pressure. |
-| `LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ` | Use the lock-free normal run queue. |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ` | Use the lock-free normal run queue. Direct yields and parked local handoffs on a compatibility runtime need it. |
 | `LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC` | Prefer hugepage-friendly allocator backing. |
 | `LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL` | Enable Linux io_uring SQPOLL experiment. |
 

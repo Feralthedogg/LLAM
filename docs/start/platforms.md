@@ -1,10 +1,5 @@
 # Platform support
 
-Linux ThreadSanitizer builds reject native asynchronous preparation with
-`ENOTSUP` before user dispatch: TSan may deliver a copied signal context after
-the kernel has already returned. Use explicit cooperative execution for race
-diagnostics. Ordinary and ASan/UBSan builds retain native asynchronous tests.
-
 LLAM keeps platform support tied to local kernel contracts and verification
 paths. Do not infer behavior from another operating system's backend.
 
@@ -81,6 +76,11 @@ caller-certified-range API remains available with its separate process-wide
 fail-fast acknowledgement; it does not qualify arbitrary C or JIT mappings.
 See the [managed C guide](../guides/managed-c.md) and
 [build guide](build.md) for the distinct contracts and verification commands.
+
+Linux ThreadSanitizer builds reject native asynchronous preparation with
+`ENOTSUP` before user dispatch: TSan may deliver a copied signal context after
+the kernel has already returned. Use a `*_compat` constructor for race
+diagnostics. Ordinary and ASan/UBSan builds retain native asynchronous tests.
 
 ## BSD retirement
 

@@ -136,9 +136,11 @@ safety cannot be proven.
 
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the
-runtime scheduler. `llam_task_safepoint()` is the lower-overhead progress hook
-for CPU-bound loops; it is a no-op outside a managed task and may yield only
-when runtime policy or preemption requests require it.
+runtime scheduler. It also does not promise a context switch: a
+[direct yield](../environment.md#runtime-profiles) with no runnable peer can return to
+the same task for up to 64 consecutive turns. `llam_task_safepoint()` is the
+lower-overhead progress hook for CPU-bound loops; it is a no-op outside a managed task
+and may yield only when runtime policy or preemption requests require it.
 
 `LLAM_PREEMPT_POLL()` and `LLAM_PREEMPT_POLL_EVERY(counter, interval)` are the
 public hot-loop helpers for request-based automatic preemption. They do not let
@@ -148,7 +150,9 @@ be honored. `LLAM_PREEMPT_POLL_EVERY` evaluates its arguments once, treats
 `interval` values `0` and `1` as "poll every call", and is safe to use in tight
 loops where a full `llam_yield()` would be too expensive.
 
-The separately enabled experimental Win64 backend is an exception only for
+Task code admitted by a runtime that requires asynchronous preemption needs no
+polls; see the [managed C guide](../../guides/managed-c.md). On a compatibility
+runtime, the separately enabled experimental Win64 backend is an exception only for
 caller-certified PE-image intervals, not arbitrary instructions or arbitrary
 C/C++ code. Its public opt-in is host-only, one-way, and may terminate the
 hosting process if a committed remote context transaction becomes uncertain.
