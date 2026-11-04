@@ -15152,6 +15152,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     bool thread_cancelled = false;
     bool broker_initialized = false;
     const size_t self_test_attempts = 20U;
+    bool malformed_connected = false;
     int written;
     int rc = -1;
 
@@ -15192,7 +15193,20 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
      * Long-running broker service must isolate that session failure instead of
      * terminating the trusted broker process and dropping later good sessions.
      */
-    if (broker_connect_and_close(path) != 0) {
+    /* bind publishes the pathname before listen completes. A pathname-only
+     * readiness check can race that interval without accepting any session. */
+    for (size_t attempt = 0U; attempt < 200U; ++attempt) {
+        if (broker_connect_and_close(path) == 0) {
+            malformed_connected = true;
+            break;
+        }
+        if (errno != ENOENT && errno != ECONNREFUSED) {
+            break;
+        }
+        usleep(5000);
+    }
+    if (!malformed_connected) {
+        fprintf(stderr, "[test_security_capability] malformed session connect failed errno=%d\n", errno);
         goto done;
     }
     if (broker_client_self_test_unix_retry(path, self_test_attempts) != 0) {

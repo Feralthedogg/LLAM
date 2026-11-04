@@ -85,7 +85,11 @@ void *llam_io_worker_main(void *arg) {
 
         if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
             (node->linux_submit_terminal ||
-             (pending == 0U && atomic_load(&node->pending_ops) == 0U))) {
+             (!atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
+              pending == 0U && atomic_load(&node->pending_ops) == 0U))) {
+            /* An executing G can publish a final request after shutdown's
+             * cancellation scan. Keep servicing it until the run driver has
+             * release-published its exit, even if this node is briefly empty. */
             break;
         }
 

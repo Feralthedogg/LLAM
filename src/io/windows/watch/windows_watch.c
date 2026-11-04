@@ -55,7 +55,9 @@ void *llam_io_worker_main(void *arg) {
         llam_windows_process_submissions(node);
         pending = atomic_load_explicit(&node->pending_ops, memory_order_acquire);
         if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
+            !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
             pending == 0U) {
+            /* Empty is transient while a running G can still publish I/O. */
             break;
         }
         llam_windows_drain_completions(node, INFINITE);

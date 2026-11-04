@@ -193,6 +193,7 @@ typedef struct shutdown_transfer_state {
 typedef struct ownerless_shutdown_state {
     test_failure_state_t failure;
     llam_runtime_t *runtime;
+    atomic_uint root_entered;
     atomic_uint helper_entered;
     atomic_uint release_helper;
     atomic_uint primary_leave_start;
@@ -2252,12 +2253,15 @@ static void ownerless_shutdown_root_task(void *arg) {
     state->root_enter_rc = llam_enter_blocking();
     state->root_enter_errno = errno;
     if (state->root_enter_rc != 0) {
+        fprintf(stderr, "ownerless shutdown: enter rc=%d errno=%d\n",
+                state->root_enter_rc, state->root_enter_errno);
         test_fail(&state->failure,
                   "ownerless shutdown root failed to acquire helper compensation");
         atomic_store_explicit(&state->helper_done, 1U, memory_order_release);
         atomic_store_explicit(&state->root_done, 1U, memory_order_release);
         return;
     }
+    atomic_store_explicit(&state->root_entered, 1U, memory_order_release);
     if (wait_flag(&state->helper_entered, deadline) != 0) {
         test_fail(&state->failure,
                   "ownerless shutdown helper did not reach its redirect boundary");
@@ -2318,6 +2322,7 @@ static int test_ownerless_redirect_active_destroy(void) {
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failure.failures, 0U);
+    atomic_init(&state.root_entered, 0U);
     atomic_init(&state.helper_entered, 0U);
     atomic_init(&state.release_helper, 0U);
     atomic_init(&state.primary_leave_start, 0U);
@@ -2348,7 +2353,11 @@ static int test_ownerless_redirect_active_destroy(void) {
         goto cleanup;
     }
     run_created = true;
-    if (wait_flag(&state.helper_entered, legacy_deadline()) != 0 ||
+    /* Helper dispatch can overtake the primary's foreign-token publication.
+     * This case tests destruction after both entries completed; shutdown
+     * during primary entry belongs to the separate publication-race cases. */
+    if (wait_flag(&state.root_entered, legacy_deadline()) != 0 ||
+        wait_flag(&state.helper_entered, legacy_deadline()) != 0 ||
         state.helper_enter_rc != 0) {
         test_fail(&state.failure,
                   "ownerless shutdown helper did not reach active redirect");

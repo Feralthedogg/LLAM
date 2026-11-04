@@ -4995,7 +4995,118 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 }
 #endif
 
+#if LLAM_RUNTIME_BACKEND_LINUX
+typedef struct io_worker_drain_state {
+    llam_runtime_t *runtime;
+    atomic_bool entered;
+    atomic_bool release;
+    atomic_bool run_done;
+    int run_rc;
+} io_worker_drain_state_t;
+
+static void io_worker_drain_task(void *argument) {
+    io_worker_drain_state_t *state = argument;
+
+    atomic_store_explicit(&state->entered, true, memory_order_release);
+    while (!atomic_load_explicit(&state->release, memory_order_acquire)) {
+        llam_pause_cpu();
+    }
+}
+
+static void *io_worker_drain_run(void *argument) {
+    io_worker_drain_state_t *state = argument;
+
+    state->run_rc = llam_runtime_run_handle(state->runtime);
+    atomic_store_explicit(&state->run_done, true, memory_order_release);
+    return NULL;
+}
+
+static void *io_worker_drain_destroy(void *argument) {
+    io_worker_drain_state_t *state = argument;
+
+    llam_runtime_destroy(state->runtime);
+    return NULL;
+}
+#endif
+
+static int exercise_io_worker_outlives_active_run(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    io_worker_drain_state_t state = {0};
+    llam_runtime_opts_t options;
+    pthread_t driver;
+    pthread_t destroyer;
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000L};
+    bool exited_early = false;
+    int join_error = EBUSY;
+
+    atomic_init(&state.entered, false);
+    atomic_init(&state.release, false);
+    atomic_init(&state.run_done, false);
+    if (llam_runtime_opts_init(&options, sizeof(options)) != 0) {
+        return fail_errno("I/O drain options");
+    }
+    options.deterministic = 1U;
+    options.preempt_mode = LLAM_PREEMPT_COOPERATIVE;
+    if (llam_runtime_create_compat(&options, sizeof(options), &state.runtime) != 0) {
+        return fail_errno("I/O drain runtime");
+    }
+    if (llam_runtime_spawn_ex(state.runtime, io_worker_drain_task, &state, NULL, 0U) == NULL ||
+        pthread_create(&driver, NULL, io_worker_drain_run, &state) != 0) {
+        llam_runtime_destroy(state.runtime);
+        return fail_msg("I/O drain driver setup");
+    }
+    while (!atomic_load_explicit(&state.entered, memory_order_acquire) &&
+           !atomic_load_explicit(&state.run_done, memory_order_acquire)) {
+        llam_pause_cpu();
+    }
+    if (!atomic_load_explicit(&state.entered, memory_order_acquire)) {
+        pthread_join(driver, NULL);
+        llam_runtime_destroy(state.runtime);
+        return fail_msg("I/O drain task did not enter");
+    }
+    if (pthread_create(&destroyer, NULL, io_worker_drain_destroy, &state) != 0) {
+        atomic_store_explicit(&state.release, true, memory_order_release);
+        pthread_join(driver, NULL);
+        llam_runtime_destroy(state.runtime);
+        return fail_msg("I/O drain destroyer setup");
+    }
+    while (!atomic_load_explicit(&state.runtime->shutdown_requested, memory_order_acquire)) {
+        llam_pause_cpu();
+    }
+
+    /* The task holds the run open, so destroy cannot free the node. There is
+     * no pending I/O, but its worker must stay available for late publication.
+     * Consume a premature exit only on the failure path, then tell teardown
+     * it was joined before releasing the task and its runtime lifetime. */
+    llam_node_t *node = &state.runtime->nodes[0];
+    uint64_t deadline = llam_now_ns() + UINT64_C(50000000);
+    do {
+        join_error = pthread_tryjoin_np(node->thread, NULL);
+        if (join_error == 0) {
+            node->thread_started = false;
+            exited_early = true;
+            break;
+        }
+        if (join_error != EBUSY) {
+            break;
+        }
+        (void)nanosleep(&delay, NULL);
+    } while (llam_now_ns() < deadline);
+
+    atomic_store_explicit(&state.release, true, memory_order_release);
+    pthread_join(driver, NULL);
+    pthread_join(destroyer, NULL);
+    if (exited_early || join_error != EBUSY || state.run_rc != 0) {
+        return fail_msg("I/O worker exited before the active run drained");
+    }
+#endif
+    return 0;
+}
+
 int main(void) {
+    if (exercise_io_worker_outlives_active_run() != 0) {
+        return 1;
+    }
     if (exercise_splitmix64_reference_vectors() != 0) {
         return 1;
     }

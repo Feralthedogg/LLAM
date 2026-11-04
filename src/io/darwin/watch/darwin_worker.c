@@ -744,7 +744,9 @@ void *llam_io_worker_main(void *arg) {
 
         pending = atomic_load(&node->pending_ops);
         if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
+            !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
             pending == 0U) {
+            /* Empty is transient while a running G can still publish I/O. */
             break;
         }
 
