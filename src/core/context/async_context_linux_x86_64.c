@@ -1978,6 +1978,14 @@ static int llam_async_preempt_enable_configured(llam_runtime_t *runtime, bool pr
         errno = EBUSY;
         goto unlock;
     }
+#if defined(LLAM_TSAN_BUILD)
+    /* TSan can defer asynchronous handlers and pass a copied ucontext. Writes
+     * to that copy cannot redirect the kernel's sigreturn. Refuse preparation
+     * before publishing handlers, capsules or any user dispatch. */
+    capability_failure = LLAM_PREEMPT_FAILURE_CONTEXT_UNSUPPORTED;
+    errno = ENOTSUP;
+    goto unlock;
+#endif
     if (pinned_runtime->preempt_mode < LLAM_PREEMPT_AUTO) {
         capability_failure = LLAM_PREEMPT_FAILURE_COOPERATIVE_MODE;
         errno = ENOTSUP;

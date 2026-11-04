@@ -1043,6 +1043,29 @@ static int async_test_signal_faults(void) {
 }
 #endif
 
+#if defined(LLAM_TSAN_BUILD)
+static int async_test_intercepted_context_refusal(void) {
+    llam_runtime_opts_t options;
+    llam_runtime_t *runtime = NULL;
+    int result = 1;
+    if (llam_runtime_opts_init(&options, sizeof(options)) != 0) return 1;
+    options.deterministic = 1U;
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) return 1;
+    if (llam_async_preempt_register_safe_range(runtime,
+            (uintptr_t)llam_async_safe_leaf_begin, (uintptr_t)llam_async_safe_leaf_end) == 0 &&
+        llam_async_preempt_enable_runtime(runtime) == -1 && errno == ENOTSUP &&
+        runtime->async_preempt_control == NULL &&
+        atomic_load_explicit(&runtime->async_preempt_enabled, memory_order_acquire) == 0U &&
+        atomic_load_explicit(&runtime->preempt_capability.failure_reason, memory_order_acquire) ==
+            LLAM_PREEMPT_FAILURE_CONTEXT_UNSUPPORTED) {
+        result = 0;
+        puts("test_async_preempt_linux_x86_64: intercepted kernel context refused before native publication");
+    }
+    llam_runtime_destroy(runtime);
+    return result;
+}
+#endif
+
 int main(int argc, char **argv) {
     async_preempt_test_state_t state;
     llam_runtime_opts_t opts;
@@ -1073,6 +1096,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "test_async_preempt_linux_x86_64: signal selector contract failed\n");
         return 1;
     }
+#if defined(LLAM_TSAN_BUILD)
+    return async_test_intercepted_context_refusal();
+#endif
     memset(&state, 0, sizeof(state));
     atomic_init(&state.release_leaf, 0U);
     atomic_init(&state.leaf_started, 0U);

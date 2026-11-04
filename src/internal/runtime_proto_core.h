@@ -133,7 +133,7 @@ void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
 #ifndef LLAM_NO_SANITIZE_THREAD
 #define LLAM_NO_SANITIZE_THREAD
 #endif
-#undef LLAM_TSAN_BUILD
+/* Native signal adapters also use this build qualification marker. */
 #endif
 
 /*

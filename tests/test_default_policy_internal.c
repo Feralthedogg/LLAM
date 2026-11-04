@@ -44,7 +44,7 @@ int main(void) {
     options.deterministic = 1U;
     int created = llam_runtime_create(&options, sizeof(options), &runtime);
     int create_error = errno;
-#if !LLAM_ASYNC_CONTEXT_COMPILED
+#if !LLAM_ASYNC_CONTEXT_COMPILED || (LLAM_PLATFORM_LINUX && defined(LLAM_TSAN_BUILD))
     if (created != -1 || errno != ENOTSUP || runtime != NULL) return fail(__LINE__);
     if (llam_runtime_init(NULL) != -1 || errno != ENOTSUP) return fail(__LINE__);
     if (llam_runtime_preempt_info_ex(llam_runtime_default(), &info, sizeof(info)) != -1 || errno != EINVAL)

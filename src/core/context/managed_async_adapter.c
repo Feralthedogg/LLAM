@@ -26,6 +26,12 @@ int llam_managed_async_prepare(llam_runtime_t *runtime) {
     if (runtime == NULL) { errno = EINVAL; return -1; }
     if (llam_managed_catalog_policy(runtime) == LLAM_PREEMPT_POLICY_COOPERATIVE ||
         runtime->preempt_mode < LLAM_PREEMPT_AUTO) return 0;
+#if LLAM_PLATFORM_LINUX && defined(LLAM_TSAN_BUILD)
+    /* Signal-context copying by TSan is incompatible with native redirection
+     * on either Linux architecture. Explicit cooperative catalogs still work. */
+    errno = ENOTSUP;
+    return -1;
+#endif
 #if LLAM_ASYNC_CONTEXT_SHARED
     return llam_async_shared_prepare_registered(runtime);
 #elif LLAM_PLATFORM_LINUX && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)

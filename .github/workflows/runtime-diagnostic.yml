@@ -251,6 +251,16 @@ jobs:
                          if s['case'] == case and s['version'] == version) for version in paths}
               print(case, medians, 'ratio', medians['after'] / medians['before'], flush=True)
           PY
+
+      - name: Profile the native select park-wake path
+        run: |
+          LLAM_BENCH_ONLY=select_park_wake LLAM_BENCH_ROUNDS=512 \
+            LLAM_BENCH_WARMUP_ROUNDS=1 LLAM_BENCH_SELECT_OPS=16384 \
+            ./after/build/perf/bench > .artifacts/runtime-intel-performance/select-profile-bench.log 2>&1 &
+          bench_pid=$!
+          sample "$bench_pid" 3 1 -mayDie \
+            -file .artifacts/runtime-intel-performance/select-profile.txt
+          wait "$bench_pid"
       - name: Check unchanged Intel floors
         run: |
           python3 after/scripts/bench_guard.py --bench "$PWD/after/build/perf/bench" \
