@@ -423,6 +423,7 @@ void llam_fire_expired_timers(llam_shard_t *shard);
 bool llam_task_wait_deadline_active(llam_task_t *task);
 bool llam_join_waiter_remove_locked(llam_task_t *target, llam_task_t *waiter);
 void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind);
+bool llam_park_try_local_handoff(llam_shard_t *shard, llam_task_t *task);
 bool llam_task_clear_wait_tracking(llam_task_t *task);
 void llam_task_clear_wait_tracking_or_abort(llam_task_t *task);
 typedef struct llam_wait_dependency {

@@ -747,7 +747,8 @@ int llam_channel_select(llam_select_op_t *ops,
         }
 select_not_ready:
         wait_tracking_published = false;
-        if (deadline_ns == 0U || llam_deadline_passed(deadline_ns)) {
+        if (deadline_ns == 0U ||
+            (deadline_ns != UINT64_MAX && llam_deadline_passed(deadline_ns))) {
             if (prepared_pair) {
                 llam_channel_select_unlock_channels(inline_channels, 2U);
                 llam_channel_select_release_channels(inline_channels, 2U);

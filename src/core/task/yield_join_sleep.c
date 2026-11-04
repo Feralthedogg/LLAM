@@ -612,17 +612,20 @@ bool llam_yield_to_local_runnable(void) {
 }
 
 /**
- * @brief Parked-join direct handoff into local runnable work.
+ * @brief Hand off a parked task to local cooperative work.
  *
  * @details
- * Spawn/join bursts commonly park the parent immediately after publishing a
- * batch of child tasks.  Once the parent is on a join wait list it no longer
- * needs to run until its target completes, so this path can switch directly to
- * another local runnable task and skip one scheduler round trip.
+ * Once a join or select waiter has published its wait, it can switch directly
+ * to local work. The same native M retains the legacy P, and asynchronous or
+ * registered continuations still require the scheduler dispatch path.
  *
  * @return true when the current parked joiner switched directly to local work.
  */
-static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *current) {
+bool llam_park_try_local_handoff(llam_shard_t *shard, llam_task_t *current) {
+    if (current == NULL ||
+        atomic_load_explicit(&current->state, memory_order_acquire) != LLAM_TASK_STATE_PARKED) {
+        return false;
+    }
     if (shard != NULL && shard->runtime != NULL &&
         shard->runtime->execution_lease_mode == LLAM_EXECUTION_LEASE_REGISTERED) {
         return false;
@@ -961,7 +964,7 @@ static int llam_join_claimed_impl(llam_task_t *task,
     llam_trace_shard(g_llam_tls_shard, self, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_JOIN);
     llam_task_sample_live_stack(self);
     llam_thread_errno_store(caller_errno);
-    if (!has_deadline && self->cancel_token == NULL && llam_join_try_local_handoff(g_llam_tls_shard, self)) {
+    if (!has_deadline && self->cancel_token == NULL && llam_park_try_local_handoff(g_llam_tls_shard, self)) {
         /* Resumed by the scheduler after the join target wakes this parked task. */
     } else {
         llam_switch_task_to_scheduler(self,

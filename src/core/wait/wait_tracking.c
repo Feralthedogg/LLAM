@@ -1417,11 +1417,19 @@ void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
                               memory_order_acquire))) {
         llam_cancel_task_wait(task);
     }
+    llam_task_sample_live_stack(task);
+    /* Select has already published every node and its cancellation owner. A
+     * cooperative legacy M may run the next local G without a scheduler round
+     * trip; the handoff helper retains the timer, stop and fairness guards.
+     * Async and registered contexts always use scheduler dispatch below. */
+    if (atomic_load_explicit(&task->active_select_state, memory_order_acquire) != NULL &&
+        llam_park_try_local_handoff(shard, task)) {
+        return;
+    }
     /* Retire the worker publication before the task enters a wait. */
     pthread_mutex_lock(&shard->lock);
     llam_worker_clear_active_g(g_llam_tls_worker);
     pthread_mutex_unlock(&shard->lock);
-    llam_task_sample_live_stack(task);
     // The scheduler resumes after this context switch and will later reinject
     // the task when its wait completes.
     llam_switch_task_to_scheduler(task, scheduler_ctx);
