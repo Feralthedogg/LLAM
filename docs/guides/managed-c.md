@@ -38,6 +38,40 @@ the loaded image and retains an independent loader reference. Passing an
 ordinary function pointer or copying metadata into heap memory does not qualify
 that function for asynchronous preemption.
 
+## Library use and preemption
+
+Static or shared linkage does not determine whether a task is asynchronously
+preemptible. LLAM can provide asynchronous preemption as a library when the task
+image is qualified, the runtime's native profile is supported, and the requested
+policy has passed startup admission.
+
+| How LLAM is used | CPU preemption contract |
+| --- | --- |
+| Static/shared LLAM plus a qualified task image and a supported native profile, using a default constructor | Required asynchronous execution; qualified CPU loops need no application poll or yield. |
+| Ordinary, unqualified task code linked against LLAM, using a default constructor | Unqualified task entries are refused with `ENOTSUP`. Unsupported native profiles also fail creation or startup. |
+| Ordinary C tasks using a `*_compat` constructor | Boundary/safepoint execution. Arbitrary CPU loops have no asynchronous interruption guarantee. Runtime I/O can still park tasks. |
+| Another language calling LLAM through the C ABI | The host can submit qualified C tasks, but its own foreign-language callbacks need separate qualification before they can be admitted as asynchronously preemptible tasks. |
+
+Compile host setup code in native mode and task code through the managed producer.
+The task's reachable calls must have supported effects and call contracts; wrapping
+an arbitrary foreign body in one managed function does not qualify that body.
+The final link of the task image must pass the LLPM2 verifier. The runtime then
+discovers or registers that image, retains its loader lifetime, and checks the
+selected native workers before user dispatch. Follow the
+[module lifetime rules](#policy-resources-and-module-lifetime) when loading or
+unloading task libraries.
+
+Installing the standard runtime SDK and linking with a normal compiler does not
+perform these compiler steps. Build the matching managed producer as described
+below. Consult the [profile matrix](../start/platforms.md): ordinary MSVC and Intel
+macOS builds have no native asynchronous backend by default, even when LLAM is
+loaded as a shared library.
+
+Use `llam_runtime_preempt_info_ex()` from host code to inspect requested/effective
+policy, the reason, and `RUNNING`/`COMMITTED` state. A pending startup probe is not an
+active asynchronous profile. Extending this compiler path to another LLVM language
+is the next [LLVM frontend integration milestone](../project/roadmap.md#llvm-frontend-integration).
+
 ## Build and link
 
 The managed producer requires LLVM **23.1.2**. Build the runtime and its matching

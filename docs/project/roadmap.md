@@ -32,9 +32,10 @@ must state which code LLAM can preempt, where foreign code runs, and how its mem
 remains valid. The managed C qualification in 3.0.0 does not qualify another
 language's stacks, garbage collector, exceptions, or JIT-generated code.
 
-The first integration target is an independently driven LLAM runtime connected to
-a host event loop. A host-driven scheduler pump, additional language execution
-profiles, and new kernel or device backends require their own designs and evidence.
+The next compiler priority is to make LLAM's managed compilation pipeline reusable
+by other LLVM-based language frontends. Host event-loop adapters are a separate
+integration track: they let a host use LLAM services, while compiler integration
+qualifies that language's own task code for asynchronous preemption.
 
 ## Current guarantees
 
@@ -64,22 +65,23 @@ establish a qualified asynchronous profile.
 
 ## Milestones
 
-The immediate priorities are a dependable execution contract and a reusable host
-integration. Broader adapters build on those foundations.
+Runtime stabilization continues across every stage. The next implementation
+priority is the LLVM frontend boundary, starting with a common IR input path and
+then qualifying one additional ahead-of-time language frontend.
 
 | Stage | Status | Deliverable | Dependency |
 | --- | --- | --- | --- |
-| 1. Runtime stabilization | Next; extends the delivered core | Repeatable qualification and failure behavior for every claimed profile. | 3.0.0 baseline |
-| 2. Host integration | Planned | Nonblocking submission and completion delivery for an external host loop. | Stage 1 contracts |
-| 3. Backend operation contracts | Planned | Shared operation and memory-lifetime conformance across native backends and host adapters. | Stage 1; develop alongside stage 2 |
+| 1. LLVM frontend integration | Next | A common IR input path and a qualified additional language frontend using the LLAM compiler/runtime contract. | 3.0.0 managed C baseline and native qualification |
+| 2. Host integration | Planned | Nonblocking submission and completion delivery for an external host loop. | Current runtime contracts; can progress alongside stage 1 |
+| 3. Backend operation contracts | Planned | Shared operation and memory-lifetime conformance across native backends and host adapters. | Current backend contracts; develop alongside stage 2 |
 | 4. Resource control and fairness | Planned | Bounded queues and measurable progress under mixed workloads. | Stages 2 and 3 |
-| 5. Ecosystem adapters | Planned | Supported host/language integrations using the same core contracts. | Stages 1–3; resource limits from stage 4 |
-| 6. Broker isolation | Optional extension of the internal foundation | A versioned process-boundary contract with explicit authority policy. | Stages 1–3 and separate security qualification |
+| 5. Ecosystem adapters | Planned | Supported host/language integrations using the same core contracts. | Stage 1 for preemptible language code; stages 2–4 for host adapters |
+| 6. Broker isolation | Optional extension of the internal foundation | A versioned process-boundary contract with explicit authority policy. | Current runtime contracts, stages 2–3, and separate security qualification |
 
 ## Runtime stabilization
 
-**Stage 1.** Extend release confidence while preserving ABI major 2, compatible
-option prefixes, and the existing handle and lifetime rules.
+**Continuous work.** Extend release confidence while preserving ABI major 2,
+compatible option prefixes, and the existing handle and lifetime rules.
 
 - Keep reducing shutdown, cancellation, lost-wakeup, select, helper, and I/O ownership
   failures into direct runtime regression tests. Synchronize test prerequisites on
@@ -92,10 +94,71 @@ option prefixes, and the existing handle and lifetime rules.
 - Keep requested/effective policy and refusal reasons observable. Unknown native state
   must be refused before capture; compatibility execution remains an explicit choice.
 
-**Complete when:** each promoted profile passes its native context, ownership,
+**Profile promotion gate:** each promoted profile passes its native context, ownership,
 failure-injection, shutdown, SDK, and performance gates from reproducible inputs.
 Unsupported profiles must report a documented refusal and its reason. Dumps must
 identify the owner and outstanding work in a failed drain or hang.
+
+## LLVM frontend integration
+
+**Stage 1.** Reuse LLAM's compiler and execution machinery for code produced by
+other LLVM frontends. LLAM supplies an execution/preemption contract on top of
+LLVM's native code generation; the existing CPU target backends still generate
+the instructions.
+
+The current implementation provides three useful boundaries:
+
+| Component | Current role | Extension needed |
+| --- | --- | --- |
+| `managed_driver.py` | Compiles `.c` inputs, accepts object/library inputs for linking, and requires final-image verification with LLVM 23.1.2. | Add a versioned `.ll` / `.bc` input contract and a reusable pipeline entry. These input modes are planned, not available in 3.0.0. |
+| `llam_managed_pass.cpp` and `managed_llvm_contract.h` | Analyze effects, check C-oriented call contracts, classify execution, and generate native/runtime boundaries. | Validate each frontend's calling conventions, ABI attributes, TLS, indirect calls, exception/unwind behavior, and memory-management requirements. |
+| `llam_managed_machine.cpp` and the final-image verifier | Check the supported machine profile, emit instruction/frame/call records, and verify the linked LLPM2 image. | Reuse this machinery when its target and execution assumptions hold, with regression coverage for the new frontend's code generation. |
+
+The MachineFunction pass is a central reuse point, but it consumes execution-class
+and effect facts produced by the IR pass. Qualification must keep IR analysis,
+machine checks, final-image verification, and runtime admission connected.
+[LLVM's code-generation model](https://llvm.org/docs/CodeGenerator.html) explains
+the boundary between IR functions and their machine-level representation.
+
+**Planned pipeline:**
+
+```text
+language frontend -> LLVM IR / bitcode
+  -> language ABI/effect validation and LLAM IR lowering
+  -> native code generation and LLAM MachineFunction pass
+  -> LLPM2 final-image verification
+  -> runtime image admission and native-worker probes
+```
+
+Implement and qualify this in order:
+
+1. **Common IR entry.** Start with IR emitted from the existing C profile. Check
+   the LLVM version, target, data layout, supported IR features, and reserved
+   metadata; run mandatory effect analysis on every input. Compare classification,
+   accepted/rejected cases, and runtime behavior with the current `.c` pipeline.
+2. **Language contract.** Select one additional AOT frontend and a documented
+   feature subset. Define callable signatures, hidden ABI parameters, TLS and
+   thread affinity, indirect-call targets, runtime intrinsics, and foreign calls.
+   Reject unmodelled exceptions, stack switching, or GC requirements before admission.
+3. **Image and runtime qualification.** Exercise executable and shared task images,
+   cross-module calls, static/shared LLAM linkage, metadata corruption, module
+   lifetime, cancellation, and native context preservation. Preserve the common
+   N:M scheduler as the baseline; new GC coordination or stack-ownership requirements
+   need an explicit runtime contract before that profile is accepted.
+4. **SDK support.** Deliver the selected frontend adapter with matching compiler,
+   verifier, runtime, installed-consumer tests, and a supported-profile matrix.
+   Broader language features and JIT code remain separate qualification work;
+   mutable code needs its own publication, invalidation, and lifetime protocol.
+
+GC integration needs language-runtime cooperation for roots, stack maps, and safe
+collection points; it is not established by machine-level preemption records.
+See [LLVM's GC integration contract](https://llvm.org/docs/GarbageCollection.html#quick-start).
+
+**Complete when:** an additional LLVM frontend's qualified task runs CPU-bound code
+without application polls or yields and demonstrates native asynchronous capture
+and peer progress through the supported static/shared library paths. Unsupported
+language features fail explicitly. The installed pipeline, final-image checks,
+context/lifetime tests, and existing latency/throughput gates must all pass.
 
 ## Host integration
 
@@ -161,8 +224,9 @@ performance gates remain satisfied under matching build and workload settings.
 
 ## Ecosystem
 
-**Stage 5.** Make the same execution backend usable from more hosts through supported
-adapters and reproducible SDKs.
+**Stage 5.** Package the compiler integrations from stage 1 and the host adapters
+from stages 2–4 as supported integrations with reproducible SDKs. Document the
+guarantees of those two integration paths separately.
 
 - Establish the C host integration first, including C++ hosts using the C ABI and
   explicit foreign-call boundaries. Keep application object models in their hosts.
