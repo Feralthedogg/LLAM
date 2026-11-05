@@ -24,6 +24,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 import bench_runtime_compare as bench
 
@@ -307,6 +308,20 @@ def test_prebuilt_options_require_no_build() -> None:
         sys.argv = original
 
 
+def test_windows_generator_override_is_honored() -> None:
+    root = Path("workspace")
+    for generator in ("Visual Studio 17 2022", "Visual Studio 18 2026"):
+        with patch.object(bench.os, "name", "nt"), \
+                patch.dict(bench.os.environ, {"CMAKE_GENERATOR": generator}), \
+                patch.object(bench.subprocess, "run") as run:
+            command = bench.llam_bench_command(root, False)
+        configure = run.call_args_list[0].args[0]
+        if configure[configure.index("-G") + 1] != generator:
+            fail(f"Windows generator override was ignored: {generator}")
+        if command != [str(root / "build" / "bench-runtime-compare" / "Release" / "bench.exe")]:
+            fail("Windows generator changed the expected benchmark path")
+
+
 def main() -> int:
     test_sample_csv_filters_requested_cases_and_warns()
     test_isolated_warning_omits_isolation_hint()
@@ -318,6 +333,7 @@ def main() -> int:
     test_main_rejects_duplicate_case_args_without_traceback()
     test_prebuilt_commands_are_used_without_building()
     test_prebuilt_options_require_no_build()
+    test_windows_generator_override_is_honored()
     print("[test_bench_runtime_compare] ok")
     return 0
 

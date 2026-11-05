@@ -56,6 +56,24 @@ def test_bench_guard_rejects_malformed_metrics() -> None:
     )
 
 
+def test_bench_guard_checks_requested_workload() -> None:
+    row = "[bench] name=select_timeout ops=65536 ops_per_sec=10000000"
+    expected = {"select_timeout": 65536}
+    if bench_guard.parse_bench_output(row, expected) != {"select_timeout": 10000000.0}:
+        fail("bench_guard rejected the requested select workload")
+    for actual in ("16384", "65536.0", "-1"):
+        try:
+            bench_guard.parse_bench_output(row.replace("ops=65536", "ops=" + actual), expected)
+        except ValueError:
+            continue
+        fail(f"bench_guard accepted a different operation count: {actual}")
+    try:
+        bench_guard.parse_bench_output(row.replace("ops=65536 ", ""), expected)
+    except ValueError:
+        return
+    fail("bench_guard accepted a missing operation count")
+
+
 def test_bench_matrix_rejects_malformed_metrics() -> None:
     config = "[bench] config rounds=1 warmup=0"
     row = "[bench] name=spawn_join ops_per_sec=1000 p50_us=1 p99_us=2 io_submit_syscalls=0"
@@ -150,6 +168,7 @@ def test_shared_cli_number_parsers_reject_coercions() -> None:
 
 def main() -> int:
     test_bench_guard_rejects_malformed_metrics()
+    test_bench_guard_checks_requested_workload()
     test_bench_matrix_rejects_malformed_metrics()
     test_bench_matrix_rejects_duplicate_profile_requests()
     test_bench_guard_rejects_ambiguous_threshold_config()

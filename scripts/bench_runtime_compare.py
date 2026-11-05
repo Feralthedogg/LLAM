@@ -287,7 +287,7 @@ def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
                     "-B",
                     str(build_dir),
                     "-G",
-                    "Visual Studio 17 2022",
+                    os.environ.get("CMAKE_GENERATOR") or "Visual Studio 17 2022",
                     "-A",
                     "x64",
                     "-DCMAKE_BUILD_TYPE=Release",

@@ -119,7 +119,7 @@ def parse_fields(line: str) -> dict[str, str]:
     return fields
 
 
-def parse_bench_output(text: str) -> dict[str, float]:
+def parse_bench_output(text: str, expected_ops: dict[str, int] | None = None) -> dict[str, float]:
     results: dict[str, float] = {}
 
     for line in text.splitlines():
@@ -139,6 +139,10 @@ def parse_bench_output(text: str) -> dict[str, float]:
             raise ValueError(f"non-positive or non-finite ops_per_sec in benchmark row: {line!r}")
         if name in results:
             raise ValueError(f"duplicate benchmark row for {name}: {line!r}")
+        if expected_ops is not None and name in expected_ops:
+            expected = expected_ops[name]
+            if fields.get("ops") != str(expected):
+                raise ValueError(f"{name}: requested {expected} operations, reported {fields.get('ops')!r}")
         results[name] = ops
     return results
 
@@ -174,7 +178,8 @@ def run_case(bench: Path, case: str, args: argparse.Namespace) -> tuple[float, s
     if proc.returncode != 0:
         raise RuntimeError(f"{case}: benchmark exited with rc={proc.returncode}")
     try:
-        parsed = parse_bench_output(proc.stdout)
+        expected_ops = {case: args.select_ops} if case.startswith("select_") else None
+        parsed = parse_bench_output(proc.stdout, expected_ops)
     except ValueError as exc:
         raise RuntimeError(f"{case}: failed to parse benchmark output: {exc}") from None
     if case not in parsed:

@@ -75,6 +75,8 @@
 
 ### Fixed
 
+* honor the selected Visual Studio generator in Windows comparison builds and
+  measure Tokio's expired select with one nonblocking poll rather than timer ticks.
 * reuse immutable lexical facts by source content in the native-domain audit,
   avoiding repeated full parsing and CI timeouts while rechecking current source,
   public headers and reviewed contracts on every audit.
@@ -116,8 +118,10 @@
 * wait for the watchdog's final fatal observation in parked-cycle tests, handle
   completed joins during cleanup and collect 31 throughput rounds in CI smoke jobs,
   retaining every measured round in the mean and preserving the performance floors.
-* use 16,384-operation select batches in CI throughput guards to reduce sensitivity
+* use 65,536-operation select batches in CI throughput guards to reduce sensitivity
   to isolated host scheduling pauses while retaining the same mean and floors.
+  Verify the reported operation count so a benchmark cannot silently clamp the
+  requested batch and still pass the guard.
 * select the installed Visual Studio generation on Windows deep runners, keep
   concurrent-destroy tests from reading reclaimed runtimes, and isolate the
   reserved-publication fixture from incidental safepoint yields.

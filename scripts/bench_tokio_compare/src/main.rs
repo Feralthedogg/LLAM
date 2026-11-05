@@ -14,7 +14,9 @@
 // See LICENSE.
 
 use std::env;
+use std::future::{poll_fn, Future};
 use std::io::ErrorKind;
+use std::task::Poll;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -259,7 +261,7 @@ async fn run_select_timeout(rounds: u32, ops_per_round: u32) -> Report {
         let (_secondary_tx, mut secondary_rx) = mpsc::channel::<usize>(1);
         let start = Instant::now();
         for _ in 0..ops_per_round {
-            let result = time::timeout(Duration::ZERO, async {
+            let selection = async {
                 tokio::select! {
                     value = primary_rx.recv() => {
                         panic!("select timeout primary ready: {value:?}");
@@ -268,9 +270,12 @@ async fn run_select_timeout(rounds: u32, ops_per_round: u32) -> Report {
                         panic!("select timeout secondary ready: {value:?}");
                     }
                 }
-            })
-            .await;
-            assert!(result.is_err(), "select timeout unexpectedly completed");
+            };
+            tokio::pin!(selection);
+            // An expired deadline is one nonblocking scan, not a timer tick.
+            let ready =
+                poll_fn(|context| Poll::Ready(selection.as_mut().poll(context).is_ready())).await;
+            assert!(!ready, "select timeout unexpectedly completed");
         }
         samples.push(start.elapsed());
     }
@@ -421,7 +426,7 @@ async fn async_main(worker_threads: usize) {
     let total_rounds = rounds + warmup_rounds;
     let spawn_tasks = env_u32("LLAM_BENCH_SPAWN_TASKS", 128, 4096);
     let channel_messages = env_u32("LLAM_BENCH_CHANNEL_MESSAGES", 1024, 16384);
-    let select_ops = env_u32("LLAM_BENCH_SELECT_OPS", 512, 16384);
+    let select_ops = env_u32("LLAM_BENCH_SELECT_OPS", 512, 65536);
     let io_messages = env_u32("LLAM_BENCH_IO_MESSAGES", 256, 8192);
     let poll_events = env_u32("LLAM_BENCH_POLL_EVENTS", 256, 8192);
     let sleep_tasks = env_u32("LLAM_BENCH_SLEEP_TASKS", spawn_tasks.max(512), 8192);
@@ -517,4 +522,18 @@ fn main() {
         .expect("failed to build Tokio runtime");
 
     runtime.block_on(async_main(worker_threads));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_select_does_not_wait_for_timer_ticks() {
+        let report = time::timeout(Duration::from_secs(5), run_select_timeout(1, 65536))
+            .await
+            .expect("expired selects must complete without per-operation timer waits");
+        assert_eq!(report.ops_per_round, 65536);
+        assert_eq!(report.samples.len(), 1);
+    }
 }

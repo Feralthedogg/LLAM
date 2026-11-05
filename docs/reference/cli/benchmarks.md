@@ -28,7 +28,7 @@ Important benchmark environment variables:
 | `LLAM_BENCH_WARMUP_ROUNDS` | Warmup rounds. |
 | `LLAM_BENCH_SPAWN_TASKS` | Spawn/join workload size. |
 | `LLAM_BENCH_CHANNEL_MESSAGES` | Channel workload size. |
-| `LLAM_BENCH_SELECT_OPS` | Select workload size. |
+| `LLAM_BENCH_SELECT_OPS` | Select workload size, capped at `65536`. |
 | `LLAM_BENCH_IO_MESSAGES` | I/O echo workload size. |
 | `LLAM_BENCH_POLL_EVENTS` | Poll wake workload size. |
 | `LLAM_BENCH_SLEEP_TASKS` | Sleep fanout workload size. |
@@ -61,6 +61,9 @@ python3 scripts/bench_runtime_compare.py \
 | `--samples <n>` | `3` | Process-level samples per runtime. |
 | `--sample-policy <mode>` | `median` | Row selection policy when multiple samples are collected. |
 | `--spread-warning-ratio <r>` | `1.50` | Warn when max/min sample spread exceeds this ratio; `0` disables. |
+
+Windows builds use `CMAKE_GENERATOR` when set. The CI lanes select Visual Studio
+17 2022 or 18 2026 to match the installed toolchain.
 
 `cpu_spike_compare.py` fills every LLAM worker with a busy task that has no
 preemption poll and compares timer, I/O, and scheduled control-trigger latency
@@ -98,7 +101,7 @@ python3 scripts/bench_guard.py --cases spawn_join,channel_pingpong --min-ops spa
 | `--timeout <sec>` | `180` | Timeout for the bench process. |
 | `--spawn-tasks <n>` | `128` | Spawn/join guard workload. |
 | `--channel-messages <n>` | `1024` | Channel guard workload. |
-| `--select-ops <n>` | `512` | Select guard workload. |
+| `--select-ops <n>` | `512` | Requested select workload, up to `65536` with the bundled bench. A different reported count fails the guard. |
 | `--io-messages <n>` | `128` | I/O guard workload. |
 | `--poll-events <n>` | `128` | Poll guard workload. |
 | `--sleep-tasks <n>` | `256` | Sleep guard workload. |

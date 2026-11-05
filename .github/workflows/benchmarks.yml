@@ -53,9 +53,11 @@ jobs:
           - name: windows-2022-x86_64
             runner: windows-2022
             cc: cl
+            generator: Visual Studio 17 2022
           - name: windows-2025-x86_64
             runner: windows-2025
             cc: cl
+            generator: Visual Studio 18 2026
 
     env:
       ROUNDS: ${{ github.event.inputs.rounds || '9' }}
@@ -126,6 +128,7 @@ jobs:
             --out-dir "$OUT_DIR"
         env:
           CC: ${{ matrix.cc }}
+          CMAKE_GENERATOR: ${{ matrix.generator }}
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v6

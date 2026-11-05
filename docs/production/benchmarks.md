@@ -181,9 +181,10 @@ and wider platform evidence.
 conservative. Public performance tables should come from scheduled benchmark
 artifacts, not local one-off runs.
 
-CI throughput guards use 31 measured rounds per case and 16,384 select operations
-per batch. A smaller select batch can finish in tens of microseconds, so one host
-scheduling pause could dominate its measured time. Other cases use the script's
+Stress and Nightly throughput guards use 31 measured rounds per case and 65,536
+select operations per batch. Short select batches can be dominated by an isolated
+host scheduling pause; the larger batches measure sustained throughput while
+retaining every measured round and the existing floors. Other cases use the script's
 [default batch sizes](../reference/cli/benchmarks.md).
 The guard compares total operations divided by total measured time;
 the additional p50/p99 values describe batch durations.
@@ -204,6 +205,10 @@ Channel select has three focused benchmark cases:
   one selected operation.
 - `select_timeout`: the immediate-timeout/no-ready path used to measure
   validation and deadline overhead.
+
+The timeout case performs one nonblocking selection scan. Tokio polls its
+selection future once instead of starting a zero-duration timer, which would
+measure timer ticks and scheduler delays rather than an already-expired deadline.
 
 Run them directly with:
 

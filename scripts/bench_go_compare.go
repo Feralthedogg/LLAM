@@ -480,7 +480,7 @@ func main() {
 	totalRounds := rounds + warmupRounds
 	spawnTasks := envU32("LLAM_BENCH_SPAWN_TASKS", 128, 4096)
 	channelMessages := envU32("LLAM_BENCH_CHANNEL_MESSAGES", 1024, 16384)
-	selectOps := envU32("LLAM_BENCH_SELECT_OPS", 512, 16384)
+	selectOps := envU32("LLAM_BENCH_SELECT_OPS", 512, 65536)
 	ioMessages := envU32("LLAM_BENCH_IO_MESSAGES", 256, 8192)
 	pollEvents := envU32("LLAM_BENCH_POLL_EVENTS", 256, 8192)
 	sleepTasks := envU32("LLAM_BENCH_SLEEP_TASKS", maxU32(spawnTasks, 512), 8192)

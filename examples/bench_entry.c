@@ -102,7 +102,7 @@ int main(void) {
     unsigned total_rounds = rounds + warmup_rounds;
     unsigned spawn_tasks = bench_env_u32("LLAM_BENCH_SPAWN_TASKS", 128U, 4096U);
     unsigned channel_messages = bench_env_u32("LLAM_BENCH_CHANNEL_MESSAGES", 1024U, 16384U);
-    unsigned select_ops = bench_env_u32("LLAM_BENCH_SELECT_OPS", 512U, 16384U);
+    unsigned select_ops = bench_env_u32("LLAM_BENCH_SELECT_OPS", 512U, 65536U);
     unsigned io_messages = bench_env_u32("LLAM_BENCH_IO_MESSAGES", 256U, 8192U);
     unsigned poll_events = bench_env_u32("LLAM_BENCH_POLL_EVENTS", 256U, 8192U);
     unsigned sleep_tasks = bench_env_u32("LLAM_BENCH_SLEEP_TASKS", spawn_tasks < 512U ? 512U : spawn_tasks, 8192U);
