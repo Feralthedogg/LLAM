@@ -65,4 +65,8 @@ Docs for LLAM 3.0.0, public ABI 2.4.
 
     Separate in-process handle hardening from broker-mode isolation.
 
+- [Follow the roadmap](project/roadmap.md)
+
+    See the path from 3.0.0 to a general-purpose asynchronous execution backend.
+
 </div>
