@@ -441,6 +441,25 @@ static bool llam_managed_defer_processor_claim(llam_managed_executor_t *worker_r
     return occupied >= online;
 }
 
+static LLAM_NOINLINE bool llam_managed_compatibility_idle(llam_managed_executor_t *worker_run) {
+    const llam_managed_run_t *run = worker_run->run;
+    const llam_runtime_t *runtime = run->runtime;
+    if (!runtime->managed_policy_pools ||
+        atomic_load_explicit(&runtime->stop_requested, memory_order_acquire) ||
+        atomic_load_explicit(&runtime->shutdown_requested, memory_order_acquire) ||
+        llam_managed_catalog_has_legacy_references(runtime) ||
+        (run->ops != NULL && run->ops->worker_needs_processor != NULL &&
+         run->ops->worker_needs_processor(worker_run->worker, run->adapter_data))) return false;
+    for (unsigned i = 0U; i < runtime->compatibility_processor_count; ++i) {
+        const llam_shard_t *shard = &runtime->shards[runtime->portable_processor_count + i];
+        if (atomic_load_explicit(&shard->processor.allocator.remote_free_pending, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&shard->processor.timer_count, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&shard->processor.timer_callbacks_active, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire) != 0U) return false;
+    }
+    return true;
+}
+
 void llam_managed_scheduler_loop(llam_managed_executor_t *worker_run) {
     llam_managed_run_t *run = worker_run->run;
     llam_runtime_t *runtime = run->runtime;
@@ -469,6 +488,19 @@ void llam_managed_scheduler_loop(llam_managed_executor_t *worker_run) {
             }
             llam_request_stop(runtime);
             break;
+        }
+        if (worker_run->worker->role == LLAM_WORKER_ROLE_LEGACY_COMPAT &&
+            llam_managed_compatibility_idle(worker_run)) {
+            /* No admitted legacy G can use this P. Keep native service above
+             * active and recheck within the existing 100us claim retry period.
+             * Late admission publishes its reference before queueing work. */
+            if (worker_run->processor_claim_waiting) {
+                llam_managed_withdraw_processor_wait(worker_run);
+                worker_run->processor_claim_waiting = false;
+            }
+            const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000L};
+            (void)nanosleep(&delay, NULL);
+            continue;
         }
         if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire))
             llam_runtime_cancel_parked_waiters(runtime);

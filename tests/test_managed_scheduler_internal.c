@@ -1103,6 +1103,98 @@ static int isolated_compatibility_processor(bool native) {
     return 0;
 }
 
+typedef struct compatibility_idle_test {
+    scheduler_test_t base;
+    atomic_uint ready;
+    atomic_uint finish;
+    atomic_uint legacy_done;
+} compatibility_idle_test_t;
+
+static void idle_probe_portable(void *argument) {
+    compatibility_idle_test_t *test = argument;
+    atomic_store_explicit(&test->ready, 1U, memory_order_release);
+    while (atomic_load_explicit(&test->finish, memory_order_acquire) == 0U) llam_yield();
+}
+
+static void idle_probe_legacy(void *argument) {
+    compatibility_idle_test_t *test = argument;
+    task_check(&test->base, g_llam_tls_worker != NULL &&
+        g_llam_tls_worker->role == LLAM_WORKER_ROLE_LEGACY_COMPAT);
+    atomic_store_explicit(&test->legacy_done, 1U, memory_order_release);
+}
+
+static uint64_t compatibility_lease_epoch(llam_runtime_t *runtime) {
+    llam_shard_t *shard = &runtime->shards[runtime->portable_processor_count];
+    pthread_mutex_lock(&shard->opaque_lock);
+    pthread_mutex_lock(&shard->lock);
+    uint64_t epoch = shard->legacy_lease.epoch;
+    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    return epoch;
+}
+
+static int compatibility_idle_late_admission(void) {
+    llam_runtime_opts_t opts;
+    llam_preempt_opts_t policy;
+    compatibility_idle_test_t test = {0};
+    llam_task_t *portable = NULL, *legacy = NULL;
+    pthread_t driver;
+    bool started = false;
+    int result = -1;
+    CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
+    CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
+    opts.deterministic = 1U;
+    policy.policy = LLAM_PREEMPT_POLICY_ASYNC_AUTO;
+    policy.native_affine_capacity = 0U;
+    CHECK(llam_runtime_create_managed(&opts, sizeof(opts), &policy, sizeof(policy), &test.base.runtime) == 0);
+    if (test.base.runtime->compatibility_processor_count == 0U) { result = 0; goto cleanup; }
+    if (register_task_class(test.base.runtime, idle_probe_portable, LLAM_MANAGED_EXECUTION_PORTABLE) != 0)
+        goto cleanup;
+    portable = llam_runtime_spawn_ex(test.base.runtime, idle_probe_portable, &test, NULL, 0U);
+    if (portable == NULL || pthread_create(&driver, NULL, run_runtime, &test.base) != 0) goto cleanup;
+    started = true;
+    if (!wait_for_flag(&test.ready)) goto cleanup;
+    uint64_t before = compatibility_lease_epoch(test.base.runtime);
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 25000000L};
+    (void)nanosleep(&delay, NULL);
+    uint64_t after = compatibility_lease_epoch(test.base.runtime);
+    bool idle = before == after;
+    if (!idle) fprintf(stderr, "empty compatibility P changed lease epoch: %llu -> %llu\n",
+        (unsigned long long)before, (unsigned long long)after);
+    llam_shard_t *compatibility = &test.base.runtime->shards[test.base.runtime->portable_processor_count];
+    atomic_store_explicit(&compatibility->processor.allocator.remote_free_pending, 1U, memory_order_release);
+    uint64_t maintenance_deadline = llam_now_ns() + UINT64_C(5000000000);
+    while (atomic_load_explicit(&compatibility->processor.allocator.remote_free_pending,
+                                 memory_order_acquire) != 0U && llam_now_ns() < maintenance_deadline) {
+        const struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000L};
+        (void)nanosleep(&pause, NULL);
+    }
+    bool maintained = atomic_load_explicit(&compatibility->processor.allocator.remote_free_pending,
+                                           memory_order_acquire) == 0U &&
+                      compatibility_lease_epoch(test.base.runtime) != after;
+    legacy = llam_runtime_spawn_ex(test.base.runtime, idle_probe_legacy, &test, NULL, 0U);
+    if (legacy == NULL || !wait_for_flag(&test.legacy_done)) goto cleanup;
+    atomic_store_explicit(&test.finish, 1U, memory_order_release);
+    if (pthread_join(driver, NULL) != 0) goto cleanup;
+    started = false;
+    if (test.base.run_result != 0 || llam_join(portable) != 0) goto cleanup;
+    portable = NULL;
+    if (llam_join(legacy) != 0) goto cleanup;
+    legacy = NULL;
+    result = idle && maintained &&
+        atomic_load_explicit(&test.base.failures, memory_order_acquire) == 0U ? 0 : -1;
+cleanup:
+    atomic_store_explicit(&test.finish, 1U, memory_order_release);
+    if (started) {
+        (void)llam_runtime_request_stop_rt(test.base.runtime);
+        (void)pthread_join(driver, NULL);
+    }
+    if (portable != NULL) (void)llam_detach(portable);
+    if (legacy != NULL) (void)llam_detach(legacy);
+    llam_runtime_destroy(test.base.runtime);
+    return result;
+}
+
 static void early_wake_source(void *argument) {
     scheduler_test_t *test = argument;
     atomic_store_explicit(&test->source_task, g_llam_tls_task, memory_order_release);
@@ -1318,6 +1410,8 @@ int main(int argc, char **argv) {
         return shutdown_during_processor_return() == 0 ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--blocking-migration") == 0)
         return blocking_result_after_migration() == 0 ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--compat-idle") == 0)
+        return compatibility_idle_late_admission() == 0 ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--async-bookkeeping") == 0) {
 #if LLAM_ASYNC_CONTEXT_SHARED
         return native_bookkeeping() == 0 ? 0 : 1;
@@ -1361,6 +1455,7 @@ int main(int argc, char **argv) {
     RUN_CASE(affine_native_lifetime(false, false));
     RUN_CASE(affine_native_lifetime(true, false));
     RUN_CASE(isolated_compatibility_processor(false));
+    RUN_CASE(compatibility_idle_late_admission());
 #endif
 #undef RUN_CASE
     puts("test_managed_scheduler_internal: dispatch, publication, affine TLS lifetime and compatibility isolation passed");

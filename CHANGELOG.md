@@ -75,6 +75,10 @@
 
 ### Fixed
 
+* defer empty compatibility-worker P claims while retaining native service,
+  remote-free/timer/I/O maintenance, bounded retry and late legacy admission.
+* wait for an actual poll-watch waiter before exercising close completion;
+  cover delayed poll entry without treating a yield count as elapsed time.
 * complete validated runnable-queue transfers under one lock when shutdown
   revokes later grants, keeping cancelled tasks reachable instead of dropping
   them between inject and owner lanes; retain ordinary STOPPING ticket refusal.

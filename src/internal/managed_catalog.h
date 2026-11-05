@@ -55,6 +55,7 @@ uint32_t llam_managed_catalog_policy(const llam_runtime_t *runtime);
 uint64_t llam_managed_catalog_budget(const llam_runtime_t *runtime);
 uint64_t llam_managed_catalog_required_isa(const llam_runtime_t *runtime);
 bool llam_managed_catalog_async_enabled(const llam_runtime_t *runtime);
+bool llam_managed_catalog_has_legacy_references(const llam_runtime_t *runtime);
 void llam_managed_catalog_run_end(llam_runtime_t *runtime);
 /* detach runs under the lifecycle gate without loader calls. NULL/errno=0
  * means absent; NULL/errno=EBUSY preserves the catalog and runtime storage.

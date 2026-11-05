@@ -639,6 +639,13 @@ void llam_managed_admission_release(llam_managed_admission_t *admission) {
     *admission = (llam_managed_admission_t){0};
 }
 
+bool llam_managed_catalog_has_legacy_references(const llam_runtime_t *runtime) {
+    const llam_managed_catalog_t *catalog = runtime != NULL ? runtime->managed_catalog : NULL;
+    /* Unknown catalogs keep the ordinary claim path; zero is only an idle hint. */
+    return catalog == NULL ||
+        atomic_load_explicit(&catalog->legacy_references, memory_order_acquire) != 0U;
+}
+
 void llam_managed_task_release(llam_task_t *task) {
     if (task == NULL || task->managed_catalog == NULL) return;
     llam_managed_admission_t admission = {task->managed_catalog, task->entry,
@@ -740,7 +747,9 @@ int llam_managed_task_admit(llam_runtime_t *runtime, llam_task_fn entry, uint32_
         goto unlock;
     }
     if (out->execution_class == LLAM_MANAGED_EXECUTION_LEGACY) {
-        atomic_fetch_add_explicit(&catalog->legacy_references, 1U, memory_order_relaxed);
+        /* Publish admission before queueing so an idle compatibility M can
+         * resume claims. Queue locks and fresh P grants still govern dispatch. */
+        atomic_fetch_add_explicit(&catalog->legacy_references, 1U, memory_order_release);
     }
     if (out->execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) {
         atomic_fetch_add_explicit(&catalog->affine_references, 1U, memory_order_relaxed);

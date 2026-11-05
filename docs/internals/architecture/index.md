@@ -34,6 +34,10 @@ Runnable-queue transfers validate ownership before removing the source entry and
 commit the destination under the same lock. A concurrent shutdown cannot discard
 the entry between those steps. Later execution still needs a fresh execution or
 STOPPING-drain grant.
+Compatibility Ms with no admitted legacy tasks defer empty P claims for the
+existing 100 microsecond retry period. Native service, pending resource maintenance
+and shutdown draining remain active; late admission publishes its catalog reference
+before queueing the task.
 
 Explicit `*_compat` constructors retain request-based boundary and safepoint preemption, so
 their legacy C loops still require LLAM calls or explicit polls. The separate

@@ -1203,6 +1203,7 @@ static int exercise_darwin_poll_filter_specific_replacement(void) {
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
 typedef struct close_waiter_state {
     int read_fd;
+    uint64_t delay_before_poll_ns;
     atomic_uint waiter_entered;
     int poll_rc;
     int poll_error;
@@ -1216,6 +1217,11 @@ static void closed_watch_waiter_task(void *arg) {
     close_waiter_state_t *state = arg;
 
     atomic_store_explicit(&state->waiter_entered, 1U, memory_order_release);
+    if (state->delay_before_poll_ns != 0U && llam_sleep_ns(state->delay_before_poll_ns) != 0) {
+        state->poll_rc = -1;
+        state->poll_error = errno;
+        return;
+    }
     errno = 0;
     state->poll_revents = (short)0x7fff;
     state->poll_rc = llam_poll_fd(state->read_fd, POLLIN, -1, &state->poll_revents);
@@ -1228,7 +1234,8 @@ static void closed_watch_closer_task(void *arg) {
     while (atomic_load_explicit(&state->waiter_entered, memory_order_acquire) == 0U) {
         llam_yield();
     }
-    for (unsigned attempt = 0U; attempt < 10000U && !state->observed_watch_waiter; ++attempt) {
+    uint64_t deadline = llam_now_ns() + UINT64_C(5000000000);
+    while (!state->observed_watch_waiter && llam_now_ns() < deadline) {
         for (unsigned i = 0U; i < g_llam_runtime.active_nodes; ++i) {
             llam_node_t *node = &g_llam_runtime.nodes[i];
             llam_poll_watch_t *watch;
@@ -1248,8 +1255,8 @@ static void closed_watch_closer_task(void *arg) {
                 break;
             }
         }
-        if (!state->observed_watch_waiter) {
-            llam_yield();
+        if (!state->observed_watch_waiter && llam_sleep_ns(UINT64_C(100000)) != 0) {
+            break;
         }
     }
 
@@ -1259,7 +1266,7 @@ static void closed_watch_closer_task(void *arg) {
 }
 #endif
 
-static int exercise_close_completes_parked_watch_waiter(void) {
+static int exercise_close_completes_parked_watch_waiter_with_delay(uint64_t delay_ns) {
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     close_waiter_state_t state;
     llam_task_t *waiter;
@@ -1270,6 +1277,7 @@ static int exercise_close_completes_parked_watch_waiter(void) {
 
     memset(&state, 0, sizeof(state));
     state.read_fd = -1;
+    state.delay_before_poll_ns = delay_ns;
     state.poll_rc = INT_MIN;
     state.close_rc = INT_MIN;
     atomic_init(&state.waiter_entered, 0U);
@@ -1321,8 +1329,15 @@ static int exercise_close_completes_parked_watch_waiter(void) {
                 (int)state.poll_revents);
         return 1;
     }
+#else
+    (void)delay_ns;
 #endif
     return 0;
+}
+
+static int exercise_close_completes_parked_watch_waiter(void) {
+    if (exercise_close_completes_parked_watch_waiter_with_delay(0U) != 0) return 1;
+    return exercise_close_completes_parked_watch_waiter_with_delay(UINT64_C(50000000));
 }
 
 #if LLAM_RUNTIME_BACKEND_LINUX
