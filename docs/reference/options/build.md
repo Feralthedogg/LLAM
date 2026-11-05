@@ -21,8 +21,7 @@ curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install
 | `--force` | Allow overwrite of existing installed files. |
 | `-h`, `--help` | Print usage. |
 
-These commands target 3.0.0. Before its release assets are available, use the
-[source build](../../start/build.md).
+These commands install 3.0.0. A [source build](../../start/build.md) is also available.
 
 Choose a release or target explicitly when automatic host detection is not what
 you want:

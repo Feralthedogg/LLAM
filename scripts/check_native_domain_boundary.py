@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 from pathlib import Path
 import re
@@ -68,6 +69,7 @@ def values(source: str) -> tuple[str, ...]:
     return tuple(token.value for token in lease.phase0._tokens(masked))
 
 
+@functools.lru_cache(maxsize=512)
 def fingerprint(source: str) -> str:
     return hashlib.sha256("\0".join(values(source)).encode()).hexdigest()
 
@@ -81,6 +83,13 @@ def function_spans(source: str) -> list:
         continued = directive and line.rstrip().endswith("\\")
         lines.append("".join("\n" if c == "\n" else " " for c in line) if directive else line)
     return lease._function_spans("".join(lines))
+
+
+@functools.lru_cache(maxsize=512)
+def _source_layout(source: str) -> tuple[str, tuple[lease._FunctionSpan, ...]]:
+    # Adversarial audits revisit the same translation units. Cache immutable
+    # lexical facts by full content; headers and review policy are checked anew.
+    return lease.phase0._mask_comments_and_literals(source), tuple(function_spans(source))
 
 
 def guard_definition(state: str) -> str:
@@ -125,8 +134,8 @@ def audit(sources: dict[str, str], headers: dict[str, str]) -> list[str]:
         if path != "src/internal/runtime_state.h" and re.search(
                 r"(?m)^\s*#\s*(define|undef)\s+LLAM_NATIVE_API_GUARD\b", source):
             errors.append(f"{path}: public native guard cannot be overridden locally")
-        masked = lease.phase0._mask_comments_and_literals(source)
-        for fn in function_spans(source):
+        masked, spans = _source_layout(source)
+        for fn in spans:
             text = source[fn.start_offset:fn.end_offset]
             key = (path, fn.name)
             expected = REVIEWED.get(key)

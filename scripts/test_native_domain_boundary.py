@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import check_native_domain_boundary as boundary
 
@@ -42,6 +43,20 @@ class NativeBoundaryTests(unittest.TestCase):
         return boundary.audit(sources, self.headers)
 
     def test_repository(self) -> None:
+        self.assertEqual(boundary.audit(self.sources, self.headers), [])
+
+    def test_repeated_audit_rechecks_changed_source_content(self) -> None:
+        self.assertEqual(boundary.audit(self.sources, self.headers), [])
+        self.assertTrue(self.mutated("src/core/task/yield_join_sleep.c", "LLAM_NATIVE_API_GUARD();", ""))
+        self.assertEqual(boundary.audit(self.sources, self.headers), [])
+
+    def test_repeated_audit_rechecks_current_review_policy(self) -> None:
+        self.assertEqual(boundary.audit(self.sources, self.headers), [])
+        key = ("src/core/base/abi.c", "llam_version_string")
+        with patch.dict(boundary.REVIEWED, {key: "0" * 64}):
+            errors = boundary.audit(self.sources, self.headers)
+            self.assertTrue(any("reviewed native-domain contract changed: llam_version_string" in e
+                                for e in errors))
         self.assertEqual(boundary.audit(self.sources, self.headers), [])
 
     def test_source_inventory_uses_utf8_and_portable_paths(self) -> None:

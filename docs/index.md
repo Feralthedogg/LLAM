@@ -24,8 +24,8 @@ Linux, macOS, and Windows.
     .\install.ps1 -Version 3.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
     ```
 
-These docs target 3.0.0. Before its release assets are published, use the
-[source build](start/build.md). See [SDK version matching](start/quickstart.md#match-the-sdk-version).
+These docs target 3.0.0. A [source build](start/build.md) is also available.
+See [SDK version matching](start/quickstart.md#match-the-sdk-version).
 
 ## Choose what you need
 

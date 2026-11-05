@@ -51,7 +51,6 @@
           <button class="inst" type="button" data-copy-install data-key="hero" aria-label="Copy install command"><span class="only-posix"><b>$</b> curl -fsSL …/install.sh | sh</span><span class="only-win"><b>&gt;</b> Invoke-WebRequest …/install.ps1</span><span class="cp">{{ icon('copy', 's') }}</span></button>
           <div class="os-note"><span class="only-posix">Linux and macOS</span><span class="only-win">Windows, PowerShell</span><span aria-hidden="true">·</span><button type="button" data-os-toggle><span class="only-posix">Use Windows</span><span class="only-win">Use Linux or macOS</span></button></div>
         </div>
-        <p class="h-sub">These docs target {{ config.extra.llam_version }}. Until its release is published, <a href="{{ 'start/build/'|url }}">build the source SDK</a>.</p>
       </div>
       <nav class="tiles" aria-label="Choose your path">
         <a class="tile" href="{{ quickstart_url }}">{{ icon('rocket', 'l') }}<span>Start a new app</span>{{ icon('arrow', 'ar') }}</a>
@@ -198,7 +197,7 @@
         <button class="copy" type="button" data-copy-install data-key="panel" aria-label="Copy install command">{{ icon('copy', 's') }}</button>
       </div>
     </div>
-    <p class="cap">The commands select {{ config.extra.llam_version }}. Before its assets are published, <a href="{{ 'start/build/'|url }}">build the source SDK</a>.</p>
+    <p class="cap">The commands install the {{ config.extra.llam_version }} SDK. A <a href="{{ 'start/build/'|url }}">source build</a> is also available.</p>
     <div class="hsteps">
       <a class="hstep" href="{{ quickstart_url }}#install-the-release"><i>1</i><b>Install</b><span>Put headers, libraries, CMake config, and pkg-config metadata in a prefix.</span></a>
       <a class="hstep" href="{{ quickstart_url }}#use-from-cmake"><i>2</i><b>Link</b><span>Use the installed llam::runtime CMake target.</span></a>

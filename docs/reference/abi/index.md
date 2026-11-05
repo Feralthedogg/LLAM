@@ -61,7 +61,7 @@ ABI rules:
 - Callers must pass their compiled struct size to `llam_abi_get_info()`.
 - The library copies only the overlapping struct prefix for ABI metadata.
 - Pointers returned as static strings are owned by the library and remain valid
-  until process exit.
+  while its module remains loaded. Retain the loader reference while using them.
 
 ## Dynamic loader checks
 

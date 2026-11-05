@@ -27,6 +27,10 @@ Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
 Language runtimes should prefer the ABI-major soname/install-name when a
 platform supports it.
 
+Keep the library loaded while using its function pointers, runtime objects or
+borrowed static strings, including the version string. Stop and destroy its
+runtime objects and release those references before unloading the module.
+
 ## Native Windows
 
 Native Windows 10/11 support covers Windows x86_64 context switching, Windows

@@ -47,9 +47,9 @@ Some handy links:
 
 ## Install
 
-The commands and examples target **3.0.0 (ABI 2.4)**. Until the 3.0.0 release assets
-are published, [build the source SDK](docs/start/build.md). Keep its headers and
-library together; a 2.2.1 SDK cannot build the 3.0.0 examples.
+The commands and examples target **3.0.0 (ABI 2.4)**. Keep the headers and library
+from the same SDK together; a 2.2.1 SDK cannot build the 3.0.0 examples.
+For a source installation, follow the [build guide](docs/start/build.md).
 
 Linux and macOS:
 

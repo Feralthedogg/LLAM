@@ -1,14 +1,9 @@
 # LLAM ChangeLog
 
-## 3.0.0 - 2026-11-03
+## 3.0.0 - 2026-11-05
 
 ### Added
 
-* give every public function a card in the API reference, with parameters read from
-  the headers, and fail the docs workflow when one is missing from the rows, the
-  rendered cards or the symbol search. Document which APIs each managed context can
-  call, the foreign-effect annotations, and the fields of the managed and resource
-  structures.
 * add compiler-qualified managed C execution with LLVM 23.1.2, LLPM2 final-image
   admission, native worker probes and asynchronous capture/restore on qualified
   Linux, macOS ARM64 and Windows MinGW profiles; retain compatibility constructors'
@@ -40,9 +35,16 @@
   Apache contribution terms, DCO instructions and a tested license-policy gate.
 * require compiler, runtime-import contract, admitted-image and relocated complete
   SDK checks in the ordinary Linux CI path, using pinned LLVM 23.1.2 tooling.
+* give every public function a card in the API reference, with parameters read from
+  the headers, and fail the docs workflow when one is missing from the rows, the
+  rendered cards or the symbol search. Document which APIs each managed context can
+  call, the foreign-effect annotations, and the fields of the managed and resource
+  structures.
 
 ### Changed
 
+* pin documentation, examples and installer links to 3.0.0, and scope homepage
+  release lookup and caching to that version so a 2.x release cannot replace it.
 * end FreeBSD, OpenBSD, NetBSD and DragonFly BSD support from 3.0.0; remove BSD CI
   and release artifacts and reject retired targets in builds/install/package/SDK
   tooling. macOS kqueue remains supported; earlier BSD sources/reports are history.
@@ -73,6 +75,13 @@
 
 ### Fixed
 
+* reuse immutable lexical facts by source content in the native-domain audit,
+  avoiding repeated full parsing and CI timeouts while rechecking current source,
+  public headers and reviewed contracts on every audit.
+* handle partial child-spawn failures in complete examples, propagate task errors,
+  cancel accepted work and retain its arguments through cleanup.
+* align release notes with ABI 2.4 and clarify that borrowed static strings require
+  the library module to remain loaded.
 * accept ordinary AArch64 unscaled byte/halfword accesses and sign-extending stack
   loads in managed code, preserving signed and unsigned results and allowing tasks
   to inspect a local `short` poll result instead of discarding it.

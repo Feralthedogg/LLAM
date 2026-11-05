@@ -166,7 +166,7 @@ LLAM_API uint32_t llam_abi_version(void);
 
 /**
  * @brief Return the static LLAM source/API version string.
- * @return String owned by the library and valid until process exit.
+ * @return String owned by the library and valid while its module remains loaded.
  */
 LLAM_API const char *llam_version_string(void);
 

@@ -450,7 +450,7 @@ jobs:
             echo "- Explicit-runtime object creation, diagnostics, resource limits and bounded drain."
             echo "- I/O deadline/cancellation options, partial-transfer helpers, linked group cancellation and task results."
             echo "- io_uring on Linux, kqueue on macOS and native Windows x86_64 IOCP support."
-            echo "- Public ABI 2.3 with ABI major 2 retained; first-party Apache-2.0 licensing and preserved third-party notices."
+            echo "- Public ABI 2.4 with ABI major 2 retained; first-party Apache-2.0 licensing and preserved third-party notices."
             echo "- BSD support ends in 3.0.0."
             echo
             echo "## Managed C requirements"
