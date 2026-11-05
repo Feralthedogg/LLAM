@@ -73,7 +73,9 @@ LLAM_MODULE_OPTS_CURRENT_SIZE
 compatible prefix, so bindings can ask the loaded library for its current
 defaults without assuming that all-zero options equal the default policy.
 Current defaults are non-deterministic balanced runtime startup and
-default-class, default-stack task spawn.
+default-class, default-stack task spawn. `llam_preempt_opts_init()` follows the same
+rule, and all-zero managed options really do differ from its `ASYNC_REQUIRED` default;
+see [managed runtime options](../options/runtime.md#managed-runtime-options).
 
 Public option structs store enum-valued fields and flag words as `uint32_t`,
 not C enum or `unsigned` objects. The enum types and constants remain available

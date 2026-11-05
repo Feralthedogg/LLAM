@@ -6,10 +6,20 @@ the intended runtime.
 
 ## Default runtime
 
-The legacy wrappers `llam_runtime_init`, `llam_spawn`, `llam_run` and
-`llam_runtime_shutdown` use the process-default runtime. `llam_runtime_init` requires
-asynchronous preemption, like `llam_runtime_create`. `llam_runtime_init_compat`
-selects compatibility execution instead.
+The legacy wrappers take no runtime handle. Which runtime they act on depends on
+where they are called from:
+
+| Wrapper | From a host thread | From a managed task |
+| --- | --- | --- |
+| `llam_runtime_init`, `llam_runtime_init_ex` | Initializes the process-default runtime. | Fails with `EBUSY`. |
+| `llam_runtime_init_compat`, `llam_runtime_init_compat_ex` | Initializes the process-default runtime. | Also the process-default runtime, whichever runtime owns the task. |
+| `llam_run` | Drives the process-default runtime. | Fails with `EBUSY`, or `EINVAL` when the process-default runtime is not initialized. |
+| `llam_spawn`, `llam_spawn_ex` | Spawns on the process-default runtime. | Spawns on the task's owner runtime. |
+| `llam_runtime_request_stop` | Stops the process-default runtime. | Stops the task's owner runtime. |
+| `llam_runtime_shutdown` | Stops and releases the process-default runtime. | Requests a cooperative stop of the task's owner runtime. |
+
+`llam_runtime_init` requires asynchronous preemption, like `llam_runtime_create`.
+`llam_runtime_init_compat` selects compatibility execution instead.
 
 This is convenient for a single LLAM-owned application, but it is a poor fit for
 embedding multiple independent subsystems in one process.

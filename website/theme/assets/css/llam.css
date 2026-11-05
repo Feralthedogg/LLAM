@@ -342,6 +342,10 @@
 .sym-b { padding: 2px 14px 16px; }
 .sig { margin: 0 0 10px; padding: 10px 12px; overflow-x: auto; border-radius: 6px; background: var(--code); box-shadow: inset 0 0 0 1px var(--rule); color: var(--fg); font-size: 13.5px; line-height: 22px; white-space: pre; }
 .sym-b p { margin: 0 0 8px; font-size: 14.5px; line-height: 23px; }
+.sym-b .params { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 2px 0 10px; font-size: 14px; line-height: 22px; }
+.sym-b .params dt { display: flex; align-items: baseline; gap: 6px; font-weight: 400; }
+.sym-b .params dt small { color: var(--fg3); font-size: 12px; }
+.sym-b .params dd { margin: 0; color: var(--fg2); }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag { padding: 2px 8px; border-radius: 6px; background: var(--soft); color: var(--fg2); font-size: 12px; line-height: 18px; font-weight: 500; }
 .empty { padding: 28px 16px; color: var(--fg2); font-size: 14px; text-align: center; }
@@ -748,6 +752,8 @@ html:has(dialog[open]) { overflow: hidden; }
   .scrim { padding: 12px; }
 }
 @media (max-width: 560px) {
+  .sym-b .params { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .sym-b .params dd { margin-bottom: 8px; }
   .ann { font-size: 13px; }
   .hd { padding: 0 8px 0 16px; }
   .brand img { height: 26px; }

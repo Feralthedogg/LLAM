@@ -29,19 +29,28 @@
 #include "runtime_internal.h"
 
 /**
- * @brief Reacquire a condition wait mutex after a signal/broadcast wake.
+ * @brief Reacquire a condition wait mutex before any return after its release.
  *
  * @details
  * Runtime mutex unlock transfers ownership directly to the next waiter before
  * waking it.  A condition waiter that was woken and then queued for the
  * associated mutex may therefore already own @p mutex by the time it resumes.
  * That is the normal condvar reacquire success path, not recursive locking.
+ *
+ * Every return must own the mutex, so this wait has no deadline and neither
+ * cancellation nor runtime stop can end it.  Its wait node is the task's free
+ * embedded node, which leaves a saturated wait generation as the only failure;
+ * that state is already fatal, and returning would admit the caller to a
+ * critical section it does not own.  The caller's @c errno survives.
  */
-static int llam_cond_reacquire_mutex(llam_mutex_t *mutex, llam_task_t *task) {
-    if (atomic_load(&mutex->owner) == (uintptr_t)task) {
-        return 0;
+static void llam_cond_reacquire_mutex(llam_mutex_t *mutex, llam_task_t *task) {
+    int saved_errno = errno;
+
+    if (atomic_load(&mutex->owner) != (uintptr_t)task &&
+        llam_mutex_lock_resolved_impl(mutex, false, 0U, false) != 0) {
+        abort();
     }
-    return llam_mutex_lock_resolved_impl(mutex, false, 0U, false);
+    errno = saved_errno;
 }
 
 /**
@@ -198,7 +207,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
             goto wait_ready;
         }
         llam_sync_wait_node_release(shard, node);
-        (void)llam_cond_reacquire_mutex(mutex, task);
+        llam_cond_reacquire_mutex(mutex, task);
         llam_cond_end_public_op(cond);
         llam_mutex_end_public_op(mutex);
         errno = saved_errno;
@@ -206,6 +215,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     }
     wait_tracking_published = true;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+        int saved_errno = errno;
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -222,12 +232,14 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
-        (void)llam_cond_reacquire_mutex(mutex, task);
+        llam_cond_reacquire_mutex(mutex, task);
         llam_cond_end_public_op(cond);
         llam_mutex_end_public_op(mutex);
+        errno = saved_errno;
         return -1;
     }
     if (llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
+        int saved_errno = errno;
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -245,9 +257,10 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
-        (void)llam_cond_reacquire_mutex(mutex, task);
+        llam_cond_reacquire_mutex(mutex, task);
         llam_cond_end_public_op(cond);
         llam_mutex_end_public_op(mutex);
+        errno = saved_errno;
         return -1;
     }
 
@@ -267,11 +280,7 @@ wait_ready:
     rc = node->error_code;
     llam_cond_waiter_consumed(cond, node);
     llam_sync_wait_node_release(shard, node);
-    if (llam_cond_reacquire_mutex(mutex, task) != 0) {
-        llam_cond_end_public_op(cond);
-        llam_mutex_end_public_op(mutex);
-        return -1;
-    }
+    llam_cond_reacquire_mutex(mutex, task);
     if (rc != 0) {
         llam_cond_end_public_op(cond);
         llam_mutex_end_public_op(mutex);

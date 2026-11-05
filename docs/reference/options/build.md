@@ -7,8 +7,8 @@ Configure the install scripts, CMake, and the Makefile.
 POSIX:
 
 ```sh
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh |
-  sh -s -- --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh |
+  sh -s -- --version 3.0.0 --prefix "$HOME/.local"
 ```
 
 | Option | Meaning |
@@ -20,6 +20,9 @@ curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install
 | `--dry-run` | Print planned file operations without installing. |
 | `--force` | Allow overwrite of existing installed files. |
 | `-h`, `--help` | Print usage. |
+
+These commands target 3.0.0. Before its release assets are available, use the
+[source build](../../start/build.md).
 
 Choose a release or target explicitly when automatic host detection is not what
 you want:

@@ -85,6 +85,7 @@ void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime,
     node->select_kind = 0U;
     node->scalar_value = 0;
     node->owner_shard = owner_shard;
+    node->uninterruptible = false;
     /*
      * This helper also resets embedded nodes immediately after a producer has
      * completed them.  Use atomic stores, not atomic_init(), because the latter

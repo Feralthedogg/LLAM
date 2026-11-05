@@ -31,36 +31,47 @@ Use the explicitly named `*_compat` initializers for boundary/safepoint executio
 
 ## Managed runtimes
 
-For compiler-qualified C, use the [managed runtime API](../../guides/managed-c.md):
-`llam_preempt_opts_init`, `llam_runtime_create_managed`,
-`llam_runtime_preempt_info_ex`, `llam_runtime_module_register_ex`,
-`llam_runtime_module_unregister`, and `llam_call_native_affine_result`.
-`<llam/managed.h>` defines caller-sized policy, resource and module structures.
+For compiler-qualified C, use the [managed runtime API](../../guides/managed-c.md).
+`<llam/managed.h>` defines caller-sized policy, resource and module structures; see
+[their fields](../options/runtime.md#managed-runtime-options).
 The ordinary and advanced constructors default to `ASYNC_REQUIRED`, refusing
 unqualified task entries and unsupported native profiles. `ASYNC_AUTO` and
 `COOPERATIVE` are explicit advanced choices. The `*_compat` constructors
 and the expert [Windows interface](platform.md#experimental-windows-preemption) retain their compatibility contracts.
 
-## Explicit ownership and I/O budgets
+| API | Purpose |
+| --- | --- |
+| `llam_preempt_opts_init` | Fill managed options with their defaults. |
+| `llam_runtime_create_managed` | Explicit runtime with a chosen admission policy and capsule and native-affine limits. |
+| `llam_runtime_preempt_info_ex` | Requested and effective policy, the reason, and capsule storage accounting. |
+| `llam_runtime_module_register_ex` | Register one loaded image's managed metadata. |
+| `llam_runtime_module_unregister` | Unregister a module; success consumes its handle. |
 
-Host-side constructors are `llam_runtime_channel_create`,
-`llam_runtime_mutex_create`, `llam_runtime_cond_create`,
-`llam_runtime_cancel_token_create`, `llam_runtime_task_group_create[_ex]`,
-`llam_runtime_timer_create_ex` and `llam_runtime_signal_set_create_ex`. They
-retain the runtime through publication and preserve existing object lifetimes.
-Old constructors retain current-task/default-runtime selection.
+## Explicit ownership
 
-`llam_wait_opts_init` initializes the caller-sized common wait policy.
-`llam_read_ex`, `llam_write_ex`, `llam_connect_ex`, `llam_poll_fd_ex`,
-`llam_read_handle_ex` and `llam_write_handle_ex` accept it. Stream fd operations
-also have absolute `llam_read_until`, `llam_write_until`, `llam_connect_until`
-and `llam_poll_fd_until` forms. New poll forms take an `int` mask in the short-mask range; legacy poll ABI
-is unchanged. Poll timeout returns 0; byte/connect timeout returns -1/`ETIMEDOUT`.
+These host-side constructors stamp an object with the runtime you name. They retain
+the runtime through publication and preserve existing object lifetimes. Older
+constructors keep their current-task/default-runtime selection. The group forms that
+take options are under [Task groups](tasks.md#task-groups).
 
-`llam_read_exact`, `llam_read_exact_ex`, `llam_write_all` and
-`llam_write_all_ex` report confirmed progress through
-a required `size_t *`, including on failure. Early EOF is `EPIPE`; premature
-zero write is `EIO`. `llam_task_local_set_owned` adds nonblocking same-M exit
-cleanup and `llam_task_local_take_result` transfers the value without cleanup.
+| API | Purpose |
+| --- | --- |
+| `llam_runtime_channel_create` | Create a channel owned by a runtime. |
+| `llam_runtime_mutex_create` | Create a mutex owned by a runtime. |
+| `llam_runtime_cond_create` | Create a condition variable owned by a runtime. |
+| `llam_runtime_cancel_token_create` | Create a cancellation token owned by a runtime. |
+| `llam_runtime_task_group_create` | Create a task group owned by a runtime. |
+| `llam_runtime_timer_create_ex` | Create a timer owned by a runtime. |
+| `llam_runtime_signal_set_create_ex` | Create a signal wait set owned by a runtime. Linux-only; other platforms return `ENOTSUP`. |
+
 See [Embed LLAM](../../guides/embedding.md) for cancellation composition,
 endpoint restrictions, drain timeout recovery and complete failure cleanup.
+
+## Reserved compiler ABI
+
+These symbols are exported for code the managed compiler generates. They are not
+application API and are not task admission.
+
+| API | Purpose |
+| --- | --- |
+| `llam_managed_native_enter` / `llam_managed_native_leave` | Native entry and exit guards the compiler emits in balanced pairs. Do not call them directly. |

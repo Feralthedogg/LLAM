@@ -2475,6 +2475,9 @@ if(Python3_Interpreter_FOUND AND UNIX AND NOT CMAKE_CROSSCOMPILING)
 endif()
 
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test_docs_api_coverage
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_docs_api_coverage.py)
+    set_tests_properties(test_docs_api_coverage PROPERTIES TIMEOUT 60)
     add_test(NAME test_managed_ci_contract
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_managed_ci.py)
     add_test(NAME test_managed_benchmark_inputs

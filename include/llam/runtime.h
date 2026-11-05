@@ -260,6 +260,14 @@ typedef struct llam_wait_opts {
     uint32_t reserved0;                /**< Must be zero. */
 } llam_wait_opts_t;
 #define LLAM_WAIT_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_wait_opts_t))
+/**
+ * @brief Fill wait options with ABI-safe defaults: no deadline, token, or flags.
+ *
+ * @param[out] opts Options to initialize. Must not be NULL.
+ * @param opts_size Size of the caller's ::llam_wait_opts_t; must be nonzero. LLAM
+ * writes only the prefix it knows.
+ * @return 0 on success, -1 with @c errno set to @c EINVAL.
+ */
 LLAM_API int llam_wait_opts_init(llam_wait_opts_t *opts, size_t opts_size);
 
 /** @brief Runtime initialization options. */
@@ -435,8 +443,16 @@ LLAM_API int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_s
  */
 LLAM_API int llam_runtime_init(const llam_runtime_opts_t *opts);
 
-/** Explicit compatibility runtime: boundary/safepoint preemption, including
- * AUTO/STRICT request policies. These functions do not require managed images. */
+/**
+ * @brief Initialize the process-default runtime for plain C tasks.
+ *
+ * @details Explicit compatibility runtime: boundary/safepoint preemption, including
+ * AUTO/STRICT request policies. These functions do not require managed images.
+ *
+ * @param opts Optional runtime options; pass NULL for defaults.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_init_compat_ex(const llam_runtime_opts_t *opts, size_t opts_size);
 LLAM_API int llam_runtime_init_compat(const llam_runtime_opts_t *opts);
 
@@ -549,10 +565,19 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
  */
 LLAM_API int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out);
 
-/** Create an explicit compatibility runtime without asynchronous admission.
- * Ownership and handle lifetime rules match llam_runtime_create. It accepts every
- * preemption mode, needs no native asynchronous profile, and does not refuse a
- * call from a managed task. */
+/**
+ * @brief Create an explicit compatibility runtime without asynchronous admission.
+ *
+ * @details Ownership and handle lifetime rules match ::llam_runtime_create. It
+ * accepts every preemption mode, needs no native asynchronous profile, and does
+ * not refuse a call from a managed task.
+ *
+ * @param opts Optional runtime options; pass NULL for defaults.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @param[out] out Receives the runtime handle; set to NULL on failure. Must not be
+ * NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_create_compat(const llam_runtime_opts_t *opts, size_t opts_size,
                                        llam_runtime_t **out);
 
@@ -639,6 +664,9 @@ LLAM_API llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
  * Canonical embedding scheduler driver. Drives the scheduler associated with
  * @p runtime until all work drains, cooperative stop is requested, or a
  * backend/runtime error is recorded. Passing NULL fails with @c EINVAL.
+ *
+ * @param runtime Runtime to drive; not NULL.
+ * @return 0 after the runtime drains or stops, -1 with @c errno set on failure.
  */
 LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
 
@@ -648,23 +676,70 @@ LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
  * These constructors pin the runtime until the new handle is published.
  * A task of another runtime gets EXDEV; invalid/stale runtimes get EINVAL.
  * Existing constructors retain their current-task/default-runtime behavior.
+ *
+ * @param runtime Initialized runtime that will own the object; not NULL.
+ * @param capacity Number of bounded buffer slots. Must be at least 1.
+ * @return New handle, or NULL with @c errno set.
  */
 LLAM_API llam_channel_t *llam_runtime_channel_create(llam_runtime_t *runtime, size_t capacity);
 LLAM_API llam_mutex_t *llam_runtime_mutex_create(llam_runtime_t *runtime);
 LLAM_API llam_cond_t *llam_runtime_cond_create(llam_runtime_t *runtime);
 LLAM_API llam_cancel_token_t *llam_runtime_cancel_token_create(llam_runtime_t *runtime);
 LLAM_API llam_task_group_t *llam_runtime_task_group_create(llam_runtime_t *runtime);
+/**
+ * @brief Create a task group from options, on the current task's or default runtime.
+ *
+ * @param opts Optional group options; NULL selects no flags, which is
+ * ::llam_task_group_create.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @return New handle, or NULL with @c errno set.
+ */
 LLAM_API llam_task_group_t *llam_task_group_create_ex(const llam_task_group_opts_t *opts, size_t opts_size);
+/**
+ * @brief Create a task group from options, owned by an explicit runtime.
+ *
+ * @param runtime Initialized runtime that will own the group; not NULL.
+ * @param opts Optional group options; NULL selects no flags.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @return New handle, or NULL with @c errno set.
+ */
 LLAM_API llam_task_group_t *llam_runtime_task_group_create_ex(llam_runtime_t *runtime,
                                                             const llam_task_group_opts_t *opts,
                                                             size_t opts_size);
+/**
+ * @brief Create a timer owned by an explicit runtime.
+ *
+ * @param runtime Initialized runtime that will own the timer; not NULL.
+ * @param opts Timer options; see ::llam_timer_create_ex.
+ * @param opts_size Size of @p opts.
+ * @param[out] out Receives the timer; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_timer_create_ex(llam_runtime_t *runtime, const llam_timer_opts_t *opts,
                                           size_t opts_size, llam_timer_t **out);
+/**
+ * @brief Create a signal wait set owned by an explicit runtime.
+ *
+ * @param runtime Initialized runtime that will own the set; not NULL.
+ * @param signos Signal numbers to subscribe to.
+ * @param signo_count Number of entries in @p signos.
+ * @param opts Optional signal options; pass NULL for defaults.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @param[out] out Receives the set; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set. Platforms other than Linux fail with
+ * @c ENOTSUP.
+ */
 LLAM_API int llam_runtime_signal_set_create_ex(llam_runtime_t *runtime, const int *signos,
                                                size_t signo_count, const llam_signal_opts_t *opts,
                                                size_t opts_size, llam_signal_set_t **out);
 
-/** @brief Request stop for this handle; a task cannot stop a peer runtime. */
+/**
+ * @brief Request stop for this handle; a task cannot stop a peer runtime.
+ *
+ * @param runtime Runtime to stop; not NULL.
+ * @return 0 on success, -1 with @c errno set to @c EINVAL for an invalid handle or
+ * @c EXDEV from a task of another runtime.
+ */
 LLAM_API int llam_runtime_request_stop_handle(llam_runtime_t *runtime);
 
 #define LLAM_RUNTIME_RESOURCE_F_RUNNING UINT32_C(1)
@@ -686,6 +761,15 @@ typedef struct llam_runtime_resources {
     uint32_t flags;
 } llam_runtime_resources_t;
 #define LLAM_RUNTIME_RESOURCES_CURRENT_SIZE ((size_t)sizeof(llam_runtime_resources_t))
+/**
+ * @brief Copy an advisory snapshot of pool sizes, live work, and closing state.
+ *
+ * @param runtime Live runtime; not NULL.
+ * @param[out] out Receives the snapshot. Must not be NULL.
+ * @param out_size Size of the caller's ::llam_runtime_resources_t; must be nonzero.
+ * LLAM writes only the compatible prefix.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_get_resources_ex(llam_runtime_t *runtime,
                                            llam_runtime_resources_t *out, size_t out_size);
 /**
@@ -696,14 +780,32 @@ LLAM_API int llam_runtime_get_resources_ex(llam_runtime_t *runtime,
  * retry after callbacks finish, then join/destroy normally. Success never consumes
  * resources. With pending tasks and no driver, returns EBUSY/NEEDS_RUNNER before
  * closing admission: start the driver before retrying. Output is optional.
+ *
+ * @param runtime Runtime to drain; not NULL.
+ * @param deadline_ns Absolute ::llam_now_ns deadline for this wait.
+ * @param[out] out Optional final snapshot, written on success and on failure after
+ * the runtime handle was accepted; pass NULL to skip it.
+ * @param out_size Size of @p out when non-NULL; must then be nonzero.
+ * @return 0 once quiescent, -1 with @c errno set.
  */
 LLAM_API int llam_runtime_drain_until(llam_runtime_t *runtime, uint64_t deadline_ns,
                                       llam_runtime_resources_t *out, size_t out_size);
 
-/** @brief Write JSON statistics for an explicit runtime. */
+/**
+ * @brief Write JSON statistics for an explicit runtime.
+ *
+ * @param runtime Runtime to report; not NULL.
+ * @param fd Destination file descriptor.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_write_stats_json_handle(llam_runtime_t *runtime, int fd);
 
-/** @brief Write the same best-effort diagnostic dump for an explicit runtime. */
+/**
+ * @brief Write the same best-effort diagnostic dump for an explicit runtime.
+ *
+ * @param runtime Runtime to dump; a NULL handle sets @c errno to @c EINVAL.
+ * @param fd Destination file descriptor; a negative value sets @c errno to @c EINVAL.
+ */
 LLAM_API void llam_dump_runtime_state_handle(llam_runtime_t *runtime, int fd);
 
 /**
@@ -908,6 +1010,13 @@ LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
  * public-operation lifecycle sentinel also fails closed with @c EBUSY. Children
  * are always spawned on the group's owner runtime, including when the caller is
  * an unmanaged host thread.
+ *
+ * @param group Group that will own the child; not NULL.
+ * @param fn Task entry point. Must not be NULL.
+ * @param arg User pointer passed to @p fn.
+ * @param opts Optional spawn options; pass NULL for defaults.
+ * @param opts_size Size of @p opts when non-NULL.
+ * @return Borrowed task handle, or NULL with @c errno set.
  */
 LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,
@@ -994,11 +1103,20 @@ LLAM_API int llam_sleep_ns(uint64_t duration_ns);
  * A @c first_deadline_ns of 0 arms the first tick for the current
  * ::llam_now_ns timestamp. Timers are runtime-aware objects; using a timer from
  * another managed runtime fails with @c EXDEV.
+ *
+ * @param opts Timer options, with a non-zero @c interval_ns.
+ * @param opts_size Size of the caller's ::llam_timer_opts_t.
+ * @param[out] out Receives the timer; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_timer_t **out);
 
 /**
  * @brief Create an interval timer with a first tick after @p interval_ns.
+ *
+ * @param interval_ns Repeat interval in nanoseconds. Must not be 0.
+ * @param[out] out Receives the timer; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_timer_create(uint64_t interval_ns, llam_timer_t **out);
 
@@ -1010,6 +1128,11 @@ LLAM_API int llam_timer_create(uint64_t interval_ns, llam_timer_t **out);
  * previous successful wait, clamped to at least 1. This lets periodic tasks
  * account for missed ticks without drift. Managed tasks park cooperatively;
  * unmanaged callers block the calling OS thread.
+ *
+ * @param timer Timer to wait on.
+ * @param[out] ticks_out Receives the elapsed interval count; set to 0 before the
+ * wait. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_timer_wait(llam_timer_t *timer, uint64_t *ticks_out);
 
@@ -1017,11 +1140,22 @@ LLAM_API int llam_timer_wait(llam_timer_t *timer, uint64_t *ticks_out);
  * @brief Wait for the next timer tick until an absolute deadline.
  *
  * @details @p deadline_ns uses ::llam_now_ns units. @c 0 is already expired.
+ *
+ * @param timer Timer to wait on.
+ * @param deadline_ns Absolute deadline.
+ * @param[out] ticks_out Receives the elapsed interval count; set to 0 before the
+ * wait. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_timer_wait_until(llam_timer_t *timer, uint64_t deadline_ns, uint64_t *ticks_out);
 
 /**
  * @brief Reset a timer to a new first deadline and interval.
+ *
+ * @param timer Timer to reset.
+ * @param first_deadline_ns Absolute first deadline; 0 means now.
+ * @param interval_ns Repeat interval in nanoseconds. Must not be 0.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_timer_reset(llam_timer_t *timer, uint64_t first_deadline_ns, uint64_t interval_ns);
 
@@ -1048,6 +1182,13 @@ LLAM_API int llam_timer_destroy(llam_timer_t *timer);
  * this before starting worker threads when possible so they inherit the signal
  * mask. Duplicate or unsupported signal sets may fail with @c EBUSY or
  * @c ENOTSUP. Other platforms currently return @c ENOTSUP.
+ *
+ * @param signos Signal numbers to subscribe to.
+ * @param signo_count Number of entries in @p signos.
+ * @param opts Optional signal options; pass NULL for defaults.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @param[out] out Receives the set; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_signal_set_create_ex(const int *signos,
                                        size_t signo_count,
@@ -1057,11 +1198,22 @@ LLAM_API int llam_signal_set_create_ex(const int *signos,
 
 /**
  * @brief Wait indefinitely for a signal in the set.
+ *
+ * @param set Signal wait set.
+ * @param[out] out Receives the signal event; cleared before the wait. Must not be
+ * NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_signal_wait(llam_signal_set_t *set, llam_signal_event_t *out);
 
 /**
  * @brief Wait for a signal in the set until an absolute deadline.
+ *
+ * @param set Signal wait set.
+ * @param deadline_ns Absolute ::llam_now_ns deadline.
+ * @param[out] out Receives the signal event; cleared before the wait. Must not be
+ * NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_signal_wait_until(llam_signal_set_t *set, uint64_t deadline_ns, llam_signal_event_t *out);
 
@@ -1151,7 +1303,9 @@ LLAM_API uint32_t llam_task_flags(const llam_task_t *task);
 /**
  * @brief Allocate a task-local storage key.
  *
- * @details On failure, @p out_key is set to ::LLAM_TASK_LOCAL_INVALID_KEY.
+ * @param[out] out_key Receives the key; set to ::LLAM_TASK_LOCAL_INVALID_KEY on
+ * failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_task_local_key_create(llam_task_local_key_t *out_key);
 
@@ -1184,6 +1338,7 @@ typedef void (*llam_task_cleanup_fn)(void *value);
 /**
  * @brief Install ownership at an empty key (EBUSY if populated).
  *
+ * @details
  * cleanup must be non-NULL for a non-NULL value, must return normally, must not
  * block or call LLAM task/wait APIs. It runs once before completion is published,
  * including after cancellation. Managed imports require NATIVE_AFFINE and retain
@@ -1191,10 +1346,22 @@ typedef void (*llam_task_cleanup_fn)(void *value);
  * Portable/expert asynchronous tasks fail ENOTSUP. Plain set cannot
  * overwrite an owned entry; take first to transfer ownership. Key deletion never
  * suppresses an already registered cleanup.
+ *
+ * @param key Active key with no value for this task.
+ * @param value Owned value. Must not be NULL.
+ * @param cleanup Called once with @p value when the task exits. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_task_local_set_owned(llam_task_local_key_t key, void *value,
                                        llam_task_cleanup_fn cleanup);
-/** @brief Remove a current-task value without cleanup; a missing active key succeeds with NULL. */
+/**
+ * @brief Remove a current-task value without cleanup; a missing active key succeeds with NULL.
+ *
+ * @param key Task-local key.
+ * @param[out] out Receives the value, and is set to NULL first. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set to @c EINVAL for an inactive key or
+ * @c ENOTSUP outside a managed task.
+ */
 LLAM_API int llam_task_local_take_result(llam_task_local_key_t key, void **out);
 
 #define LLAM_TASK_RESULT_F_SET UINT32_C(1)
@@ -1204,11 +1371,33 @@ typedef struct llam_task_result {
     uint32_t flags;       /**< SET if the task called set_result; otherwise all fields zero. */
 } llam_task_result_t;
 #define LLAM_TASK_RESULT_CURRENT_SIZE ((size_t)sizeof(llam_task_result_t))
-/** @brief Set the current task's result. The runtime does not destroy the value. */
+/**
+ * @brief Set the current task's result. The runtime does not destroy the value.
+ *
+ * @param value Application-owned value; NULL is a valid result.
+ * @param application_error Application error, independent of runtime @c errno.
+ * @return 0 on success, -1 with @c errno set to @c ENOTSUP outside a managed task.
+ */
 LLAM_API int llam_task_set_result(void *value, int32_t application_error);
-/** @brief Peek at a completed task, including a borrowed group child; EAGAIN until completed. */
+/**
+ * @brief Peek at a completed task, including a borrowed group child; EAGAIN until completed.
+ *
+ * @param task Task handle; not consumed.
+ * @param[out] out Receives the result, left unchanged on failure. Must not be NULL.
+ * @param out_size Size of the caller's ::llam_task_result_t; must be nonzero.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_task_get_result(llam_task_t *task, llam_task_result_t *out, size_t out_size);
-/** @brief Consume a normal joinable handle and copy its result; runtime failure leaves output untouched. */
+/**
+ * @brief Consume a normal joinable handle and copy its result; runtime failure leaves output untouched.
+ *
+ * @param task Joinable task handle, consumed on success.
+ * @param deadline_ns Absolute ::llam_now_ns deadline; 0 is already expired. A
+ * timeout leaves the handle joinable.
+ * @param[out] out Receives the result. Must not be NULL.
+ * @param out_size Size of the caller's ::llam_task_result_t; must be nonzero.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_join_result(llam_task_t *task, llam_task_result_t *out, size_t out_size);
 LLAM_API int llam_join_result_until(llam_task_t *task, uint64_t deadline_ns,
                                     llam_task_result_t *out, size_t out_size);
@@ -1336,8 +1525,10 @@ LLAM_API int llam_cond_destroy(llam_cond_t *cond);
  * @details Must be called from a managed LLAM task; outside task context fails
  * with @c ENOTSUP. The caller must own @p mutex on entry. LLAM atomically
  * releases it while waiting and reacquires it before returning, including
- * signal, broadcast, timeout, cancellation, and spurious wake paths. Callers
- * must wait in a predicate loop.
+ * signal, broadcast, timeout, cancellation, runtime stop, and spurious wake
+ * paths. The reacquire has no deadline and cannot be cancelled, so a stopping
+ * runtime cannot drain until the mutex's owner unlocks it. Callers must wait in
+ * a predicate loop.
  */
 LLAM_API int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex);
 
@@ -1347,8 +1538,10 @@ LLAM_API int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex);
  * @details Must be called from a managed LLAM task; outside task context fails
  * with @c ENOTSUP. The caller must own @p mutex on entry. LLAM atomically
  * releases it while waiting and reacquires it before returning, including
- * signal, broadcast, timeout, cancellation, and spurious wake paths. Callers
- * must wait in a predicate loop.
+ * signal, broadcast, timeout, cancellation, runtime stop, and spurious wake
+ * paths. The reacquire has no deadline and cannot be cancelled, so the call can
+ * return later than @p deadline_ns, and a stopping runtime cannot drain until
+ * the mutex's owner unlocks it. Callers must wait in a predicate loop.
  * @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0 is treated as an
  * already-expired deadline.
  */

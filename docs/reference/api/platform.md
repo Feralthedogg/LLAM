@@ -22,6 +22,10 @@ asynchronous preemption opt-in.
 
 ## Experimental Windows preemption
 
+| API | Purpose |
+| --- | --- |
+| `llam_runtime_enable_experimental_windows_async_preempt_ex` | Opt a compatibility runtime into the experimental Windows backend. |
+
 `llam_runtime_enable_experimental_windows_async_preempt_ex()` atomically opts
 an idle, fixed-primary Win64 runtime from `llam_runtime_create_compat()` into the
 experimental backend. The caller passes

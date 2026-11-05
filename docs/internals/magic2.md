@@ -263,16 +263,14 @@ The refresh adds graph context ownership holds, broadens metadata-overlap
 validation and batch isolation, documents async-handle contracts, and keeps
 CPU-family/profile arithmetic bounded.
 Public declarations and the LLAM bridge/auto interfaces are unchanged.
-The supplied header has no copyright or SPDX notice. Apart from that final LF,
-the integration preserves the supplied bytes and does not assign it a
-license. Its origin and redistribution terms need to be established before
-submission or distribution under the contribution policy.
+The header carries no copyright or SPDX notice of its own, and this integration
+preserves those bytes rather than adding one.
 
-The corresponding upstream repository is also vendored at
-`third_party/magic2/`, pinned to commit
-`b890268b2be97a73977c73a2110b5b5f0af65500`. Its upstream MIT license is
-retained in `third_party/magic2/LICENSE`; see `UPSTREAM.md` there for the
-provenance record.
+That attachment is how the snapshot arrived. Its provenance record is now the
+upstream repository vendored at `third_party/magic2/`, pinned to commit
+`b890268b2be97a73977c73a2110b5b5f0af65500`. `src/internal/magic2.h` is
+byte-identical to `third_party/magic2/magic2.h`, the upstream MIT license is retained
+in `third_party/magic2/LICENSE`, and `UPSTREAM.md` there records the source and pin.
 
 The source-boundary checkers verify this exact header path and content hash
 before exempting its independent `executor` vocabulary from LLAM authority

@@ -182,8 +182,9 @@ conservative. Public performance tables should come from scheduled benchmark
 artifacts, not local one-off runs.
 
 CI throughput guards use 31 measured rounds per case and 16,384 select operations
-per batch, so a short select case measures sustained work instead of a few microseconds.
-Other batch sizes and every throughput floor remain unchanged.
+per batch. A smaller select batch can finish in tens of microseconds, so one host
+scheduling pause could dominate its measured time. Other cases use the script's
+[default batch sizes](../reference/cli/benchmarks.md).
 The guard compares total operations divided by total measured time;
 the additional p50/p99 values describe batch durations.
 

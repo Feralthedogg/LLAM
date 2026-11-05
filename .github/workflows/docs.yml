@@ -70,39 +70,8 @@ jobs:
 
       - name: Check public API reference coverage
         run: |
-          python - <<'PY'
-          import pathlib
-          import re
-          import sys
-
-          root = pathlib.Path(".")
-          read_pages = lambda folder: "\n".join(path.read_text(encoding="utf-8") for path in sorted((root / folder).glob("*.md")))
-          api_doc = read_pages("docs/reference/api")
-          options_doc = read_pages("docs/reference/options")
-          headers = "\n".join(
-              (root / path).read_text(encoding="utf-8")
-              for path in ("include/llam/runtime.h", "include/llam/io.h")
-          )
-          public_symbols = sorted(set(re.findall(r"LLAM_API\s+[^;()]*?\b(llam_[A-Za-z0-9_]+)\s*\(", headers)))
-          missing_symbols = [name for name in public_symbols if name not in api_doc]
-          required_macros = [
-              "LLAM_ABI_INFO_CURRENT_SIZE",
-              "LLAM_RUNTIME_OPTS_CURRENT_SIZE",
-              "LLAM_SPAWN_OPTS_CURRENT_SIZE",
-              "LLAM_TIMER_OPTS_CURRENT_SIZE",
-              "LLAM_SIGNAL_OPTS_CURRENT_SIZE",
-              "LLAM_IO_BUFFER_OPTS_CURRENT_SIZE",
-              "LLAM_FILE_STAT_CURRENT_SIZE",
-              "LLAM_RUNTIME_STATS_CURRENT_SIZE",
-          ]
-          missing_macros = [name for name in required_macros if name not in api_doc and name not in options_doc]
-          missing = missing_symbols + missing_macros
-          if missing:
-              print("Public API docs are missing:")
-              for name in missing:
-                  print(f"  - {name}")
-              sys.exit(1)
-          PY
+          python scripts/test_docs_api_coverage.py
+          python scripts/check_docs_api_coverage.py --site-dir site
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

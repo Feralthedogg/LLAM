@@ -28,8 +28,9 @@ sequenceDiagram
     alt direct completion
         API-->>Task: return, no park
     else backend supports it
+        API->>API: prepare wait
+        API->>Node: submit
         API->>Shard: park task
-        Shard->>Node: submit
         Node->>Kernel: io_uring, kqueue, IOCP
         Kernel-->>Node: completion
         Node->>Shard: wake owner

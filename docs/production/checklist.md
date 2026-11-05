@@ -21,6 +21,9 @@ Before tagging a release build, require:
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.
 - Verify BSD targets are rejected with `make test-platform-support`.
+- The `linux-managed-compiler-sdk` job with its pinned LLVM 23.1.2, and on hosts with
+  a real admitted image the `test_managed_async_compiler_default*` tests. See
+  [Managed compiler and SDK](verification.md#managed-compiler-and-sdk).
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
   the Windows stress jobs (2022 in `Stress`, 2022 and 2025 in `Nightly Deep CI`),
   including forced Windows 10/11 policies and opt-in TCP `POLLIN` IOCP smoke.
@@ -40,10 +43,11 @@ Before tagging a release build, require:
   resource-limit violations, or unexpected edge client errors. Require this
   gate before claiming long-running runtime/server stability.
 - `python3 scripts/stress_server_composite.py --quick --seed 1234` on at least one POSIX
-  platform. Quick mode is a hosted-runner smoke gate and uses a lower absolute
-  flood delivery threshold than standard mode; delivery ratio must still remain
-  exact. Keep the printed seed from failed randomized edge runs so the same
-  churn/reset sequence can be replayed.
+  platform. Quick mode is a hosted-runner smoke gate with lower absolute flood
+  delivery thresholds than standard mode. Its correctness matrix still requires
+  every expected fanout line and its lossless flood cases a ratio of at least
+  `0.999`, while best-effort flood cases have no ratio floor. Keep the printed seed
+  from failed randomized edge runs so the same churn/reset sequence can be replayed.
 - `python3 scripts/bench_runtime_compare.py --runtime all --isolate-cases` for
   the public LLAM/Go/Tokio comparison graph. Keep the default multi-sample
   median mode for release numbers.

@@ -37,6 +37,15 @@ For parked tasks, inspect:
 These fields separate cancellation loss, timeout loss, wake handoff loss, I/O
 ownership races, and opaque blocking stalls.
 
+Each node line samples its queues without waiting for their locks. Read a `0` in
+`io_queues(...)` as unknown when `locks(...)` reports the lock that guards it as
+`busy`:
+
+| Lock state | Depths not sampled |
+| --- | --- |
+| `submit=busy` | `submit` |
+| `watch=busy` | `control` and every watch, waiter, and ready count |
+
 ## CI timeout dumps
 
 The stress binaries support `LLAM_RUNTIME_DUMP_ON_SIGNAL` on POSIX. CI wraps

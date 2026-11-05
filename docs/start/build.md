@@ -50,9 +50,11 @@ The optional LLVM preemption pass and metadata inspector are separate from the
 runtime ABI and are disabled by default. See
 [Preemption metadata](../guides/preempt-metadata.md) for the `off`,
 `auto`, and `required` modes, `llam-clang`, and supported-target limits.
-To install just the metadata tooling component after building it:
+These targets exist only in a tree configured with that tooling on Linux x86-64,
+with LLVM development files installed. To build and install just that component:
 
 ```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLLAM_PREEMPT_TOOLING=required
 cmake --build build --target llam_preempt_pass llam_preempt_metadata_inspect
 cmake --install build --component PreemptTools --prefix /tmp/llam-sdk
 ```

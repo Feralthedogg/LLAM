@@ -149,18 +149,18 @@ Use this checklist for every docs change:
 
 ## Coverage checks
 
-The docs workflow fails when a public `LLAM_API` symbol exists in
-`include/llam/runtime.h` or `include/llam/io.h` but is missing from the pages
-under `docs/reference/api/`. Run the same intent locally after public header
-changes:
+The docs workflow fails unless every public `LLAM_API` function in `include/llam/`
+has exactly one row in an `API` table under `docs/reference/api/`, renders as a card
+with an anchor, and is in the symbol search index. A mention in prose does not count.
+Functions only the compiler calls belong under `Reserved compiler ABI`. The check also
+requires each `*_CURRENT_SIZE` macro on a reference page, and each `@param` in a header
+to name a real parameter. Run it locally after public header changes:
 
 ```sh
-for name in $(rg --no-filename -o 'LLAM_API[^(;]+\s+(llam_[A-Za-z0-9_]+)\(' -r '$1' include/llam/runtime.h include/llam/io.h | sort -u); do
-  rg -q "$name" docs/reference/api/ || printf '%s\n' "$name"
-done
+python3 scripts/check_docs_api_coverage.py --site-dir /tmp/llam-mkdocs-build
 ```
 
-No output means the API reference mentions every public symbol.
+Leave out `--site-dir` to check only the headers and pages, without a site build.
 
 ## Update triggers
 
@@ -190,8 +190,10 @@ The site is MkDocs with its own theme. Everything site-only lives in `website/`.
 | `diagrams/` | A drawing of each `mermaid` block. The site ships these instead of Mermaid. |
 
 The theme adds API rows and filters by page. A table under `docs/reference/api/`
-whose first column is headed `API` becomes symbol rows, with each row's signature
-and return values taken from the headers. Pages listed in `FILTER_PAGES` in
+whose first column is headed `API` becomes symbol rows, with each row's signature,
+parameters, and return values taken from the headers. Declarations directly under
+one comment share it, and each row shows only the `@param` entries for its own
+parameters. Write `@param[out]` or `@param[in,out]` when a pointer is written. Pages listed in `FILTER_PAGES` in
 `hooks.py` get a filter. A C block of 30 lines or more starts with its trailing
 `main()` folded when `main()` is a small part of it, and Copy still takes the whole
 program.

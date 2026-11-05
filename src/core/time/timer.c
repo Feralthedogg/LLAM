@@ -578,7 +578,13 @@ static void llam_cancel_task_wait_impl(llam_task_t *task, uint64_t expected_gene
                     LLAM_TASK_STATE_PARKED &&
                 atomic_load_explicit(&task->wait_reason, memory_order_acquire) ==
                     (unsigned)wait_reason) {
-                removed = llam_wait_queue_remove(queue, node);
+                /*
+                 * A condition waiter must return owning its mutex, so stop
+                 * leaves that reacquire queued for the owner's unlock. The
+                 * flag is fixed before tracking publishes this node, and the
+                 * resolver pin keeps it from being recycled here.
+                 */
+                removed = !node->uninterruptible && llam_wait_queue_remove(queue, node);
                 if (removed) {
                     node->error_code = ECANCELED;
                 }

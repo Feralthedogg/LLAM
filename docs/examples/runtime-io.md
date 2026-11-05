@@ -11,6 +11,7 @@ Windows.
 ```c title="main.c"
 #include <llam/runtime.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -28,56 +29,71 @@ static void reader_task(void *arg) {
     if (n > 0) {
         printf("read=%.*s\n", (int)n, buf);
     }
+    (void)llam_task_set_result(NULL, n < 0 ? errno : 0);
 }
 
 static void writer_task(void *arg) {
     echo_state_t *state = arg;
     const char *msg = "hello";
 
-    (void)llam_write(state->writer, msg, strlen(msg));
+    ssize_t n = llam_write(state->writer, msg, strlen(msg));
+    (void)llam_task_set_result(NULL, n < 0 ? errno : 0);
+}
+
+static int join_error(llam_task_t *task) {
+    llam_task_result_t result;
+
+    return llam_join_result(task, &result, sizeof(result)) == 0 ? result.error : errno;
 }
 
 static void root(void *arg) {
-    (void)arg;
+    echo_state_t *state = arg;
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        (void)llam_task_set_result(NULL, errno);
         return;
     }
+    state->reader = sv[0];
+    state->writer = sv[1];
 
-    echo_state_t state = {
-        .reader = sv[0],
-        .writer = sv[1],
-    };
+    int error = 0;
+    llam_task_t *reader = llam_spawn(reader_task, state, NULL);
+    llam_task_t *writer = reader != NULL ? llam_spawn(writer_task, state, NULL) : NULL;
 
-    llam_task_t *reader = llam_spawn(reader_task, &state, NULL);
-    llam_task_t *writer = llam_spawn(writer_task, &state, NULL);
-
-    if (reader != NULL) {
-        (void)llam_join(reader);
-    }
     if (writer != NULL) {
-        (void)llam_join(writer);
+        error = join_error(writer);
+    } else {
+        error = errno;
+        /* With no writer, the reader needs EOF or it waits forever. */
+        (void)shutdown(sv[1], SHUT_WR);
+    }
+    if (reader != NULL) {
+        int reader_error = join_error(reader);
+        if (error == 0) error = reader_error;
     }
 
     (void)llam_close(sv[0]);
     (void)llam_close(sv[1]);
+    (void)llam_task_set_result(NULL, error);
 }
 
 int main(void) {
-    if (llam_runtime_init_compat(NULL) != 0) {
+    /* Declared here because a failed join can leave a child running; the
+     * run call returns only after every task has finished. */
+    echo_state_t state;
+    llam_runtime_t *runtime = NULL;
+    if (llam_runtime_create_compat(NULL, 0, &runtime) != 0) return 1;
+    llam_task_t *task = llam_runtime_spawn_ex(runtime, root, &state, NULL, 0);
+    if (task == NULL || llam_runtime_run_handle(runtime) != 0) {
+        llam_runtime_destroy(runtime);
         return 1;
     }
-
-    llam_task_t *task = llam_spawn(root, NULL, NULL);
-    if (task == NULL) {
-        llam_runtime_shutdown();
-        return 1;
-    }
-    int rc = llam_run();
-    if (rc == 0 && llam_join(task) != 0) rc = -1;
-    llam_runtime_shutdown();
-    return rc;
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
+    llam_runtime_destroy(runtime);
+    return failed;
 }
 ```
 

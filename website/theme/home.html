@@ -51,6 +51,7 @@
           <button class="inst" type="button" data-copy-install data-key="hero" aria-label="Copy install command"><span class="only-posix"><b>$</b> curl -fsSL …/install.sh | sh</span><span class="only-win"><b>&gt;</b> Invoke-WebRequest …/install.ps1</span><span class="cp">{{ icon('copy', 's') }}</span></button>
           <div class="os-note"><span class="only-posix">Linux and macOS</span><span class="only-win">Windows, PowerShell</span><span aria-hidden="true">·</span><button type="button" data-os-toggle><span class="only-posix">Use Windows</span><span class="only-win">Use Linux or macOS</span></button></div>
         </div>
+        <p class="h-sub">These docs target {{ config.extra.llam_version }}. Until its release is published, <a href="{{ 'start/build/'|url }}">build the source SDK</a>.</p>
       </div>
       <nav class="tiles" aria-label="Choose your path">
         <a class="tile" href="{{ quickstart_url }}">{{ icon('rocket', 'l') }}<span>Start a new app</span>{{ icon('arrow', 'ar') }}</a>
@@ -189,14 +190,15 @@
           <button class="tab" type="button" role="tab" data-os-pick="posix">Linux and macOS</button>
           <button class="tab" type="button" role="tab" data-os-pick="win">Windows</button>
         </div>
-        <span class="rel" id="release">Latest release <span id="release-v"></span></span>
+        <span class="rel" id="release" data-release-tag="v{{ config.extra.llam_version }}">Release <span id="release-v"></span></span>
       </div>
       <div class="cmdbox">
-        <div class="only-posix" data-install><div><span class="pr">$ </span><span data-cmd>curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh |</span></div><div><span data-cmd>    sh -s -- --prefix "$HOME/.local"</span></div></div>
-        <div class="only-win" data-install><div><span class="pr">&gt; </span><span data-cmd>Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/latest/download/install.ps1" -OutFile install.ps1</span></div><div><span class="pr">&gt; </span><span data-cmd>.\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"</span></div></div>
+        <div class="only-posix" data-install><div><span class="pr">$ </span><span data-cmd>curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v{{ config.extra.llam_version }}/install.sh |</span></div><div><span data-cmd>    sh -s -- --version {{ config.extra.llam_version }} --prefix "$HOME/.local"</span></div></div>
+        <div class="only-win" data-install><div><span class="pr">&gt; </span><span data-cmd>Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v{{ config.extra.llam_version }}/install.ps1" -OutFile install.ps1</span></div><div><span class="pr">&gt; </span><span data-cmd>.\install.ps1 -Version {{ config.extra.llam_version }} -Prefix "$env:LOCALAPPDATA\LLAM"</span></div></div>
         <button class="copy" type="button" data-copy-install data-key="panel" aria-label="Copy install command">{{ icon('copy', 's') }}</button>
       </div>
     </div>
+    <p class="cap">The commands select {{ config.extra.llam_version }}. Before its assets are published, <a href="{{ 'start/build/'|url }}">build the source SDK</a>.</p>
     <div class="hsteps">
       <a class="hstep" href="{{ quickstart_url }}#install-the-release"><i>1</i><b>Install</b><span>Put headers, libraries, CMake config, and pkg-config metadata in a prefix.</span></a>
       <a class="hstep" href="{{ quickstart_url }}#use-from-cmake"><i>2</i><b>Link</b><span>Use the installed llam::runtime CMake target.</span></a>

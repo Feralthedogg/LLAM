@@ -48,9 +48,10 @@ make server-flood
   --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30
 ```
 
-For chat fanout, one inbound message can produce `clients - 1` peer deliveries,
-so million-level delivery rates can appear before inbound message rates reach the
-same scale.
+The `mps` options and report fields count millions per second. Inbound and delivery
+rates differ: in chat fanout one inbound message can produce `clients - 1` peer
+deliveries, so 16 clients at `--target-mps 0.30` can reach 4.5 million deliveries per
+second.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -61,8 +62,8 @@ same scale.
 | `--drain-sec <sec>` | `1.0` | Time to read late fanout after sending stops. |
 | `--message-bytes <n>` | `8` | Message size. Valid range is `2..1024`. |
 | `--batch <n>` | `128` | Per-client send batch. Valid range is `1..65536`. |
-| `--target-mps <m>` | `0.0` | Optional target inbound messages/sec. `0` means unthrottled. |
-| `--min-delivery-mps <m>` | `0.0` | Fail if observed delivery rate is below this value. |
+| `--target-mps <m>` | `0.0` | Optional target inbound rate in millions of messages/sec, so `0.30` is 300,000/sec. `0` means unthrottled. |
+| `--min-delivery-mps <m>` | `0.0` | Fail if the observed delivery rate, in millions of deliveries/sec, is below this value. `1.3` is 1,300,000/sec. `0` disables the check. |
 | `--min-delivery-ratio <r>` | `0.0` | Fail if observed/expected broadcast ratio is below this value. |
 | `--shutdown-timeout <sec>` | `30.0` | Server shutdown wait before forced cleanup. |
 | `--server-lossless` | off | Start the target server with `--lossless`. |
@@ -117,8 +118,14 @@ Edge logs split client socket failures into expected churn/cleanup errors and
 `unexpected_client_errors`; the latter must stay at zero. Pass `--seed` to replay
 randomized correctness payloads and edge churn behavior from a previous run.
 
-`--quick` is intended for hosted CI runners. It keeps exact-delivery checks but
-uses a lower absolute flood delivery threshold than the standard profile.
+`--quick` is intended for hosted CI runners. It keeps the exact-delivery correctness
+checks but uses lower absolute flood thresholds than the standard profile:
+
+| Phase | Delivery requirement |
+| --- | --- |
+| Correctness matrix | Every expected fanout line, in both profiles. |
+| Lossless flood (`lossless-8b`, `lossless-1kb`) | Observed/expected ratio of at least `0.999`, in both profiles. |
+| Best-effort flood (`throughput-8b`, `throughput-64b`) | No ratio floor. Minimum delivery rate is 0.10 and 0.08 million/sec with `--quick`, and 1.3 and 1.0 million/sec in the standard profile. |
 
 The one-hour profile runs the same classes of checks with a long soak layout: 30
 minutes of main flood, two 5-minute payload flood phases, and 20 minutes of mixed
@@ -137,7 +144,7 @@ and scheduled benchmark jobs.
 | `--correctness-matrix <cases>` | `8:8:16,16:4:64,32:2:1024` | Comma-separated `clients:messages:payload_bytes` cases. |
 | `--correctness-timeout <sec>` | `30` | Per-correctness-case timeout. |
 | `--flood-duration <sec>` | `60` | Main native flood duration. |
-| `--flood-min-delivery-ratio <r>` | `0.0` | Minimum observed/expected broadcast ratio for flood phases. |
+| `--flood-min-delivery-ratio <r>` | `0.0` | Minimum observed/expected broadcast ratio for flood phases. Above `0`, it replaces each phase's floor; `0.0` keeps the floors above. |
 | `--allow-flood-forced-stop` | off | Allow native flood cleanup to force-stop the server. |
 | `--payload-flood-duration <sec>` | `10` | Duration for payload-size flood phases. |
 | `--edge-duration <sec>` | `60` | Edge/churn phase duration. |

@@ -219,9 +219,8 @@ function loadStyles(href) {
   });
 }
 
-// Latest release
+// The release matching this documentation
 
-const RELEASE_KEY = 'llam-release';
 const RELEASE_TTL = 3600 * 1000;
 
 function releaseNode({ tag, date }) {
@@ -236,9 +235,11 @@ function releaseNode({ tag, date }) {
 async function initRelease() {
   const line = $('#release');
   const slot = $('#release-v');
+  const tag = line.dataset.releaseTag;
+  const key = `llam-release:${tag}`;
   let cached = null;
-  try { cached = JSON.parse(read(RELEASE_KEY) || 'null'); } catch { cached = null; }
-  if (cached && Date.now() - cached.at < RELEASE_TTL) {
+  try { cached = JSON.parse(read(key) || 'null'); } catch { cached = null; }
+  if (cached?.tag === tag && Date.now() - cached.at < RELEASE_TTL) {
     slot.replaceChildren(releaseNode(cached));
     return;
   }
@@ -246,23 +247,24 @@ async function initRelease() {
   try {
     const { Reveal } = await loadSkullet();
     if (!slot.firstChild) {
-      reveal = new Reveal(slot, { id: 'latest-release', label: 'Loading latest release' });
-      reveal.load(releaseNode({ tag: 'v0.0.0', date: '2026-01-01' }));
+      reveal = new Reveal(slot, { id: 'docs-release', label: `Loading release ${tag}` });
+      reveal.load(releaseNode({ tag, date: '2026-01-01' }));
     }
   } catch {
     // No skeleton: the line fills in or goes away all the same
   }
   try {
-    const response = await fetch('https://api.github.com/repos/Feralthedogg/LLAM/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
+    const response = await fetch(`https://api.github.com/repos/Feralthedogg/LLAM/releases/tags/${encodeURIComponent(tag)}`, { headers: { Accept: 'application/vnd.github+json' } });
     if (!response.ok) throw new Error('No release');
     const release = await response.json();
+    if (release.tag_name !== tag) throw new Error('Wrong release');
     const value = { tag: release.tag_name, date: release.published_at, at: Date.now() };
-    write(RELEASE_KEY, JSON.stringify(value));
+    write(key, JSON.stringify(value));
     if (reveal) reveal.show(releaseNode(value));
     else slot.replaceChildren(releaseNode(value));
   } catch {
     reveal?.destroy();
-    if (cached) slot.replaceChildren(releaseNode(cached));
+    if (cached?.tag === tag) slot.replaceChildren(releaseNode(cached));
     else line.hidden = true;
   }
 }

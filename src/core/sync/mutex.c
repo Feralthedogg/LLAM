@@ -99,17 +99,19 @@ int llam_mutex_trylock(llam_mutex_t *mutex) {
  * enqueues a wait node, arms optional timeout/cancellation tracking, parks the
  * current task, and consumes the wait node's completion error after wakeup.
  *
- * @param mutex           Mutex to acquire.
- * @param has_deadline    Whether @p deadline_ns is active.
- * @param deadline_ns     Absolute monotonic deadline in nanoseconds.
- * @param register_cancel Whether to register the task's cancellation token.
+ * @param mutex        Mutex to acquire.
+ * @param has_deadline Whether @p deadline_ns is active.
+ * @param deadline_ns  Absolute monotonic deadline in nanoseconds.
+ * @param cancellable  Whether cancellation tokens and runtime stop can end the
+ *                     wait. Condition reacquire passes @c false because it must
+ *                     return owning the mutex.
  *
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
                                   bool has_deadline,
                                   uint64_t deadline_ns,
-                                  bool register_cancel) {
+                                  bool cancellable) {
     llam_shard_t *shard;
     llam_task_t *task;
     llam_wait_node_t *node;
@@ -132,7 +134,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
     }
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
-    if (register_cancel) llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
+    if (cancellable) llam_task_merge_wait_deadline(task, &has_deadline, &deadline_ns);
     current = (uintptr_t)task;
     if (atomic_load(&mutex->owner) == current) {
         errno = EDEADLK;
@@ -155,6 +157,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
 
     node->task = task;
     node->owner_shard = shard->id;
+    node->uninterruptible = !cancellable;
 
     pthread_mutex_lock(&mutex->lock);
     expected = 0U;
@@ -211,7 +214,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
         llam_sync_wait_node_release(shard, node);
         return -1;
     }
-    if (register_cancel && llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
+    if (cancellable && llam_task_has_cancel_tokens(task) && llam_cancel_token_register_task(task) != 0) {
         bool removed;
 
         if (llam_wait_node_completed(node)) {
@@ -245,7 +248,7 @@ wait_ready:
          */
         llam_disarm_task_wait_deadline(task);
     }
-    if (register_cancel) {
+    if (cancellable) {
         llam_cancel_token_unregister_task(task);
     }
     if (wait_tracking_published) {
@@ -260,7 +263,7 @@ wait_ready:
     return 0;
 }
 
-int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool register_cancel) {
+int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool cancellable) {
     int rc;
     int saved_errno;
 
@@ -268,7 +271,7 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
     if (mutex == NULL) {
         return -1;
     }
-    rc = llam_mutex_lock_resolved_impl(mutex, has_deadline, deadline_ns, register_cancel);
+    rc = llam_mutex_lock_resolved_impl(mutex, has_deadline, deadline_ns, cancellable);
     saved_errno = errno;
     llam_mutex_end_public_op(mutex);
     errno = saved_errno;

@@ -36,6 +36,41 @@ u64 managed_stack(unsigned count) {
     return sum;
 }
 
+int managed_signed_byte(int value) {
+    volatile signed char local = (signed char)value;
+    return local;
+}
+
+long long managed_signed_byte_wide(int value) {
+    volatile signed char local = (signed char)value;
+    return local;
+}
+
+int managed_signed_half(int value) {
+    volatile short local = (short)value;
+    return local;
+}
+
+long long managed_signed_half_wide(int value) {
+    volatile short local = (short)value;
+    return local;
+}
+
+long long managed_signed_word(int value) {
+    volatile int local = value;
+    return local;
+}
+
+unsigned managed_unsigned_byte(unsigned value) {
+    volatile unsigned char local = (unsigned char)value;
+    return local;
+}
+
+unsigned managed_unsigned_half(unsigned value) {
+    volatile unsigned short local = (unsigned short)value;
+    return local;
+}
+
 __attribute__((noinline)) u64 managed_recursive(unsigned count) {
     if (count == 0U) return 1U;
     return count * managed_recursive(count - 1U);

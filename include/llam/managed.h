@@ -136,27 +136,84 @@ typedef struct llam_preempt_info {
 #define LLAM_MODULE_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_module_opts_t))
 #define LLAM_PREEMPT_INFO_CURRENT_SIZE ((size_t)sizeof(llam_preempt_info_t))
 
+/**
+ * @brief Fill managed options with their defaults: ASYNC_REQUIRED, 64 MiB, four slots.
+ *
+ * @details A zeroed ::llam_preempt_opts_t differs: its @c policy is ASYNC_AUTO.
+ *
+ * @param[out] out Options to initialize. Must not be NULL.
+ * @param out_size Size of the caller's ::llam_preempt_opts_t; must be nonzero. LLAM
+ * writes only the prefix it knows.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_preempt_opts_init(llam_preempt_opts_t *out, size_t out_size);
-/* Advanced host-only policy constructor. The default policy is ASYNC_REQUIRED,
- * as for the ordinary constructors. ASYNC_AUTO and COOPERATIVE are explicit
- * alternatives. Creation may inspect and pin native loader images; calling
- * from a LLAM task returns EBUSY. */
+/**
+ * @brief Create a runtime with an explicit managed policy and resource limits.
+ *
+ * @details Advanced host-only policy constructor. The default policy is
+ * ASYNC_REQUIRED, as for the ordinary constructors. ASYNC_AUTO and COOPERATIVE are
+ * explicit alternatives. Creation may inspect and pin native loader images; calling
+ * from a LLAM task returns EBUSY.
+ *
+ * @param runtime_opts Optional runtime options; pass NULL for defaults.
+ * @param runtime_opts_size Size of @p runtime_opts when non-NULL; must then be nonzero.
+ * @param preempt_opts Optional managed options; pass NULL with size 0 for the defaults
+ * of ::llam_preempt_opts_init.
+ * @param preempt_opts_size Size of @p preempt_opts; must be nonzero when it is non-NULL
+ * and 0 when it is NULL.
+ * @param[out] out Receives the runtime handle; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_create_managed(
     const llam_runtime_opts_t *runtime_opts, size_t runtime_opts_size,
     const llam_preempt_opts_t *preempt_opts, size_t preempt_opts_size,
     llam_runtime_t **out);
+/**
+ * @brief Copy the runtime's requested and effective policy and storage accounting.
+ *
+ * @details A compatibility runtime reports ::LLAM_PREEMPT_REASON_LEGACY_RUNTIME.
+ *
+ * @param runtime Live runtime; not NULL.
+ * @param[out] out Receives the snapshot. Must not be NULL.
+ * @param out_size Size of the caller's ::llam_preempt_info_t; must be nonzero. LLAM
+ * writes only the compatible prefix.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_preempt_info_ex(
     llam_runtime_t *runtime, llam_preempt_info_t *out, size_t out_size);
+/**
+ * @brief Register one loaded image's managed metadata with a stopped runtime.
+ *
+ * @details Host only; a task gets @c EBUSY. Keep the caller's loader reference alive
+ * during this call. LLAM obtains its own reference and validates the image.
+ *
+ * @param runtime Runtime with stopped dispatch; not NULL.
+ * @param opts Module options, with nonzero metadata fields and zero flags.
+ * @param opts_size Size of @p opts; must include @c metadata_address and
+ * @c metadata_bytes, so at least 16 bytes.
+ * @param[out] out Receives the module handle; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_module_register_ex(
     llam_runtime_t *runtime, const llam_module_opts_t *opts, size_t opts_size,
     llam_module_t **out);
-/** Success consumes the handle. EBUSY preserves it; another runtime is EXDEV.
+/**
+ * @brief Unregister a module and release LLAM's loader reference.
+ *
+ * @details Success consumes the handle. EBUSY preserves it; another runtime is EXDEV.
  * Registration changes require host context, stopped dispatch, and no retained
- * G, capsule, native operation or catalog reader. */
+ * G, capsule, native operation or catalog reader.
+ *
+ * @param runtime Runtime that registered the module; not NULL.
+ * @param module Module handle; not NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_runtime_module_unregister(llam_runtime_t *runtime, llam_module_t *module);
 
-/** Execute one native callback on the current task's dedicated native thread.
- * The compiler classifies callers as NATIVE_AFFINE. A qualified affine task
+/**
+ * @brief Execute one native callback on the current task's dedicated native thread.
+ *
+ * @details The compiler classifies callers as NATIVE_AFFINE. A qualified affine task
  * releases its logical processor before the callback and reacquires a fresh
  * execute/drain lease on the same native thread before returning. The callback
  * may block and use native TLS; it cannot call stateful LLAM APIs or leave by
@@ -169,14 +226,24 @@ LLAM_API int llam_runtime_module_unregister(llam_runtime_t *runtime, llam_module
  * and a racing processor-ownership change returns EBUSY. On those failures *out
  * is NULL when out is valid. Native callback
  * reentry is rejected before touching caller arguments, as for other LLAM APIs.
+ *
+ * @param fn Callback to run. Must not be NULL.
+ * @param arg User pointer passed to @p fn.
+ * @param[out] out Receives the callback result; NULL is a valid result. Must not be
+ * NULL.
+ * @return 0 after callback completion, -1 with @c errno set before callback entry.
  */
 LLAM_API int llam_call_native_affine_result(llam_blocking_fn fn, void *arg, void **out);
 
-/* Compiler ABI, not task admission. The qualified compiler emits balanced
+/**
+ * @brief Reserved for compiler-generated code. Application code must not call these.
+ *
+ * @details Compiler ABI, not task admission. The qualified compiler emits balanced
  * native entry/exit calls. They preserve errno/LastError and never allocate,
  * resolve dynamic TLS or acquire a lock. A native callback has no managed G/P
  * context. Unbalanced guards fail closed; they are not a public disable switch.
- * Runtime managed creation and LLPM2 admission are separate contracts. */
+ * Runtime managed creation and LLPM2 admission are separate contracts.
+ */
 LLAM_API void llam_managed_native_enter(void);
 LLAM_API void llam_managed_native_leave(void);
 

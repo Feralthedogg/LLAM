@@ -635,6 +635,7 @@ typedef struct llam_wait_node {
     atomic_uint wake_armed;
     atomic_uint wake_completed;
     atomic_uint wake_queued;
+    bool uninterruptible;
 } llam_wait_node_t;
 
 /** @brief FIFO waiter queue guarded by the owning primitive's lock. */

@@ -19,27 +19,38 @@ application code.
 
 </div>
 
+## Match the SDK version
+
+This quickstart targets **LLAM 3.0.0 (ABI 2.4)**. A 2.2.1 SDK does not
+provide `llam_runtime_create_compat()` or the task-result APIs used below, so these
+examples will not compile against it.
+
+The installer commands below select **v3.0.0**. Until its release assets are
+published, [build and install the 3.0.0 source](build.md) to use these examples.
+Keep the headers and library from that same SDK together.
+For a POSIX install, `pkg-config --modversion llam` reports the selected SDK version.
+
 ## Install the release
 
 === "Linux, macOS"
 
     ```sh
-    curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh |
-      sh -s -- --prefix "$HOME/.local"
+    curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh |
+      sh -s -- --version 3.0.0 --prefix "$HOME/.local"
     ```
 
     Use a system prefix when the machine expects globally installed SDKs:
 
     ```sh
-    curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh |
-      sudo sh -s -- --prefix /usr/local
+    curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh |
+      sudo sh -s -- --version 3.0.0 --prefix /usr/local
     ```
 
 === "Windows"
 
     ```powershell
-    Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/latest/download/install.ps1" -OutFile install.ps1
-    .\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"
+    Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.ps1" -OutFile install.ps1
+    .\install.ps1 -Version 3.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
     ```
 
 Choose a release or target explicitly when automatic host detection is not what

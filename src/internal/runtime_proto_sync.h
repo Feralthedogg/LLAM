@@ -138,11 +138,11 @@ static inline llam_channel_t *llam_channel_public_handle(llam_channel_t *channel
  * entry point to avoid treating the raw mutex address as an opaque public
  * slot/generation handle during reacquire.
  */
-int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool register_cancel);
+int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool cancellable);
 int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
                                   bool has_deadline,
                                   uint64_t deadline_ns,
-                                  bool register_cancel);
+                                  bool cancellable);
 
 /*
  * Wait-node allocation and task tracking.

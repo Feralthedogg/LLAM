@@ -47,17 +47,21 @@ Some handy links:
 
 ## Install
 
+The commands and examples target **3.0.0 (ABI 2.4)**. Until the 3.0.0 release assets
+are published, [build the source SDK](docs/start/build.md). Keep its headers and
+library together; a 2.2.1 SDK cannot build the 3.0.0 examples.
+
 Linux and macOS:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh | sh -s -- --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh | sh -s -- --version 3.0.0 --prefix "$HOME/.local"
 ```
 
 Windows:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/latest/download/install.ps1" -OutFile install.ps1
-.\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.ps1" -OutFile install.ps1
+.\install.ps1 -Version 3.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Then link it from CMake and run your first task with the

@@ -4,6 +4,11 @@
 
 ### Added
 
+* give every public function a card in the API reference, with parameters read from
+  the headers, and fail the docs workflow when one is missing from the rows, the
+  rendered cards or the symbol search. Document which APIs each managed context can
+  call, the foreign-effect annotations, and the fields of the managed and resource
+  structures.
 * add compiler-qualified managed C execution with LLVM 23.1.2, LLPM2 final-image
   admission, native worker probes and asynchronous capture/restore on qualified
   Linux, macOS ARM64 and Windows MinGW profiles; retain compatibility constructors'
@@ -68,6 +73,15 @@
 
 ### Fixed
 
+* accept ordinary AArch64 unscaled byte/halfword accesses and sign-extending stack
+  loads in managed code, preserving signed and unsigned results and allowing tasks
+  to inspect a local `short` poll result instead of discarding it.
+* return from `llam_cond_wait()` and `llam_cond_wait_until()` holding the mutex on
+  every path. Runtime stop used to cancel a contended reacquire too, so the call
+  returned `ECANCELED` without the mutex and the caller's unlock failed with `EPERM`.
+  The reacquire now waits for the owner's unlock, so a stopping runtime drains only
+  after that unlock, and a task that exits while holding the mutex keeps the run call
+  from returning.
 * preserve spawn request budgets across waits, prevent late cancellation delivery
   from affecting a subsequent wait, and allow group cleanup after runtime teardown
   has invalidated all of its child handles.
@@ -93,6 +107,8 @@
 * wait for the watchdog's final fatal observation in parked-cycle tests, handle
   completed joins during cleanup and collect 31 throughput rounds in CI smoke jobs,
   retaining every measured round in the mean and preserving the performance floors.
+* use 16,384-operation select batches in CI throughput guards to reduce sensitivity
+  to isolated host scheduling pauses while retaining the same mean and floors.
 * select the installed Visual Studio generation on Windows deep runners, keep
   concurrent-destroy tests from reading reclaimed runtimes, and isolate the
   reserved-publication fixture from incidental safepoint yields.
@@ -129,8 +145,6 @@
 
 * hand parked cooperative selects directly to local work, and keep a lone cooperative
   task running across at most 64 idle direct yields instead of requeueing it.
-* use 16,384-operation select batches in CI throughput guards to reduce sensitivity
-  to isolated host scheduling pauses while retaining the same mean and floors.
 
 ## 2.2.1 - 2026-08-01
 

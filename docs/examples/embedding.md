@@ -67,6 +67,10 @@ if (llam_abi_get_info(&info, LLAM_ABI_INFO_CURRENT_SIZE) != 0) {
 if (info.abi_major != LLAM_ABI_VERSION_MAJOR) {
     return 1;
 }
+/* llam_runtime_create_compat() and the asynchronous default arrived in ABI 2.4. */
+if (info.abi_minor < 4U) {
+    return 1;
+}
 ```
 
 Use [ABI contract](../reference/abi/index.md) for the full dynamic-loader rules.

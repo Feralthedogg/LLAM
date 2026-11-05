@@ -26,16 +26,22 @@ static void root(void *arg) {
     (void)arg;
     int sv[2];
     char buf[64];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        (void)llam_task_set_result(NULL, errno);
+        return;
+    }
     llam_fd_t fd = sv[0];
 
     uint64_t deadline = llam_now_ns() + 250ULL * 1000000ULL;
     ssize_t n = llam_read_until(fd, buf, sizeof buf, deadline);
-    if (n < 0 && errno == ETIMEDOUT) {
+    int error = n < 0 ? errno : 0;
+    if (error == ETIMEDOUT) {
         printf("read timed out\n");
+        error = 0;
     }
     (void)llam_close(sv[0]);
     (void)llam_close(sv[1]);
+    (void)llam_task_set_result(NULL, error);
 }
 
 /* fold */
@@ -47,7 +53,9 @@ int main(void) {
         llam_runtime_destroy(runtime);
         return 1;
     }
-    int rc = llam_join(task);
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
     llam_runtime_destroy(runtime);
-    return rc;
+    return failed;
 }

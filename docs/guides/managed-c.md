@@ -66,10 +66,14 @@ sdk/bin/llam-clang host.o tasks.o \
 ./managed-demo
 ```
 
-`llam-clang` and `llam-managed-clang` default to `required`, which rejects unsupported effects. `auto` leaves functions with unknown
-effects in the legacy class. Both managed modes require the matching plugin
-and final-image verifier; a missing tool is an error. `off` uses the native
-compiler. LTO, sanitizer instrumentation, section rewriting and link folding
+| `--llam-managed=` | Accepted by | Effect |
+| --- | --- | --- |
+| `required` (default) | `llam-clang`, `llam-managed-clang` | Rejects unsupported effects. |
+| `auto` | `llam-clang`, `llam-managed-clang` | Leaves functions with unknown effects in the legacy class. |
+| `off` | `llam-clang` only | Runs the native compiler. `llam-managed-clang` exits with status 2. |
+
+Both managed modes require the matching plugin and final-image verifier; a missing
+tool is an error. LTO, sanitizer instrumentation, section rewriting and link folding
 are outside this compiler profile and are rejected.
 
 ## Required compiler and SDK CI
@@ -209,7 +213,107 @@ are rejected from it. Callback completion preserves its result, `errno` and
 Windows `LastError`. Cancellation before callback entry returns `ECANCELED`;
 after callback entry the runtime first completes the native return handoff.
 
+## What each context can call
+
+`required` mode checks every call a qualified function makes. A call with no
+contract stops the compile with `LLAM managed effect/ABI is unqualified`; `auto` mode
+instead leaves that function in the legacy class.
+
+| API group | Host thread | Compatibility task | Qualified function |
+| --- | --- | --- | --- |
+| Spawn and join, sync, channels, timers, cancellation, byte I/O, owned buffers, DNS, object constructors, stop requests, `llam_runtime_get_resources_ex`, `llam_call_blocking_result`, `llam_now_ns`, `llam_wait_opts_init`, `llam_io_buffer_opts_init` | Per API; see [Threading](../reference/abi/threading.md) | Yes | Yes |
+| Signal sets, `llam_task_local_set_owned` | Signal sets only | Yes | Yes; the function becomes `NATIVE_AFFINE` |
+| `llam_call_native_affine_result` | `ENOTSUP` | `ENOTSUP` | Yes; the function becomes `NATIVE_AFFINE` |
+| `llam_poll_fd`, `llam_poll_handle` | Yes | Yes | Rejected: narrow integer ABI |
+| `llam_enter_blocking`, `llam_leave_blocking` | No-op | Yes | Rejected |
+| Stats, JSON stats, dumps, `llam_runtime_preempt_info_ex` | Yes | Yes | Rejected |
+| Runtime create and init, `llam_runtime_default`, run, drain, shutdown, destroy, module registration, Windows opt-in | Yes | Per API: constructors and run drivers get `EBUSY`, except the `*_compat` constructors; shutdown and destroy only request a stop | Rejected |
+| `llam_abi_version`, `llam_abi_get_info`, `llam_version_string`, `llam_runtime_opts_init`, `llam_spawn_opts_init`, `llam_preempt_opts_init` | Yes | Yes | Rejected |
+
+`llam_managed_native_enter` and `llam_managed_native_leave` are for the code the
+compiler generates, in every context.
+
+Callbacks have their own rules:
+
+| Callback | What it can call |
+| --- | --- |
+| `llam_call_blocking_result` | It runs on a helper OS thread with no task, so the host-thread rules apply. |
+| `llam_call_native_affine_result` | Only `llam_now_ns`, `llam_abi_version`, `llam_abi_get_info`, `llam_version_string`, `llam_runtime_opts_init`, `llam_spawn_opts_init`, `llam_wait_opts_init` and `llam_io_buffer_opts_init`. Every other public function fails with `ENOTSUP`. |
+
+Keep setup and reporting in host code compiled with `--llam-managed=off`. When task
+code needs something the first table rejects, use the replacement:
+
+| Instead of | Use | Why |
+| --- | --- | --- |
+| `llam_poll_fd` | `llam_poll_fd_until` or `llam_poll_fd_ex` | These take an `int` mask. |
+| `llam_poll_handle` | `llam_poll_fd_until` on POSIX, where a handle is a descriptor; a blocking callback on Windows | |
+| `llam_enter_blocking` | `llam_call_blocking_result` | Keeps the worker free. |
+| Foreign work tied to the task's OS thread | `llam_call_native_affine_result` | Blocks only this task's own thread. |
+| `printf`, `strlen`, other unlisted calls | A callback compiled with `--llam-managed=off` | A callback in a managed file is checked too. |
+
+Use a `short` local for `revents` when the task needs to distinguish readable input
+from hangup or error events. Pass `NULL` when only the poll's return value is needed.
+
+For example, this task waits for input and then logs a line. Compile `callbacks.c` with
+`--llam-managed=off` and `tasks.c` with the managed driver:
+
+```c title="callbacks.c"
+#include <stdio.h>
+
+void *log_line(void *arg) {
+    return puts(arg) >= 0 ? arg : NULL;
+}
+```
+
+```c title="tasks.c"
+#include <llam/runtime.h>
+#include <poll.h>
+
+void *log_line(void *);
+
+/* 0 once fd is readable and the line is logged, -1 otherwise. */
+int wait_then_log(llam_fd_t fd, char *line) {
+    uint64_t deadline = llam_now_ns() + UINT64_C(1000000000);
+    void *logged = NULL;
+    short revents = 0;
+
+    if (llam_poll_fd_until(fd, POLLIN, deadline, &revents) <= 0 ||
+        (revents & POLLIN) == 0) {
+        return -1;
+    }
+    if (llam_call_blocking_result(log_line, line, &logged) != 0) {
+        return -1;
+    }
+    return logged != NULL ? 0 : -1;
+}
+```
+
+### Foreign calls and effects
+
+Only `malloc`, `calloc`, `realloc`, `free`, `memcpy`, `memmove`, `memset` and `memcmp`
+are recognized libc calls, and they need their standard signatures. Reading or
+writing `errno`, or any thread-local variable, makes the function `NATIVE_AFFINE`.
+
+A foreign declaration can state its effect with an annotation. The compiler cannot
+check the function behind it, so the annotation is your promise:
+
+```c
+__attribute__((annotate("llam-foreign-fast")))
+extern long fast_mix(long);
+```
+
+| Annotation | Applies to | Result |
+| --- | --- | --- |
+| `llam-foreign-fast` | Foreign declaration | Callable; the caller stays `PORTABLE`. The function must return promptly, must not block, and must preserve native thread state. |
+| `llam-native-affine` | Declaration or definition | Callable; the caller becomes `NATIVE_AFFINE`. |
+| `llam-foreign-blocking` | Foreign declaration | Rejected: an inline call cannot park. Use `llam_call_blocking_result`. |
+| `llam-legacy` | Definition | Compiles in the legacy class even in `required`. `ASYNC_REQUIRED` then refuses it at spawn. |
+| `llam-no-preempt` | Definition | Rejected in `required`. |
+
 ## Policy, resources, and module lifetime
+
+The [field tables](../reference/options/runtime.md#managed-runtime-options) list each
+option, counter, and flag.
 
 `llam_runtime_preempt_info_ex()` uses the usual caller-size handshake. Inspect
 requested and effective policies, the reason, `RUNNING`/`COMMITTED` flags,
@@ -246,7 +350,8 @@ calculation as native capture requests. Zero means no active qualified native
 profile. This is a request budget: native delivery, PC eligibility and reader
 drain can delay actual preemption. It is not a hard scheduling deadline.
 
-Creation and module mutation are host operations. Keep the caller's loader
+Creation and module mutation are host operations. Pass at least the two metadata
+fields of `llam_module_opts_t`, 16 bytes, and keep the caller's loader
 reference alive during `llam_runtime_module_register_ex()`; LLAM obtains its own
 reference. Mutation requires stopped dispatch and no retained G/native/catalog
 references. `EBUSY` preserves the module handle; success consumes it. Another

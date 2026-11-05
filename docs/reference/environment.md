@@ -203,8 +203,8 @@ These variables tune bundled example-server tests, not the LLAM public ABI.
 | `LLAM_SERVER_FLOOD_DRAIN_SEC` | seconds | Drain window after flood traffic. |
 | `LLAM_SERVER_FLOOD_MESSAGE_BYTES` | bytes | Flood payload size. |
 | `LLAM_SERVER_FLOOD_BATCH` | count | Messages sent per client batch. |
-| `LLAM_SERVER_FLOOD_TARGET_MPS` | rate | Target messages per second. |
-| `LLAM_SERVER_FLOOD_MIN_DELIVERY_MPS` | rate | Minimum accepted delivery rate. |
+| `LLAM_SERVER_FLOOD_TARGET_MPS` | rate | Target inbound rate in millions of messages per second; `0.30` is 300,000. |
+| `LLAM_SERVER_FLOOD_MIN_DELIVERY_MPS` | rate | Minimum accepted delivery rate in millions of deliveries per second; `1.3` is 1,300,000. |
 | `LLAM_SERVER_FLOOD_MIN_DELIVERY_RATIO` | ratio | Minimum accepted delivery ratio. |
 | `LLAM_SERVER_FLOOD_SHUTDOWN_TIMEOUT` | seconds | Server shutdown timeout. |
 | `LLAM_SERVER_FLOOD_SERVER_LOSSLESS` | `0`, `1` | Start the target server in lossless mode. |
@@ -217,9 +217,16 @@ These variables tune bundled example-server tests, not the LLAM public ABI.
 
 ## Legacy names
 
-Old automation can still use earlier spellings. Any `LLAM_FOO` falls back to
-`NM_FOO`, and the worker variables also accept `LLAM_EXPERIMENTAL_SHARD_RINGS`,
-`LLAM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT`, and `LLAM_EXPERIMENTAL_DYNAMIC_SHARDS`.
-Use the canonical names in new scripts.
+Old automation can still use earlier spellings for variables read through the
+runtime's environment helper: the runtime library's own settings and the C
+benchmark, demo, and stress programs built on `examples/env_compat.h`. For those,
+any `LLAM_FOO` falls back to `NM_FOO`, and the worker variables also accept
+`LLAM_EXPERIMENTAL_SHARD_RINGS`, `LLAM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT`, and
+`LLAM_EXPERIMENTAL_DYNAMIC_SHARDS`.
+
+Everything else reads only the `LLAM_` name: the chat server and flood programs
+(`LLAM_CHAT_*`, `LLAM_SERVER_FLOOD_*`), `LLAM_RUNTIME_DUMP_ON_SIGNAL`,
+`LLAM_WINDOWS_FORCE_GENERATION`, Python tools, install scripts, and compiler
+drivers. Use the canonical names in new scripts.
 
 For C structs, build settings, and install script options, see [Options](options/runtime.md).

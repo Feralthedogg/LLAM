@@ -20,10 +20,14 @@ task handle is consumed by one successful join or one detach.
 | `LLAM_PREEMPT_POLL_EVERY` | Safepoint macro for counted loops. Arguments are evaluated once. |
 | `llam_task_set_class` | Change the current task scheduler class. |
 
-`llam_task_set_result` publishes an application value/error at completion.
-`llam_join_result` and `llam_join_result_until` copy it before consuming a normal
-handle; `llam_task_get_result` peeks after completion, including a borrowed group
-child. An unsuccessful join leaves output untouched.
+## Task results
+
+| API | Purpose |
+| --- | --- |
+| `llam_task_set_result` | Publish an application value and error at completion. |
+| `llam_join_result` | Wait, copy the result, and consume a normal handle. An unsuccessful join leaves output untouched. |
+| `llam_join_result_until` | Same, until an absolute deadline. A timeout leaves the handle joinable. |
+| `llam_task_get_result` | Peek after completion, including at a borrowed group child. |
 
 ## Task groups
 
@@ -46,4 +50,6 @@ child. An unsuccessful join leaves output untouched.
 | `llam_task_local_key_delete` | Delete a task-local storage key. |
 | `llam_task_local_get` | Read the current task's value for a key. |
 | `llam_task_local_set` | Set or clear the current task's value for a key. |
+| `llam_task_local_set_owned` | Install a value at an empty key, with a nonblocking cleanup that runs at task exit. |
+| `llam_task_local_take_result` | Remove a value and transfer its ownership without running cleanup. |
 | `LLAM_TASK_LOCAL_INVALID_KEY` | Invalid key sentinel. |

@@ -3332,7 +3332,11 @@ test-platform-support:
 example_explicit_runtime: $(RUNTIME_OBJS) $(OBJDIR)/examples/explicit_runtime.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-test: test-platform-support example_explicit_runtime
+.PHONY: test-docs-api-coverage
+test-docs-api-coverage:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/test_docs_api_coverage.py
+
+test: test-platform-support test-docs-api-coverage example_explicit_runtime
 
 $(OBJDIR)/examples/explicit_runtime.o: examples/explicit_runtime.c $(LLAM_PUBLIC_HDRS)
 	@mkdir -p $(dir $@)

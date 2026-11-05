@@ -185,32 +185,131 @@ File types:
 | `LLAM_FILE_TYPE_SYMLINK` | Symbolic link or Windows reparse point. |
 | `LLAM_FILE_TYPE_OTHER` | Other platform-specific type. |
 
-## Managed constructor policy
+## Managed runtime options
 
 `<llam/managed.h>` adds caller-sized `llam_preempt_opts_t` without extending
-`llam_runtime_opts_t`. The defaults are `ASYNC_REQUIRED`, a 64 MiB capsule storage
-budget and four native-affine slots, and `llam_runtime_create()` and
-`llam_runtime_init()` use the same defaults. The budget is a quota, not an eager 64 MiB
+`llam_runtime_opts_t`. Pass it to `llam_runtime_create_managed()`.
+
+| Field | Meaning | `0` means |
+| --- | --- | --- |
+| `policy` | One of `LLAM_PREEMPT_POLICY_*`. | `ASYNC_AUTO`, so a zeroed struct is **not** the default policy. |
+| `flags` | Reserved. A nonzero value fails with `EINVAL`. | Required value. |
+| `capsule_budget_bytes` | Capsule storage quota in bytes. | 64 MiB. |
+| `native_affine_capacity` | Dedicated native-affine M slots, at most 1024. | 4 slots. |
+| `reserved0` | Reserved. A nonzero value fails with `EINVAL`. | Required value. |
+
+`llam_preempt_opts_init()`, and a `NULL` options pointer with size `0`, select
+`ASYNC_REQUIRED`, a 64 MiB budget and four slots. `llam_runtime_create()` and
+`llam_runtime_init()` use those same defaults. A smaller nonzero size keeps the
+default for each field it omits. A `NULL` pointer with a nonzero size, or a non-`NULL`
+pointer with size `0`, fails with `EINVAL`.
+
+The budget is a quota, not an eager 64 MiB
 allocation or RSS limit. Prepared storage grows from the native-M-scaled initial
 pool up to the quota; temporary depletion returns `EAGAIN`, quota exhaustion
 returns `ENOMEM`, and rejected spawns never publish a task.
 
-`ASYNC_REQUIRED` rejects legacy code, incompatible whole-task `NO_PREEMPT` and
-unavailable native profiles before user entry, and rejects a `preempt_mode` of `OFF`
-or `COOPERATIVE` with `EINVAL`. `ASYNC_AUTO` accepts legacy code on one extra
-compatibility processor. `COOPERATIVE` explicitly disables native capture and keeps
-that processor. `llam_runtime_preempt_info_ex` reports requested/effective
-policies, reasons, active quantum and prepared/in-use storage. See
-[managed runtimes](../../guides/managed-c.md) for module pinning, affine refill and
+| Policy | Use |
+| --- | --- |
+| `LLAM_PREEMPT_POLICY_ASYNC_REQUIRED` | Rejects legacy code, incompatible whole-task `NO_PREEMPT` and unavailable native profiles before user entry, and rejects a `preempt_mode` of `OFF` or `COOPERATIVE` with `EINVAL`. |
+| `LLAM_PREEMPT_POLICY_ASYNC_AUTO` | Accepts legacy code on one extra compatibility processor. |
+| `LLAM_PREEMPT_POLICY_COOPERATIVE` | Explicitly disables native capture and keeps that processor. |
+
+See [managed runtimes](../../guides/managed-c.md) for module pinning, affine refill and
 callback lifetime.
+
+### Module options
+
+`llam_runtime_module_register_ex()` reads `llam_module_opts_t`. `opts_size` must
+include both metadata fields, so at least 16 bytes.
+
+| Field | Meaning |
+| --- | --- |
+| `metadata_address` | `(uint64_t)(uintptr_t)` of the image's LLPM2 section. Must not be `0`. |
+| `metadata_bytes` | Size of that section. Must not be `0`. |
+| `flags` | Reserved; must be `0` when present. |
+| `reserved0` | Reserved; must be `0` when present. |
+
+### Preemption info
+
+`llam_runtime_preempt_info_ex()` writes the prefix of `llam_preempt_info_t` that the
+caller's `out_size` and the loaded library share.
+
+| Field | Meaning |
+| --- | --- |
+| `requested_policy` | The `LLAM_PREEMPT_POLICY_*` the runtime was created with. |
+| `effective_policy` | Policy of the latest startup attempt. `LLAM_PREEMPT_EFFECTIVE_MIXED` means qualified asynchronous tasks and isolated legacy tasks together. |
+| `reason` | One of `LLAM_PREEMPT_REASON_*`, below. |
+| `flags` | `LLAM_PREEMPT_INFO_F_RUNNING` during an active run; `LLAM_PREEMPT_INFO_F_COMMITTED` after its committed barrier. |
+| `capsule_budget_bytes` | Configured quota. |
+| `capsule_charge_bytes` | Storage charged per task. `0` means no native allocation profile is prepared. |
+| `conservative_task_charge_bytes` | Per-task charge used to compute the maximum. |
+| `maximum_charged_tasks` | Tasks the budget admits. With a positive charge, `0` means not even one, not unlimited. |
+| `registered_modules`, `registered_entries` | Catalog contents. |
+| `retained_references` | Tasks holding a catalog reference, including in-flight admission and retained, not-yet-reclaimed tasks. |
+| `excluded_tasks`, `legacy_tasks`, `native_affine_tasks` | Retained tasks by class. `excluded_tasks` counts `NO_PREEMPT`. |
+| `native_affine_capacity`, `native_affine_available` | Configured and currently free affine slots. |
+| `portable_processors`, `compatibility_processors` | Logical processors by role. |
+| `effective_quantum_ns[3]` | Configured native request interval, indexed by `llam_task_class_t`. All zero when inactive or unqualified. These are not observed latencies. |
+| `reserved_capsule_bytes` | Prepared storage including free slots. Not RSS. |
+| `prepared_capsules`, `available_capsules` | Prepared pool size and its free slots. |
+
+| Reason | Meaning |
+| --- | --- |
+| `LLAM_PREEMPT_REASON_NONE` | No limitation applies. |
+| `LLAM_PREEMPT_REASON_LEGACY_RUNTIME` | A compatibility runtime, created without managed policy. |
+| `LLAM_PREEMPT_REASON_REQUEST_DISABLED` | The runtime's `preempt_mode` disables preemption requests. |
+| `LLAM_PREEMPT_REASON_COOPERATIVE_POLICY` | The `COOPERATIVE` policy was requested. |
+| `LLAM_PREEMPT_REASON_ADAPTER_UNAVAILABLE` | This build or platform has no native asynchronous adapter. |
+| `LLAM_PREEMPT_REASON_ISA_UNAVAILABLE` | A registered image needs an instruction-set feature this CPU lacks. |
+| `LLAM_PREEMPT_REASON_PROBE_PENDING` | The native startup probe has not committed yet. |
+| `LLAM_PREEMPT_REASON_STARTUP_FAILED` | The startup probe did not commit. |
+| `LLAM_PREEMPT_REASON_LEGACY_MIXED` | Qualified and legacy tasks are both running. |
+| `LLAM_PREEMPT_REASON_LEGACY_MIX_UNQUALIFIED` | Legacy tasks are present, and this runtime cannot isolate them beside asynchronous tasks. |
+
+## Runtime resources
+
+`llam_runtime_get_resources_ex()` and `llam_runtime_drain_until()` write
+`llam_runtime_resources_t`, an advisory sample whose counts can change immediately.
+
+| Field | Meaning |
+| --- | --- |
+| `worker_count` | Logical processors (P), portable plus compatibility. |
+| `blocking_worker_count` | Blocking pool threads. |
+| `admitted_tasks` | Tasks counted against `max_tasks`, released only after task object reclamation. |
+| `live_tasks` | Tasks that have not finished. |
+| `blocking_jobs` | Queued and running callbacks, which may still use caller memory. |
+| `max_tasks`, `max_blocking_jobs` | Configured limits; `0` is unlimited. |
+| `public_operations` | Public calls pinning the runtime, excluding this query or drain. |
+| `bound_native_workers` | Native threads (M) currently bound. Unlike `worker_count`, this is OS threads rather than logical processors. |
+| `flags` | Bitwise OR of the flags below, describing this sample only. |
+
+| Flag | Meaning |
+| --- | --- |
+| `LLAM_RUNTIME_RESOURCE_F_RUNNING` | A driver is running the runtime. |
+| `LLAM_RUNTIME_RESOURCE_F_DRAINING` | `llam_runtime_drain_until()` has permanently closed admission. |
+| `LLAM_RUNTIME_RESOURCE_F_NEEDS_RUNNER` | No driver is running and live tasks remain, so a driver must run before they can finish. |
+| `LLAM_RUNTIME_RESOURCE_F_QUIESCENT` | No driver, live task, blocking job, or other public operation remains. |
+
+`QUIESCENT` does not mean that resources are released or that objects are gone:
+completed tasks stay counted in `admitted_tasks` until joined or detached, and
+caller-owned handles stay valid. After a successful drain, join the tasks, destroy
+those objects, and then call `llam_runtime_destroy()`. See
+[Bound resources and shutdown](../../guides/embedding.md#bound-resources-and-shutdown).
 
 ## Operation wait options
 
 `llam_wait_opts_init` sets an inheriting deadline, no extra cancellation token and
-zero flags. `deadline_ns` uses the monotonic `llam_now_ns` clock; zero adds no
-operation limit. A task's persistent spawn budget still applies. `cancel_token`
-is an additional OR source; it never replaces task/group cancellation. Reserved
-flags/fields must remain zero. Omitted input tails use defaults. See the
+zero flags.
+
+| Field | Meaning |
+| --- | --- |
+| `deadline_ns` | Absolute deadline on the monotonic `llam_now_ns` clock; `0` adds no operation limit. A task's persistent spawn budget still applies. |
+| `cancel_token` | Optional additional OR source; it never replaces task or group cancellation. |
+| `flags` | Reserved; a nonzero value fails with `EINVAL`. |
+| `reserved0` | Reserved; a nonzero value fails with `EINVAL`. |
+
+Omitted input tails use defaults. See the
 [embedding guide](../../guides/embedding.md#compose-cancellation-and-budgets)
 for endpoint capabilities, partial-transfer and buffer-lifetime rules.
 

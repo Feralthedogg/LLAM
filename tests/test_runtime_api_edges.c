@@ -114,6 +114,17 @@ typedef struct cond_owner_recheck_state {
     int wait_errno;
 } cond_owner_recheck_state_t;
 
+typedef struct cond_stop_reacquire_state {
+    edge_state_t edge;
+    llam_mutex_t *mutex;
+    llam_cond_t *cond;
+    unsigned waiter_count;
+    bool signal_before_stop;
+    atomic_uint waiting;
+    atomic_uint owner_released;
+    atomic_uint critical_tasks;
+} cond_stop_reacquire_state_t;
+
 typedef struct timer_heap_overflow_state {
     edge_state_t edge;
     size_t saved_len;
@@ -2286,6 +2297,73 @@ static void stop_request_task(void *arg) {
     }
 }
 
+static void cond_stop_reacquire_waiter_task(void *arg) {
+    cond_stop_reacquire_state_t *state = arg;
+    int wait_rc;
+    int wait_errno;
+
+    if (llam_mutex_lock(state->mutex) != 0) {
+        task_fail(&state->edge, "cond stop reacquire lock", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->waiting, 1U, memory_order_release);
+    errno = 0;
+    wait_rc = llam_cond_wait(state->cond, state->mutex);
+    wait_errno = errno;
+    if (atomic_load_explicit(&state->owner_released, memory_order_acquire) == 0U) {
+        task_fail(&state->edge, "cond stop returned before owner unlock", wait_errno);
+    }
+    if (state->signal_before_stop ? wait_rc != 0 : (wait_rc != -1 || wait_errno != ECANCELED)) {
+        task_fail(&state->edge, "cond stop wait result", wait_errno);
+    }
+    if (atomic_fetch_add_explicit(&state->critical_tasks, 1U, memory_order_acq_rel) != 0U) {
+        task_fail(&state->edge, "cond stop critical section overlap", 0);
+    }
+    llam_yield();
+    (void)atomic_fetch_sub_explicit(&state->critical_tasks, 1U, memory_order_acq_rel);
+    errno = 0;
+    if (llam_mutex_unlock(state->mutex) != 0) {
+        task_fail(&state->edge, "cond stop unlock after reacquire", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->edge.ran, 1U, memory_order_relaxed);
+}
+
+static void cond_stop_reacquire_owner_task(void *arg) {
+    cond_stop_reacquire_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->waiting, memory_order_acquire) < state->waiter_count) {
+        llam_yield();
+    }
+    /* Each waiter queues on the condition before releasing this mutex. */
+    if (llam_mutex_lock(state->mutex) != 0) {
+        task_fail(&state->edge, "cond stop owner lock", errno);
+        return;
+    }
+    if (state->signal_before_stop) {
+        if (llam_cond_broadcast(state->cond) != 0) {
+            task_fail(&state->edge, "cond stop broadcast", errno);
+        }
+        /* Let woken waiters park on the mutex, so stop's scan finds that wait. */
+        for (unsigned i = 0U; i < 64U; ++i) {
+            llam_yield();
+        }
+    }
+    if (llam_runtime_request_stop() != 0) {
+        task_fail(&state->edge, "cond stop request", errno);
+    }
+    /* The scheduler repeats its stop scan on every pass until tasks drain. */
+    for (unsigned i = 0U; i < 64U; ++i) {
+        llam_yield();
+    }
+    atomic_store_explicit(&state->owner_released, 1U, memory_order_release);
+    if (llam_mutex_unlock(state->mutex) != 0) {
+        task_fail(&state->edge, "cond stop owner unlock", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->edge.ran, 1U, memory_order_relaxed);
+}
+
 static void stop_late_waiter_task(void *arg) {
     edge_state_t *state = arg;
 
@@ -4417,6 +4495,107 @@ cleanup_no_runtime:
     return rc;
 }
 
+static int run_cond_stop_reacquire_round(unsigned waiter_count,
+                                         bool deterministic,
+                                         bool signal_before_stop) {
+    cond_stop_reacquire_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *waiters[8] = {NULL};
+    llam_task_t *owner = NULL;
+    unsigned expected_ran = waiter_count + 1U;
+    int rc = 1;
+
+    if (waiter_count > sizeof(waiters) / sizeof(waiters[0])) {
+        return 1;
+    }
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.edge.failures, 0U);
+    atomic_init(&state.edge.ran, 0U);
+    atomic_init(&state.waiting, 0U);
+    atomic_init(&state.owner_released, 0U);
+    atomic_init(&state.critical_tasks, 0U);
+    state.waiter_count = waiter_count;
+    state.signal_before_stop = signal_before_stop;
+    state.mutex = llam_mutex_create();
+    state.cond = llam_cond_create();
+    if (state.mutex == NULL || state.cond == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup_no_runtime;
+    }
+    opts.deterministic = deterministic ? 1U : 0U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init_compat(&opts) != 0) {
+        goto cleanup_no_runtime;
+    }
+    for (unsigned i = 0U; i < waiter_count; ++i) {
+        waiters[i] = llam_spawn(cond_stop_reacquire_waiter_task, &state, NULL);
+        if (waiters[i] == NULL) {
+            goto cleanup_runtime;
+        }
+    }
+    owner = llam_spawn(cond_stop_reacquire_owner_task, &state, NULL);
+    if (owner == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0) {
+        (void)fail_errno("cond stop reacquire run failed");
+        goto cleanup_runtime;
+    }
+    if (check_task_failures(&state.edge) != 0) {
+        goto cleanup_runtime;
+    }
+    for (unsigned i = 0U; i < waiter_count; ++i) {
+        if (llam_join(waiters[i]) != 0) {
+            (void)fail_errno("cond stop reacquire waiter join failed");
+            goto cleanup_runtime;
+        }
+    }
+    if (llam_join(owner) != 0) {
+        (void)fail_errno("cond stop reacquire owner join failed");
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.edge.ran, memory_order_relaxed) != expected_ran) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] cond stop reacquire ran=%u expected=%u\n",
+                      atomic_load_explicit(&state.edge.ran, memory_order_relaxed),
+                      expected_ran);
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    /* A waiter that returned without the mutex leaves the owner state wrong. */
+    if (state.cond != NULL && llam_cond_destroy(state.cond) != 0) {
+        rc = 1;
+    }
+    if (state.mutex != NULL && llam_mutex_destroy(state.mutex) != 0) {
+        rc = 1;
+    }
+    return rc;
+}
+
+static int test_runtime_stop_preserves_cond_mutex_reacquire(void) {
+    static const unsigned waiter_counts[] = {1U, 8U};
+
+    for (size_t i = 0U; i < sizeof(waiter_counts) / sizeof(waiter_counts[0]); ++i) {
+        if (run_cond_stop_reacquire_round(waiter_counts[i], true, false) != 0 ||
+            run_cond_stop_reacquire_round(waiter_counts[i], true, true) != 0) {
+            return 1;
+        }
+    }
+    /* Default worker count: these rounds race real parallel workers. */
+    for (unsigned round = 0U; round < 32U; ++round) {
+        if (run_cond_stop_reacquire_round(8U, false, (round & 1U) != 0U) != 0) {
+            (void)fprintf(stderr, "[test_runtime_api_edges] cond stop reacquire round=%u\n", round);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_runtime_stop_cancels_late_channel_wait(void) {
     edge_state_t state;
     llam_spawn_opts_t pinned;
@@ -6314,6 +6493,10 @@ int main(void) {
 #endif
     if (run_edge_case("runtime_stop_cancels_parked_channel_wait",
                       test_runtime_stop_cancels_parked_channel_wait) != 0) {
+        return 1;
+    }
+    if (run_edge_case("runtime_stop_preserves_cond_mutex_reacquire",
+                      test_runtime_stop_preserves_cond_mutex_reacquire) != 0) {
         return 1;
     }
     if (run_edge_case("runtime_stop_cancels_late_channel_wait",

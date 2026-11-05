@@ -136,7 +136,9 @@ unjoined objects until reclamation; join/detach releases capacity after all
 lifetime pins drain. Blocking admission counts queued and running callbacks.
 Rejected admissions return `EAGAIN` without invoking a callback.
 
-Call `llam_runtime_get_resources_ex` for an advisory snapshot. To stop accepting
+Call `llam_runtime_get_resources_ex` for an advisory snapshot; its
+[fields and flags](../reference/options/runtime.md#runtime-resources) are listed with
+the options. To stop accepting
 new tasks/objects and wait for the active driver, use
 `llam_runtime_drain_until(rt, deadline, &resources, sizeof(resources))` from a
 host thread. Success consumes no handle: join completed work, destroy caller-owned

@@ -73,9 +73,17 @@ owners, waiters, or public-operation pins make destroy return `-1/EBUSY`.
 Condition waits follow condition-variable style rules. The caller must own the
 associated mutex on entry. LLAM atomically releases it while waiting and
 reacquires it before returning, including signal, broadcast, timeout,
-cancellation, and spurious wake paths. Callers must wait in a predicate loop
-because wakeups are not a predicate guarantee. Invalid-argument or wrong-owner
-failures return before releasing the mutex.
+cancellation, runtime stop, and spurious wake paths. Callers must wait in a
+predicate loop because wakeups are not a predicate guarantee. Invalid-argument or
+wrong-owner failures return before releasing the mutex.
+
+The reacquire has no deadline and cannot be cancelled. After `ETIMEDOUT` or
+`ECANCELED`, the call still waits for the mutex's current owner to unlock it, so it
+can return later than its deadline, and a stopping runtime cannot drain until that
+owner unlocks. A task that exits while holding the mutex leaves the waiter parked
+forever, so the run call does not return; `llam_runtime_drain_until()` still gives the
+host a bounded wait, and a [runtime dump](../../guides/diagnostics.md#runtime-dumps)
+shows the parked task.
 
 `llam_cond_signal()` and `llam_cond_broadcast()` may be called with or without
 the associated mutex held, and may be called outside a managed LLAM task while

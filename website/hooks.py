@@ -95,31 +95,52 @@ def _doc_inline(text):
 
 
 def _parse_comment(comment):
-    """Split a doxygen comment into brief, details, and return text."""
+    """Split a doxygen comment into brief, details, return text, and parameters."""
     lines = []
     for line in comment.strip()[3:-2].split("\n"):
         lines.append(re.sub(r"^\s*\*?\s?", "", line))
     parts = {"brief": [], "details": [], "return": []}
-    current = None
+    params = []
+    # Text before the first tag is the brief
+    current = parts["brief"]
     for line in lines:
-        m = re.match(r"@(\w+)\s*(.*)", line)
+        m = re.match(r"@(\w+)(?:\[([\w, ]+)\])?\s*(.*)", line)
         if m and m.group(1) not in ("c", "p"):
-            tag = m.group(1)
+            tag, direction, rest = m.groups()
+            current = None
             if tag == "brief":
-                current = "brief"
+                current = parts["brief"]
             elif tag in ("details", "note"):
-                current = "details"
+                current = parts["details"]
             elif tag in ("return", "returns"):
-                current = "return"
-            else:
-                current = None
-            if current:
-                parts[current].append(m.group(2))
-        elif current:
-            parts[current].append(line)
+                current = parts["return"]
+            elif tag == "param":
+                name, _, rest = rest.partition(" ")
+                current = [rest]
+                params.append({"name": name, "dir": (direction or "").replace(" ", ""), "text": current})
+                continue
+            if current is not None:
+                current.append(rest)
+        elif current is not None:
+            current.append(line)
     out = {k: _doc_inline(" ".join(v)) for k, v in parts.items()}
+    out["params"] = [dict(p, text=_doc_inline(" ".join(p["text"]))) for p in params]
     out["errors"] = sorted(set(re.findall(r"\bE[A-Z0-9]{3,}\b", comment)))
     return out
+
+
+NO_COMMENT = {"brief": "", "details": "", "return": "", "params": [], "errors": []}
+
+
+def _param_names(sig):
+    """The parameter names in a declaration, in order."""
+    args = sig.partition("(")[2].rsplit(")", 1)[0]
+    names = []
+    for arg in args.split(","):
+        m = re.search(r"(\w+)\s*(?:\[[^\]]*\])?\s*$", arg)
+        if m and m.group(1) != "void":
+            names.append(m.group(1))
+    return names
 
 
 def _pretty_signature(sig):
@@ -144,14 +165,22 @@ def _load_headers():
     for name in HEADERS:
         with open(os.path.join(ROOT, "include", "llam", name), encoding="utf-8") as fh:
             text = fh.read()
+        comment, comment_end = NO_COMMENT, -1
         for m in decl.finditer(text):
-            entry = _parse_comment(m.group(1)) if m.group(1) else {"brief": "", "details": "", "return": "", "errors": []}
+            # Declarations directly under a comment share it, each taking its own parameters
+            if m.group(1):
+                comment = _parse_comment(m.group(1))
+            elif text[comment_end:m.start()].strip():
+                comment = NO_COMMENT
+            comment_end = m.end()
+            names = _param_names(m.group(2))
+            entry = dict(comment, params=sorted((p for p in comment["params"] if p["name"] in names), key=lambda p: names.index(p["name"])))
             entry.update(sig=_pretty_signature(m.group(2)), header="llam/" + name, line=text.count("\n", 0, m.start(2)) + 1)
             SYMBOLS.setdefault(m.group(3), entry)
         for m in macro.finditer(text):
             if m.group(2) in SYMBOLS:
                 continue
-            entry = _parse_comment(m.group(1)) if m.group(1) else {"brief": "", "details": "", "return": "", "errors": []}
+            entry = _parse_comment(m.group(1)) if m.group(1) else dict(NO_COMMENT)
             entry.update(sig="#define %s%s" % (m.group(2), m.group(3) or ""), header="llam/" + name, line=text.count("\n", 0, m.start(2)) + 1)
             SYMBOLS[m.group(2)] = entry
     with open(os.path.join(ROOT, "include", "llam", "runtime.h"), encoding="utf-8") as fh:
@@ -303,6 +332,10 @@ def _symbol_row(name, purpose, page_path):
         body.append("<p>%s</p>" % brief)
     if info["details"]:
         body.append("<p>%s</p>" % info["details"])
+    if info["params"]:
+        body.append('<dl class="params">%s</dl>' % "".join(
+            "<dt><code>%s</code>%s</dt><dd>%s</dd>" % (p["name"], "<small>%s</small>" % p["dir"] if p["dir"] else "", p["text"])
+            for p in info["params"]))
     if info["return"]:
         body.append("<p><b>Returns</b> %s</p>" % info["return"])
     tags = ['<span class="tag">%s</span>' % e for e in info["errors"]]

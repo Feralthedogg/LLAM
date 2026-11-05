@@ -18,6 +18,7 @@
  * marker starts folded on the page.
  */
 #include <llam/runtime.h>
+#include <errno.h>
 #include <stdio.h>
 
 static void square(void *arg) {
@@ -26,25 +27,33 @@ static void square(void *arg) {
 }
 
 static void root(void *arg) {
-    (void)arg;
-    int value = 12;
+    int *value = arg;
+    int error = 0;
 
-    llam_task_t *task = llam_spawn(square, &value, NULL);
-    if (task != NULL && llam_join(task) == 0) {
-        printf("result=%d\n", value);
+    llam_task_t *task = llam_spawn(square, value, NULL);
+    if (task == NULL || llam_join(task) != 0) {
+        error = errno;
+    } else {
+        printf("result=%d\n", *value);
     }
+    (void)llam_task_set_result(NULL, error);
 }
 
 /* fold */
 int main(void) {
+    /* Declared here because a failed join can leave the child running; the
+     * run call returns only after every task has finished. */
+    int value = 12;
     llam_runtime_t *runtime = NULL;
     if (llam_runtime_create_compat(NULL, 0, &runtime) != 0) return 1;
-    llam_task_t *task = llam_runtime_spawn_ex(runtime, root, NULL, NULL, 0);
+    llam_task_t *task = llam_runtime_spawn_ex(runtime, root, &value, NULL, 0);
     if (task == NULL || llam_runtime_run_handle(runtime) != 0) {
         llam_runtime_destroy(runtime);
         return 1;
     }
-    int rc = llam_join(task);
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
     llam_runtime_destroy(runtime);
-    return rc;
+    return failed;
 }

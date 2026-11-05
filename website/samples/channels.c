@@ -18,13 +18,19 @@
  * marker starts folded on the page.
  */
 #include <llam/runtime.h>
+#include <errno.h>
 #include <stdio.h>
 
 static void producer(void *arg) {
     llam_channel_t *channel = arg;
-    (void)llam_channel_send(channel, "ping");
-    (void)llam_channel_send(channel, "pong");
+    int error = 0;
+
+    if (llam_channel_send(channel, "ping") != 0 ||
+        llam_channel_send(channel, "pong") != 0) {
+        error = errno;
+    }
     (void)llam_channel_close(channel);
+    (void)llam_task_set_result(NULL, error);
 }
 
 static void consumer(void *arg) {
@@ -34,18 +40,43 @@ static void consumer(void *arg) {
     while (llam_channel_recv_result(channel, &value) == 0) {
         printf("recv=%s\n", (const char *)value);
     }
+    /* EPIPE means the channel is closed and drained. */
+    (void)llam_task_set_result(NULL, errno == EPIPE ? 0 : errno);
 }
 
 /* fold */
+static int join_error(llam_task_t *task) {
+    llam_task_result_t result;
+
+    return llam_join_result(task, &result, sizeof(result)) == 0 ? result.error : errno;
+}
+
 static void root(void *arg) {
     (void)arg;
     llam_channel_t *channel = llam_channel_create(2);
-    if (channel == NULL) return;
-    llam_task_t *a = llam_spawn(producer, channel, NULL);
+    if (channel == NULL) {
+        (void)llam_task_set_result(NULL, errno);
+        return;
+    }
+
+    int error = 0;
     llam_task_t *b = llam_spawn(consumer, channel, NULL);
-    if (a != NULL) (void)llam_join(a);
-    if (b != NULL) (void)llam_join(b);
-    (void)llam_channel_destroy(channel);
+    llam_task_t *a = b != NULL ? llam_spawn(producer, channel, NULL) : NULL;
+
+    if (a != NULL) {
+        error = join_error(a);
+    } else {
+        error = errno;
+        /* With no producer to close it, the consumer would wait forever. */
+        (void)llam_channel_close(channel);
+    }
+    if (b != NULL) {
+        int consumer_error = join_error(b);
+        if (error == 0) error = consumer_error;
+    }
+
+    if (llam_channel_destroy(channel) != 0 && error == 0) error = errno;
+    (void)llam_task_set_result(NULL, error);
 }
 
 int main(void) {
@@ -56,7 +87,9 @@ int main(void) {
         llam_runtime_destroy(runtime);
         return 1;
     }
-    int rc = llam_join(task);
+    llam_task_result_t result;
+    int failed = llam_join_result(task, &result, sizeof(result)) != 0;
+    if (!failed) failed = result.flags != LLAM_TASK_RESULT_F_SET || result.error != 0;
     llam_runtime_destroy(runtime);
-    return rc;
+    return failed;
 }

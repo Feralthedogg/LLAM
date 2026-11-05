@@ -18,12 +18,45 @@ managed tasks park while the backend waits.
 | `llam_preadv_handle` / `llam_pwritev_handle` | Scatter/gather positional I/O for generic handles. |
 | `llam_close` / `llam_close_handle` | Close while invalidating runtime-local descriptor or handle state. |
 
+## Deadlines and wait options
+
+`llam_wait_opts_t` bounds one operation with an absolute deadline and an extra
+cancellation token. The `*_until` forms take only the deadline, and `0` there means
+already expired. New poll forms take an `int` mask in the short-mask range; the older
+poll ABI is unchanged. Poll timeout returns 0; byte and connect timeout returns
+-1/`ETIMEDOUT`. See the [wait option fields](../options/runtime.md#operation-wait-options)
+and [Embed LLAM](../../guides/embedding.md#compose-cancellation-and-budgets) for
+endpoint restrictions.
+
+| API | Purpose |
+| --- | --- |
+| `llam_wait_opts_init` | Fill wait options with ABI-safe defaults. |
+| `llam_read_ex` / `llam_write_ex` | Stream I/O with a wait policy. |
+| `llam_read_handle_ex` / `llam_write_handle_ex` | Handle I/O with a wait policy. |
+| `llam_connect_ex` | Connect with a wait policy. |
+| `llam_poll_fd_ex` | Wait for readiness with a wait policy. |
+| `llam_read_until` / `llam_write_until` | Stream I/O until an absolute deadline. |
+| `llam_connect_until` | Connect until an absolute deadline. |
+| `llam_poll_fd_until` | Wait for readiness until an absolute deadline. |
+
+## Exact transfers
+
+These calls loop until the whole count has moved and report confirmed progress
+through a required `size_t *`, including on failure. Early EOF is `EPIPE`; a premature
+zero-byte write is `EIO`.
+
+| API | Purpose |
+| --- | --- |
+| `llam_read_exact` / `llam_write_all` | Transfer exactly the requested bytes. |
+| `llam_read_exact_ex` / `llam_write_all_ex` | Transfer exactly the requested bytes with a wait policy. |
+
 ## Datagram, socket, and DNS
 
 | API | Purpose |
 | --- | --- |
 | `llam_recvfrom` / `llam_sendto` | Datagram I/O with peer addresses. |
-| `llam_recv_owned` / `llam_recvfrom_owned` | Datagram receive into runtime-owned buffers. |
+| `llam_recv_owned` | Socket receive into a runtime-owned buffer, with `recv` flags such as `MSG_PEEK`. Works on stream and datagram sockets. |
+| `llam_recvfrom_owned` | Datagram receive into a runtime-owned buffer, also returning the peer address. |
 | `llam_accept` | Accept a socket connection with scheduler-safe waiting. |
 | `llam_connect` | Connect a socket with scheduler-safe waiting. |
 | `llam_poll_fd` | Wait for descriptor/socket readiness. |

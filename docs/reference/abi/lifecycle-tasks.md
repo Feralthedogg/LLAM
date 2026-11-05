@@ -40,6 +40,9 @@ runtime failures return `-1` with `errno` set.
 `llam_runtime_request_stop()` requests cooperative stop and wakes scheduler,
 I/O, and blocking workers. It does not forcibly kill live tasks; `llam_run()`
 still waits for live tasks to exit or observe cancellation through user code.
+Stop cancels parked waits with `ECANCELED`, with one exception: a condition waiter
+reacquiring its mutex stays parked until the owner unlocks it, because
+[every condition wait returns holding the mutex](sync.md#condition-variables).
 Unmanaged callers target the process-default runtime. Managed callers target
 their current task's owner runtime.
 
@@ -115,10 +118,18 @@ publishing work.
 
 ### Task groups
 
-Task groups own the child task handles spawned through the group. Group
-cancellation cancels only the group's automatically attached cancellation token;
-children spawned with an explicit caller-owned token remain controlled by that
-token. The child task pointer returned by `llam_task_group_spawn*()` is a
+Task groups own the child task handles spawned through the group.
+`llam_task_group_cancel()` cancels the group's own token. Which children observe
+it depends on how the group was created and on each child's token:
+
+| Group | Child with no explicit token | Child with an explicit token |
+| --- | --- | --- |
+| No flags, including `llam_task_group_create()` | Group token | Explicit token only; group cancellation does not reach the child. |
+| `LLAM_TASK_GROUP_F_LINK_CANCEL` | Group token | Group token OR explicit token, whichever is cancelled first. |
+
+Group cancellation never cancels a caller-owned token, so a task or another group
+sharing that token is unaffected. The child task pointer returned by
+`llam_task_group_spawn*()` is a
 borrowed diagnostics handle; regular `llam_join()` and `llam_detach()` reject it
 with `EBUSY` so only `llam_task_group_join*()` can consume group-owned children.
 The child is marked as group-owned before it can execute, so a self-join or

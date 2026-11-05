@@ -23,6 +23,10 @@ while (!ready) {
 }
 ```
 
+The caller still holds the mutex after any return, including `ETIMEDOUT` and
+`ECANCELED`, so unlock it after the loop either way. See
+[Condition variables](../reference/abi/sync.md#condition-variables).
+
 Signal and broadcast may be called from managed or unmanaged host threads while
 the owner runtime is live.
 

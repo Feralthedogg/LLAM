@@ -114,7 +114,7 @@ LLAM_API ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
 /**
  * @brief Read/write/connect/poll with one absolute deadline and extra token.
  *
- * Managed operations use the earliest task/call deadline and observe task OR
+ * @details Managed operations use the earliest task/call deadline and observe task OR
  * group OR call cancellation. Cancellation never releases a buffer while a
  * backend/helper can still access it; a completed transfer can win the race.
  * Bounded read/write/connect need a managed task. POSIX bounded byte I/O accepts
@@ -123,6 +123,20 @@ LLAM_API ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
  * Windows HANDLE variants require native overlapped support when bounded.
  * Poll supports host threads as well. Its timeout result is 0, like poll_fd.
  * Existing read_when_ready and its relative millisecond timeout are unchanged.
+ *
+ * @param fd Descriptor or socket.
+ * @param handle Platform handle.
+ * @param buf Transfer buffer, in use until the call returns. May be NULL only when
+ * @p count is 0.
+ * @param count Maximum bytes to transfer.
+ * @param addr Peer socket address. Must not be NULL.
+ * @param addrlen Size of @p addr in bytes.
+ * @param events Poll events, in the range of a @c short.
+ * @param[out] revents Optional returned events, set to 0 first.
+ * @param opts Optional wait policy; pass NULL for no additional limit.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @return Bytes transferred for read and write, 0 for connect, and the ready count,
+ * or 0 on timeout, for poll. Failure returns -1 with @c errno set.
  */
 LLAM_API ssize_t llam_read_ex(llam_fd_t fd, void *buf, size_t count,
                               const llam_wait_opts_t *opts, size_t opts_size);
@@ -137,7 +151,21 @@ LLAM_API ssize_t llam_read_handle_ex(llam_handle_t handle, void *buf, size_t cou
 LLAM_API ssize_t llam_write_handle_ex(llam_handle_t handle, const void *buf, size_t count,
                                       const llam_wait_opts_t *opts, size_t opts_size);
 
-/** @brief Absolute-deadline forms; deadline 0 is already expired. */
+/**
+ * @brief Absolute-deadline forms; deadline 0 is already expired.
+ *
+ * @param fd Descriptor or socket.
+ * @param buf Transfer buffer, in use until the call returns. May be NULL only when
+ * @p count is 0.
+ * @param count Maximum bytes to transfer.
+ * @param addr Peer socket address. Must not be NULL.
+ * @param addrlen Size of @p addr in bytes.
+ * @param events Poll events, in the range of a @c short.
+ * @param deadline_ns Absolute ::llam_now_ns deadline.
+ * @param[out] revents Optional returned events, set to 0 first.
+ * @return Bytes transferred for read and write, 0 for connect, and the ready count,
+ * or 0 on timeout, for poll. Failure returns -1 with @c errno set.
+ */
 LLAM_API ssize_t llam_read_until(llam_fd_t fd, void *buf, size_t count, uint64_t deadline_ns);
 LLAM_API ssize_t llam_write_until(llam_fd_t fd, const void *buf, size_t count, uint64_t deadline_ns);
 LLAM_API int llam_connect_until(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen, uint64_t deadline_ns);
@@ -146,10 +174,19 @@ LLAM_API int llam_poll_fd_until(llam_fd_t fd, int events, uint64_t deadline_ns, 
 /**
  * @brief Transfer exactly count bytes, returning confirmed progress on failure.
  *
- * Return 0 after count bytes, -1 with errno otherwise. progress is required and
- * starts at 0; EOF before a complete read is EPIPE, a zero-byte write is EIO.
+ * @details EOF before a complete read is @c EPIPE, a zero-byte write is @c EIO.
  * Completed chunks remain counted after timeout/cancel/error. These helpers
  * cannot roll back bytes already transferred; do not resend the confirmed prefix.
+ *
+ * @param fd Descriptor or socket.
+ * @param buf Transfer buffer, in use until the call returns. May be NULL only when
+ * @p count is 0.
+ * @param count Bytes to transfer, at most @c SIZE_MAX / 2.
+ * @param opts Optional wait policy; pass NULL for no additional limit.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @param[out] progress Receives the confirmed byte count, starting at 0. Must not be
+ * NULL.
+ * @return 0 after @p count bytes, -1 with @c errno set otherwise.
  */
 LLAM_API int llam_read_exact_ex(llam_fd_t fd, void *buf, size_t count,
                                 const llam_wait_opts_t *opts, size_t opts_size, size_t *progress);
@@ -311,6 +348,10 @@ LLAM_API int llam_close_handle(llam_handle_t handle);
  * zero-byte read, the function returns @c 0 and stores @c NULL in @p out. On
  * failure, the function returns @c -1, stores @c NULL in @p out, and sets
  * @c errno.
+ *
+ * @param fd Descriptor or socket.
+ * @param max_count Maximum bytes to read.
+ * @param[out] out Receives the buffer or NULL. Must not be NULL.
  */
 LLAM_API ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out);
 
@@ -324,6 +365,11 @@ LLAM_API ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_
  * zero-byte receive, the function returns @c 0 and stores @c NULL in @p out. On
  * failure, the function returns @c -1, stores @c NULL in @p out, and sets
  * @c errno.
+ *
+ * @param fd Socket, stream or datagram.
+ * @param max_count Maximum bytes to receive.
+ * @param flags @c recv flags, such as @c MSG_PEEK.
+ * @param[out] out Receives the buffer or NULL. Must not be NULL.
  */
 LLAM_API ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out);
 
@@ -334,6 +380,15 @@ LLAM_API ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam
  * read readiness. Calls outside a managed task delegate to the platform
  * @c recvfrom and may block. @p src_addr and @p addrlen must either both be
  * NULL or both be non-NULL.
+ *
+ * @param fd Datagram socket.
+ * @param buf Destination buffer, in use until the call returns.
+ * @param count Maximum bytes to receive.
+ * @param flags @c recvfrom flags.
+ * @param[out] src_addr Optional peer address.
+ * @param[in,out] addrlen Capacity of @p src_addr on entry, peer address size on
+ * return.
+ * @return Bytes received, or -1 with @c errno set.
  */
 LLAM_API ssize_t llam_recvfrom(llam_fd_t fd,
                                void *buf,
@@ -362,6 +417,15 @@ LLAM_API ssize_t llam_sendto(llam_fd_t fd,
  * @details On success with a positive byte count, @p out receives a non-NULL
  * owned buffer that must be released. A zero-length datagram returns 0 and
  * stores NULL in @p out, matching the existing owned-buffer EOF/zero rule.
+ *
+ * @param fd Datagram socket.
+ * @param max_count Maximum bytes to receive.
+ * @param flags @c recvfrom flags.
+ * @param[out] src_addr Optional peer address.
+ * @param[in,out] addrlen Capacity of @p src_addr on entry, peer address size on
+ * return.
+ * @param[out] out Receives the buffer or NULL. Must not be NULL.
+ * @return Bytes received, or -1 with @c errno set.
  */
 LLAM_API ssize_t llam_recvfrom_owned(llam_fd_t fd,
                                      size_t max_count,
@@ -378,13 +442,33 @@ LLAM_API ssize_t llam_recvfrom_owned(llam_fd_t fd,
  */
 LLAM_API int llam_io_buffer_opts_init(llam_io_buffer_opts_t *opts, size_t opts_size);
 
-/** @brief Allocate a runtime-owned buffer with explicit capacity/alignment options. */
+/**
+ * @brief Allocate a runtime-owned buffer with explicit capacity/alignment options.
+ *
+ * @param opts Optional buffer options.
+ * @param opts_size Size of @p opts when non-NULL; must then be nonzero.
+ * @param[out] out Receives the buffer; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_io_buffer_alloc_ex(const llam_io_buffer_opts_t *opts, size_t opts_size, llam_io_buffer_t **out);
 
-/** @brief Allocate a runtime-owned buffer with default alignment. */
+/**
+ * @brief Allocate a runtime-owned buffer with default alignment.
+ *
+ * @param capacity Minimum usable capacity in bytes.
+ * @param[out] out Receives the buffer; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_io_buffer_alloc(size_t capacity, llam_io_buffer_t **out);
 
-/** @brief Allocate a runtime-owned buffer with a power-of-two alignment. */
+/**
+ * @brief Allocate a runtime-owned buffer with a power-of-two alignment.
+ *
+ * @param capacity Minimum usable capacity in bytes.
+ * @param alignment Required power-of-two alignment in bytes.
+ * @param[out] out Receives the buffer; set to NULL on failure. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
 LLAM_API int llam_io_buffer_alloc_aligned(size_t capacity, size_t alignment, llam_io_buffer_t **out);
 
 /**
@@ -402,6 +486,12 @@ LLAM_API size_t llam_io_buffer_alignment(const llam_io_buffer_t *buffer);
  * @details On success with a positive byte count, @p out receives a buffer that
  * must be released with ::llam_io_buffer_release. EOF returns 0 and stores
  * NULL. Failure returns -1, stores NULL in @p out, and sets @c errno.
+ *
+ * @param fd Descriptor to read.
+ * @param max_count Maximum bytes to read.
+ * @param offset File offset in bytes.
+ * @param alignment Required power-of-two alignment in bytes.
+ * @param[out] out Receives the buffer or NULL. Must not be NULL.
  */
 LLAM_API ssize_t llam_pread_owned_aligned(llam_fd_t fd,
                                           size_t max_count,
@@ -409,7 +499,15 @@ LLAM_API ssize_t llam_pread_owned_aligned(llam_fd_t fd,
                                           size_t alignment,
                                           llam_io_buffer_t **out);
 
-/** @brief HANDLE variant of ::llam_pread_owned_aligned. */
+/**
+ * @brief HANDLE variant of ::llam_pread_owned_aligned.
+ *
+ * @param handle Handle to read.
+ * @param max_count Maximum bytes to read.
+ * @param offset File offset in bytes.
+ * @param alignment Required power-of-two alignment in bytes.
+ * @param[out] out Receives the buffer or NULL. Must not be NULL.
+ */
 LLAM_API ssize_t llam_pread_handle_owned_aligned(llam_handle_t handle,
                                                  size_t max_count,
                                                  uint64_t offset,
@@ -467,6 +565,9 @@ LLAM_API size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer);
  * be NULL or both be non-NULL; mismatched peer-address outputs fail with
  * @c EINVAL before any connection is consumed.
  *
+ * @param fd Listening socket.
+ * @param[out] addr Optional peer address.
+ * @param[in,out] addrlen Capacity of @p addr on entry, peer address size on return.
  * @return Accepted descriptor on success, or @c LLAM_INVALID_FD on failure with
  * @c errno set.
  */
@@ -495,6 +596,12 @@ LLAM_API int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t a
  * OS thread. @p timeout_ms < 0 waits indefinitely, @p timeout_ms == 0 performs
  * a non-blocking readiness check, and positive values bound the wait in
  * milliseconds.
+ *
+ * @param fd Descriptor or socket.
+ * @param events Poll events.
+ * @param timeout_ms Relative timeout in milliseconds, as described above.
+ * @param[out] revents Optional returned events.
+ * @return Ready count, 0 on timeout, or -1 with @c errno set.
  */
 LLAM_API int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
 
@@ -503,6 +610,12 @@ LLAM_API int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
  * @details Windows HANDLE waits use the blocking-helper pool in managed tasks;
  * this is not socket readiness and does not replace ::llam_poll_fd. POSIX
  * delegates to ::llam_poll_fd.
+ *
+ * @param handle Handle to wait on.
+ * @param events Poll events.
+ * @param timeout_ms Relative timeout in milliseconds, as for ::llam_poll_fd.
+ * @param[out] revents Optional returned events.
+ * @return Ready count, 0 on timeout, or -1 with @c errno set.
  */
 LLAM_API int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
 
@@ -513,6 +626,14 @@ LLAM_API int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms
  * Resolver failures return 0, store the getaddrinfo @c EAI_* status in
  * @p gai_error, and store NULL in @p out. Successful results must be freed with
  * ::llam_freeaddrinfo_result.
+ *
+ * @param node Host name or address; may be NULL when @p service is set.
+ * @param service Service name or port; may be NULL when @p node is set.
+ * @param hints Optional lookup hints.
+ * @param[out] out Receives the result list, set to NULL first. Must not be NULL.
+ * @param[out] gai_error Receives the @c EAI_* status, set to 0 first. Must not be
+ * NULL.
+ * @return 0 when the lookup ran, -1 with @c errno set otherwise.
  */
 LLAM_API int llam_getaddrinfo_result(const char *node,
                                      const char *service,
@@ -530,11 +651,24 @@ LLAM_API void llam_freeaddrinfo_result(struct addrinfo *result);
  * the common @c O_RDONLY, @c O_WRONLY, @c O_RDWR, @c O_CREAT, @c O_EXCL, and
  * @c O_TRUNC flags to @c CreateFileA. On success, @p out receives a
  * ::llam_handle_t that must be closed with ::llam_close_handle.
+ *
+ * @param path Path to open. Must not be NULL.
+ * @param flags Open flags.
+ * @param mode Mode bits for a created file.
+ * @param[out] out Receives the handle, set to ::LLAM_INVALID_HANDLE first. Must not
+ * be NULL.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *out);
 
 /**
  * @brief Stat a filesystem path through the runtime blocking path.
+ *
+ * @param path Path to query. Must not be NULL.
+ * @param[out] out Receives the metadata; its prefix is cleared first. Must not be
+ * NULL.
+ * @param out_size Size of the caller's ::llam_file_stat_t; must be nonzero.
+ * @return 0 on success, -1 with @c errno set.
  */
 LLAM_API int llam_stat_path_ex(const char *path, llam_file_stat_t *out, size_t out_size);
 

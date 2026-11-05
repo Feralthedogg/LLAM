@@ -13,16 +13,19 @@ Linux, macOS, and Windows.
 === "Linux, macOS"
 
     ```sh
-    curl -fsSL https://github.com/Feralthedogg/LLAM/releases/latest/download/install.sh |
-      sh -s -- --prefix "$HOME/.local"
+    curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.sh |
+      sh -s -- --version 3.0.0 --prefix "$HOME/.local"
     ```
 
 === "Windows"
 
     ```powershell
-    Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/latest/download/install.ps1" -OutFile install.ps1
-    .\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"
+    Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v3.0.0/install.ps1" -OutFile install.ps1
+    .\install.ps1 -Version 3.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
     ```
+
+These docs target 3.0.0. Before its release assets are published, use the
+[source build](start/build.md). See [SDK version matching](start/quickstart.md#match-the-sdk-version).
 
 ## Choose what you need
 
