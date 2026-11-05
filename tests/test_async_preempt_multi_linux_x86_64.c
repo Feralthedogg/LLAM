@@ -968,7 +968,7 @@ static void stop_controller_task(void *opaque) {
         if (ticket_snapshot || watchdog_snapshot) {
             fprintf(stderr, "async stop drain snapshot: ticket=%u watchdog=%u shutdown=%u lease=%u\n",
                 ticket_snapshot ? 1U : 0U, watchdog_snapshot ? 1U : 0U,
-                shutdown_visible ? 1U : 0U, g_llam_tls_shard->legacy_lease.state);
+                shutdown_visible ? 1U : 0U, (unsigned)g_llam_tls_shard->legacy_lease.state);
             stop_fail(state, "ordinary STOPPING snapshot contract was widened");
         }
         pthread_mutex_unlock(&g_llam_tls_shard->lock);

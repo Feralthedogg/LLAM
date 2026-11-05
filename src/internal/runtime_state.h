@@ -51,7 +51,6 @@ typedef struct llam_scheduler_tls {
     llam_processor_t *processor;
     llam_task_t *task;
     llam_ctx_t *scheduler_ctx;
-    unsigned io_handoff_yield;
     unsigned opaque_redirect_hint;
 } llam_scheduler_tls_t;
 
@@ -60,7 +59,7 @@ typedef struct llam_scheduler_tls {
 __attribute__((pure))
 #endif
 llam_scheduler_tls_t *llam_scheduler_tls_current(void);
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+#if LLAM_PLATFORM_DARWIN
 void llam_scheduler_tls_cache_bind_current(void);
 #endif
 
@@ -69,8 +68,22 @@ void llam_scheduler_tls_cache_bind_current(void);
 #define g_llam_tls_processor (llam_scheduler_tls_current()->processor)
 #define g_llam_tls_task (llam_scheduler_tls_current()->task)
 #define g_llam_tls_scheduler_ctx (llam_scheduler_tls_current()->scheduler_ctx)
-#define g_llam_tls_io_handoff_yield (llam_scheduler_tls_current()->io_handoff_yield)
 #define g_llam_tls_opaque_redirect_hint (llam_scheduler_tls_current()->opaque_redirect_hint)
+
+/* The G owning this C frame retains the scope through a native M change. */
+static inline unsigned *llam_task_io_handoff_begin(void) {
+    llam_task_t *task = g_llam_tls_task;
+    if (task == NULL) return NULL;
+    if (task->io_handoff_depth == UINT_MAX) abort();
+    ++task->io_handoff_depth;
+    return &task->io_handoff_depth;
+}
+
+static inline void llam_task_io_handoff_end(unsigned *depth) {
+    if (depth == NULL) return;
+    if (*depth == 0U) abort();
+    --*depth;
+}
 
 #include "managed_domain.h"
 

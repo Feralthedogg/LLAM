@@ -75,6 +75,12 @@
 
 ### Fixed
 
+* complete validated runnable-queue transfers under one lock when shutdown
+  revokes later grants, keeping cancelled tasks reachable instead of dropping
+  them between inject and owner lanes; retain ordinary STOPPING ticket refusal.
+* print lease enum diagnostics with the matching unsigned type.
+* retain I/O/channel handoff scopes in the owning task across native-thread
+  migration, and extend the Darwin scheduler-address cache to ARM64.
 * re-resolve scheduler TLS and native errno addresses across opaque task switches,
   including blocking and sleep entry safepoints, instead of retaining a source
   worker's compiler-cached TLS base. Add cross-thread address checks, forced-entry
@@ -125,7 +131,8 @@
   retaining every measured round in the mean and preserving the performance floors.
 * use 65,536-operation select batches in CI throughput guards to reduce sensitivity
   to isolated host scheduling pauses while retaining the same mean and floors.
-  Verify the reported operation count so a benchmark cannot silently clamp the
+  Use 16,384-message channel batches for the same reason. Verify reported counts
+  so a benchmark cannot silently clamp the
   requested batch and still pass the guard.
 * select the installed Visual Studio generation on Windows deep runners, keep
   concurrent-destroy tests from reading reclaimed runtimes, and isolate the

@@ -305,6 +305,20 @@ typedef enum llam_yield_exchange_result {
 } llam_yield_exchange_result_t;
 llam_yield_exchange_result_t llam_norm_queue_exchange_yield_unlocked(
     llam_shard_t *shard, llam_task_t *current, llam_task_t **out_next);
+/* A commit consumes validation from the same locked, non-suspending operation.
+ * Its queue move linearizes at that validation, before a concurrent stop flag;
+ * it grants no execution ticket for a later dispatch. */
+typedef enum llam_queue_commit_result {
+    LLAM_QUEUE_COMMIT_REJECTED = -1,
+    LLAM_QUEUE_COMMIT_OVERFLOW = 0,
+    LLAM_QUEUE_COMMIT_LOCAL = 1
+} llam_queue_commit_result_t;
+llam_queue_commit_result_t llam_queue_commit_bounded_locked(
+    llam_shard_t *shard, llam_queue_t *queue, unsigned capacity, llam_task_t *task);
+llam_queue_commit_result_t llam_norm_queue_commit_owner_locked(
+    llam_shard_t *shard, llam_task_t *task);
+llam_queue_commit_result_t llam_norm_queue_commit_yield_locked(
+    llam_shard_t *shard, llam_task_t *task);
 bool llam_norm_queue_push_owner_locked(llam_shard_t *shard,
                                        const llam_processor_queue_access_t *access,
                                        llam_task_t *task);
@@ -327,6 +341,9 @@ void llam_queue_push_tail(llam_queue_t *queue, llam_task_t *task);
  * Runnable placement, overflow queues, and stealing.
  */
 void llam_drain_inject_queue(llam_shard_t *shard);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_test_set_inject_transfer_hook(void (*hook)(llam_shard_t *, llam_task_t *));
+#endif
 void llam_enqueue_overflow_task(llam_runtime_t *rt, llam_task_t *task);
 unsigned llam_hot_streak_cap_locked(llam_shard_t *shard, bool pressure);
 void llam_mark_runnable_locked(llam_shard_t *shard,

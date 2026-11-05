@@ -1039,7 +1039,7 @@ void llam_scheduler_bind_identity(llam_shard_t *shard,
     if (shard == NULL || worker == NULL || ctx == NULL) {
         return;
     }
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+#if LLAM_PLATFORM_DARWIN
     llam_scheduler_tls_cache_bind_current();
 #endif
     /* Binding metadata and lease publication share the handoff lock. */

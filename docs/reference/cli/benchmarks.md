@@ -100,7 +100,7 @@ python3 scripts/bench_guard.py --cases spawn_join,channel_pingpong --min-ops spa
 | `--warmup <n>` | `1` | Warmup rounds. |
 | `--timeout <sec>` | `180` | Timeout for the bench process. |
 | `--spawn-tasks <n>` | `128` | Spawn/join guard workload. |
-| `--channel-messages <n>` | `1024` | Channel guard workload. |
+| `--channel-messages <n>` | `1024` | Requested channel workload, up to `16384`. A different reported count fails the guard. |
 | `--select-ops <n>` | `512` | Requested select workload, up to `65536` with the bundled bench. A different reported count fails the guard. |
 | `--io-messages <n>` | `128` | I/O guard workload. |
 | `--poll-events <n>` | `128` | Poll guard workload. |

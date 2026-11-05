@@ -515,20 +515,20 @@ void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool know
     }
     direct_local_handoff = llam_write_direct_local_handoff_enabled();
     if (direct_local_handoff) {
-        g_llam_tls_io_handoff_yield += 1U;
+        unsigned *scope = llam_task_io_handoff_begin();
         if (llam_yield_to_local_runnable()) {
-            g_llam_tls_io_handoff_yield -= 1U;
+            llam_task_io_handoff_end(scope);
             return;
         }
-        g_llam_tls_io_handoff_yield -= 1U;
+        llam_task_io_handoff_end(scope);
     }
     if (llam_write_handoff_requires_work() && !llam_io_shard_has_local_work()) {
         return;
     }
     if (known_socket && !llam_write_handoff_check_fd_enabled()) {
-        g_llam_tls_io_handoff_yield += 1U;
+        unsigned *scope = llam_task_io_handoff_begin();
         llam_yield_internal();
-        g_llam_tls_io_handoff_yield -= 1U;
+        llam_task_io_handoff_end(scope);
         return;
     }
     if (known_socket) {
@@ -538,9 +538,9 @@ void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool know
     } else if (!llam_fd_is_blocking_socket(fd)) {
         return;
     }
-    g_llam_tls_io_handoff_yield += 1U;
+    unsigned *scope = llam_task_io_handoff_begin();
     llam_yield_internal();
-    g_llam_tls_io_handoff_yield -= 1U;
+    llam_task_io_handoff_end(scope);
 }
 
 /**

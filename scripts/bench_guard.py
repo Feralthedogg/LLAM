@@ -178,7 +178,11 @@ def run_case(bench: Path, case: str, args: argparse.Namespace) -> tuple[float, s
     if proc.returncode != 0:
         raise RuntimeError(f"{case}: benchmark exited with rc={proc.returncode}")
     try:
-        expected_ops = {case: args.select_ops} if case.startswith("select_") else None
+        expected_ops = None
+        if case.startswith("select_"):
+            expected_ops = {case: args.select_ops}
+        elif case == "channel_pingpong":
+            expected_ops = {case: args.channel_messages}
         parsed = parse_bench_output(proc.stdout, expected_ops)
     except ValueError as exc:
         raise RuntimeError(f"{case}: failed to parse benchmark output: {exc}") from None

@@ -1190,6 +1190,8 @@ struct llam_task {
     llam_alloc_chunk_t *alloc_span;
     /* Allocation-registry unlink only; protected by its registry mutex. */
     struct llam_task **registry_prev_link;
+    /* Owned by this G's C frames, including after a cooperative M migration. */
+    unsigned io_handoff_depth;
 };
 
 /** @brief Intrusive task-local storage value linked from its owning task. */

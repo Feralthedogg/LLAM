@@ -419,17 +419,23 @@ bool llam_queue_push_bounded_locked(llam_shard_t *shard,
         !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
         return false;
     }
+    return llam_queue_commit_bounded_locked(shard, queue, capacity, task) == LLAM_QUEUE_COMMIT_LOCAL;
+}
+
+llam_queue_commit_result_t llam_queue_commit_bounded_locked(
+    llam_shard_t *shard, llam_queue_t *queue, unsigned capacity, llam_task_t *task) {
+    if (shard == NULL || queue == NULL || task == NULL) return LLAM_QUEUE_COMMIT_REJECTED;
     if (queue->depth < capacity) {
         llam_queue_push_tail(queue, task);
         if (queue == &shard->processor.inject_q) {
             atomic_store_explicit(&shard->processor.inject_depth, queue->depth, memory_order_release);
         }
-        return true;
+        return LLAM_QUEUE_COMMIT_LOCAL;
     }
 
     shard->metrics.queue_overflows += 1U;
     llam_enqueue_overflow_task(shard->runtime, task);
-    return false;
+    return LLAM_QUEUE_COMMIT_OVERFLOW;
 }
 
 /**
@@ -531,6 +537,14 @@ bool llam_enqueue_opaque_redirect_task_locked(llam_shard_t *blocked, llam_task_t
  *
  * @param shard Owner shard whose inject queue is drained.
  */
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static void (*g_inject_transfer_hook)(llam_shard_t *, llam_task_t *);
+
+void llam_test_set_inject_transfer_hook(void (*hook)(llam_shard_t *, llam_task_t *)) {
+    g_inject_transfer_hook = hook;
+}
+#endif
+
 void llam_drain_inject_queue(llam_shard_t *shard) {
     unsigned drained = 0;
     bool pressure;
@@ -543,37 +557,43 @@ void llam_drain_inject_queue(llam_shard_t *shard) {
     if (!llam_processor_queue_access_lock(&shard->processor, &access)) {
         return;
     }
-    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &access)) {
-        pthread_mutex_unlock(&shard->lock);
-        return;
-    }
     if (shard->processor.inject_q.depth == 0U) {
         atomic_store_explicit(&shard->processor.inject_depth, 0U, memory_order_release);
         pthread_mutex_unlock(&shard->lock);
         return;
     }
     while (drained < LLAM_INJECT_DRAIN_BUDGET) {
-        llam_task_t *task = llam_queue_pop_head(&shard->processor.inject_q);
+        llam_task_t *task;
+        llam_queue_commit_result_t result;
         bool prefer_hot;
+        unsigned original_hot;
 
-        if (task == NULL) {
+        /* This is the transfer's linearization point. A stop flag may revoke
+         * later grants, but cannot strand a task between this locked pop and
+         * its destination commit. P projection changes also need this lock. */
+        if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, &access)) break;
+        task = llam_queue_pop_head(&shard->processor.inject_q);
+        if (task == NULL) break;
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        if (g_inject_transfer_hook != NULL) g_inject_transfer_hook(shard, task);
+#endif
+        original_hot = task->enqueue_hot;
+        prefer_hot = llam_should_enqueue_hot_locked(shard, task, original_hot != 0U, pressure);
+        task->enqueue_hot = 0U;
+        if (prefer_hot) {
+            result = llam_queue_commit_bounded_locked(shard, &shard->processor.hot_q,
+                                                       LLAM_HOT_QUEUE_CAP, task);
+            if (result == LLAM_QUEUE_COMMIT_LOCAL) shard->metrics.hot_enqueues += 1U;
+        } else {
+            result = llam_norm_queue_commit_owner_locked(shard, task);
+        }
+        if (result == LLAM_QUEUE_COMMIT_REJECTED) {
+            /* Nothing was published: retain the runnable G in its source. */
+            task->enqueue_hot = original_hot;
+            llam_queue_push_tail(&shard->processor.inject_q, task);
             break;
         }
-
-        prefer_hot = llam_should_enqueue_hot_locked(shard, task, task->enqueue_hot != 0U, pressure);
-        if (prefer_hot) {
-            if (llam_queue_push_bounded_locked(shard,
-                                               &shard->processor.hot_q,
-                                               LLAM_HOT_QUEUE_CAP,
-                                               task,
-                                               &access)) {
-                shard->metrics.hot_enqueues += 1U;
-            }
-        } else {
-            (void)llam_norm_queue_push_owner_locked(shard, &access, task);
-        }
-        task->enqueue_hot = 0U;
-        drained += 1U;
+        ++drained;
     }
     atomic_store_explicit(&shard->processor.inject_depth, shard->processor.inject_q.depth, memory_order_release);
     pthread_mutex_unlock(&shard->lock);

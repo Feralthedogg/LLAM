@@ -637,6 +637,60 @@ static int test_owner_timer_expiry_uses_local_lane(void) {
     return 0;
 }
 
+static void stop_during_inject_transfer(llam_shard_t *shard, llam_task_t *task) {
+    (void)task;
+    atomic_store_explicit(&shard->runtime->shutdown_requested, true, memory_order_release);
+}
+
+static int test_stop_during_inject_transfer(bool lockfree, bool hot) {
+    llam_runtime_t *runtime = NULL;
+    llam_task_t task;
+    llam_task_t *queued = NULL;
+    llam_processor_owner_ticket_t ticket;
+    uint64_t flags = lockfree ? LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ : 0U;
+    if (create_runtime(flags, &runtime) != 0) return fail("inject transfer setup failed");
+    llam_shard_t *shard = &runtime->shards[0];
+    initialize_fake_sleep_task(runtime, shard, &task, 0x4323U, 1U, 0U);
+    task.state = LLAM_TASK_STATE_RUNNABLE;
+    task.wait_reason = LLAM_WAIT_NONE;
+    task.enqueue_hot = hot ? 1U : 0U;
+    llam_scheduler_bind_identity(shard, &shard->primary_worker, &shard->scheduler_ctx);
+    pthread_mutex_lock(&shard->lock);
+    llam_queue_push_tail(&shard->processor.inject_q, &task);
+    atomic_store_explicit(&shard->processor.inject_depth, 1U, memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+    llam_test_set_inject_transfer_hook(stop_during_inject_transfer);
+    llam_drain_inject_queue(shard);
+    llam_test_set_inject_transfer_hook(NULL);
+    bool revoked = !llam_processor_owner_ticket_snapshot(&shard->processor, &ticket);
+    /* Restore the isolated fixture only after proving execute authority was revoked. */
+    atomic_store_explicit(&runtime->shutdown_requested, false, memory_order_release);
+    pthread_mutex_lock(&shard->lock);
+    unsigned transferred = shard->processor.hot_q.depth + llam_norm_queue_depth(shard);
+    unsigned pending = shard->processor.inject_q.depth;
+    if (shard->processor.hot_q.depth != 0U)
+        queued = llam_queue_pop_head(&shard->processor.hot_q);
+    else if (shard->processor.norm_q.depth != 0U) {
+        queued = llam_queue_pop_head(&shard->processor.norm_q);
+        (void)llam_norm_queue_note_dequeue(shard);
+    }
+    else if (pending != 0U)
+        queued = llam_queue_pop_head(&shard->processor.inject_q);
+    atomic_store_explicit(&shard->processor.inject_depth, 0U, memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+    if (queued == NULL) queued = llam_norm_queue_pop_owner_unlocked(shard);
+    llam_scheduler_unbind_identity(shard, &shard->primary_worker);
+    llam_scheduler_clear_identity();
+    llam_runtime_destroy(runtime);
+    if (!revoked || transferred != 1U || pending != 0U || queued != &task) {
+        fprintf(stderr, "inject transfer lockfree=%u hot=%u revoked=%u moved=%u pending=%u queued=%u\n",
+            lockfree ? 1U : 0U, hot ? 1U : 0U, revoked ? 1U : 0U,
+            transferred, pending, queued == &task ? 1U : 0U);
+        return fail("shutdown revoked a popped inject task before destination commit");
+    }
+    return 0;
+}
+
 int main(void) {
     int failures = 0;
     int timer_rc;
@@ -648,6 +702,10 @@ int main(void) {
     if (test_host_spawn_uses_inject_lane() != 0) {
         failures += 1;
     }
+    for (unsigned lockfree = 0U; lockfree < 2U; ++lockfree)
+        for (unsigned hot = 0U; hot < 2U; ++hot)
+            if (test_stop_during_inject_transfer(lockfree != 0U, hot != 0U) != 0)
+                failures += 1;
     timer_rc = test_timer_rehome_generation_and_ownership();
     if (timer_rc != 0 && timer_rc != 77) {
         failures += 1;

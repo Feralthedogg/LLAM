@@ -28,6 +28,12 @@ on their stack. Internal scheduler and errno cursors use read-only lookups that
 opaque calls invalidate, with compiler fences preserving that property under
 LTO. Blocking and sleep entry safepoints resolve worker state in a fresh C
 activation. Shared scheduler publication still uses its own locks and atomics.
+Handoff scopes belong to the task owning the suspended C frame, so moving that
+frame to another M does not decrement a different thread's hint or affect a peer G.
+Runnable-queue transfers validate ownership before removing the source entry and
+commit the destination under the same lock. A concurrent shutdown cannot discard
+the entry between those steps. Later execution still needs a fresh execution or
+STOPPING-drain grant.
 
 Explicit `*_compat` constructors retain request-based boundary and safepoint preemption, so
 their legacy C loops still require LLAM calls or explicit polls. The separate

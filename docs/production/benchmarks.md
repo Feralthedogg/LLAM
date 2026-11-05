@@ -181,10 +181,11 @@ and wider platform evidence.
 conservative. Public performance tables should come from scheduled benchmark
 artifacts, not local one-off runs.
 
-Stress and Nightly throughput guards use 31 measured rounds per case and 65,536
-select operations per batch. Short select batches can be dominated by an isolated
+Stress and Nightly throughput guards use 31 measured rounds per case, 16,384
+channel messages and 65,536 select operations per batch. Short batches can be dominated by an isolated
 host scheduling pause; the larger batches measure sustained throughput while
-retaining every measured round and the existing floors. Other cases use the script's
+retaining every measured round and the existing floors. Reported channel and select
+counts must match the requested workloads. Other cases use the script's
 [default batch sizes](../reference/cli/benchmarks.md).
 The guard compares total operations divided by total measured time;
 the additional p50/p99 values describe batch durations.

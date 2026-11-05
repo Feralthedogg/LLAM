@@ -57,21 +57,18 @@ def test_bench_guard_rejects_malformed_metrics() -> None:
 
 
 def test_bench_guard_checks_requested_workload() -> None:
-    row = "[bench] name=select_timeout ops=65536 ops_per_sec=10000000"
-    expected = {"select_timeout": 65536}
-    if bench_guard.parse_bench_output(row, expected) != {"select_timeout": 10000000.0}:
-        fail("bench_guard rejected the requested select workload")
-    for actual in ("16384", "65536.0", "-1"):
-        try:
-            bench_guard.parse_bench_output(row.replace("ops=65536", "ops=" + actual), expected)
-        except ValueError:
-            continue
-        fail(f"bench_guard accepted a different operation count: {actual}")
-    try:
-        bench_guard.parse_bench_output(row.replace("ops=65536 ", ""), expected)
-    except ValueError:
-        return
-    fail("bench_guard accepted a missing operation count")
+    for case, count in (("select_timeout", 65536), ("channel_pingpong", 16384)):
+        row = f"[bench] name={case} ops={count} ops_per_sec=10000000"
+        expected = {case: count}
+        if bench_guard.parse_bench_output(row, expected) != {case: 10000000.0}:
+            fail(f"bench_guard rejected the requested {case} workload")
+        for actual in (str(count // 4), f"{count}.0", "-1", None):
+            changed = row.replace(f"ops={count} ", "" if actual is None else f"ops={actual} ")
+            try:
+                bench_guard.parse_bench_output(changed, expected)
+            except ValueError:
+                continue
+            fail(f"bench_guard accepted a different operation count for {case}: {actual}")
 
 
 def test_bench_matrix_rejects_malformed_metrics() -> None:

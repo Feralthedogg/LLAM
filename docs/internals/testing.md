@@ -33,6 +33,7 @@ tests.
 | `test_managed_scheduler_internal` | Registered M/P ownership and lifetime. `--errno-migration` moves one C activation between native threads and checks scheduler and errno addresses. `--async-bookkeeping` forces entry safepoints and holds the source M until another M resumes a blocking call, while checking balanced native roots. |
 | `test_runtime_core` | Lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats. |
 | `test_multi_runtime_core` | Explicit runtime-handle ownership, shutdown isolation, and cross-runtime misuse. |
+| `test_processor_queue_timer_internal` | Owner-only queue access, timer rehoming and inject transfers with shutdown forced between source removal and destination commit, across FIFO/lock-free and hot/normal lanes. |
 | `test_runtime_api_edges` | Public API edges: task ownership, cancellation, channel close and drain, blocking callbacks, cond/mutex deadlines, and managed/unmanaged call boundaries. |
 | `test_runtime_select_edges` | `llam_channel_select()` send, close, and cancel races, for lost-wakeup attribution outside the example server. |
 | `test_runtime_io_dump` | A parked fd-readiness wait appears in `llam_dump_runtime_state()` as native request ownership or as an explicit blocking fallback job. |

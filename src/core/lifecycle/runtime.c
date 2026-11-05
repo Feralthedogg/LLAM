@@ -37,7 +37,7 @@ uint32_t g_llam_xsave_mask_lo;
 uint32_t g_llam_xsave_mask_hi;
 /** @brief FP-control context flag used by platform context switch code. */
 uint32_t g_llam_fp_control_context;
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
+#if LLAM_PLATFORM_DARWIN
 /* Dyld owns the storage. The libc key only caches its address for bound Ms;
  * it owns no allocation and installs no callback into an unloadable image. */
 static _Thread_local llam_scheduler_tls_t g_llam_scheduler_tls;

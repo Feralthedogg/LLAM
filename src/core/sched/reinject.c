@@ -109,15 +109,14 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
         // the current worker will immediately see local queue state.
         task->enqueue_hot = 0U;
         if (hot) {
-            if (llam_queue_push_bounded_locked(shard,
-                                               &shard->processor.hot_q,
-                                               LLAM_HOT_QUEUE_CAP,
-                                               task,
-                                               access)) {
+            if (llam_queue_commit_bounded_locked(shard, &shard->processor.hot_q,
+                                                   LLAM_HOT_QUEUE_CAP, task) == LLAM_QUEUE_COMMIT_LOCAL) {
                 shard->metrics.hot_enqueues += 1U;
             }
         } else {
-            (void)llam_norm_queue_push_owner_locked(shard, access, task);
+            if (llam_norm_queue_commit_owner_locked(shard, task) == LLAM_QUEUE_COMMIT_REJECTED)
+                (void)llam_queue_commit_bounded_locked(shard, &shard->processor.inject_q,
+                                                       LLAM_INJECT_QUEUE_CAP, task);
         }
     } else if (llam_queue_push_bounded_locked(shard,
                                              &shard->processor.inject_q,

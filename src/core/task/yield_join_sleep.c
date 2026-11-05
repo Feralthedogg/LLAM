@@ -250,8 +250,9 @@ void llam_yield_internal(void) {
 
 static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail_reason) {
 #if LLAM_DIRECT_OWNER_HANDOFF
-    llam_shard_t *shard = g_llam_tls_shard;
-    llam_task_t *current = g_llam_tls_task;
+    llam_scheduler_tls_t *tls = llam_scheduler_tls_current();
+    llam_shard_t *shard = tls->shard;
+    llam_task_t *current = tls->task;
     llam_task_t *next;
     llam_runtime_t *rt;
     llam_yield_exchange_result_t exchange;
@@ -330,7 +331,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         current->forced_yield_budget = rt->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->last_yield_ns = current->io_handoff_depth != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
         current->last_runnable_ns = now_ns;
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
@@ -340,7 +341,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     }
     llam_publish_direct_active_g(shard, next, 0U);
     llam_legacy_lease_test_pause(LLAM_LEASE_TEST_POINT_AFTER_DIRECT_YIELD);
-    g_llam_tls_task = next;
+    tls->task = next;
 
     shard->metrics.yields += 1U;
     shard->metrics.ctx_switches += 1U;
@@ -380,7 +381,7 @@ static bool llam_yield_keep_running_if_idle(llam_shard_t *shard) {
     }
     shard->processor.direct_handoff_streak += 1U;
     shard->metrics.yields += 1U;
-    task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    task->last_yield_ns = task->io_handoff_depth != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     if (rt->preempt_mode >= LLAM_PREEMPT_AUTO) {
         atomic_store_explicit(&worker->last_safepoint_ns, llam_now_ns(), memory_order_release);
     }
@@ -467,7 +468,7 @@ void llam_yield(void) {
     direct_mode = llam_direct_yield_handoff_mode(rt);
     if (rt->execution_lease_mode == LLAM_EXECUTION_LEASE_LEGACY &&
         direct_mode != 0U &&
-        (direct_mode >= 2U || g_llam_tls_io_handoff_yield != 0U) &&
+        (direct_mode >= 2U || task->io_handoff_depth != 0U) &&
         llam_yield_try_direct_handoff(shard)) {
         return;
     }
@@ -478,7 +479,7 @@ void llam_yield(void) {
     task->forced_yield_budget = rt->forced_yield_every;
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
-    task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    task->last_yield_ns = task->io_handoff_depth != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
     queue_access_valid = llam_processor_queue_access_snapshot(&shard->processor,
@@ -493,7 +494,9 @@ void llam_yield(void) {
     } else if (queue_access_valid &&
         llam_processor_queue_access_validate_owner_mutation_locked(shard,
                                                                     &queue_access)) {
-        (void)llam_norm_queue_push_yield_locked(shard, &queue_access, task);
+        if (llam_norm_queue_commit_yield_locked(shard, task) == LLAM_QUEUE_COMMIT_REJECTED)
+            (void)llam_queue_commit_bounded_locked(shard, &shard->processor.inject_q,
+                                                   LLAM_INJECT_QUEUE_CAP, task);
     } else if (llam_queue_push_bounded_locked(shard,
                                               &shard->processor.inject_q,
                                               LLAM_INJECT_QUEUE_CAP,
@@ -630,7 +633,7 @@ bool llam_yield_to_local_runnable(void) {
         current->forced_yield_budget = shard->runtime->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->last_yield_ns = current->io_handoff_depth != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
         current->last_runnable_ns = now_ns;
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;

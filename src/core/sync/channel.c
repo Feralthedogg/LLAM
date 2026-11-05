@@ -70,9 +70,9 @@ static bool llam_channel_should_handoff_to_waiter(const llam_wait_node_t *node, 
  * @brief Yield after a channel handoff without marking it as a normal user yield.
  */
 static void llam_channel_handoff_yield(void) {
-    g_llam_tls_io_handoff_yield += 1U;
+    unsigned *scope = llam_task_io_handoff_begin();
     llam_yield_internal();
-    g_llam_tls_io_handoff_yield -= 1U;
+    llam_task_io_handoff_end(scope);
 }
 
 /**

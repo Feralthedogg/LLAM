@@ -250,39 +250,31 @@ static bool llam_cldeque_has_work(llam_cldeque_t *deque) {
 bool llam_norm_queue_push_owner_locked(llam_shard_t *shard,
                                        const llam_processor_queue_access_t *access,
                                        llam_task_t *task) {
-    bool pushed;
-
     if (shard == NULL || task == NULL ||
-        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
-        return false;
-    }
-    if (!llam_norm_queue_note_enqueue(shard)) {
-        return false;
-    }
+        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) return false;
+    return llam_norm_queue_commit_owner_locked(shard, task) == LLAM_QUEUE_COMMIT_LOCAL;
+}
 
+llam_queue_commit_result_t llam_norm_queue_commit_owner_locked(
+    llam_shard_t *shard, llam_task_t *task) {
+    llam_queue_commit_result_t result;
+    if (shard == NULL || task == NULL || !llam_norm_queue_note_enqueue(shard))
+        return LLAM_QUEUE_COMMIT_REJECTED;
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        pushed = llam_cldeque_push_bottom(&shard->processor.norm_cldeque, task);
-    } else {
-        pushed = llam_queue_push_bounded_locked(shard,
-                                                &shard->processor.norm_q,
-                                                LLAM_NORM_QUEUE_CAP,
-                                                task,
-                                                access);
-    }
-
-    if (pushed) {
-        shard->metrics.norm_enqueues += 1U;
-        return true;
-    }
-
-    (void)llam_norm_queue_note_dequeue(shard);
-    if (llam_lockfree_normq_enabled(shard->runtime)) {
+        if (llam_cldeque_push_bottom(&shard->processor.norm_cldeque, task)) {
+            shard->metrics.norm_enqueues += 1U;
+            return LLAM_QUEUE_COMMIT_LOCAL;
+        }
+        (void)llam_norm_queue_note_dequeue(shard);
         shard->metrics.queue_overflows += 1U;
-        // Lock-free deque overflow spills to the runtime overflow queue so the
-        // task is not lost when the bounded deque is saturated.
         llam_enqueue_overflow_task(shard->runtime, task);
+        return LLAM_QUEUE_COMMIT_OVERFLOW;
     }
-    return false;
+    result = llam_queue_commit_bounded_locked(shard, &shard->processor.norm_q,
+                                               LLAM_NORM_QUEUE_CAP, task);
+    if (result == LLAM_QUEUE_COMMIT_LOCAL) shard->metrics.norm_enqueues += 1U;
+    else (void)llam_norm_queue_note_dequeue(shard);
+    return result;
 }
 
 /**
@@ -367,17 +359,18 @@ llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
 bool llam_norm_queue_push_yield_locked(llam_shard_t *shard,
                                        const llam_processor_queue_access_t *access,
                                        llam_task_t *task) {
-    if (shard == NULL || task == NULL) {
-        return false;
-    }
-    if (!llam_lockfree_normq_enabled(shard->runtime)) {
-        return llam_norm_queue_push_owner_locked(shard, access, task);
-    }
-    if (!llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) {
-        return false;
-    }
+    if (shard == NULL || task == NULL ||
+        !llam_processor_queue_access_validate_owner_mutation_locked(shard, access)) return false;
+    return llam_norm_queue_commit_yield_locked(shard, task) == LLAM_QUEUE_COMMIT_LOCAL;
+}
+
+llam_queue_commit_result_t llam_norm_queue_commit_yield_locked(
+    llam_shard_t *shard, llam_task_t *task) {
+    if (shard == NULL || task == NULL) return LLAM_QUEUE_COMMIT_REJECTED;
+    if (!llam_lockfree_normq_enabled(shard->runtime))
+        return llam_norm_queue_commit_owner_locked(shard, task);
     if (!llam_norm_queue_note_enqueue(shard)) {
-        return false;
+        return LLAM_QUEUE_COMMIT_REJECTED;
     }
 
     /*
@@ -391,12 +384,12 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard,
     if (shard->processor.norm_q.depth < LLAM_NORM_QUEUE_CAP) {
         llam_queue_push_tail(&shard->processor.norm_q, task);
         shard->metrics.norm_enqueues += 1U;
-        return true;
+        return LLAM_QUEUE_COMMIT_LOCAL;
     }
     shard->metrics.queue_overflows += 1U;
     llam_enqueue_overflow_task(shard->runtime, task);
     (void)llam_norm_queue_note_dequeue(shard);
-    return false;
+    return LLAM_QUEUE_COMMIT_OVERFLOW;
 }
 
 /**

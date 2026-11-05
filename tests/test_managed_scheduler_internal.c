@@ -52,6 +52,7 @@ typedef struct errno_migration_test {
     int destination_error;
     bool tls_cursor_ok;
     bool errno_cursor_ok;
+    bool handoff_scope_ok;
     _Alignas(16) unsigned char task_stack[65536];
     _Alignas(16) unsigned char peer_stack[65536];
 } errno_migration_test_t;
@@ -72,6 +73,7 @@ static void errno_migration_task(void) {
     errno_migration_test_t *test = errno_migration;
     llam_worker_t *source_worker = g_llam_tls_worker;
     int *source_errno = &errno;
+    unsigned *source_handoff = llam_task_io_handoff_begin();
     errno = EDOM;
     if (test->mode == 0U) llam_switch_task_to_scheduler(&test->task, &test->source);
     else if (test->mode == 1U) llam_switch_task_to_task(&test->task, &test->peer);
@@ -84,6 +86,8 @@ static void errno_migration_task(void) {
     test->tls_cursor_ok = source_worker == (llam_worker_t *)&test->source &&
                          g_llam_tls_worker == (llam_worker_t *)&test->destination;
     test->errno_cursor_ok = source_errno != &errno;
+    llam_task_io_handoff_end(source_handoff);
+    test->handoff_scope_ok = *source_handoff == 0U && g_llam_tls_task->io_handoff_depth == 0U;
     atomic_store_explicit(&test->stage, 2U, memory_order_release);
     llam_ctx_switch(&test->task.ctx, &test->destination);
     abort();
@@ -109,8 +113,10 @@ static void *errno_migration_source(void *argument) {
     errno_migration_test_t *test = argument;
     /* Opaque markers only; no runtime API dereferences these as workers. */
     g_llam_tls_worker = (llam_worker_t *)&test->source;
+    g_llam_tls_task = &test->task;
     llam_ctx_switch(&test->source, &test->task.ctx);
     g_llam_tls_worker = NULL;
+    g_llam_tls_task = NULL;
     errno = ERANGE;
     /* Destination cannot resume until this native M owns the sentinel. */
     atomic_store_explicit(&test->stage, 1U, memory_order_release);
@@ -124,8 +130,10 @@ static void *errno_migration_destination(void *argument) {
     while (atomic_load_explicit(&test->stage, memory_order_acquire) != 1U) llam_pause_cpu();
     errno = E2BIG;
     g_llam_tls_worker = (llam_worker_t *)&test->destination;
+    g_llam_tls_task = &test->task;
     llam_ctx_switch(&test->destination, &test->task.ctx);
     g_llam_tls_worker = NULL;
+    g_llam_tls_task = NULL;
     return NULL;
 }
 
@@ -147,6 +155,7 @@ static int errno_migration_cases(void) {
         int source_error = test->source_error, destination_error = test->destination_error;
         bool tls_cursor_ok = test->tls_cursor_ok;
         bool errno_cursor_ok = test->errno_cursor_ok;
+        bool handoff_scope_ok = test->handoff_scope_ok;
         free(test);
         errno_migration = NULL;
         if (source_error != ERANGE || destination_error != EDOM)
@@ -155,6 +164,7 @@ static int errno_migration_cases(void) {
         CHECK(source_error == ERANGE && destination_error == EDOM);
         CHECK(tls_cursor_ok);
         CHECK(errno_cursor_ok);
+        CHECK(handoff_scope_ok);
     }
     return 0;
 }

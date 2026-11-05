@@ -1929,7 +1929,7 @@ ready_done:
 
 void llam_windows_async_lifetime_prepare_yield(llam_task_t *task) {
     llam_windows_async_capsule_t *capsule = task->async_preempt_task;
-    if (capsule != NULL && g_llam_tls_io_handoff_yield == 0U &&
+    if (capsule != NULL && task->io_handoff_depth == 0U &&
         task->windows_async_internal_yield_depth == 0U &&
         g_llam_tls_worker != NULL &&
         atomic_load_explicit(&g_llam_tls_worker->runtime_critical_depth, memory_order_acquire) == 0U &&
