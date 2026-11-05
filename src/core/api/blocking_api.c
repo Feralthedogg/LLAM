@@ -200,13 +200,8 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
 /* A parked C frame can resume on another native M. Resolve scheduler TLS in a
  * fresh activation: a compiler may retain the source M's TLS address across
  * the context switch, even when it reloads the value stored at that address. */
-#if defined(_MSC_VER)
-__declspec(noinline)
-#else
-__attribute__((noinline))
-#endif
-static int llam_blocking_finish_wait(llam_task_t *task, llam_wait_node_t *node,
-                                      void **out) {
+static LLAM_NOINLINE int llam_blocking_finish_wait(llam_task_t *task, llam_wait_node_t *node,
+                                                   void **out) {
     llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking_or_abort(task);
     llam_sync_wait_node_release(g_llam_tls_shard, node);
@@ -243,9 +238,7 @@ static int llam_blocking_finish_wait(llam_task_t *task, llam_wait_node_t *node,
  *
  * @return 0 on success, or -1 on failure with @c errno describing the error.
  */
-int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
-    LLAM_NATIVE_API_GUARD(-1);
-
+static LLAM_NOINLINE int llam_blocking_submit_wait(llam_blocking_fn fn, void *arg, void **out) {
     llam_runtime_t *rt;
     llam_task_t *task;
     llam_worker_t *worker;
@@ -254,7 +247,6 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_wait_node_t *node;
     bool async_reserved = false;
 
-    llam_task_safepoint();
     task = g_llam_tls_task;
     worker = g_llam_tls_worker;
 
@@ -427,6 +419,14 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
                                     g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
     }
     return llam_blocking_finish_wait(task, node, out);
+}
+
+int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
+    LLAM_NATIVE_API_GUARD(-1);
+
+    llam_task_safepoint();
+    /* The safepoint can migrate this G; do not retain a source M's TLS base. */
+    return llam_blocking_submit_wait(fn, arg, out);
 }
 
 void *llam_call_blocking(llam_blocking_fn fn, void *arg) {

@@ -84,6 +84,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/lifecycle/runtime.c
     src/core/base/abi.c
     src/core/base/errno.c
+    src/core/base/native_errno.c
     src/core/memory/alloc.c
     src/core/memory/task_span.c
     src/core/memory/allocator_quiescent.c
@@ -1166,6 +1167,7 @@ if(LLAM_LINUX_ARM64_ASYNC_MECHANISM)
     # Deliberately independent of scheduler/I/O activation: link the actual
     # context switch and signal transport, not a replacement test switch.
     target_sources(test_async_context_linux_arm64 PRIVATE
+        src/core/base/native_errno.c
         src/core/context/async_context_linux_arm64.c
         src/asm/linux/arm64/async_context_arm64.S
         src/asm/linux/arm64/linux_context_arm64.S

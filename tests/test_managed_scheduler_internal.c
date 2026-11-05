@@ -50,9 +50,8 @@ typedef struct errno_migration_test {
     unsigned mode;
     int source_error;
     int destination_error;
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     bool tls_cursor_ok;
-#endif
+    bool errno_cursor_ok;
     _Alignas(16) unsigned char task_stack[65536];
     _Alignas(16) unsigned char peer_stack[65536];
 } errno_migration_test_t;
@@ -71,9 +70,8 @@ static void errno_migration_peer(void) {
 
 static void errno_migration_task(void) {
     errno_migration_test_t *test = errno_migration;
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     llam_worker_t *source_worker = g_llam_tls_worker;
-#endif
+    int *source_errno = &errno;
     errno = EDOM;
     if (test->mode == 0U) llam_switch_task_to_scheduler(&test->task, &test->source);
     else if (test->mode == 1U) llam_switch_task_to_task(&test->task, &test->peer);
@@ -83,10 +81,9 @@ static void errno_migration_task(void) {
         llam_switch_task_to_task_hot(&test->task, &test->peer, saved);
     }
     test->destination_error = current_thread_error();
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     test->tls_cursor_ok = source_worker == (llam_worker_t *)&test->source &&
                          g_llam_tls_worker == (llam_worker_t *)&test->destination;
-#endif
+    test->errno_cursor_ok = source_errno != &errno;
     atomic_store_explicit(&test->stage, 2U, memory_order_release);
     llam_ctx_switch(&test->task.ctx, &test->destination);
     abort();
@@ -110,14 +107,10 @@ static void errno_migration_context(llam_ctx_t *context, unsigned char *stack,
 
 static void *errno_migration_source(void *argument) {
     errno_migration_test_t *test = argument;
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     /* Opaque markers only; no runtime API dereferences these as workers. */
     g_llam_tls_worker = (llam_worker_t *)&test->source;
-#endif
     llam_ctx_switch(&test->source, &test->task.ctx);
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     g_llam_tls_worker = NULL;
-#endif
     errno = ERANGE;
     /* Destination cannot resume until this native M owns the sentinel. */
     atomic_store_explicit(&test->stage, 1U, memory_order_release);
@@ -130,13 +123,9 @@ static void *errno_migration_destination(void *argument) {
     errno_migration_test_t *test = argument;
     while (atomic_load_explicit(&test->stage, memory_order_acquire) != 1U) llam_pause_cpu();
     errno = E2BIG;
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     g_llam_tls_worker = (llam_worker_t *)&test->destination;
-#endif
     llam_ctx_switch(&test->destination, &test->task.ctx);
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
     g_llam_tls_worker = NULL;
-#endif
     return NULL;
 }
 
@@ -156,18 +145,16 @@ static int errno_migration_cases(void) {
         CHECK(pthread_create(&destination, NULL, errno_migration_destination, test) == 0);
         CHECK(pthread_join(source, NULL) == 0 && pthread_join(destination, NULL) == 0);
         int source_error = test->source_error, destination_error = test->destination_error;
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
         bool tls_cursor_ok = test->tls_cursor_ok;
-#endif
+        bool errno_cursor_ok = test->errno_cursor_ok;
         free(test);
         errno_migration = NULL;
         if (source_error != ERANGE || destination_error != EDOM)
             fprintf(stderr, "errno migration mode %u: source=%d/%d destination=%d/%d\n",
                 mode, source_error, ERANGE, destination_error, EDOM);
         CHECK(source_error == ERANGE && destination_error == EDOM);
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
         CHECK(tls_cursor_ok);
-#endif
+        CHECK(errno_cursor_ok);
     }
     return 0;
 }
@@ -237,7 +224,7 @@ static void task_check_at(scheduler_test_t *test, bool passed, unsigned line) {
 #define task_check(test, passed) task_check_at((test), (passed), __LINE__)
 
 /* Native TLS addresses can be hoisted for a function's entire activation.
- * Inspect from a fresh frame after migration, never cache a source M's TLV. */
+ * Inspect from a fresh frame after migration, never cache a source M's TLS address. */
 static TEST_NOINLINE uint64_t current_run_generation(void) {
     return atomic_load_explicit(&g_llam_tls_task->run_generation, memory_order_acquire);
 }
@@ -644,6 +631,7 @@ typedef struct blocking_migration_test {
     _Atomic(llam_worker_t *) source_worker;
     atomic_uint source_parked;
     atomic_uint returned;
+    atomic_uint migrations;
     atomic_uint failures;
 } blocking_migration_test_t;
 
@@ -692,6 +680,10 @@ static void blocking_migration_task(void *argument) {
     int rc = llam_call_blocking_result(blocking_migration_callback, test, &result);
     if (rc != 0 || result != test)
         atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
+    if (g_llam_tls_worker == atomic_load_explicit(&test->source_worker, memory_order_acquire))
+        atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
+    else
+        atomic_fetch_add_explicit(&test->migrations, 1U, memory_order_relaxed);
     atomic_store_explicit(&test->returned, 1U, memory_order_release);
 }
 
@@ -725,6 +717,7 @@ static int blocking_result_after_migration(void) {
     CHECK(llam_join(task) == 0);
     CHECK(atomic_load_explicit(&test.source_parked, memory_order_acquire) == 1U &&
           atomic_load_explicit(&test.returned, memory_order_acquire) == 1U &&
+          atomic_load_explicit(&test.migrations, memory_order_acquire) == 1U &&
           atomic_load_explicit(&test.failures, memory_order_acquire) == 0U);
     llam_runtime_destroy(runtime);
     return 0;
@@ -1233,18 +1226,46 @@ static int dynamic_empty_processors(void) {
 }
 
 #if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_ASYNC_CONTEXT_SHARED
+static const llam_managed_scheduler_ops_t *bookkeeping_native_ops;
+static blocking_migration_test_t *bookkeeping_migration;
+
+static void bookkeeping_migration_service(llam_worker_t *worker, void *data) {
+    if (bookkeeping_native_ops->service != NULL)
+        bookkeeping_native_ops->service(worker, data);
+    blocking_migration_service(worker, bookkeeping_migration);
+}
+
 static int native_bookkeeping(void) {
     llam_runtime_opts_t opts;
     llam_preempt_opts_t policy;
     scheduler_test_t test = {0};
+    blocking_migration_test_t migration = {0};
+    llam_managed_scheduler_ops_t migration_ops;
+    llam_task_t *migration_task = NULL;
     llam_task_t *tasks[TASK_COUNT];
     CHECK(llam_runtime_opts_init(&opts, sizeof(opts)) == 0);
     CHECK(llam_preempt_opts_init(&policy, sizeof(policy)) == 0);
     opts.preempt_mode = LLAM_PREEMPT_AUTO;
     opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+    /* Exercise entry safepoints as well as the explicit yield/park paths. */
+    opts.forced_yield_every = 1U;
     CHECK(llam_runtime_create_managed(&opts, sizeof(opts), &policy, sizeof(policy), &test.runtime) == 0);
     CHECK(atomic_load_explicit(&test.runtime->async_preempt_enabled, memory_order_acquire) != 0U);
     CHECK(register_task_class(test.runtime, exercising_task, LLAM_MANAGED_EXECUTION_PORTABLE) == 0);
+    if (test.runtime->portable_processor_count > 1U) {
+        /* Hold the source M after returning P, rather than depending on an
+         * incidental scheduler interleaving to observe a native M change. */
+        bookkeeping_native_ops = test.runtime->managed_scheduler_ops;
+        bookkeeping_migration = &migration;
+        migration_ops = *bookkeeping_native_ops;
+        migration_ops.service = bookkeeping_migration_service;
+        test.runtime->managed_scheduler_ops = &migration_ops;
+        CHECK(register_task_class(test.runtime, blocking_migration_task,
+                                   LLAM_MANAGED_EXECUTION_PORTABLE) == 0);
+        migration_task = llam_runtime_spawn_ex(test.runtime, blocking_migration_task,
+            &migration, NULL, 0U);
+        CHECK(migration_task != NULL);
+    }
     test.processor_active = calloc(test.runtime->active_shards, sizeof(*test.processor_active));
     CHECK(test.processor_active != NULL);
     for (unsigned i = 0U; i < test.runtime->active_shards; ++i) atomic_init(&test.processor_active[i], 0U);
@@ -1254,6 +1275,14 @@ static int native_bookkeeping(void) {
     }
     CHECK(llam_runtime_run_handle(test.runtime) == 0);
     for (unsigned i = 0U; i < TASK_COUNT; ++i) CHECK(llam_join(tasks[i]) == 0);
+    if (migration_task != NULL) {
+        CHECK(llam_join(migration_task) == 0);
+        CHECK(atomic_load_explicit(&migration.source_parked, memory_order_acquire) == 1U &&
+              atomic_load_explicit(&migration.returned, memory_order_acquire) == 1U &&
+              atomic_load_explicit(&migration.migrations, memory_order_acquire) == 1U &&
+              atomic_load_explicit(&migration.failures, memory_order_acquire) == 0U);
+        atomic_fetch_add_explicit(&test.migrations, 1U, memory_order_relaxed);
+    }
     CHECK(assert_unbound(&test) == 0 && atomic_load(&test.completed) == TASK_COUNT &&
           atomic_load(&test.callbacks) == TASK_COUNT);
     llam_async_shared_stats_t stats;
@@ -1265,6 +1294,8 @@ static int native_bookkeeping(void) {
         test.runtime->portable_processor_count, atomic_load(&test.migrations));
     free(test.processor_active);
     llam_runtime_destroy(test.runtime);
+    bookkeeping_native_ops = NULL;
+    bookkeeping_migration = NULL;
     return isolated_compatibility_processor(true);
 }
 #endif

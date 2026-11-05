@@ -32,6 +32,10 @@
 
 #include "runtime_types.h"
 
+/* libc may mark its errno-address accessor const across a migrating C frame. */
+#undef errno
+#define errno (*llam_native_errno_location())
+
 // Process-default runtime used by legacy init/spawn/run/shutdown wrappers.
 extern llam_runtime_t g_llam_runtime;
 
@@ -41,31 +45,32 @@ extern uint32_t g_llam_xsave_mask_hi;
 extern uint32_t g_llam_fp_control_context;
 
 // Scheduler TLS. These are set only while a runtime worker or managed task runs.
-#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
 typedef struct llam_scheduler_tls {
     llam_shard_t *shard;
     llam_worker_t *worker;
     llam_processor_t *processor;
     llam_task_t *task;
     llam_ctx_t *scheduler_ctx;
+    unsigned io_handoff_yield;
+    unsigned opaque_redirect_hint;
 } llam_scheduler_tls_t;
 
 /* Read-only, never const: an opaque context switch invalidates this lookup. */
-__attribute__((pure)) llam_scheduler_tls_t *llam_scheduler_tls_current(void);
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((pure))
+#endif
+llam_scheduler_tls_t *llam_scheduler_tls_current(void);
+#if LLAM_PLATFORM_DARWIN && LLAM_ARCH_X86_64
 void llam_scheduler_tls_cache_bind_current(void);
+#endif
 
 #define g_llam_tls_shard (llam_scheduler_tls_current()->shard)
 #define g_llam_tls_worker (llam_scheduler_tls_current()->worker)
 #define g_llam_tls_processor (llam_scheduler_tls_current()->processor)
 #define g_llam_tls_task (llam_scheduler_tls_current()->task)
 #define g_llam_tls_scheduler_ctx (llam_scheduler_tls_current()->scheduler_ctx)
-#else
-extern _Thread_local llam_shard_t *g_llam_tls_shard;
-extern _Thread_local llam_worker_t *g_llam_tls_worker;
-extern _Thread_local llam_processor_t *g_llam_tls_processor;
-extern _Thread_local llam_task_t *g_llam_tls_task;
-extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
-#endif
+#define g_llam_tls_io_handoff_yield (llam_scheduler_tls_current()->io_handoff_yield)
+#define g_llam_tls_opaque_redirect_hint (llam_scheduler_tls_current()->opaque_redirect_hint)
 
 #include "managed_domain.h"
 
@@ -1256,10 +1261,6 @@ static inline llam_runtime_t *llam_runtime_tls_owner_fast(void) {
     }
     return NULL;
 }
-
-// Recursion/fast-path hints used by channel handoff and opaque-block redirect.
-extern _Thread_local unsigned g_llam_tls_io_handoff_yield;
-extern _Thread_local unsigned g_llam_tls_opaque_redirect_hint;
 
 /**
  * @brief Encoded completion user-data tags for backend I/O events.

@@ -264,8 +264,10 @@ typedef struct llam_ctx {
  */
 #if defined(_MSC_VER)
 #define LLAM_NORETURN __declspec(noreturn)
+#define LLAM_NOINLINE __declspec(noinline)
 #else
 #define LLAM_NORETURN __attribute__((noreturn))
+#define LLAM_NOINLINE __attribute__((noinline))
 #endif
 
 /*
@@ -282,6 +284,12 @@ typedef struct llam_ctx {
 #else
 #define LLAM_INTERNAL_API
 #endif
+
+/* An opaque fiber switch can change the native thread within a C activation. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((pure))
+#endif
+LLAM_INTERNAL_API int *llam_native_errno_location(void);
 
 void llam_ctx_switch(llam_ctx_t *from, const llam_ctx_t *to);
 void llam_fiber_bootstrap(void);

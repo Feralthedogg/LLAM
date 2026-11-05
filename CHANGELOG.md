@@ -75,6 +75,10 @@
 
 ### Fixed
 
+* re-resolve scheduler TLS and native errno addresses across opaque task switches,
+  including blocking and sleep entry safepoints, instead of retaining a source
+  worker's compiler-cached TLS base. Add cross-thread address checks, forced-entry
+  safepoints and an explicitly synchronized native M migration regression.
 * honor the selected Visual Studio generator in Windows comparison builds and
   measure Tokio's expired select with one nonblocking poll rather than timer ticks,
   retaining the selection scan after earlier work exhausts its cooperative budget.

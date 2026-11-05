@@ -75,18 +75,13 @@ void llam_scheduler_tls_cache_bind_current(void) {
     }
 }
 #else
-/** @brief Thread-local shard currently running on this native thread. */
-_Thread_local llam_shard_t *g_llam_tls_shard;
-/** @brief Thread-local worker identity slot currently running on this native thread. */
-_Thread_local llam_worker_t *g_llam_tls_worker;
-/** @brief Thread-local processor identity cell currently running on this native thread. */
-_Thread_local llam_processor_t *g_llam_tls_processor;
-/** @brief Thread-local task currently executing on this native thread. */
-_Thread_local llam_task_t *g_llam_tls_task;
-/** @brief Thread-local scheduler context for returning from task fibers. */
-_Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
+static _Thread_local llam_scheduler_tls_t g_llam_scheduler_tls;
+
+LLAM_NOINLINE llam_scheduler_tls_t *llam_scheduler_tls_current(void) {
+    /* Keep the read-only lookup from becoming a const native TLS address
+     * under interprocedural optimization. This compiler fence emits no CPU
+     * synchronization and leaves shared-state publication to its own atomics. */
+    atomic_signal_fence(memory_order_acq_rel);
+    return &g_llam_scheduler_tls;
+}
 #endif
-/** @brief Thread-local hint requesting a yield after I/O handoff. */
-_Thread_local unsigned g_llam_tls_io_handoff_yield;
-/** @brief Thread-local redirect target hint while leaving opaque blocking. */
-_Thread_local unsigned g_llam_tls_opaque_redirect_hint;

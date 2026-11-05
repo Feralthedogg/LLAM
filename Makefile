@@ -388,6 +388,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
 	$(OBJDIR)/src/core/base/abi.o \
 	$(OBJDIR)/src/core/base/errno.o \
+	$(OBJDIR)/src/core/base/native_errno.o \
 	$(OBJDIR)/src/core/base/util.o \
 	$(OBJDIR)/src/core/base/io_udata.o \
 	$(OBJDIR)/src/core/registry/capability.o \
@@ -857,7 +858,8 @@ endif
 ifeq ($(HOST_PLATFORM),linux)
 ifeq ($(UNAME_M),aarch64)
 ifeq ($(LLAM_EXPERIMENTAL_ASYNC_PREEMPT),1)
-TEST_ASYNC_CONTEXT_LINUX_ARM64_OBJS += $(OBJDIR)/src/core/context/async_context_linux_arm64.o \
+TEST_ASYNC_CONTEXT_LINUX_ARM64_OBJS += $(OBJDIR)/src/core/base/native_errno.o \
+	$(OBJDIR)/src/core/context/async_context_linux_arm64.o \
 	$(OBJDIR)/src/asm/linux/arm64/async_context_arm64.o \
 	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o \
 	$(OBJDIR)/tests/fixtures/async_darwin_leaf.o \

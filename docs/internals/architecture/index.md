@@ -23,6 +23,12 @@ Native-affine tasks retain a dedicated M. The `ASYNC_REQUIRED` policy refuses
 metadata-free legacy tasks, and `ASYNC_AUTO` runs them on a separate compatibility P.
 See the [managed C guide](../../guides/managed-c.md).
 
+Cooperative portable continuations can move between Ms while a runtime C API is
+on their stack. Internal scheduler and errno cursors use read-only lookups that
+opaque calls invalidate, with compiler fences preserving that property under
+LTO. Blocking and sleep entry safepoints resolve worker state in a fresh C
+activation. Shared scheduler publication still uses its own locks and atomics.
+
 Explicit `*_compat` constructors retain request-based boundary and safepoint preemption, so
 their legacy C loops still require LLAM calls or explicit polls. The separate
 [expert Windows API](../../start/build.md#build-on-windows) continues to accept

@@ -30,6 +30,7 @@ tests.
 | `test_shared_load` | `dlopen()` coverage for the shared library ABI surface. |
 | `test_default_policy_internal` | The `ASYNC_REQUIRED` default, unqualified-entry refusal, and explicit `*_compat` constructors. |
 | `test_managed_async_compiler` | A compiled image with poll-free CPU work under native capture, through the managed and default constructors. It needs `LLAM_MANAGED_TOOLING`. |
+| `test_managed_scheduler_internal` | Registered M/P ownership and lifetime. `--errno-migration` moves one C activation between native threads and checks scheduler and errno addresses. `--async-bookkeeping` forces entry safepoints and holds the source M until another M resumes a blocking call, while checking balanced native roots. |
 | `test_runtime_core` | Lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats. |
 | `test_multi_runtime_core` | Explicit runtime-handle ownership, shutdown isolation, and cross-runtime misuse. |
 | `test_runtime_api_edges` | Public API edges: task ownership, cancellation, channel close and drain, blocking callbacks, cond/mutex deadlines, and managed/unmanaged call boundaries. |

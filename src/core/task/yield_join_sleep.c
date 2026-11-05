@@ -1146,12 +1146,12 @@ int llam_detach(llam_task_t *task_handle) {
  * @param have_now_ns Whether @p now_ns is a valid monotonic timestamp.
  * @param now_ns      Caller-provided timestamp when @p have_now_ns is true.
  */
-static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_t now_ns) {
+static LLAM_NOINLINE int llam_sleep_after_safepoint(uint64_t deadline_ns, bool have_now_ns,
+                                                   uint64_t now_ns, int caller_errno) {
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_wait_node_t *node = NULL;
     llam_runtime_t *pinned_runtime = NULL;
-    int caller_errno = llam_thread_errno_load();
     int rc;
     int node_error;
     int timer_insert_errno;
@@ -1160,8 +1160,6 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     bool timer_completion_pending = false;
 
     uint64_t requested_wake = deadline_ns;
-
-    llam_task_safepoint();
 
     if (task == NULL) {
         /* Pin the default runtime long enough to avoid init/shutdown storage races. */
@@ -1344,6 +1342,13 @@ sleep_wait_ready:
     }
     llam_thread_errno_store(caller_errno);
     return 0;
+}
+
+static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_t now_ns) {
+    int caller_errno = llam_thread_errno_load();
+
+    llam_task_safepoint();
+    return llam_sleep_after_safepoint(deadline_ns, have_now_ns, now_ns, caller_errno);
 }
 
 /**
