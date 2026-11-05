@@ -289,6 +289,7 @@ async function startGlass() {
   if (softwareRenderer()) return;
   const root = document.documentElement;
   const box = $('.hero-top');
+  const hero = $('.hero');
   const canvas = $('#glass');
   const wide = matchMedia('(min-width: 1120px)');
   const plain = matchMedia('(prefers-reduced-transparency: reduce)');
@@ -309,8 +310,10 @@ async function startGlass() {
     context.fillStyle = '#000';
     context.fillRect(0, 0, backdrop.width, backdrop.height);
     context.imageSmoothingQuality = 'high';
-    const width = 2400 * dpr;
-    context.drawImage(art, Math.round((backdrop.width - width) / 2), 0, width, width * art.naturalHeight / art.naturalWidth);
+    const style = getComputedStyle(hero);
+    const width = parseFloat(style.backgroundSize) * dpr;
+    const top = parseFloat(style.backgroundPositionY) * dpr;
+    context.drawImage(art, Math.round((backdrop.width - width) / 2), top, width, width * art.naturalHeight / art.naturalWidth);
   };
   paintBackdrop();
 

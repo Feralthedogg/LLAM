@@ -95,7 +95,7 @@
 .ann { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 6px 44px; position: relative; background: var(--accent); color: #fff; font-size: 14px; font-weight: 500; text-align: center; }
 .ann button { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; color: #fff; cursor: pointer; }
 .ann button:hover { background: rgb(255 255 255 / .16); }
-.hd { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; height: var(--hd); padding: 0 24px 0 28px; background: var(--bar); color: #fff; }
+.hd { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; height: var(--hd); padding: 0 max(24px, calc((100% - var(--page-max)) / 2 + 24px)) 0 max(28px, calc((100% - var(--page-max)) / 2 + 28px)); background: var(--bar); color: #fff; }
 .brand { display: flex; align-items: center; margin-right: auto; font-size: 21px; font-weight: 600; letter-spacing: -.01em; }
 .brand-home { display: flex; align-items: center; gap: 10px; }
 .brand img { height: 30px; width: auto; }
@@ -126,7 +126,7 @@
 .btn.line-l:hover { background: rgb(25 25 28 / .05); }
 
 /* Hero */
-.hero { position: relative; overflow: hidden; background: #000 url(../img/hero.webp) center top / 2400px auto no-repeat; color: #fff; }
+.hero { position: relative; overflow: hidden; background: #000 url(../img/hero.webp) center top / 2800px auto no-repeat; color: #fff; }
 .hero-in { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 352px; gap: 32px; max-width: 1312px; min-height: 688px; margin: 0 auto; padding: 56px 32px 40px; }
 .h-name { margin: 0; font-size: 142px; line-height: 1; font-weight: 600; letter-spacing: -.02em; }
 .h-full { margin: 8px 0 0; color: var(--on-d2); font-size: 18px; line-height: 26px; }
@@ -183,7 +183,7 @@
 .below { margin-top: 28px; }
 
 /* Band */
-.band { position: relative; overflow: hidden; background: #0a0c2c url(../img/band.webp) right center / 1800px auto no-repeat; color: #fff; }
+.band { position: relative; overflow: hidden; background: #0a0c2c url(../img/band.webp) right -380px center / 2180px auto no-repeat; color: #fff; }
 .band-in { max-width: 1312px; margin: 0 auto; padding: 64px 32px; }
 .band h2 { max-width: 620px; margin: 0; font-size: 35px; line-height: 42px; font-weight: 600; letter-spacing: -.01em; }
 .band p { max-width: 560px; margin: 14px 0 0; color: #d4d7ee; font-size: 17px; line-height: 27px; }
@@ -217,7 +217,7 @@
 .state.p { background: rgb(77 91 255 / .1); color: #3441d6; }
 .term { overflow: hidden; border-radius: 12px; background: #0f0f14; color: #d6d6e0; font: 400 12.5px/22px var(--mono); }
 .term-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 40px; padding: 0 18px; border-bottom: 1px solid var(--rule-d); color: var(--on-d2); font: 400 13px var(--sans); }
-.term-b { padding: 14px 18px 18px; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, #000 86%, transparent); mask-image: linear-gradient(90deg, #000 86%, transparent); }
+.term-b { padding: 14px 18px 18px; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
 .term-b div { white-space: pre; }
 .term-b .hd2 { color: #fff; font-weight: 500; }
 .term-b em { color: var(--accent-l); font-style: normal; }
@@ -248,7 +248,7 @@
 
 /* Docs */
 .doc { background: var(--bg); color: var(--fg); }
-.doc-grid { display: flex; flex-wrap: wrap; align-items: stretch; }
+.doc-grid { display: flex; flex-wrap: wrap; align-items: stretch; width: 100%; max-width: var(--page-max); margin: 0 auto; }
 .side { flex: 0 0 288px; padding: 16px 12px 40px; border-right: 1px solid var(--rule); font-size: 14px; line-height: 20px; }
 .main { flex: 999 1 560px; min-width: 0; display: flex; flex-wrap: wrap; align-items: flex-start; }
 .art { flex: 999 1 560px; min-width: 0; padding: 28px clamp(20px, 4vw, 56px) 72px; }
@@ -379,7 +379,7 @@
 
 
 /* The page */
-:root { --hd: 64px; }
+:root { --hd: 64px; --page-max: 1920px; }
 html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; scroll-padding-top: calc(var(--hd) + 16px); }
 body { margin: 0; background: var(--bg); color: var(--fg); }
 body.home { background: #000; color: #fff; }
@@ -640,7 +640,7 @@ body.home .ipanel .copy { box-shadow: 0 0 0 12px var(--panel); }
 .hero-in, .why { position: relative; }
 
 /* Not found */
-.lost { display: grid; place-items: center; flex: 1; min-height: 640px; padding: 48px 24px; background: #000 url(../img/hero.webp) center top / 2400px auto no-repeat; color: #fff; }
+.lost { display: grid; place-items: center; flex: 1; min-height: 640px; padding: 48px 24px; background: #000 url(../img/hero.webp) center top / 2800px auto no-repeat; color: #fff; }
 .lost-in { width: 100%; max-width: 560px; padding: 32px; border-radius: 16px; background: rgb(14 16 48 / .72); -webkit-backdrop-filter: blur(22px); backdrop-filter: blur(22px); box-shadow: inset 0 0 0 1px rgb(255 255 255 / .08); }
 .lost h1 { margin: 0; font-size: 72px; line-height: 80px; font-weight: 600; letter-spacing: -.02em; }
 .lost p { margin: 6px 0 20px; color: #d4d7ee; font-size: 17px; line-height: 27px; }
@@ -677,6 +677,16 @@ html:has(dialog[open]) { overflow: hidden; }
 .toast[hidden] { display: none; }
 
 /* The print of a page is its words */
+/* The art keeps its size on big screens. Once the whole mark fits across, it also
+   moves down so its horns clear the top of the hero. */
+@media (min-width: 2560px) {
+  .hero, .lost { background-position: center 125px; }
+}
+/* Past this width the band's art stays beside the copy, not at the screen edge. */
+@media (min-width: 1800px) {
+  .band { background-position: calc(50% + 190px) center; }
+}
+
 @media print {
   .hd, .side, .toc, .toc-m, .ft, .pn, .meta a, .cb-copy, .filter, .ann { display: none !important; }
   .tabbed-block { display: block !important; }
@@ -713,7 +723,7 @@ html:has(dialog[open]) { overflow: hidden; }
   .out { border-left: 0; border-top: 1px solid var(--rule-d); }
   .duo { grid-template-columns: minmax(0, 1fr); gap: 32px; }
   .vcards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .band { background-position: right -900px center; }
+  .band { background-position: right -1280px center; }
 }
 @media (max-width: 960px) {
   :root { --hd: 56px; }
@@ -758,7 +768,7 @@ html:has(dialog[open]) { overflow: hidden; }
   .hd { padding: 0 8px 0 16px; }
   .brand img { height: 26px; }
   .brand { font-size: 19px; }
-  .hero { background: #000 url(../img/hero-phone.webp) -290px 0 / 800px auto no-repeat; }
+  .hero { background: #000 url(../img/hero-phone.webp) -290px 0 / 1200px auto no-repeat; }
   .hero-in { padding: 228px 16px 28px; gap: 0; }
   .h-name { font-size: 96px; }
   .h-full { margin-top: 4px; font-size: 16px; line-height: 24px; }
