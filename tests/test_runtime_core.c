@@ -4972,6 +4972,7 @@ static int test_active_io_tracking_counter_saturation_rolls_back(void) {
 typedef struct deferred_fatal_wait_state {
     llam_channel_t *wait_channel;
     llam_channel_t *trigger_channel;
+    uint64_t waiter_start_delay_ns;
     _Atomic(llam_task_t *) raw_waiter;
     atomic_uint helper_failed;
     atomic_uint fallback_stop;
@@ -4981,6 +4982,11 @@ static void deferred_fatal_parked_task(void *opaque) {
     deferred_fatal_wait_state_t *state = opaque;
     void *value = NULL;
 
+    if (state->waiter_start_delay_ns != 0U &&
+        llam_sleep_ns(state->waiter_start_delay_ns) != 0) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+        return;
+    }
     atomic_store_explicit(&state->raw_waiter, g_llam_tls_task, memory_order_release);
     if (llam_channel_recv_result(state->wait_channel, &value) == 0 || errno != ECANCELED) {
         atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
@@ -4991,9 +4997,11 @@ static void deferred_fatal_trigger_task(void *opaque) {
     deferred_fatal_wait_state_t *state = opaque;
     llam_task_t *waiter = NULL;
     void *value = NULL;
-    unsigned i;
+    uint64_t deadline_ns = llam_now_ns() + 5000000000ULL;
 
-    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+    /* A fast yielding G can exhaust an iteration budget before its peer gets
+     * native CPU time. Park between probes and bound elapsed setup time. */
+    for (;;) {
         waiter = atomic_load_explicit(&state->raw_waiter, memory_order_acquire);
         if (waiter != NULL &&
             atomic_load_explicit(&waiter->state, memory_order_acquire) ==
@@ -5001,11 +5009,10 @@ static void deferred_fatal_trigger_task(void *opaque) {
             atomic_load_explicit(&waiter->active_wait_node, memory_order_acquire) != NULL) {
             break;
         }
-        (void)llam_yield();
-    }
-    if (waiter == NULL || i == WAIT_RESOLVER_TEST_SPINS) {
-        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
-        return;
+        if (llam_now_ns() >= deadline_ns || llam_sleep_ns(100000ULL) != 0) {
+            atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+            return;
+        }
     }
 
     atomic_store_explicit(&g_llam_tls_task->wait_generation,
@@ -5025,24 +5032,24 @@ static void deferred_fatal_trigger_task(void *opaque) {
 static void *deferred_fatal_monitor_main(void *opaque) {
     deferred_fatal_wait_state_t *state = opaque;
     llam_runtime_t *rt = llam_runtime_default_storage();
-    unsigned i;
+    uint64_t deadline_ns = llam_now_ns() + 5000000000ULL;
 
-    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
-        if (atomic_load_explicit(&rt->fatal_errno, memory_order_acquire) == EOVERFLOW) {
-            break;
-        }
+    while (atomic_load_explicit(&rt->fatal_errno, memory_order_acquire) != EOVERFLOW &&
+           llam_now_ns() < deadline_ns) {
         test_host_thread_yield();
     }
-    if (i == WAIT_RESOLVER_TEST_SPINS) {
+    if (atomic_load_explicit(&rt->fatal_errno, memory_order_acquire) != EOVERFLOW) {
         atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
         llam_request_stop(rt);
         return NULL;
     }
-    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
-        if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
-            return NULL;
-        }
+    deadline_ns = llam_now_ns() + 5000000000ULL;
+    while (!atomic_load_explicit(&rt->stop_requested, memory_order_acquire) &&
+           llam_now_ns() < deadline_ns) {
         test_host_thread_yield();
+    }
+    if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
+        return NULL;
     }
 
     /* Bound a regression: the test must never leave its scheduler hung. */
@@ -5051,7 +5058,7 @@ static void *deferred_fatal_monitor_main(void *opaque) {
     return NULL;
 }
 
-static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
+static int check_deferred_fatal_parked_wait(uint64_t waiter_start_delay_ns) {
     deferred_fatal_wait_state_t state;
     llam_runtime_t *rt;
     llam_task_t *waiter;
@@ -5062,6 +5069,7 @@ static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
     int result = 0;
 
     memset(&state, 0, sizeof(state));
+    state.waiter_start_delay_ns = waiter_start_delay_ns;
     atomic_init(&state.raw_waiter, NULL);
     atomic_init(&state.helper_failed, 0U);
     atomic_init(&state.fallback_stop, 0U);
@@ -5101,6 +5109,17 @@ static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
         atomic_load_explicit(&rt->live_tasks, memory_order_acquire) != 0U) {
         result = 1;
     }
+    if (result != 0) {
+        fprintf(stderr,
+                "[test_runtime_core] deferred fatal state: run=%d errno=%d helper=%u "
+                "fallback=%u live=%u fatal=%d pending=%u\n",
+                run_rc, run_errno,
+                atomic_load_explicit(&state.helper_failed, memory_order_acquire),
+                atomic_load_explicit(&state.fallback_stop, memory_order_acquire),
+                atomic_load_explicit(&rt->live_tasks, memory_order_acquire),
+                atomic_load_explicit(&rt->fatal_errno, memory_order_acquire),
+                atomic_load_explicit(&rt->deferred_fatal_pending, memory_order_acquire));
+    }
     /* The fatal runtime is terminal to public calls; clear only to reclaim test handles. */
     atomic_store_explicit(&rt->fatal_errno, 0, memory_order_release);
     {
@@ -5122,6 +5141,13 @@ static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
     return result != 0
                ? test_fail_errno("deferred fatal did not stop and drain a parked wait")
                : 0;
+}
+
+static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
+    if (check_deferred_fatal_parked_wait(0U) != 0) {
+        return 1;
+    }
+    return check_deferred_fatal_parked_wait(100000000ULL);
 }
 
 typedef struct prestopped_deferred_fatal_state {
