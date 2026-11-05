@@ -76,7 +76,8 @@
 ### Fixed
 
 * honor the selected Visual Studio generator in Windows comparison builds and
-  measure Tokio's expired select with one nonblocking poll rather than timer ticks.
+  measure Tokio's expired select with one nonblocking poll rather than timer ticks,
+  retaining the selection scan after earlier work exhausts its cooperative budget.
 * reuse immutable lexical facts by source content in the native-domain audit,
   avoiding repeated full parsing and CI timeouts while rechecking current source,
   public headers and reviewed contracts on every audit.

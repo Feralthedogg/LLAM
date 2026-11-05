@@ -209,6 +209,7 @@ Channel select has three focused benchmark cases:
 The timeout case performs one nonblocking selection scan. Tokio polls its
 selection future once instead of starting a zero-duration timer, which would
 measure timer ticks and scheduler delays rather than an already-expired deadline.
+The scan also runs when earlier work has exhausted the task's cooperative budget.
 
 Run them directly with:
 

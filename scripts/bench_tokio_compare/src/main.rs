@@ -254,6 +254,13 @@ async fn run_select_park_wake(rounds: u32, ops_per_round: u32) -> Report {
     }
 }
 
+async fn poll_once_unconstrained<F: Future>(future: F) -> Poll<F::Output> {
+    // A previous case's exhausted budget must not skip the selection scan.
+    let future = tokio::task::unconstrained(future);
+    tokio::pin!(future);
+    poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
+}
+
 async fn run_select_timeout(rounds: u32, ops_per_round: u32) -> Report {
     let mut samples = Vec::with_capacity(rounds as usize);
     for _ in 0..rounds {
@@ -271,11 +278,11 @@ async fn run_select_timeout(rounds: u32, ops_per_round: u32) -> Report {
                     }
                 }
             };
-            tokio::pin!(selection);
             // An expired deadline is one nonblocking scan, not a timer tick.
-            let ready =
-                poll_fn(|context| Poll::Ready(selection.as_mut().poll(context).is_ready())).await;
-            assert!(!ready, "select timeout unexpectedly completed");
+            assert!(
+                poll_once_unconstrained(selection).await.is_pending(),
+                "select timeout unexpectedly completed"
+            );
         }
         samples.push(start.elapsed());
     }
@@ -527,6 +534,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expired_select_polls_both_branches_after_budget_exhaustion() {
+        use std::cell::Cell;
+
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        let polls = Cell::new(0);
+        let pending = || {
+            poll_fn(|_| {
+                polls.set(polls.get() + 1);
+                Poll::<()>::Pending
+            })
+        };
+        let selection = async {
+            tokio::select! {
+                _ = pending() => panic!("first branch unexpectedly completed"),
+                _ = pending() => panic!("second branch unexpectedly completed"),
+            }
+        };
+        assert!(poll_once_unconstrained(selection).await.is_pending());
+        assert_eq!(
+            polls.get(),
+            2,
+            "an expired select must inspect both branches"
+        );
+    }
 
     #[tokio::test]
     async fn expired_select_does_not_wait_for_timer_ticks() {
