@@ -47,31 +47,6 @@ static inline int llam_signal_restore(ucontext_t *frame, const llam_async_signal
     (void)low; (void)high;
     return llam_linux_arm64_async_restore(frame, machine);
 }
-#elif defined(__FreeBSD__) && LLAM_ARCH_X86_64
-#include "async_context_freebsd_x86_64.h"
-typedef llam_freebsd_x86_async_machine_t llam_async_signal_machine_t;
-#define LLAM_ASYNC_SIGNAL_MASK_WORDS 2U
-#define LLAM_ASYNC_SIGNAL_SENDER_CODE SI_LWP
-#define llam_signal_save_gate llam_freebsd_x86_async_save_gate
-#define llam_signal_gate_begin llam_freebsd_x86_async_gate_begin
-#define llam_signal_gate_end llam_freebsd_x86_async_gate_end
-_Static_assert(sizeof(sigset_t) == 16U, "FreeBSD native signal mask must retain all 128 bits");
-static inline uintptr_t llam_signal_frame_pc(const ucontext_t *frame) { return frame->uc_mcontext.mc_rip; }
-static inline uintptr_t llam_signal_frame_sp(const ucontext_t *frame) { return frame->uc_mcontext.mc_rsp; }
-static inline uint64_t llam_signal_frame_flags(const ucontext_t *frame) { return frame->uc_mcontext.mc_rflags; }
-static inline uint64_t llam_signal_machine_flags(const llam_async_signal_machine_t *machine) { return machine->flags; }
-static inline int llam_signal_read(const ucontext_t *frame, int error, uintptr_t low, uintptr_t high,
-                                    llam_async_signal_machine_t *machine) {
-    return llam_freebsd_x86_async_read(frame, error, low, high, machine);
-}
-static inline int llam_signal_redirect(ucontext_t *frame, const llam_ctx_t *scheduler,
-                                        const sigset_t *mask, uintptr_t low, uintptr_t high) {
-    return llam_freebsd_x86_async_redirect(frame, scheduler, mask, low, high);
-}
-static inline int llam_signal_restore(ucontext_t *frame, const llam_async_signal_machine_t *machine,
-                                       uintptr_t low, uintptr_t high) {
-    return llam_freebsd_x86_async_restore(frame, machine, low, high);
-}
 #else
 #error "No qualified signal-native transport for this target"
 #endif

@@ -213,7 +213,7 @@ unsigned declaredEffect(const Function &F,
     }
     const Triple &T = F.getParent()->getTargetTriple();
     if (llam::matchesContract(F, "p") &&
-        ((F.getName() == "__error" && (T.isOSDarwin() || T.isOSFreeBSD())) ||
+        ((F.getName() == "__error" && T.isOSDarwin()) ||
          (F.getName() == "__errno_location" && T.isOSLinux()) ||
          (F.getName() == "_errno" && T.isOSWindows()))) return LLAM_LLPM2_EFFECT_NATIVE_AFFINE;
     return LLAM_LLPM2_EFFECT_UNKNOWN;
@@ -335,6 +335,7 @@ unsigned localEffects(Function &F,
 class ManagedPass : public PassInfoMixin<ManagedPass> {
 public:
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
+        llam::rejectRetiredBSDTarget(M.getTargetTriple());
         const bool Required = std::getenv("LLAM_MANAGED_REQUIRED") != nullptr;
         lowerManagedTargetMarkers(M);
         lowerFiniteIndirectCalls(M);

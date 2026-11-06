@@ -128,6 +128,25 @@ class ManagedCompilerTests(unittest.TestCase):
         self.assertIn("unqualified", result.stderr)
         self.assertFalse(output.exists())
 
+    def test_retired_bsd_targets_rejected_without_public_headers(self) -> None:
+        source = self.work / "retired-target.c"
+        source.write_text("long entry(long n){return n+1;}\n")
+        for system in ("freebsd14.0", "openbsd7.6", "netbsd10.0", "dragonfly6.4"):
+            with self.subTest(system=system):
+                triple = "x86_64-unknown-" + system
+                output = self.work / (system + ".o")
+                result = self.driver("--target=" + triple, "-c", str(source), "-o", str(output))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("BSD support ended in LLAM 3.0.0", result.stderr)
+                self.assertFalse(output.exists())
+                result = subprocess.run(
+                    [str(self.llvm / "clang"), "--target=" + triple, "-O2", "-fno-crash-diagnostics",
+                     "-fpass-plugin=" + str(self.plugin), "-c", str(source), "-o", str(output)],
+                    env=self.env, capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("BSD support ended in LLAM 3.0.0", result.stderr)
+                self.assertFalse(output.exists())
+
     def test_auto_keeps_unknown_code_legacy_without_safe_ranges(self) -> None:
         path = self.work / "legacy.c"
         path.write_text("extern long foreign(long);long entry(long n){return foreign(n);}\n")

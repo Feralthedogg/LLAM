@@ -247,6 +247,7 @@ public:
         Function &F = MF.getFunction();
         if (!F.hasFnAttribute("llam.managed.class")) return false;
         Triple T(F.getParent()->getTargetTriple());
+        llam::rejectRetiredBSDTarget(T);
         bool Arm = T.getArch() == Triple::aarch64 || T.getArch() == Triple::aarch64_32;
         if ((!Arm && T.getArch() != Triple::x86_64) || T.getArch() == Triple::aarch64_32) {
             report_fatal_error("LLAM managed machine profile requires 64-bit AArch64 or x86-64");

@@ -2312,7 +2312,7 @@ typedef struct runtime_env_snapshot {
 static void test_host_thread_yield(void) {
     /*
      * These race tests use unmanaged pthreads.  A pure busy spin can starve
-     * the final participant on small BSD VMs before the LLAM race is reached.
+     * the final participant on constrained hosts before the LLAM race is reached.
      */
     usleep(100U);
 }
@@ -3486,11 +3486,11 @@ static void run_hold_task(void *arg) {
     /*
      * Keep the first scheduler driver alive until the contender has actually
      * lost the run-token race.  Counting "about to call llam_run" is not
-     * enough on slower BSD schedulers: the winner can drain before the second
+     * enough: the winner can drain before the second
      * host thread enters llam_run(), producing two sequential successes instead
      * of a true concurrent-run failure.
      *
-     * Use a short timer sleep instead of a pure yield spin.  DragonFlyBSD can
+     * Use a short timer sleep instead of a pure yield spin. A spin can
      * otherwise let the watchdog sample a synthetic test-only state where a
      * live task is repeatedly yielding but no external wake source is visible,
      * causing an EDEADLK false positive before the losing llam_run() returns.
@@ -3916,7 +3916,7 @@ static int test_concurrent_run_contract(void) {
      * successful callers would execute the same shard state at the same time.
      *
      * Keep one initialized runtime across all rounds. This isolates the run
-     * token race from rapid backend thread/kqueue teardown churn on BSD VMs,
+     * token race from rapid backend thread/kqueue teardown churn,
      * which is covered separately by the lifecycle race tests above.
      */
     llam_runtime_opts_t opts;

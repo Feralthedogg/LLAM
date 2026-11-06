@@ -128,7 +128,7 @@ typedef struct llam_cpu_set {
 
 #ifndef MAP_ANONYMOUS
 #ifdef MAP_ANON
-/** @brief Darwin/BSD compatibility alias for anonymous mmap. */
+/** @brief Compatibility alias for Unix SDKs that expose only MAP_ANON. */
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 #endif

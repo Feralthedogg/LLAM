@@ -1,6 +1,6 @@
 /**
  * @file src/io/darwin/watch/darwin_state.c
- * @brief Darwin/BSD kqueue watch state queues and wait-list ownership helpers.
+ * @brief Darwin kqueue watch state queues and wait-list ownership helpers.
  *
  * @details
  * Kqueue watch state mirrors the Linux multishot watch model but uses

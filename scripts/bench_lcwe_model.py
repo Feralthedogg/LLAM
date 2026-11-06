@@ -631,7 +631,7 @@ def write_markdown(
             "- real completion-driven I/O and timer wakeups;",
             "- balanced-mode p99 latency degradation at or below 10%;",
             "- low-load and mixed-site throughput regression at or below 5%;",
-            "- Linux, Darwin/BSD, and Windows correctness;",
+            "- Linux, macOS, and Windows correctness;",
             "- existing stackful benchmark geometric-mean regression at or "
             "below 3%.",
             "",

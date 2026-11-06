@@ -29,8 +29,7 @@
 #define LLAM_NATIVE_DOMAIN_RESERVED UINT64_MAX
 
 #if LLAM_PLATFORM_WINDOWS || \
-    ((defined(__aarch64__) || defined(__x86_64__)) && (defined(__linux__) || defined(__APPLE__))) || \
-    (defined(__x86_64__) && (defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)))
+    ((defined(__aarch64__) || defined(__x86_64__)) && (defined(__linux__) || defined(__APPLE__)))
 #define LLAM_NATIVE_DOMAIN_AVAILABLE 1
 #else
 #define LLAM_NATIVE_DOMAIN_AVAILABLE 0
@@ -80,21 +79,6 @@ static uint64_t llam_native_domain_id(void) {
     number = UINT64_C(0x2000000) | SYS_thread_selfid;
 #elif defined(__linux__)
     number = SYS_gettid;
-#elif defined(__FreeBSD__)
-    long native_id = 0;
-    uintptr_t argument = (uintptr_t)&native_id;
-    number = SYS_thr_self;
-    /* FreeBSD's fast syscall return zeros r8/r9/r10. Model the complete
-     * caller-saved set so inlined guards cannot retain M/slot pointers there. */
-    __asm__ volatile("syscall" : "=a"(result), "+D"(argument) : "a"(number)
-                     : "rcx", "r11", "rsi", "rdx", "r8", "r9", "r10", "memory", "cc");
-    return result == 0U && native_id > 0 ? (uint64_t)native_id : 0U;
-#elif defined(__NetBSD__)
-    number = SYS__lwp_self;
-#elif defined(__OpenBSD__)
-    number = SYS_getthrid;
-#elif defined(__DragonFly__)
-    number = SYS_lwp_gettid;
 #else
     return 0U;
 #endif

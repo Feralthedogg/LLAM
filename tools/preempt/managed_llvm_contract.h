@@ -23,6 +23,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -30,6 +31,18 @@
 #include <string>
 
 namespace llam {
+inline void rejectRetiredBSDTarget(const llvm::Triple &Target) {
+    switch (Target.getOS()) {
+    case llvm::Triple::FreeBSD:
+    case llvm::Triple::OpenBSD:
+    case llvm::Triple::NetBSD:
+    case llvm::Triple::DragonFly:
+        llvm::report_fatal_error("BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling.");
+    default:
+        return;
+    }
+}
+
 inline constexpr llvm::Attribute::AttrKind ManagedABIAttributes[] = {
     llvm::Attribute::ByVal, llvm::Attribute::ByRef, llvm::Attribute::StructRet,
     llvm::Attribute::InAlloca, llvm::Attribute::Preallocated, llvm::Attribute::InReg,

@@ -29,7 +29,43 @@ BSD = ("FreeBSD", "OpenBSD", "NetBSD", "DragonFly")
 MESSAGE = "BSD support ended in LLAM 3.0.0"
 
 
+def retired_distribution_commands(system: str, work: Path) -> list[list[str]]:
+    target = ("dragonflybsd" if system == "DragonFly" else system.lower()) + "-x86_64"
+    commands = [
+        ["make", "-s", "-n", f"UNAME_S={system}", "all"],
+        ["sh", "scripts/install.sh", "--dry-run", "--prefix", str(work / "prefix")],
+        ["sh", "scripts/package_release.sh", target],
+        ["sh", "scripts/generate_sdk_metadata.sh", str(work / "sdk"), target],
+    ]
+    powershell = shutil.which("pwsh")
+    if powershell:
+        commands.extend([
+            [powershell, "-NoProfile", "-File", "scripts/install.ps1", "-Target", target,
+             "-Prefix", str(work / "prefix"), "-DryRun"],
+            [powershell, "-NoProfile", "-File", "scripts/package_release_windows.ps1",
+             "-Target", target, "-BuildDir", str(work / "sdk")],
+        ])
+    if shutil.which("cmake"):
+        commands.append(["cmake", "-S", str(ROOT), "-B", str(work / system),
+                         f"-DCMAKE_SYSTEM_NAME={system}"])
+    return commands
+
+
 class PlatformSupportTests(unittest.TestCase):
+    def assert_retired_distribution(self, system: str, work: Path, fake_bin: Path) -> None:
+        uname = fake_bin / "uname"
+        uname.write_text(f'#!/bin/sh\ncase "$1" in -s) echo {system} ;; *) echo x86_64 ;; esac\n')
+        uname.chmod(0o700)
+        env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+                   PYTHONDONTWRITEBYTECODE="1")
+        for command in retired_distribution_commands(system, work):
+            result = subprocess.run(command, cwd=ROOT, env=env, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            self.assertNotEqual(result.returncode, 0, command)
+            self.assertIn(MESSAGE, result.stdout, (command, result.stdout))
+        self.assertFalse((work / "prefix").exists())
+        self.assertFalse((work / "sdk").exists())
+
     def test_retired_build_and_distribution_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".llam-retired-platform-", dir=ROOT) as directory:
             work = Path(directory)
@@ -37,44 +73,19 @@ class PlatformSupportTests(unittest.TestCase):
             fake_bin.mkdir()
             for system in BSD:
                 with self.subTest(system=system):
-                    uname = fake_bin / "uname"
-                    uname.write_text(f'#!/bin/sh\ncase "$1" in -s) echo {system} ;; *) echo x86_64 ;; esac\n')
-                    uname.chmod(0o700)
-                    env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
-                               PYTHONDONTWRITEBYTECODE="1")
-                    target = ("dragonflybsd" if system == "DragonFly" else system.lower()) + "-x86_64"
-                    commands = [
-                        ["make", "-s", "-n", f"UNAME_S={system}", "all"],
-                        ["sh", "scripts/install.sh", "--dry-run", "--prefix", str(work / "prefix")],
-                        ["sh", "scripts/package_release.sh", target],
-                        ["sh", "scripts/generate_sdk_metadata.sh", str(work / "sdk"), target],
-                    ]
-                    powershell = shutil.which("pwsh")
-                    if powershell:
-                        commands.extend([
-                            [powershell, "-NoProfile", "-File", "scripts/install.ps1", "-Target", target,
-                             "-Prefix", str(work / "prefix"), "-DryRun"],
-                            [powershell, "-NoProfile", "-File", "scripts/package_release_windows.ps1",
-                             "-Target", target, "-BuildDir", str(work / "sdk")],
-                        ])
-                    if shutil.which("cmake"):
-                        commands.append(["cmake", "-S", str(ROOT), "-B", str(work / system),
-                                         f"-DCMAKE_SYSTEM_NAME={system}"])
-                    for command in commands:
-                        result = subprocess.run(command, cwd=ROOT, env=env, text=True,
-                                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
-                        self.assertNotEqual(result.returncode, 0, command)
-                        self.assertIn(MESSAGE, result.stdout, (command, result.stdout))
-                    self.assertFalse((work / "prefix").exists())
-                    self.assertFalse((work / "sdk").exists())
-            compiler = shutil.which("clang") or shutil.which("cc")
-            if compiler:
-                for macro in ("__FreeBSD__", "__OpenBSD__", "__NetBSD__", "__DragonFly__"):
-                    result = subprocess.run([compiler, "-E", "-x", "c", "-Iinclude", f"-D{macro}=1", "-"],
-                                            input='#include "llam/platform.h"\n', cwd=ROOT, text=True,
-                                            capture_output=True, timeout=15)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(MESSAGE, result.stderr)
+                    self.assert_retired_distribution(system, work, fake_bin)
+
+    def test_retired_public_headers(self) -> None:
+        compiler = shutil.which("clang") or shutil.which("cc")
+        if compiler is None:
+            self.skipTest("C preprocessor unavailable")
+        for macro in ("__FreeBSD__", "__OpenBSD__", "__NetBSD__", "__DragonFly__"):
+            with self.subTest(macro=macro):
+                result = subprocess.run([compiler, "-E", "-x", "c", "-Iinclude", f"-D{macro}=1", "-"],
+                                        input='#include "llam/platform.h"\n', cwd=ROOT, text=True,
+                                        capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(MESSAGE, result.stderr)
 
 
 if __name__ == "__main__":

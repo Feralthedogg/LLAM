@@ -3,7 +3,7 @@
  * @brief Portable ucontext-based fiber context fallback for unsupported assembly targets.
  *
  * @details
- * Linux, Darwin, and BSD x86-64 builds use native assembly context switching.
+ * Linux and Darwin x86-64 builds use native assembly context switching.
  * AArch64/arm64 builds also use native assembly on the supported Unix-like
  * targets. Other supported targets fall back to @c ucontext so the runtime
  * remains buildable and testable without architecture-specific assembly.
@@ -28,7 +28,7 @@
 
 #include "runtime_internal.h"
 
-#if !(((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
+#if !(((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN) && LLAM_ARCH_X86_64) || \
       (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)) && \
     !LLAM_ARCH_AARCH64
 

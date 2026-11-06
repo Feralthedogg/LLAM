@@ -1,6 +1,6 @@
 /**
  * @file src/io/darwin/watch/darwin_worker.c
- * @brief Darwin/BSD I/O worker loop and kqueue polling lifecycle.
+ * @brief Darwin I/O worker loop and kqueue polling lifecycle.
  *
  * @details
  * Each kqueue I/O node owns a worker. The worker applies queued control
@@ -765,12 +765,9 @@ void *llam_io_worker_main(void *arg) {
         } while (count < 0 && errno == EINTR);
         if (count < 0) {
             /*
-             * BSD kqueue implementations can transiently report no kernel
-             * resources while LLAM rapidly tears down and recreates runtime
-             * workers in lifecycle race tests. Treat that like an empty poll
-             * iteration instead of poisoning the runtime with a fatal error;
-             * back off briefly so a persistent kernel pressure condition does
-             * not turn the I/O worker into a spin loop.
+             * Treat transient kernel resource pressure like an empty poll
+             * iteration. Back off briefly so persistent pressure does not turn
+             * the I/O worker into a spin loop.
              */
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 struct timespec retry_ts;

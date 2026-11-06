@@ -39,6 +39,12 @@ typedef struct abi_prefix {
 #define ASSERT_EXPR_TYPE(expr, type, message) \
     _Static_assert(_Generic((expr), type: 1, default: 0), message)
 
+_Static_assert(LLAM_PLATFORM_BSD == 0, "retired BSD macro must remain inert");
+_Static_assert(LLAM_PLATFORM_FREEBSD == 0, "retired FreeBSD macro must remain inert");
+_Static_assert(LLAM_PLATFORM_OPENBSD == 0, "retired OpenBSD macro must remain inert");
+_Static_assert(LLAM_PLATFORM_NETBSD == 0, "retired NetBSD macro must remain inert");
+_Static_assert(LLAM_PLATFORM_DRAGONFLY == 0, "retired DragonFly macro must remain inert");
+
 ASSERT_FIELD_U32(llam_spawn_opts_t, task_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, stack_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, flags);

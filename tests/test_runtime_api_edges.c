@@ -310,7 +310,7 @@ static void cancel_destroy_race_wait_start(cancel_destroy_race_state_t *state) {
     while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
         /*
          * These are host pthreads, not managed LLAM tasks. Yield to the host
-         * scheduler so slow BSD VMs do not spend the race budget starving the
+         * scheduler so constrained hosts do not spend the race budget starving the
          * peer thread before the actual cancel/destroy interleaving begins.
          */
         host_thread_yield();
@@ -3770,7 +3770,7 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     /*
      * This edge test intentionally stalls in pthread_mutex_lock() while a host
      * thread corrupts the mutex owner.  Disable watchdog preemption for the
-     * task so SIGUSR1 does not mask the owner-recheck assertion on BSD.
+     * task so a watchdog signal does not mask the owner-recheck assertion.
      */
     spawn_opts.flags |= LLAM_SPAWN_F_NO_PREEMPT;
     if (init_runtime() != 0) {

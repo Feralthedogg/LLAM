@@ -43,7 +43,8 @@ REVIEWED = {('src/io/api/wait_options.c', 'llam_wait_opts_init'): '137a70a2ca1bd
  ('src/core/base/abi.c', 'llam_spawn_opts_init'): '399025c8dbc12dccfb306d89adf0b21b254d1c7ddd2b35d6663bd19b7c4d60f8',
  ('src/core/time/time.c', 'llam_now_ns'): 'acf08755e53d41c6119691005193d5c5fd27ca2b51f5ec3d2a48d01115c3506d',
  ('src/io/api/owned.c', 'llam_io_buffer_opts_init'): 'bb6e6dd0a912558c37d1d68f0ef236761f4ccb3fe6696ca9ef5c4890202f3ac4',
- ('src/core/preempt/native_domain.c', 'llam_native_domain_id'): 'ff2df36a6fb32fe29b33e18c7f69b7800480e8f41dd656258a412bad9efb8911',
+ # BSD-only syscall branches removed; supported native syscalls are unchanged.
+ ('src/core/preempt/native_domain.c', 'llam_native_domain_id'): 'cf1c8dc89f8f746f47b4eff98fee14ae653f34defc04866a0a48e795a5a49693',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_hash'): '04e2c581b3ea88a67b7473eff9cdfb20d2a43f3d81b79823fbfe2c3882338195',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_lookup'): '6e195846dfe7e4c089553f032abad2632da4198cffb75007e8574d812e2142b3',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_guarded_worker'): '9161bd21fcae13848831f162f3c18c28625053ae3e93d3543f59a697241725bf',

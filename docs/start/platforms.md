@@ -86,10 +86,14 @@ diagnostics. Ordinary and ASan/UBSan builds retain native asynchronous tests.
 
 FreeBSD, OpenBSD, NetBSD and DragonFly BSD are unsupported from **3.0.0**.
 CMake, Make, public platform headers, the installer and release packaging reject
-these targets. BSD CI and release artifacts have been retired. The macOS kqueue
-backend remains supported.
+these targets. BSD implementation code, native context fixtures, CI and release
+artifacts have been retired. The macOS kqueue backend and its SDK availability
+checks remain supported. Legacy public BSD feature macros are constant `0` for
+source compatibility; they cannot enable a retired backend. The managed producer
+and LLVM passes also reject BSD target triples, including header-free task inputs.
 
 Use versioned 2.x sources, headers, documentation and installers for an existing
 BSD deployment; the 3.0 installer does not install legacy BSD archives. This does
-not promise continued 2.x maintenance. Earlier BSD adapters, experiment reports
-and measurement artifacts remain historical material and do not qualify 3.0.
+not promise continued 2.x maintenance. Earlier implementations remain available in
+versioned source history. Historical experiment reports and measurement artifacts
+do not qualify 3.0.

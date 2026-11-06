@@ -1,6 +1,6 @@
 /**
  * @file src/io/darwin/runtime_io_watch_darwin_internal.h
- * @brief Darwin/BSD kqueue I/O watch backend private declarations.
+ * @brief Darwin kqueue I/O watch backend private declarations.
  *
  * @details
  * The kqueue backend uses kevents for request readiness and multishot-style
@@ -36,8 +36,8 @@
 #define LLAM_DARWIN_KEVENT_BATCH 32U
 
 /*
- * BSD kqueue variants are close to Darwin but not identical.  Keep portability
- * gates here so worker/control files can stay focused on watch ownership logic.
+ * Retain SDK availability checks for supported macOS deployment targets.
+ * Worker/control files share these watch and optional Mach wake capabilities.
  */
 #ifdef EV_DISPATCH
 #define LLAM_KQUEUE_WATCH_ONESHOT_FLAGS EV_DISPATCH

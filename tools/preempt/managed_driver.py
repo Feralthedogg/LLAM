@@ -132,6 +132,25 @@ def run(command: list[str], env: dict[str, str]) -> None:
     subprocess.run(command, env=env, check=True)
 
 
+def target_triple(clang: Path, link_flags: list[str]) -> str:
+    target_flags = []
+    i = 0
+    while i < len(link_flags):
+        arg = link_flags[i]
+        if arg in ("-target", "--target", "-arch"):
+            target_flags.extend(link_flags[i:i + 2])
+            i += 1
+        elif arg.startswith("--target="):
+            target_flags.append(arg)
+        i += 1
+    triple = subprocess.run([str(clang), *target_flags, "-dumpmachine"], check=True, text=True,
+                            stdout=subprocess.PIPE).stdout
+    require(re.search(r"(?:^|-)(?:freebsd|openbsd|netbsd|dragonfly(?:bsd)?)(?:[0-9.]|-|$)",
+                      triple, re.IGNORECASE) is None,
+            "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling.")
+    return triple
+
+
 def compile_invocation(inv: Invocation) -> None:
     clang, llc, objdump = (inv.llvm / name for name in ("clang", "llc", "llvm-objdump"))
     for tool in (clang, llc, objdump):
@@ -142,18 +161,7 @@ def compile_invocation(inv: Invocation) -> None:
     env.pop("LLAM_MANAGED_REQUIRED", None)
     if inv.mode == "required":
         env["LLAM_MANAGED_REQUIRED"] = "1"
-    target_flags = []
-    i = 0
-    while i < len(inv.link_flags):
-        arg = inv.link_flags[i]
-        if arg in ("-target", "--target", "-arch"):
-            target_flags.extend(inv.link_flags[i:i + 2])
-            i += 1
-        elif arg.startswith("--target="):
-            target_flags.append(arg)
-        i += 1
-    triple = subprocess.run([str(clang), *target_flags, "-dumpmachine"], check=True, text=True,
-                            stdout=subprocess.PIPE).stdout
+    triple = target_triple(clang, inv.link_flags)
     if "apple" in triple and sys.platform == "darwin" and not any(
             arg in ("-isysroot", "--sysroot") or arg.startswith("--sysroot=") for arg in inv.compile_flags):
         sdk = os.environ.get("SDKROOT") or subprocess.run(

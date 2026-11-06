@@ -58,10 +58,8 @@ static bool llam_legacy_lease_compose_or_restore(
 static bool llam_scheduler_signal_stack_failure_is_fatal(int err) {
     /*
      * The alternate signal stack is a diagnostics surface for guard-page fault
-     * reports, not a correctness prerequisite for running tasks.  DragonFlyBSD
-     * can transiently report EAGAIN when tests rapidly move shard 0 across host
-     * pthreads; treating that as fatal makes the scheduler fail even though the
-     * runtime can safely continue with reduced crash diagnostics.
+     * reports, not a correctness prerequisite for running tasks. Transient
+     * EAGAIN leaves reduced crash diagnostics without preventing task execution.
      */
     return err != EAGAIN;
 }
@@ -1440,7 +1438,7 @@ void llam_scheduler_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
 
         task->last_run_ns = run_ns;
         task->total_run_ns += run_ns;
-#if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
+#if (LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
 #if defined(LLAM_ENABLE_TEST_HOOKS) && LLAM_PLATFORM_WINDOWS
         llam_task_sample_stack_rsp(task, llam_windows_async_probe_stack_rsp(task));
 #else

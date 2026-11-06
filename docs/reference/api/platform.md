@@ -13,12 +13,17 @@ asynchronous preemption opt-in.
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Portable fd/socket invalid sentinel and predicate. |
 | `LLAM_INVALID_HANDLE` / `LLAM_HANDLE_IS_INVALID` | Portable handle invalid sentinel and predicate. |
 | `LLAM_PLATFORM_WINDOWS` / `LLAM_PLATFORM_POSIX` | Major platform-family feature macros. |
-| `LLAM_PLATFORM_LINUX` / `LLAM_PLATFORM_DARWIN` / `LLAM_PLATFORM_BSD` | Platform detection macros; BSD detection now leads to a build error. |
-| `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | Legacy BSD detection macros; unsupported in 3.0.0. |
+| `LLAM_PLATFORM_LINUX` / `LLAM_PLATFORM_DARWIN` | Supported POSIX platform detection macros. |
+| `LLAM_PLATFORM_BSD` / `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | Retired feature macros retained as constant `0` for source compatibility. BSD compiler targets are rejected independently. |
 | `LLAM_PLATFORM_KQUEUE` | Non-zero on macOS targets. |
 | `LLAM_ARCH_X86_64` / `LLAM_ARCH_AARCH64` | Public architecture feature macros. |
 | `LLAM_PLATFORM_NAME` | Human-readable platform name used by diagnostics. |
 | `LLAM_API` | Public symbol visibility/import/export macro. |
+
+BSD support ended in 3.0.0. The zero-valued compatibility macros do not select a
+runtime backend, native context transport, or compiler profile. The public header
+rejects retired compiler targets before including platform system headers. Existing
+BSD applications must use versioned 2.x sources and tooling.
 
 ## Experimental Windows preemption
 

@@ -149,15 +149,13 @@ _Static_assert(offsetof(llam_ctx_t, xsave_area) == 248, "llam_ctx_t.xsave_area o
 _Static_assert(offsetof(llam_ctx_t, simd_valid) == 256, "llam_ctx_t.simd_valid offset must match asm/windows/x86_64 context switch");
 _Static_assert(offsetof(llam_ctx_t, simd_flags) == 260, "llam_ctx_t.simd_flags offset must match asm/windows/x86_64 context switch");
 _Static_assert(sizeof(llam_ctx_t) == 264, "llam_ctx_t size must match asm/windows/x86_64 context switch");
-#elif (LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64
+#elif (LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN) && LLAM_ARCH_X86_64
 /**
  * @brief x86-64 callee-saved context layout.
  *
  * The offsets below are consumed directly by
  * @c asm/linux/x86_64/linux_context_x86_64.S and
- * @c asm/darwin/x86_64/darwin_context_x86_64.S. BSD x86-64 targets intentionally use
- * the Linux-labelled SysV assembly path because the saved callee-saved register
- * set and stack ABI are the same for this fiber switch contract.
+ * @c asm/darwin/x86_64/darwin_context_x86_64.S.
  */
 typedef struct llam_ctx {
     uint64_t rsp;
