@@ -145,7 +145,7 @@ def target_triple(clang: Path, link_flags: list[str]) -> str:
         i += 1
     triple = subprocess.run([str(clang), *target_flags, "-dumpmachine"], check=True, text=True,
                             stdout=subprocess.PIPE).stdout
-    require(re.search(r"(?:^|-)(?:freebsd|openbsd|netbsd|dragonfly(?:bsd)?)(?:[0-9.]|-|$)",
+    require(re.search(r"^[^-]+-[^-]+-(?:freebsd|openbsd|netbsd|dragonfly(?:bsd)?)(?:[0-9.]|-|$)",
                       triple, re.IGNORECASE) is None,
             "BSD support ended in LLAM 3.0.0; use versioned 2.x sources/tooling.")
     return triple

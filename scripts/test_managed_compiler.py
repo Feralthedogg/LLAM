@@ -147,6 +147,14 @@ class ManagedCompilerTests(unittest.TestCase):
                 self.assertIn("BSD support ended in LLAM 3.0.0", result.stderr)
                 self.assertFalse(output.exists())
 
+    def test_bsd_vendor_name_does_not_reject_linux(self) -> None:
+        source = self.work / "bsd-vendor-linux.c"
+        source.write_text("long entry(long n){return n+1;}\n")
+        output = source.with_suffix(".o")
+        result = self.driver("--target=x86_64-freebsd-linux-gnu", "-c", str(source), "-o", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(output.exists())
+
     def test_auto_keeps_unknown_code_legacy_without_safe_ranges(self) -> None:
         path = self.work / "legacy.c"
         path.write_text("extern long foreign(long);long entry(long n){return foreign(n);}\n")
