@@ -72,6 +72,7 @@ static void result_lifetime() {
     llam::outcome<tracked> result;
     CHECK(first.take(result) == -1 && errno == EAGAIN && first && !result);
     auto future = std::move(first);
+    CHECK(first.reset() == 0); // Resetting the source must not consume the destination.
     CHECK(!first && future);
     CHECK(llam_runtime_run_handle(rt) == 0);
     CHECK(llam_scope_drain_until(owner, 0U, nullptr, 0U) == 0);
@@ -81,7 +82,9 @@ static void result_lifetime() {
     tracked *payload = nullptr;
     CHECK(result.success(payload) == 0 && payload->value == 42U);
     auto moved = std::move(result);
+    CHECK(result.reset() == 0);
     CHECK(!result && moved.kind() == LLAM_OUTCOME_OK && moved.task_id() != 0U);
+    CHECK(moved.success(payload) == 0 && payload->value == 42U && drops == 1U);
     CHECK(moved.reset() == 0 && drops == 2U);
 }
 static void failure_and_errors() {

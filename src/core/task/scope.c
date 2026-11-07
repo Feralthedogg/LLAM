@@ -16,14 +16,17 @@
  */
 #include "structured_internal.h"
 
-void llam_scope_dispose(llam_structured_object_t *object) {
-    llam_scope_t *scope = (llam_scope_t *)object;
+static void llam_scope_free(llam_scope_t *scope) {
     if (scope->cancel_token != NULL && llam_cancel_token_destroy(scope->cancel_token) != 0) abort();
     if (scope->done != NULL) {
-        llam_structured_notify(object->owner, scope->done);
+        llam_structured_notify(scope->object.owner, scope->done);
         if (llam_channel_destroy(scope->done) != 0) abort();
     }
     free(scope);
+}
+
+void llam_scope_dispose(llam_structured_object_t *object) {
+    llam_scope_free((llam_scope_t *)object);
 }
 
 static llam_scope_t *llam_scope_allocate(llam_runtime_t *owner) {
@@ -34,7 +37,7 @@ static llam_scope_t *llam_scope_allocate(llam_runtime_t *owner) {
     if (scope->cancel_token != NULL) scope->done = llam_runtime_channel_create(owner, 1U);
     if (scope->cancel_token == NULL || scope->done == NULL) {
         int error = errno;
-        llam_scope_dispose(&scope->object);
+        llam_scope_free(scope);
         errno = error;
         return NULL;
     }
@@ -61,7 +64,7 @@ int llam_runtime_scope_create_ex(llam_runtime_t *runtime, const llam_scope_opts_
         pthread_mutex_unlock(&g_llam_structured_lock);
     }
     int error = errno;
-    if (scope != NULL && result != 0) llam_scope_dispose(&scope->object);
+    if (scope != NULL && result != 0) llam_scope_free(scope);
     llam_runtime_end_public_op(owner);
     if (result != 0) errno = error;
     return result;

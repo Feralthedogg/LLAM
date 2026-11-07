@@ -16,15 +16,18 @@
  */
 #include "structured_internal.h"
 
-void llam_future_dispose(llam_structured_object_t *object) {
-    llam_future_t *future = (llam_future_t *)object;
+static void llam_future_free(llam_future_t *future) {
     if (future->done != NULL) {
-        llam_structured_notify(object->owner, future->done);
+        llam_structured_notify(future->object.owner, future->done);
         if (llam_channel_destroy(future->done) != 0) abort();
     }
     llam_structured_release(future->argument != NULL ? &future->argument->object : NULL);
     llam_structured_release(future->result != NULL ? &future->result->object : NULL);
     free(future);
+}
+
+void llam_future_dispose(llam_structured_object_t *object) {
+    llam_future_free((llam_future_t *)object);
 }
 
 llam_future_t *llam_future_prepare(llam_scope_t *scope, const llam_result_contract_t *contract) {
@@ -46,7 +49,7 @@ llam_future_t *llam_future_prepare(llam_scope_t *scope, const llam_result_contra
     pthread_mutex_unlock(&g_llam_structured_lock);
     if (result != 0) {
         int error = errno;
-        llam_future_dispose(&future->object);
+        llam_future_free(future);
         errno = error;
         return NULL;
     }
