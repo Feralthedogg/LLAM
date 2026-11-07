@@ -80,7 +80,11 @@ static void record_task_check(scope_case_t *test, bool passed, const char *expre
         atomic_fetch_add_explicit(&test->failures, 1U, memory_order_relaxed);
     }
 }
-#define task_check(test, expression) record_task_check((test), (expression), #expression, __LINE__)
+#define task_check(test, expression) do { \
+    /* Keep MSVC's C11 atomic intrinsic expansion out of the diagnostic call. */ \
+    bool check_passed = (expression); \
+    record_task_check((test), check_passed, #expression, __LINE__); \
+} while (0)
 
 static void argument_drop(void *data, void *context) {
     scope_case_t *test = context;
