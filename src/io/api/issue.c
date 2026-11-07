@@ -94,6 +94,7 @@ void llam_task_exit_internal(void) {
         abort();
     }
     rt = task->owner_runtime;
+    if (g_llam_tls_worker != NULL && g_llam_tls_worker->preempt_region_depth != 0U) _Exit(125);
     llam_task_local_cleanup_owned(task);
     llam_scoped_task_entry_returned(task);
 

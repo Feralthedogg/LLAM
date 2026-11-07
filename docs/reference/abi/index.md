@@ -7,7 +7,7 @@ implementations may rely on when loading LLAM dynamically.
 
 LLAM exposes one stable public ABI family: public symbols declared in
 `include/llam/runtime.h`, `include/llam/io.h`, `include/llam/managed.h`, and
-`include/llam/scope.h` (development ABI 2.5).
+`include/llam/scope.h` (ABI 2.5+) and `include/llam/executor.h` (development ABI 2.6).
 
 All other non-static implementation symbols are private even if a platform
 linker happens to export them. Language runtimes must bind only documented
@@ -18,9 +18,21 @@ The development tree public ABI version is (published 3.0.0 archives remain ABI 
 ```text
 LLAM_VERSION         = 3.0.0
 LLAM_ABI_VERSION_MAJOR = 2
-LLAM_ABI_VERSION_MINOR = 5
+LLAM_ABI_VERSION_MINOR = 6
 LLAM_ABI_VERSION       = (major << 16) | minor
 ```
+
+ABI 2.6 adds cancellation-shielded borrowed group drain, short nested no-preemption
+regions and shared local executors. `llam_spawn_opts_t` grows from 32 to 40 bytes
+on supported 64-bit ABIs, appending `local_executor` at offset 32. Callers with the
+old 32-byte prefix retain ordinary scheduling; an incomplete pointer tail is never
+read. Unsized `llam_spawn` and `llam_task_group_spawn` also read only that original
+32-byte prefix; appended fields require the size-aware `_ex` APIs.
+`llam_local_executor_opts_t` is 8 bytes, with zero flags and reserved fields.
+Other public layouts are unchanged. Resolve the new symbols and require minor >= 6
+before using them. See [execution controls](../api/executors.md) for thread ownership
+and [borrowed group drain](../api/tasks.md#development-borrowed-group-drain) for the
+successful-return lifetime boundary.
 
 ABI 2.5 adds owned scopes, typed value handles, independent futures and cancellation-safe
 scope drain in `<llam/scope.h>`. It preserves all existing layouts and group/result

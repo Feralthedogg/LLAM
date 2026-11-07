@@ -245,7 +245,7 @@ static size_t llam_channel_round_capacity(size_t capacity) {
     return rounded;
 }
 
-static llam_channel_t *llam_channel_create_owned(size_t capacity, llam_runtime_t *owner_runtime) {
+llam_channel_t *llam_channel_create_owned(size_t capacity, llam_runtime_t *owner_runtime) {
     if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
 
 

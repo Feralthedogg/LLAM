@@ -18,6 +18,7 @@
 #include "runtime_internal.h"
 #include "managed_image.h"
 #include "llam/scope.h"
+#include "llam/executor.h"
 #if !LLAM_PLATFORM_WINDOWS
 #include <dlfcn.h>
 #endif

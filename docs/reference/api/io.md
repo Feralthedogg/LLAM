@@ -88,3 +88,24 @@ zero-byte write is `EIO`.
 | `llam_open_async` | Open a filesystem path through the blocking path. |
 | `llam_stat_path_ex` | Fill portable file metadata into `llam_file_stat_t`. |
 | `LLAM_FILE_TYPE_*` | Portable file type values used by `llam_file_stat_t`. |
+
+## Borrowed buffer completion
+
+A byte-transfer operation returning to its caller is the boundary after which
+that request's backend, kernel and helper callback may no longer access its
+borrowed buffer. This applies to success, error, timeout and cancellation; a
+successful partial transfer still reports its confirmed byte count.
+
+A cancellation request or `close` from another task is not an operation-completion
+acknowledgement. Retain every active buffer loan until the corresponding call
+returns, or until its owning child has passed a successful group drain. Do not
+free/reuse buffers just because `llam_cancel_token_cancel`, `llam_close` or
+`llam_close_handle` returned. On Windows, cancellation must still be followed by
+terminal completion, as described in Microsoft's
+[I/O cancellation guidance](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations).
+
+`test_cavo_lifetime --io` exercises pending reads and writes, cancellation and
+close races, then immediately reuses each returned buffer while the backend
+continues to make progress. The POSIX `--io-helper` variant disables byte-operation capabilities before
+dispatch to exercise the actual blocking fallback. These tests accompany native platform verification; a test
+on one backend is not evidence for a different OS.

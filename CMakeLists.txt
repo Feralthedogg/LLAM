@@ -23,7 +23,7 @@ endif()
 project(llam VERSION 3.0.0 LANGUAGES C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 2)
-set(LLAM_ABI_VERSION_MINOR 5)
+set(LLAM_ABI_VERSION_MINOR 6)
 set(LLAM_LIBRARY_VERSION "${PROJECT_VERSION}")
 
 include(GNUInstallDirs)
@@ -188,6 +188,10 @@ set(LLAM_RUNTIME_SOURCES
     src/core/task/task_handle_registry.c
     src/core/task/task_handle_claim.c
     src/core/task/task_group.c
+    src/core/task/task_group_drain.c
+    src/core/task/local_executor.c
+    src/core/task/local_executor_binding.c
+    src/core/wait/cleanup_wait.c
     src/core/task/task_group_registry.c
     src/core/task/task_local.c
     src/core/task/structured_registry.c
@@ -860,6 +864,30 @@ target_link_libraries(test_multi_runtime_core PRIVATE llam_runtime)
 add_executable(test_api_usability tests/test_api_usability.c)
 target_link_libraries(test_api_usability PRIVATE llam_runtime)
 target_include_directories(test_api_usability PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
+
+add_executable(test_cavo_lifetime tests/test_cavo_lifetime.c tests/cavo_io_lifetime.c)
+target_link_libraries(test_cavo_lifetime PRIVATE llam_runtime_testhooks)
+target_compile_definitions(test_cavo_lifetime PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+target_include_directories(test_cavo_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
+add_test(NAME test_cavo_lifetime COMMAND test_cavo_lifetime)
+set_tests_properties(test_cavo_lifetime PROPERTIES TIMEOUT 30)
+if(NOT WIN32)
+    add_test(NAME test_cavo_io_helper COMMAND test_cavo_lifetime --io-helper)
+    set_tests_properties(test_cavo_io_helper PROPERTIES TIMEOUT 30)
+endif()
+
+add_executable(test_cavo_execution tests/test_cavo_execution.c tests/cavo_local_executor.c)
+target_link_libraries(test_cavo_execution PRIVATE llam_runtime ${CMAKE_DL_LIBS})
+target_include_directories(test_cavo_execution PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
+add_test(NAME test_cavo_execution COMMAND test_cavo_execution)
+set_tests_properties(test_cavo_execution PROPERTIES TIMEOUT 30)
+if(Python3_FOUND)
+    add_test(NAME test_cavo_region_unbalanced
+        COMMAND ${Python3_EXECUTABLE} -c
+            "import subprocess,sys; result=subprocess.run([sys.argv[1], '--unbalanced']); sys.exit(0 if result.returncode == 125 else 1)"
+            $<TARGET_FILE:test_cavo_execution>)
+    set_tests_properties(test_cavo_region_unbalanced PROPERTIES TIMEOUT 15)
+endif()
 
 add_executable(test_scope_values tests/test_scope_values.c)
 target_link_libraries(test_scope_values PRIVATE llam_runtime)
@@ -1882,6 +1910,8 @@ foreach(LLAM_TEST_TARGET
         test_api_usability
         test_scope
         test_scope_values
+        test_cavo_lifetime
+        test_cavo_execution
         test_runtime_api_edges
         test_runtime_select_edges
         test_runtime_io_dump
@@ -2166,6 +2196,35 @@ if(LLAM_MANAGED_PLUGIN_ACTIVE AND Python3_FOUND)
             set(LLAM_MANAGED_IMAGE_LINK_FLAGS -dynamiclib -Wl,-undefined,dynamic_lookup
                 -fno-register-global-dtors-with-atexit)
         endif()
+        set(LLAM_CAVO_EXECUTION_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/cavo-execution-fixture${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        add_custom_command(OUTPUT "${LLAM_CAVO_EXECUTION_FIXTURE}"
+            COMMAND ${CMAKE_COMMAND} -E env
+                "LLAM_LLVM_BIN=${LLVM_TOOLS_BINARY_DIR}"
+                "LLAM_MANAGED_PLUGIN=$<TARGET_FILE:llam_managed_pass>"
+                "PYTHONDONTWRITEBYTECODE=1"
+                ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/preempt/managed_driver.py
+                --llam-managed=required ${LLAM_MANAGED_IMAGE_TARGET_FLAGS} ${LLAM_MANAGED_IMAGE_LINK_FLAGS}
+                -I${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/managed/cavo_execution.c
+                -o "${LLAM_CAVO_EXECUTION_FIXTURE}"
+            DEPENDS llam_managed_pass tests/fixtures/managed/cavo_execution.c
+                tests/fixtures/managed/cavo_execution.h include/llam/executor.h include/llam/runtime.h
+                tools/preempt/managed_driver.py tools/preempt/managed_verify.py
+                tools/preempt/managed_runtime_contracts.def VERBATIM)
+        add_custom_target(cavo_execution_fixture DEPENDS "${LLAM_CAVO_EXECUTION_FIXTURE}")
+        add_dependencies(test_cavo_execution cavo_execution_fixture)
+        target_compile_definitions(test_cavo_execution PRIVATE
+            LLAM_CAVO_NATIVE_FIXTURE_PATH="${LLAM_CAVO_EXECUTION_FIXTURE}")
+        if(APPLE)
+            target_link_options(test_cavo_execution PRIVATE -Wl,-export_dynamic)
+        else()
+            target_link_options(test_cavo_execution PRIVATE -Wl,--export-dynamic)
+        endif()
+        add_test(NAME test_cavo_preempt_regions COMMAND test_cavo_execution --critical)
+        set_tests_properties(test_cavo_preempt_regions PROPERTIES TIMEOUT 30)
+        add_test(NAME test_cavo_local_native COMMAND test_cavo_execution --local)
+        set_tests_properties(test_cavo_local_native PROPERTIES TIMEOUT 30)
+
         foreach(LLAM_FIXTURE_KIND image affine)
             set(LLAM_FIXTURE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/managed-${LLAM_FIXTURE_KIND}-fixture${CMAKE_SHARED_LIBRARY_SUFFIX}")
             set(LLAM_FIXTURE_DEFINITIONS)

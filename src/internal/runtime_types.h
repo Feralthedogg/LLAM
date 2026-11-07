@@ -1072,6 +1072,7 @@ struct llam_task {
     bool io_scope_active;
     /* Non-NULL means the task handle is borrowed and only this group may join it. */
     llam_task_group_t *owning_group;
+    bool group_retirement_pending;
     /* Scope execution owns this completion reference until final task retirement. */
     llam_future_t *scope_completion;
     llam_task_fn entry;
@@ -1079,6 +1080,8 @@ struct llam_task {
     llam_managed_catalog_t *managed_catalog;
     uint32_t managed_execution_class;
     llam_worker_t *managed_execution_worker;
+    llam_local_executor_t *local_executor;
+    bool local_executor_retired;
     uint64_t managed_execution_generation;
     _Alignas(16) llam_ctx_t ctx;
     _Atomic(llam_worker_t *) managed_dispatch_owner;
@@ -1183,6 +1186,7 @@ struct llam_task {
     atomic_uint preempt_requested;
     /* Only internal cleanup waits alter this G-local policy; tokens stay set. */
     atomic_uint cleanup_wait_depth;
+    atomic_uint borrowed_drain_depth;
     atomic_uint completed;
     atomic_uint reclaim_ready;
     atomic_uint reclaim_claimed;
@@ -1216,6 +1220,11 @@ struct llam_task_group {
     size_t count;
     size_t capacity;
     size_t active_spawns;
+    size_t pending_retirements;
+    _Atomic size_t lifetime_refs;
+    llam_channel_t *drain_event;
+    bool sealed;
+    bool drain_signalled;
     _Atomic size_t active_ops;
     size_t public_handle_slot;
     uint32_t public_handle_generation;
@@ -1498,8 +1507,12 @@ struct llam_worker {
     atomic_uint_fast64_t managed_reservation;
     atomic_bool managed_slot_used;
     atomic_bool managed_slot_closing;
+    _Atomic(llam_local_executor_t *) local_executor;
     atomic_uint native_domain_depth;
     unsigned native_domain_slot;
+    unsigned preempt_region_depth; /* Native-M-local; never read by capture controllers. */
+    llam_task_t *preempt_region_task;
+    uint64_t preempt_region_generation;
     atomic_uint_fast64_t run_generation;
     atomic_uintptr_t async_preempt_state;
     /* Backend routing cache, published before native enable and cleared after

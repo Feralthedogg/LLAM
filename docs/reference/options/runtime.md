@@ -103,6 +103,16 @@ opts.stack_class = LLAM_STACK_CLASS_LARGE;
 | `flags` | Bitwise OR of `LLAM_SPAWN_F_*`. |
 | `deadline_ns` | Optional absolute deadline in `llam_now_ns()` units; `0` disables it. |
 | `cancel_token` | Optional cancellation token observed by waits and I/O. |
+| `local_executor` | ABI 2.6+: optional shared [local executor](../api/executors.md#shared-local-executors). Root and local children must all name the same handle to share one LLAM-owned native thread. `NULL` keeps ordinary scheduling. |
+
+The executor pointer is an optional complete tail field: old 32-byte options
+retain their behavior, and the current 64-bit layout is 40 bytes. Initialize with
+`llam_spawn_opts_init` from host code, or use a zero-initialized record in qualified
+managed code and set the required fields. Other spawn fields keep their usual
+defaults. Appended fields require the explicit-size `_ex` APIs; unsized legacy
+spawn wrappers read only the original 32-byte prefix. The `NATIVE_AFFINE` flag
+alone reserves independent per-task threads;
+it does not create a shared local domain.
 
 Task classes:
 

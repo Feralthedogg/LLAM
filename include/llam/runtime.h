@@ -60,7 +60,7 @@ extern "C" {
 #define LLAM_VERSION_PATCH 0U
 
 #define LLAM_ABI_VERSION_MAJOR 2U
-#define LLAM_ABI_VERSION_MINOR 5U
+#define LLAM_ABI_VERSION_MINOR 6U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 
@@ -94,6 +94,7 @@ typedef struct llam_abi_info {
 /* Public opaque handles. */
 typedef struct llam_task llam_task_t;
 typedef struct llam_scope llam_scope_t;
+typedef struct llam_local_executor llam_local_executor_t;
 typedef struct llam_future llam_future_t;
 typedef struct llam_value llam_value_t;
 typedef struct llam_mutex llam_mutex_t;
@@ -242,6 +243,7 @@ typedef struct llam_spawn_opts {
     uint32_t reserved0;                 /**< Reserved ABI padding; initialize to 0, ignored by this version. */
     uint64_t deadline_ns;               /**< Optional absolute deadline in llam_now_ns() units; 0 disables it. */
     llam_cancel_token_t *cancel_token;  /**< Optional cancellation token observed by waits and I/O. */
+    llam_local_executor_t *local_executor; /**< ABI 2.6: one shared native thread; NULL keeps ordinary placement. */
 } llam_spawn_opts_t;
 
 /** @brief Current size to pass to ::llam_spawn_ex and ::llam_spawn_opts_init. */
@@ -867,7 +869,9 @@ LLAM_API llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn
  * @param fn Task entry point. Must not be NULL.
  * @param arg User pointer passed to fn.
  * @param opts Optional spawn options; pass NULL for defaults.
- * @details Convenience wrapper around ::llam_spawn_ex.
+ * @details Legacy convenience wrapper around ::llam_spawn_ex. It reads only the
+ * original 32-byte options prefix for ABI compatibility; use the size-aware
+ * _ex form to supply local_executor or later option fields.
  * @return Task handle on success, NULL on failure with errno set.
  */
 LLAM_API llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts);
@@ -1029,6 +1033,8 @@ LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
 
 /**
  * @brief Spawn a task owned by a group.
+ * @details Reads only the original 32-byte spawn-options prefix. Use
+ * ::llam_task_group_spawn_ex to supply local_executor or later option fields.
  */
 LLAM_API llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
                                    llam_task_fn fn,
@@ -1068,6 +1074,19 @@ LLAM_API int llam_task_group_join(llam_task_group_t *group);
  * @return 0 when every child was joined, or -1 with @c errno set.
  */
 LLAM_API int llam_task_group_join_until(llam_task_group_t *group, uint64_t deadline_ns);
+
+/** Seal group admission and drain actual child execution before consuming every
+ * child handle. Caller cancellation and request deadlines are deferred, not
+ * cleared; runtime stop still allows existing children and this wait to progress.
+ * Managed callers park. A child cannot drain its own group (EDEADLK), and host
+ * callers need an active runner for pending work (EBUSY). Sealed spawns fail with
+ * EPIPE. Existing join APIs remain interruptible and leave admission reusable.
+ * Zero proves quiescence. A fatal runtime error does NOT authorize releasing
+ * borrowed captures/stacks: the caller must retain them or terminate, never
+ * unwind borrowed storage as if drain succeeded. No timeout variant is provided.
+ */
+LLAM_API int llam_task_group_drain(llam_task_group_t *group);
+
 
 /**
  * @brief Sleep the current task until an absolute deadline.

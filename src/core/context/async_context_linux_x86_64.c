@@ -3189,9 +3189,12 @@ bool llam_async_preempt_task_quiescent(const llam_task_t *task) {
     quiet = llam_async_service_snapshot_pair_locked(shard, worker, &ticket) &&
         llam_async_task_banks_quiet(storage) &&
         atomic_load_explicit(&state->status, memory_order_acquire) == LLAM_ASYNC_PREEMPT_STATUS_IDLE &&
-        atomic_load_explicit(&state->affine_live_g, memory_order_acquire) == 1U &&
+        (task->local_executor != NULL ? atomic_load_explicit(&state->affine_live_g, memory_order_acquire) >= 1U
+         : atomic_load_explicit(&state->affine_live_g, memory_order_acquire) == 1U) &&
         atomic_load_explicit(&state->pending_restore, memory_order_acquire) == 0U &&
-        atomic_load_explicit(&state->ready_depth, memory_order_acquire) == 0U &&
+        /* Local READY records are parked G storage, not live native operations.
+         * They stay on this M until the foreign call returns. */
+        (task->local_executor != NULL || atomic_load_explicit(&state->ready_depth, memory_order_acquire) == 0U) &&
         state->captured_capsule == NULL &&
         ((llam_async_worker_bridge_t *)state->bridge_storage)->terminal_task == NULL;
     pthread_mutex_unlock(&shard->lock);
@@ -3387,7 +3390,7 @@ static void llam_linux_managed_returned(llam_worker_t *worker, llam_processor_t 
      * it does not manufacture a native restore witness. */
     llam_async_preempt_cancel_request(worker, state->request_generation);
     if (atomic_load_explicit(&task->state, memory_order_acquire) == LLAM_TASK_STATE_DEAD) {
-        if (task->managed_execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) {
+        if (llam_task_owns_native_thread(task)) {
             llam_async_worker_bridge_t *bridge = state->bridge_storage;
             pthread_mutex_lock(&bridge->ready_lock);
             if (bridge->terminal_task != NULL || !llam_task_scan_ref_try_acquire(processor->runtime, task)) abort();

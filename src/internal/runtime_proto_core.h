@@ -48,6 +48,27 @@ void llam_free_task(llam_task_t *task);
 void llam_task_release_resources(llam_task_t *task);
 void llam_task_release_stack(llam_task_t *task);
 void llam_task_mark_reclaim_ready(llam_task_t *task);
+void llam_task_group_note_retirement(llam_task_t *task);
+void llam_local_executor_task_retired(llam_task_t *task);
+void llam_local_executor_task_started(llam_task_t *task, llam_worker_t *worker);
+bool llam_local_executor_worker_closing(llam_worker_t *worker);
+bool llam_local_executor_worker_pending(const llam_worker_t *worker);
+bool llam_local_executor_worker_idle(const llam_worker_t *worker);
+void llam_local_executor_worker_joined(llam_worker_t *worker);
+void llam_local_executor_defer_shutdown(llam_runtime_t *runtime);
+llam_local_executor_t *llam_local_executor_retire_runtime(llam_runtime_t *runtime);
+void llam_local_executor_collect_retired(llam_local_executor_t *head);
+bool llam_task_owns_native_thread(const llam_task_t *task);
+
+typedef struct llam_cleanup_wait_state {
+    llam_task_t *task;
+    unsigned cleanup_depth;
+    unsigned drain_depth;
+} llam_cleanup_wait_state_t;
+int llam_borrowed_cleanup_enter(llam_cleanup_wait_state_t *mask);
+void llam_borrowed_cleanup_leave(const llam_cleanup_wait_state_t *mask);
+int llam_borrowed_wait_event(llam_runtime_t *owner, llam_channel_t *event);
+
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
 void llam_yield_internal(void);
 #else

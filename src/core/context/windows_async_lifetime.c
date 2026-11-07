@@ -250,13 +250,17 @@ static bool llam_windows_async_capsule_quiescent(const llam_windows_async_capsul
     return true;
 }
 
-static bool llam_windows_async_binding_native_idle(const llam_windows_async_binding_t *binding) {
+static bool llam_windows_async_binding_operations_idle(const llam_windows_async_binding_t *binding) {
     return atomic_load_explicit(&binding->retire_count, memory_order_acquire) == 0U &&
         atomic_load_explicit(&binding->finalizer_count, memory_order_acquire) == 0U &&
-        atomic_load_explicit(&binding->ready_depth, memory_order_acquire) == 0U &&
         atomic_load_explicit(&binding->binding_ops, memory_order_acquire) == 0U &&
         atomic_load_explicit(&binding->captured_bank, memory_order_acquire) == NULL &&
         atomic_load_explicit(&binding->pending_restore, memory_order_acquire) == NULL;
+}
+
+static bool llam_windows_async_binding_native_idle(const llam_windows_async_binding_t *binding) {
+    return llam_windows_async_binding_operations_idle(binding) &&
+        atomic_load_explicit(&binding->ready_depth, memory_order_acquire) == 0U;
 }
 
 static bool llam_windows_async_terminal_drained(const llam_windows_async_binding_t *binding) {
@@ -3858,7 +3862,7 @@ static void llam_windows_managed_returned(llam_worker_t *worker, llam_processor_
     (void)data;
     llam_windows_async_lifetime_scheduler_return(shard, task);
     if (atomic_load_explicit(&task->state, memory_order_acquire) == LLAM_TASK_STATE_DEAD) {
-        if (task->managed_execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) {
+        if (llam_task_owns_native_thread(task)) {
             llam_windows_async_control_t *control = llam_windows_async_control(task->owner_runtime);
             llam_windows_async_binding_t *binding = llam_windows_async_worker_binding(control, worker);
             llam_windows_async_lock(shard);
@@ -3949,8 +3953,11 @@ bool llam_windows_async_task_quiescent(const llam_task_t *task) {
         task->managed_execution_class != LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) return false;
     llam_windows_async_lock(binding->worker->compat_shard);
     bool ready = llam_windows_async_capsule_quiescent(task->async_preempt_task) &&
-        llam_windows_async_binding_native_idle(binding) &&
-        atomic_load_explicit(&binding->execution_debt, memory_order_acquire) == 1U;
+        llam_windows_async_binding_operations_idle(binding) &&
+        /* Queued local restores cannot execute until this same M returns. */
+        (task->local_executor != NULL || atomic_load_explicit(&binding->ready_depth, memory_order_acquire) == 0U) &&
+        (task->local_executor != NULL ? atomic_load_explicit(&binding->execution_debt, memory_order_acquire) >= 1U
+         : atomic_load_explicit(&binding->execution_debt, memory_order_acquire) == 1U);
     llam_windows_async_unlock(binding->worker->compat_shard);
     return ready;
 }

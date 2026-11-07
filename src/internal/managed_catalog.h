@@ -32,10 +32,14 @@ typedef struct llam_managed_admission {
     uint32_t spawn_flags;
     llam_worker_t *execution_worker;
     uint64_t execution_generation;
+    llam_local_executor_t *local_executor;
+    bool local_executor_retired;
 } llam_managed_admission_t;
 
 int llam_managed_task_admit(llam_runtime_t *runtime, llam_task_fn entry, uint32_t spawn_flags,
                              llam_managed_admission_t *out);
+int llam_managed_task_admit_local(llam_runtime_t *runtime, llam_task_fn entry,
+    uint32_t spawn_flags, llam_local_executor_t *domain, llam_managed_admission_t *out);
 bool llam_managed_catalog_retain(llam_managed_catalog_t *catalog);
 void llam_managed_catalog_release(llam_managed_catalog_t *catalog);
 /* Release task/admission references through these typed helpers so failed

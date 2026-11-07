@@ -229,6 +229,8 @@ void llam_task_mark_reclaim_ready(llam_task_t *task) {
     if (task == NULL) {
         return;
     }
+    llam_task_group_note_retirement(task);
+    llam_local_executor_task_retired(task);
     atomic_store_explicit(&task->reclaim_ready, 1U, memory_order_release);
 }
 

@@ -117,6 +117,10 @@ LLAM_API ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
  * @details Managed operations use the earliest task/call deadline and observe task OR
  * group OR call cancellation. Cancellation never releases a buffer while a
  * backend/helper can still access it; a completed transfer can win the race.
+ * Every operation return (success, error, timeout or cancellation) ends access
+ * to its borrowed byte buffer. Requesting token cancellation or closing the
+ * descriptor from another task is not that completion boundary: retain the
+ * loan until the operation returns, or its owning task is fully drained.
  * Bounded read/write/connect need a managed task. POSIX bounded byte I/O accepts
  * sockets and nonblocking pipes/devices, rejecting regular/block files with
  * ENOTSUP rather than promising to interrupt a blocking filesystem call.

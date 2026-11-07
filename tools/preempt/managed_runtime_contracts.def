@@ -198,3 +198,13 @@ LLAM_RUNTIME_CONTRACT(158, llam_scope_get_report_ex, "ippq", RUNTIME_CRITICAL)
 LLAM_RUNTIME_CONTRACT(159, llam_scope_drain_until, "ipqpq", RUNTIME_CRITICAL)
 LLAM_RUNTIME_CONTRACT(160, llam_scope_cancel_and_drain_until, "ipqpq", RUNTIME_CRITICAL)
 LLAM_RUNTIME_CONTRACT(161, llam_scope_destroy, "ip", RUNTIME_CRITICAL)
+
+/* ABI 2.6 borrowed group drain and bounded execution regions. */
+LLAM_RUNTIME_CONTRACT(162, llam_task_group_drain, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(163, llam_preempt_region_enter, "i", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(164, llam_preempt_region_leave, "i", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(165, llam_local_executor_opts_init, "ipq", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(166, llam_runtime_local_executor_create_ex, "ippqp", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(167, llam_local_executor_close, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(168, llam_local_executor_drain, "ip", RUNTIME_CRITICAL)
+LLAM_RUNTIME_CONTRACT(169, llam_local_executor_destroy, "ip", RUNTIME_CRITICAL)

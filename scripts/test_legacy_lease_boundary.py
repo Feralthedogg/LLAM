@@ -170,6 +170,11 @@ class LegacyLeaseBoundaryTest(unittest.TestCase):
             "registered execution contract changed",
         )
         self.assert_error(
+            path, source.replace("atomic_init(&worker->local_executor, NULL)",
+                                 "atomic_init(&worker->local_executor, previous)", 1),
+            "registered execution contract changed",
+        )
+        self.assert_error(
             path, source + "\nvoid rogue(llam_worker_t *worker) { worker->active_g = NULL; }\n",
             "execution authority member",
         )

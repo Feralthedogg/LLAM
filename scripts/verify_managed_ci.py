@@ -30,10 +30,13 @@ REQUIRED_TESTS = (
     "test_managed_runtime_contracts",
     "test_managed_image_internal",
     "test_managed_sdk",
+    "test_cavo_preempt_regions",
+    "test_cavo_local_native",
 )
 BUILD_TARGETS = (
     "llam_managed_pass", "llam_runtime", "llam_runtime_shared",
     "llam_preempt_metadata_inspect", "test_managed_image_internal",
+    "test_cavo_execution",
     "demo", "stress", "bench", "server", "server_lossless", "server_flood",
 )
 
@@ -99,7 +102,7 @@ def main() -> int:
     require_completed_tests(junit)
     if result:
         return result
-    print("Managed CI: compiler, runtime contracts, real image and relocated complete SDK passed")
+    print("Managed CI: compiler, runtime contracts, native execution controls and relocated SDK passed")
     return 0
 
 

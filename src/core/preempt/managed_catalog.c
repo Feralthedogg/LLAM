@@ -17,6 +17,7 @@
 
 #include "runtime_internal.h"
 #include "managed_catalog.h"
+#include "core/task/local_executor_internal.h"
 #include "managed_image.h"
 #include "managed_async_adapter.h"
 #include "capsule_pool.h"
@@ -633,8 +634,10 @@ void llam_managed_admission_release(llam_managed_admission_t *admission) {
         atomic_fetch_sub_explicit(&admission->catalog->affine_references, 1U, memory_order_release) == 0U) {
         abort();
     }
-    llam_managed_release_execution(admission->catalog->runtime, admission->execution_worker,
-                                     admission->execution_class, admission->execution_generation);
+    if (admission->local_executor != NULL)
+        llam_local_executor_admission_release(admission->local_executor, admission->local_executor_retired);
+    else llam_managed_release_execution(admission->catalog->runtime, admission->execution_worker,
+                                         admission->execution_class, admission->execution_generation);
     llam_managed_catalog_release(admission->catalog);
     *admission = (llam_managed_admission_t){0};
 }
@@ -648,13 +651,18 @@ bool llam_managed_catalog_has_legacy_references(const llam_runtime_t *runtime) {
 
 void llam_managed_task_release(llam_task_t *task) {
     if (task == NULL || task->managed_catalog == NULL) return;
-    llam_managed_admission_t admission = {task->managed_catalog, task->entry,
-                                          task->managed_execution_class, task->flags,
-                                          task->managed_execution_worker, task->managed_execution_generation};
+    llam_managed_admission_t admission = {
+        .catalog = task->managed_catalog, .entry = task->entry,
+        .execution_class = task->managed_execution_class, .spawn_flags = task->flags,
+        .execution_worker = task->managed_execution_worker,
+        .execution_generation = task->managed_execution_generation,
+        .local_executor = task->local_executor, .local_executor_retired = task->local_executor_retired
+    };
     llam_managed_admission_release(&admission);
     task->managed_catalog = NULL;
     task->managed_execution_worker = NULL;
     task->managed_execution_generation = 0U;
+    task->local_executor = NULL;
 }
 
 static bool llam_managed_index_contains(const llam_managed_index_t *index, uintptr_t pc) {
@@ -669,12 +677,92 @@ static bool llam_managed_index_contains(const llam_managed_index_t *index, uintp
     return false;
 }
 
-int llam_managed_task_admit(llam_runtime_t *runtime, llam_task_fn entry, uint32_t spawn_flags,
-                             llam_managed_admission_t *out) {
-    if (runtime == NULL || entry == NULL || out == NULL) {
-        errno = EINVAL;
+static const llam_managed_entry_ref_t *llam_managed_index_find_entry(
+    const llam_managed_index_t *index, uintptr_t address) {
+    size_t low = 0U, high = index->entry_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2U;
+        const llam_managed_entry_ref_t *candidate = &index->entries[middle];
+        if (address < candidate->entry->native_entry) high = middle;
+        else if (address > candidate->entry->native_entry) low = middle + 1U;
+        else return candidate;
+    }
+    return NULL;
+}
+
+static bool llam_managed_task_descriptor_valid(const llam_managed_entry_ref_t *found, bool required) {
+    const llam_llpm2_entry_t *descriptor = found->entry;
+    return found->task_type_id != 0U && descriptor->type_id == found->task_type_id &&
+        descriptor->execution_class <= LLAM_LLPM2_NATIVE_AFFINE &&
+        (descriptor->flags & (LLAM_LLPM2_ENTRY_INTERNAL | LLAM_LLPM2_ENTRY_NATIVE_BOUNDARY |
+                              LLAM_LLPM2_ENTRY_RUNTIME_BRIDGE)) == 0U &&
+        (!required || (descriptor->execution_class != LLAM_LLPM2_LEGACY &&
+                       (descriptor->flags & LLAM_LLPM2_ENTRY_NO_PREEMPT) == 0U));
+}
+
+/* The admission transaction holds the catalog lock across classification and
+ * resource/reference publication; helpers never drop or reacquire it. */
+static int llam_managed_classify_task(llam_managed_catalog_t *catalog,
+    llam_task_fn entry, bool local, llam_managed_admission_t *out) {
+    bool required = catalog->opts.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED;
+    if (required && (out->spawn_flags & LLAM_SPAWN_F_NO_PREEMPT) != 0U) { errno = EINVAL; return -1; }
+    uintptr_t address = (uintptr_t)entry;
+    const llam_managed_entry_ref_t *found = llam_managed_index_find_entry(&catalog->index, address);
+    if (found != NULL) {
+        if (!llam_managed_task_descriptor_valid(found, required)) { errno = ENOTSUP; return -1; }
+        const llam_llpm2_entry_t *descriptor = found->entry;
+        out->entry = descriptor->execution_class == LLAM_LLPM2_LEGACY
+                         ? entry : (llam_task_fn)descriptor->managed_entry;
+        out->execution_class = descriptor->execution_class;
+        if ((descriptor->flags & LLAM_LLPM2_ENTRY_NO_PREEMPT) != 0U)
+            out->spawn_flags |= LLAM_SPAWN_F_NO_PREEMPT;
+    } else if (llam_managed_index_contains(&catalog->index, address) || required) {
+        /* A body/interior/thunk continuation cannot borrow legacy admission. */
+        errno = ENOTSUP;
         return -1;
     }
+    if (local || (out->spawn_flags & LLAM_SPAWN_F_NATIVE_AFFINE) != 0U) {
+        if (out->execution_class == LLAM_MANAGED_EXECUTION_LEGACY &&
+            (!local || catalog->opts.policy != LLAM_PREEMPT_POLICY_COOPERATIVE)) {
+            errno = ENOTSUP;
+            return -1;
+        }
+        out->execution_class = LLAM_MANAGED_EXECUTION_NATIVE_AFFINE;
+    }
+    return 0;
+}
+
+static int llam_managed_retain_admission(llam_managed_catalog_t *catalog,
+    const llam_local_executor_binding_t *local, llam_managed_admission_t *out) {
+    if (local != NULL) {
+        out->execution_worker = local->worker;
+        out->execution_generation = local->generation;
+    } else if (llam_managed_reserve_execution(catalog->runtime, out->execution_class,
+            &out->execution_worker, &out->execution_generation) != 0) return -1;
+    if (!llam_managed_catalog_retain(catalog)) {
+        if (local == NULL) llam_managed_release_execution(catalog->runtime, out->execution_worker,
+                                                          out->execution_class, out->execution_generation);
+        out->execution_worker = NULL;
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if (out->execution_class == LLAM_MANAGED_EXECUTION_LEGACY) {
+        /* Publish admission before queueing so an idle compatibility M can
+         * resume claims. Queue locks and fresh P grants still govern dispatch. */
+        atomic_fetch_add_explicit(&catalog->legacy_references, 1U, memory_order_release);
+    }
+    if (out->execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE)
+        atomic_fetch_add_explicit(&catalog->affine_references, 1U, memory_order_relaxed);
+    if ((out->spawn_flags & LLAM_SPAWN_F_NO_PREEMPT) != 0U)
+        atomic_fetch_add_explicit(&catalog->excluded_references, 1U, memory_order_relaxed);
+    out->catalog = catalog;
+    out->local_executor = local != NULL ? local->domain : NULL;
+    return 0;
+}
+
+static int llam_managed_task_admit_impl(llam_runtime_t *runtime, llam_task_fn entry, uint32_t spawn_flags,
+    const llam_local_executor_binding_t *local, llam_managed_admission_t *out) {
+    if (runtime == NULL || entry == NULL || out == NULL) { errno = EINVAL; return -1; }
     *out = (llam_managed_admission_t){.entry = entry,
         .execution_class = LLAM_MANAGED_EXECUTION_LEGACY, .spawn_flags = spawn_flags};
     if (runtime->managed_catalog == NULL) {
@@ -688,80 +776,32 @@ int llam_managed_task_admit(llam_runtime_t *runtime, llam_task_fn entry, uint32_
         return -1;
     }
     llam_managed_catalog_t *catalog = runtime->managed_catalog;
-    const llam_managed_entry_ref_t *found = NULL;
-    uintptr_t address = (uintptr_t)entry;
-    size_t low = 0U, high = catalog->index.entry_count;
     int result = -1;
-    if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) {
-        errno = EBUSY;
-        goto unlock;
-    }
-    if (catalog->opts.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED &&
-        (spawn_flags & LLAM_SPAWN_F_NO_PREEMPT) != 0U) {
-        errno = EINVAL;
-        goto unlock;
-    }
-    while (low < high) {
-        size_t middle = low + (high - low) / 2U;
-        const llam_managed_entry_ref_t *candidate = &catalog->index.entries[middle];
-        if (address < candidate->entry->native_entry) high = middle;
-        else if (address > candidate->entry->native_entry) low = middle + 1U;
-        else { found = candidate; break; }
-    }
-    if (found != NULL) {
-        const llam_llpm2_entry_t *descriptor = found->entry;
-        if (found->task_type_id == 0U || descriptor->type_id != found->task_type_id ||
-            descriptor->execution_class > LLAM_LLPM2_NATIVE_AFFINE ||
-            (descriptor->flags & (LLAM_LLPM2_ENTRY_INTERNAL | LLAM_LLPM2_ENTRY_NATIVE_BOUNDARY |
-                                  LLAM_LLPM2_ENTRY_RUNTIME_BRIDGE)) != 0U ||
-            (catalog->opts.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED &&
-             (descriptor->execution_class == LLAM_LLPM2_LEGACY ||
-              (descriptor->flags & LLAM_LLPM2_ENTRY_NO_PREEMPT) != 0U))) {
-            errno = ENOTSUP;
-            goto unlock;
-        }
-        out->entry = descriptor->execution_class == LLAM_LLPM2_LEGACY
-                         ? entry : (llam_task_fn)descriptor->managed_entry;
-        out->execution_class = descriptor->execution_class;
-        if ((descriptor->flags & LLAM_LLPM2_ENTRY_NO_PREEMPT) != 0U) {
-            out->spawn_flags |= LLAM_SPAWN_F_NO_PREEMPT;
-        }
-    } else if (llam_managed_index_contains(&catalog->index, address) ||
-               catalog->opts.policy == LLAM_PREEMPT_POLICY_ASYNC_REQUIRED) {
-        /* A body/interior/thunk continuation cannot borrow legacy admission. */
-        errno = ENOTSUP;
-        goto unlock;
-    }
-    if ((spawn_flags & LLAM_SPAWN_F_NATIVE_AFFINE) != 0U) {
-        if (out->execution_class == LLAM_MANAGED_EXECUTION_LEGACY) {
-            errno = ENOTSUP;
-            goto unlock;
-        }
-        out->execution_class = LLAM_MANAGED_EXECUTION_NATIVE_AFFINE;
-    }
-    if (llam_managed_reserve_execution(runtime, out->execution_class, &out->execution_worker, &out->execution_generation) != 0) goto unlock;
-    if (!llam_managed_catalog_retain(catalog)) {
-        llam_managed_release_execution(runtime, out->execution_worker, out->execution_class, out->execution_generation);
-        out->execution_worker = NULL;
-        errno = EOVERFLOW;
-        goto unlock;
-    }
-    if (out->execution_class == LLAM_MANAGED_EXECUTION_LEGACY) {
-        /* Publish admission before queueing so an idle compatibility M can
-         * resume claims. Queue locks and fresh P grants still govern dispatch. */
-        atomic_fetch_add_explicit(&catalog->legacy_references, 1U, memory_order_release);
-    }
-    if (out->execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) {
-        atomic_fetch_add_explicit(&catalog->affine_references, 1U, memory_order_relaxed);
-    }
-    if ((out->spawn_flags & LLAM_SPAWN_F_NO_PREEMPT) != 0U) {
-        atomic_fetch_add_explicit(&catalog->excluded_references, 1U, memory_order_relaxed);
-    }
-    out->catalog = catalog;
-    result = 0;
-unlock:
+    if (atomic_load_explicit(&runtime->stop_requested, memory_order_acquire)) errno = EBUSY;
+    else if (llam_managed_classify_task(catalog, entry, local != NULL, out) == 0)
+        result = llam_managed_retain_admission(catalog, local, out);
     pthread_mutex_unlock(&g_managed_catalog_lock);
     if (result != 0) *out = (llam_managed_admission_t){0};
+    return result;
+}
+
+int llam_managed_task_admit(llam_runtime_t *runtime, llam_task_fn entry, uint32_t flags,
+                             llam_managed_admission_t *out) {
+    return llam_managed_task_admit_impl(runtime, entry, flags, NULL, out);
+}
+
+int llam_managed_task_admit_local(llam_runtime_t *runtime, llam_task_fn entry,
+    uint32_t flags, llam_local_executor_t *handle, llam_managed_admission_t *out) {
+    if (handle == NULL) return llam_managed_task_admit(runtime, entry, flags, out);
+    llam_local_executor_binding_t binding = {0};
+    if (llam_local_executor_admit(runtime, handle, &binding.domain,
+                                  &binding.worker, &binding.generation) != 0) return -1;
+    int result = llam_managed_task_admit_impl(runtime, entry, flags, &binding, out);
+    if (result != 0) {
+        int error = errno;
+        llam_local_executor_admission_release(binding.domain, false);
+        errno = error;
+    }
     return result;
 }
 

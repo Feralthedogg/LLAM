@@ -281,7 +281,49 @@ static int test_old_binding_runtime_roundtrip(void) {
     return 0;
 }
 
+static int test_spawn_executor_tail_prefix(void) {
+    _Alignas(llam_spawn_opts_t) unsigned char storage[sizeof(llam_spawn_opts_t) + 16U];
+    memset(storage, 0xA5, sizeof(storage));
+    size_t old_size = offsetof(llam_spawn_opts_t, local_executor);
+    if (llam_spawn_opts_init((llam_spawn_opts_t *)(void *)storage, old_size) != 0 ||
+        !guard_unchanged(storage + old_size, sizeof(storage) - old_size))
+        return fail_msg("old spawn initializer changed the new executor tail");
+    llam_runtime_opts_t options;
+    if (llam_runtime_opts_init(&options, sizeof(options)) != 0) return 1;
+    options.deterministic = 1U;
+    options.worker_count = 1U;
+    llam_runtime_t *runtime = NULL;
+    if (llam_runtime_create_compat(&options, sizeof(options), &runtime) != 0) return 1;
+    llam_task_t *first = llam_runtime_spawn_ex(runtime, compat_task, NULL,
+        (const llam_spawn_opts_t *)(const void *)storage, old_size);
+    llam_task_t *partial = llam_runtime_spawn_ex(runtime, compat_task, NULL,
+        (const llam_spawn_opts_t *)(const void *)storage, sizeof(llam_spawn_opts_t) - 1U);
+    int result = first == NULL || partial == NULL;
+    if (result == 0) result = llam_runtime_run_handle(runtime) != 0 || llam_join(first) != 0 || llam_join(partial) != 0;
+    llam_runtime_destroy(runtime);
+    return result != 0 ? fail_msg("old/partial executor tail was interpreted as a handle") : 0;
+}
+
+static int test_unsized_spawn_prefix(void) {
+    _Alignas(llam_spawn_opts_t) unsigned char storage[sizeof(llam_spawn_opts_t)];
+    memset(storage, 0xA5, sizeof(storage));
+    llam_spawn_opts_t *old = (llam_spawn_opts_t *)(void *)storage;
+    if (llam_spawn_opts_init(old, offsetof(llam_spawn_opts_t, local_executor)) != 0) return 1;
+    llam_runtime_opts_t options = {.deterministic = 1U, .worker_count = 1U};
+    if (llam_runtime_init_compat_ex(&options, sizeof(options)) != 0) return 1;
+    llam_task_group_t *group = llam_task_group_create();
+    llam_task_t *task = llam_spawn(compat_task, NULL, old);
+    llam_task_t *child = group != NULL ? llam_task_group_spawn(group, compat_task, NULL, old) : NULL;
+    int result = group == NULL || task == NULL || child == NULL;
+    if (result == 0) result = llam_run() != 0 || llam_join(task) != 0 || llam_task_group_drain(group) != 0;
+    llam_runtime_shutdown();
+    if (group != NULL && llam_task_group_destroy(group) != 0) result = 1;
+    return result ? fail_msg("unsized legacy spawn read the appended executor pointer") : 0;
+}
+
 int main(void) {
+    if (test_unsized_spawn_prefix() != 0) return 1;
+    if (test_spawn_executor_tail_prefix() != 0) return 1;
     if (test_old_runtime_opts_prefix() != 0 ||
         test_old_spawn_opts_prefix() != 0 ||
         test_partial_runtime_opts_prefix_defaults() != 0 ||

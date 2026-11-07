@@ -40,6 +40,7 @@ task handle is consumed by one successful join or one detach.
 | `llam_task_group_cancel` | Cancel the group source; external tokens themselves are never cancelled. |
 | `llam_task_group_join` | Join all grouped children. |
 | `llam_task_group_join_until` | Join grouped children until an absolute deadline. |
+| `llam_task_group_drain` | Seal admission and wait for actual child/native retirement while deferring caller cancellation and deadlines, including during runtime stop. |
 | `llam_task_group_destroy` | Destroy a group after child work is drained or cancelled. |
 
 ## Task-local storage
@@ -53,3 +54,20 @@ task handle is consumed by one successful join or one detach.
 | `llam_task_local_set_owned` | Install a value at an empty key, with a nonblocking cleanup that runs at task exit. |
 | `llam_task_local_take_result` | Remove a value and transfer its ownership without running cleanup. |
 | `LLAM_TASK_LOCAL_INVALID_KEY` | Invalid key sentinel. |
+
+## Development: borrowed group drain
+
+ABI 2.6 adds `llam_task_group_drain` for structured scopes whose children borrow
+parent storage. It seals admission (`EPIPE` on subsequent spawns), includes spawn
+reservations already accepted, parks managed callers and consumes all child
+handles only after actual execution retirement. Caller cancellation and request
+deadlines are deferred and restored; existing children continue cleanup during
+runtime stop. Ordinary group join retains its interruptible, reusable contract.
+
+There is deliberately no timed borrowed drain. Only a zero return authorizes
+releasing borrowed captures/stacks. A fatal runtime error does not establish
+quiescence: retain storage or terminate rather than unwinding it as though cleanup
+succeeded. Invalid/stale handles, wrong owners, a child draining its own group,
+and missing host runners are diagnosed. A host drain does not drive the scheduler.
+The owned [scope deadline API](scopes.md) is suitable when ownership can remain
+outstanding after timeout; it does not establish a borrowed lexical lifetime.

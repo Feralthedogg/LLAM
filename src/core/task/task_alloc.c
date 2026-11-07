@@ -106,6 +106,9 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->request_deadline_ns = 0U;
     task->io_scope_active = false;
     task->scope_completion = NULL;
+    task->group_retirement_pending = false;
+    task->local_executor = NULL;
+    task->local_executor_retired = false;
     memset(&task->application_result, 0, sizeof(task->application_result));
     for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
         task->cancel_links[i].task = task;
@@ -166,6 +169,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->active_timer = NULL;
     atomic_init(&task->preempt_requested, 0U);
     atomic_init(&task->cleanup_wait_depth, 0U);
+    atomic_init(&task->borrowed_drain_depth, 0U);
     atomic_init(&task->completed, 0U);
     atomic_init(&task->reclaim_ready, 0U);
     atomic_init(&task->reclaim_claimed, 0U);

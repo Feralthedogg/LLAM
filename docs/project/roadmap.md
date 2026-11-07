@@ -65,15 +65,18 @@ establish a qualified asynchronous profile.
 
 ## Milestones
 
-Runtime stabilization continues across every stage. The next implementation
-priority is typed outcomes and cancellation-safe scope drain. The development
-tree implements these as additive ABI 2.5; native verification remains required
-for every supported profile. The next compiler milestone is a common IR input
-path, then one additional ahead-of-time language frontend.
+Runtime stabilization continues across every stage. The development tree provides
+owned typed outcomes and cancellation-safe scope drain in ABI 2.5, followed by
+borrowed group drain, short no-preemption regions and shared local executors in
+ABI 2.6. These additions are not in the published 3.0.0 archives (ABI 2.4).
+The next compiler milestone is a common IR input path, then one additional
+ahead-of-time language frontend. Runtime primitives do not qualify that frontend's
+calling convention, transitive effects, unwinding or borrow rules.
 
 | Stage | Status | Deliverable | Dependency |
 | --- | --- | --- | --- |
 | 0. Owned task composition | Implemented in development ABI 2.5; not in stable 3.0.0 | Typed owned results, independent futures and cancellation-safe scope drain; [API contract](../reference/api/scopes.md). | Existing lifetime/ownership and native retirement contracts |
+| 0a. Borrowed/local execution | Implemented in development ABI 2.6; not in stable 3.0.0 | Uncancelled borrowed group drain, short no-preemption regions, a shared LLAM-owned local thread and I/O loan retirement tests; [execution controls](../reference/api/executors.md). | Group retirement, native binding and backend completion contracts |
 | 1. LLVM frontend integration | Next compiler milestone | A common IR input path and a qualified additional language frontend using the LLAM compiler/runtime contract. | 3.0.0 managed C baseline and native qualification |
 | 2. Host integration | Planned | Nonblocking submission and completion delivery for an external host loop. | Current runtime contracts; can progress alongside stage 1 |
 | 3. Backend operation contracts | Planned | Shared operation and memory-lifetime conformance across native backends and host adapters. | Current backend contracts; develop alongside stage 2 |

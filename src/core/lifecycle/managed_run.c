@@ -35,6 +35,7 @@ static void llam_managed_join_workers(llam_managed_run_t *run) {
             continue;
         if (worker_run->thread_started) {
             if (pthread_join(worker_run->thread, NULL) != 0) abort();
+            llam_local_executor_worker_joined(worker_run->worker);
             worker_run->thread_started = false;
         }
     }
@@ -70,6 +71,7 @@ static void *llam_managed_refill_service(void *argument) {
             if (claimed) llam_reclaim_claimed_task(run->runtime, task);
             atomic_fetch_sub_explicit(&run->terminal_obligations, 1U, memory_order_release);
         }
+        llam_local_executor_worker_joined(finished->worker);
         if (finished->execution_generation != 0U) {
             llam_managed_release_execution(run->runtime, finished->worker,
                 LLAM_MANAGED_EXECUTION_NATIVE_AFFINE, finished->execution_generation);

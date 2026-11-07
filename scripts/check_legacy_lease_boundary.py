@@ -52,7 +52,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # contract and its negative fixtures; no source-file-wide exemption applies.
 REGISTERED_EXECUTION_CONTRACTS = {
     "src/core/sched/worker_registry.c": {
-        "llam_worker_init_registered": "a5b3c5d4fc582736b6f662a59dbdd5487a86ebe0eeaf967c851c66a1f4468a89",
+        "llam_worker_init_registered": "a5bf44dfbf4e25652b1c13df8a4c2556c440607a060d05eb52164bddce5fdd51",
     },
     "src/core/sched/execution_lease.c": {
         "llam_execution_lease_native_owner": "354b5d9522d279671db0631eef9e517014c0dffd3429508108dc582fa53361f2",

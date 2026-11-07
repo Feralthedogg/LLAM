@@ -94,6 +94,7 @@ static inline llam_cond_t *llam_cond_public_handle(llam_cond_t *cond) {
  * repeatedly allocating and freeing the same small object shape.
  */
 llam_channel_t *llam_channel_cache_acquire(void);
+llam_channel_t *llam_channel_create_owned(size_t capacity, llam_runtime_t *owner_runtime);
 bool llam_channel_cache_release(llam_channel_t *channel);
 int llam_channel_register_live(llam_channel_t *channel);
 void llam_channel_tls_cache_drain(void);

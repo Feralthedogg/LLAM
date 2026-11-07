@@ -58,6 +58,7 @@ static llam_cancel_token_t *llam_spawn_owner_cancel(const llam_spawn_owner_t *ow
 }
 
 static void llam_spawn_attach_completion(llam_task_t *task, const llam_spawn_owner_t *owner) {
+    if (owner != NULL && owner->group != NULL) task->group_retirement_pending = true;
     if (owner == NULL || owner->completion == NULL) return;
     task->scope_completion = owner->completion;
     /* The runnable queue publishes all ownership fields together. The scope
@@ -387,6 +388,9 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, cancel_token)) {
             opts_storage.cancel_token = raw_opts.cancel_token;
         }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, local_executor)) {
+            opts_storage.local_executor = raw_opts.local_executor;
+        }
         opts = &opts_storage;
         if (LLAM_UNLIKELY(!llam_public_task_class_valid(opts->task_class) ||
                           !llam_public_stack_class_valid(opts->stack_class))) {
@@ -445,7 +449,8 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
      * A compatibility G must never be published on a portable P, and affine
      * reservations must be returned if allocation fails before publication. */
     llam_managed_admission_t admission;
-    if (llam_managed_task_admit(rt, fn, opts != NULL ? opts->flags : 0U, &admission) != 0) {
+    if (llam_managed_task_admit_local(rt, fn, opts != NULL ? opts->flags : 0U,
+                                      opts != NULL ? opts->local_executor : NULL, &admission) != 0) {
         int saved_errno = errno;
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
         if (windows_async_host_reservation) llam_windows_async_host_spawn_release(rt);
@@ -514,6 +519,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
     task->managed_execution_class = admission.execution_class;
     task->managed_execution_worker = admission.execution_worker;
     task->managed_execution_generation = admission.execution_generation;
+    task->local_executor = admission.local_executor;
     fn = admission.entry;
     task->id = llam_spawn_next_task_id(rt, target, local_spawn);
     task->state = LLAM_TASK_STATE_NEW;
@@ -726,5 +732,7 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
 llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
     LLAM_NATIVE_API_GUARD(NULL);
 
-    return llam_spawn_current(fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
+    /* Unsized ABI-major-2 callers supply the original 32-byte prefix. */
+    size_t size = opts != NULL ? offsetof(llam_spawn_opts_t, local_executor) : 0U;
+    return llam_spawn_current(fn, arg, opts, size);
 }

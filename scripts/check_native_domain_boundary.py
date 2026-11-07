@@ -34,7 +34,9 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 
 # Full token fingerprints for genuinely context-free APIs and the signal-safe
-# guard primitives. No filename-wide or function-name-only exemption is granted.
+# guard primitives and M/G-owned public critical transitions. The latter use
+# authoritative native bindings, never inherited scheduler TLS as permission.
+# No filename-wide or function-name-only exemption is granted.
 REVIEWED = {('src/io/api/wait_options.c', 'llam_wait_opts_init'): '137a70a2ca1bd22f047bd317cce548e3220d0bd5c791d0c54a9e9d406c16af46',
  ('src/core/base/abi.c', 'llam_abi_version'): '96a408ba14c62a2195d474d56f38a201dd26323f6d7ed9c0fe29316002197d7d',
  ('src/core/base/abi.c', 'llam_version_string'): '59fbd42a9de07c6c72fbf101a27209b87d61e338d29ba6582236a57ed1b6db0b',
@@ -48,12 +50,17 @@ REVIEWED = {('src/io/api/wait_options.c', 'llam_wait_opts_init'): '137a70a2ca1bd
  ('src/core/preempt/native_domain.c', 'llam_native_domain_hash'): '04e2c581b3ea88a67b7473eff9cdfb20d2a43f3d81b79823fbfe2c3882338195',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_lookup'): '6e195846dfe7e4c089553f032abad2632da4198cffb75007e8574d812e2142b3',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_guarded_worker'): '9161bd21fcae13848831f162f3c18c28625053ae3e93d3543f59a697241725bf',
- ('src/core/preempt/native_domain.c', 'llam_managed_native_enter'): 'cf47bf3a255704d52acedb5a33553b99b622990ab66594c095c5592e4720e539',
- ('src/core/preempt/native_domain.c', 'llam_managed_native_leave'): 'c62d331f9f2f220400f95cdbee6aaa4a17410f570625d03ce30b54a7c97c43dc',
+ ('src/core/preempt/native_domain.c', 'llam_managed_native_enter'): 'ffe979aeadb0ad56bc8cda070f3d2a91a49fd99d0edf5a05ce19c3304a627310',
+ ('src/core/preempt/native_domain.c', 'llam_managed_native_leave'): '9c59defc3e56522cd4dc0a34f707f129cbf7fe817b28ef24a4cb0335a76e2c2c',
  ('src/internal/managed_domain.h', 'llam_native_domain_blocked'): '6533309355ad61a82c2cea5ac4c068712ca6bd6481bf99ce992c30e78f366e2d',
  ('src/core/preempt/native_domain.c', 'llam_native_domain_bind'): 'c3d0c78772230f36efb1019fadeae26a004e17a47314ec534b6b6874e224014c',
- ('src/core/preempt/native_domain.c', 'llam_native_domain_unbind'): '05fa5771a0806e08ce4ff5298651d387bf4a44f868b4d57a418467cd9c73ac3a',
- ('src/core/preempt/native_domain.c', 'llam_native_domain_worker_init'): '7575695c0140b6e0b8fc173c9fed584f8420b6ef72b16264bcd348738e34d643'}
+ ('src/core/preempt/native_domain.c', 'llam_native_domain_unbind'): 'a4b73bef2a8b89636779d4ca4df6557c302dfa946c11b9624ab6a00b02f1d279',
+ ('src/core/preempt/native_domain.c', 'llam_native_domain_worker_init'): 'f61c596bd9041856acd63c3e15e08cb61188120689aa428c305955e3cb4ac52c',
+ ('src/core/preempt/native_domain.c', 'llam_preempt_region_context'): '648a25cb5a4da3fb633ee66657801a9a798eeecde3b7cfad52196821cefdf991',
+ ('src/core/preempt/native_domain.c', 'llam_preempt_region_enter'): 'f08c075a4c46e7137a2267effed1a3b6c51de34c9cd40ed2142ce54934768fec',
+ ('src/core/preempt/native_domain.c', 'llam_preempt_region_leave'): '32393142c09796d4aef7435a9d5fdfb796da99e78fb97bdbf72ec259cefdc681',
+ ('src/core/preempt/native_domain.c', 'llam_native_domain_enter_worker'): '3943eeb51e9b99cd1e4f588b8b551c9e5a80a31b207c070d4d2cc3933f767195',
+ ('src/core/preempt/native_domain.c', 'llam_native_domain_leave_worker'): '04be6c3f116c1d785cd5ad8d02aa44df1d303b4f8092645a198b298264930598'}
 
 GUARD_MACRO = """#define LLAM_NATIVE_API_GUARD(failure) do {
 if (LLAM_UNLIKELY(llam_native_domain_blocked())) { errno = ENOTSUP; return failure; }
@@ -188,7 +195,7 @@ def main() -> int:
     for error in errors:
         print(f"error: {error}")
     if not errors:
-        print("native domain boundary: all public entries guarded or exact reviewed pure contracts")
+        print("native domain boundary: all public entries guarded or exact reviewed native contracts")
     return bool(errors)
 
 

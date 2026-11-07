@@ -198,10 +198,6 @@ int llam_task_group_destroy(llam_task_group_t *group) {
     pthread_mutex_unlock(&group->lock);
     pthread_mutex_unlock(&g_llam_task_group_registry_lock);
 
-    if (group->lock_initialized) {
-        pthread_mutex_destroy(&group->lock);
-    }
-    free(group->tasks);
-    free(group);
+    llam_task_group_storage_release(group);
     return 0;
 }

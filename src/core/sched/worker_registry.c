@@ -42,6 +42,7 @@ static void llam_worker_init_registered(llam_worker_t *worker,
     atomic_init(&worker->execution_state, LLAM_WORKER_EXEC_IDLE);
     atomic_init(&worker->runtime_critical_depth, 0U);
     atomic_init(&worker->preempt_disable_depth, 0U);
+    atomic_init(&worker->local_executor, NULL);
     llam_native_domain_worker_init(worker);
     atomic_init(&worker->run_generation, 0U);
     atomic_init(&worker->async_preempt_state, 0U);

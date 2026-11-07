@@ -32,4 +32,14 @@ llam_task_group_t *llam_task_group_public_handle(llam_task_group_t *group);
 int llam_task_group_register_live(llam_task_group_t *group);
 int llam_task_group_lock_live(llam_task_group_t *handle, llam_task_group_t **out_group);
 
+void llam_task_group_storage_free(llam_task_group_t *group);
+void llam_task_group_storage_release(llam_task_group_t *group);
+bool llam_task_group_signal_locked(llam_task_group_t *group);
+void llam_task_group_signal(llam_task_group_t *group, bool signal);
+int llam_task_group_consume_children(llam_task_group_t *group, bool has_deadline, uint64_t deadline_ns);
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_task_group_test_spawn_hook(void (*hook)(unsigned, void *), void *argument);
+#endif
+
 #endif

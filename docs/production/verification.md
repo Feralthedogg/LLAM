@@ -244,3 +244,27 @@ headers and shared runtime. It requires default asynchronous admission, progress
 through a no-safepoint rendezvous, and successful typed take after runtime teardown.
 Native Windows CTest executes scope and IOCP poll-retirement cases; it does not
 claim that the POSIX managed SDK launcher is qualified on Windows.
+
+
+## Development borrowed/local execution gate
+
+ABI 2.6 adds `test_cavo_lifetime` and `test_cavo_execution` to Make and CTest.
+The lifetime suite covers borrowed group cancellation, expired request budgets,
+runtime stop, active admission, real callback/cleanup retirement and owner checks.
+Its I/O variants reuse buffers immediately after pending read/write cancel or close;
+a later write would expose the replacement marker and a later read would corrupt it.
+`--io-helper` forces the POSIX capability fallback before request publication;
+Windows exercises overlapped named-pipe HANDLEs in native CI.
+
+The execution suite checks nested regions, refusal from guarded native callbacks,
+refused suspension, pending cancellation and exact exit status 125 for unbalanced
+return. It also checks a real shared local thread, close/admission, stale handles,
+self-drain refusal, independent task handles and delayed TLS/FLS destructors.
+Both suites run with the separate `make test-asan` objects.
+
+With required LLVM tooling, `test_cavo_preempt_regions` and
+`test_cavo_local_native` run qualified no-poll fixtures on a single processor.
+The mandatory managed CI driver requires both tests and a relocated SDK consumer;
+missing or skipped tests fail that gate. Native Windows CTest validates the core
+executor/region and IOCP/HANDLE lifetime paths. The Unix LLVM fixture does not
+claim to qualify a Windows compiler profile or a new language frontend.

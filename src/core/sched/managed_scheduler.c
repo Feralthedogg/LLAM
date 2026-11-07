@@ -105,9 +105,11 @@ static bool llam_managed_has_obligations(const llam_managed_run_t *run) {
          run->ops->has_obligations(run->runtime, run->adapter_data))) return true;
     for (size_t i = 0U; i < run->runtime->managed_worker_count; ++i) {
         const llam_worker_t *worker = &run->runtime->managed_workers[i];
+        if (llam_local_executor_worker_pending(worker)) return true;
         if (worker->role == LLAM_WORKER_ROLE_NATIVE_AFFINE &&
             llam_managed_worker_reserved(worker) &&
-            !atomic_load_explicit(&worker->managed_slot_used, memory_order_acquire)) return true;
+            !atomic_load_explicit(&worker->managed_slot_used, memory_order_acquire) &&
+            !llam_local_executor_worker_idle(worker)) return true;
     }
     return false;
 }
@@ -475,13 +477,16 @@ void llam_managed_scheduler_loop(llam_managed_executor_t *worker_run) {
             run->ops->service(worker_run->worker, run->adapter_data);
         if (worker_run->worker->role == LLAM_WORKER_ROLE_NATIVE_AFFINE &&
             (worker_run->terminal_task != NULL ||
+             llam_local_executor_worker_closing(worker_run->worker) ||
              (run->ops != NULL && run->ops->worker_can_exit != NULL &&
               run->ops->worker_can_exit(worker_run->worker, run->adapter_data)))) break;
         if (!llam_managed_has_obligations(run)) {
             if (worker_run->worker->role == LLAM_WORKER_ROLE_NATIVE_AFFINE) {
                 atomic_store_explicit(&worker_run->worker->managed_slot_closing, true, memory_order_seq_cst);
-                if ((atomic_load_explicit(&worker_run->worker->managed_reservation, memory_order_seq_cst) & 1U) != 0U &&
-                    !atomic_load_explicit(&worker_run->worker->managed_slot_used, memory_order_acquire)) {
+                if (llam_local_executor_worker_pending(worker_run->worker) ||
+                    ((atomic_load_explicit(&worker_run->worker->managed_reservation, memory_order_seq_cst) & 1U) != 0U &&
+                     !atomic_load_explicit(&worker_run->worker->managed_slot_used, memory_order_acquire) &&
+                     !llam_local_executor_worker_idle(worker_run->worker))) {
                     atomic_store_explicit(&worker_run->worker->managed_slot_closing, false, memory_order_release);
                     continue;
                 }
@@ -563,6 +568,7 @@ void llam_managed_scheduler_loop(llam_managed_executor_t *worker_run) {
             worker_run->execution_generation = task->managed_execution_generation;
             atomic_store_explicit(&worker_run->worker->managed_slot_used, true, memory_order_release);
         }
+        llam_local_executor_task_started(task, worker_run->worker);
         started_ns = llam_scheduler_set_task_running(shard, task);
         shard->metrics.ctx_switches += 1U;
         llam_switch_scheduler_to_task(&worker_run->scheduler_ctx, task);
@@ -584,7 +590,7 @@ void llam_managed_scheduler_loop(llam_managed_executor_t *worker_run) {
         if (run->ops != NULL && run->ops->returned != NULL) {
             run->ops->returned(worker_run->worker, &shard->processor, task,
                                run->adapter_data);
-        } else if (dead && worker_run->worker->role == LLAM_WORKER_ROLE_NATIVE_AFFINE) {
+        } else if (dead && llam_task_owns_native_thread(task)) {
             if (!llam_task_scan_ref_try_acquire(runtime, task)) abort();
             worker_run->terminal_task = task;
             atomic_fetch_add_explicit(&run->terminal_obligations, 1U, memory_order_release);

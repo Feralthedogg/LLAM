@@ -1517,6 +1517,7 @@ static bool llam_shared_capsule_quiescent(llam_shared_capsule_t *capsule) {
 bool llam_async_shared_task_quiescent(const llam_task_t *task) {
     llam_shared_control_t *control = llam_shared_task_control(task);
     llam_shared_capsule_t *capsule = task != NULL ? task->async_preempt_task : NULL;
+    /* Other local Gs retain credits; current-bank and native-operation quiescence still apply. */
     bool ready;
     if (task == NULL) return false;
     if (control == NULL) return capsule == NULL;
@@ -1525,7 +1526,8 @@ bool llam_async_shared_task_quiescent(const llam_task_t *task) {
     ready = llam_shared_service_locked(control, NULL) &&
         atomic_load_explicit(&capsule->origin, memory_order_acquire) == control &&
         llam_shared_capsule_quiescent(capsule) &&
-        atomic_load_explicit(&control->execution_debt, memory_order_acquire) == 1U &&
+        (task->local_executor != NULL ? atomic_load_explicit(&control->execution_debt, memory_order_acquire) >= 1U
+         : atomic_load_explicit(&control->execution_debt, memory_order_acquire) == 1U) &&
         atomic_load_explicit(&control->retire_depth, memory_order_acquire) == 0U &&
         atomic_load_explicit(&control->finalizer_depth, memory_order_acquire) == 0U &&
         atomic_load_explicit(&control->binding_ops, memory_order_acquire) == 0U &&
@@ -2529,7 +2531,7 @@ static void llam_shared_managed_returned(llam_worker_t *worker, llam_processor_t
     (void)data;
     llam_async_shared_scheduler_return(processor->compat_shard, task);
     if (atomic_load_explicit(&task->state, memory_order_acquire) == LLAM_TASK_STATE_DEAD) {
-        if (task->managed_execution_class == LLAM_MANAGED_EXECUTION_NATIVE_AFFINE) {
+        if (llam_task_owns_native_thread(task)) {
             llam_shared_control_t *control = llam_shared_worker_control(worker);
             llam_shared_lock(control);
             if (capsule == NULL || control->terminal_task != NULL ||

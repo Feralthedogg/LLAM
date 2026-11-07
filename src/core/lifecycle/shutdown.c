@@ -63,10 +63,12 @@ static void llam_runtime_close_ready_fd(llam_fd_t fd) {
  * normal shutdown cleanup.
  */
 static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt,
-                                                               llam_future_t **scoped_retired) {
+                                                               llam_future_t **scoped_retired,
+                                                               llam_local_executor_t **local_retired) {
     unsigned i;
     llam_managed_catalog_t *retired_catalog = NULL;
     *scoped_retired = NULL;
+    *local_retired = NULL;
 
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
@@ -85,6 +87,7 @@ static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt
      * so stale post-shutdown inspection fails without reading reclaimed task
      * storage.
      */
+    llam_local_executor_defer_shutdown(rt);
     atomic_store_explicit(&rt->initialized, false, memory_order_release);
 
     // The calling thread is no longer considered a runtime worker while
@@ -525,6 +528,7 @@ static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt
     }
 #endif
 
+    *local_retired = llam_local_executor_retire_runtime(rt);
     retired_catalog = llam_managed_catalog_detach(rt);
     if (retired_catalog == NULL && errno != 0) abort();
     free(rt->block_threads);
@@ -676,9 +680,11 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
             }
             llam_runtime_lifecycle_lock();
             llam_future_t *scoped_retired;
-            llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt, &scoped_retired);
+            llam_local_executor_t *local_retired;
+            llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt, &scoped_retired, &local_retired);
             llam_runtime_lifecycle_unlock();
             llam_scoped_task_collect_retired(scoped_retired);
+            llam_local_executor_collect_retired(local_retired);
             llam_managed_catalog_retire(retired);
         }
     }
@@ -718,9 +724,11 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt) {
         }
         llam_runtime_lifecycle_lock();
         llam_future_t *scoped_retired;
-        llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt, &scoped_retired);
+        llam_local_executor_t *local_retired;
+        llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt, &scoped_retired, &local_retired);
         llam_runtime_lifecycle_unlock();
         llam_scoped_task_collect_retired(scoped_retired);
+        llam_local_executor_collect_retired(local_retired);
         llam_managed_catalog_retire(retired);
     }
 

@@ -17,6 +17,7 @@
 
 #include "runtime_internal.h"
 #include "llam/managed.h"
+#include "llam/executor.h"
 #include <limits.h>
 
 #if !LLAM_PLATFORM_WINDOWS
@@ -114,6 +115,9 @@ static llam_worker_t *llam_native_domain_lookup(uint64_t native_id) {
 void llam_native_domain_worker_init(llam_worker_t *worker) {
     atomic_init(&worker->native_domain_depth, 0U);
     worker->native_domain_slot = 0U;
+    worker->preempt_region_depth = 0U;
+    worker->preempt_region_task = NULL;
+    worker->preempt_region_generation = 0U;
 }
 
 int llam_native_domain_bind(llam_worker_t *worker) {
@@ -169,7 +173,8 @@ void llam_native_domain_unbind(llam_worker_t *worker) {
     if (worker == NULL || worker->native_domain_slot == 0U) return;
     unsigned index = worker->native_domain_slot - 1U;
     if (index >= LLAM_NATIVE_DOMAIN_SLOTS ||
-        atomic_load_explicit(&worker->native_domain_depth, memory_order_acquire) != 0U) abort();
+        atomic_load_explicit(&worker->native_domain_depth, memory_order_acquire) != 0U ||
+        worker->preempt_region_depth != 0U || worker->preempt_region_task != NULL) abort();
     llam_native_domain_slot_t *slot = &g_native_domain_slots[index];
     if (atomic_load_explicit(&slot->native_id, memory_order_acquire) != llam_native_domain_id() ||
         atomic_load_explicit(&slot->worker, memory_order_relaxed) != worker) abort();
@@ -186,25 +191,91 @@ llam_worker_t *llam_native_domain_guarded_worker(void) {
         atomic_load_explicit(&worker->native_domain_depth, memory_order_acquire) != 0U ? worker : NULL;
 }
 
+static void llam_native_domain_enter_worker(llam_worker_t *worker) {
+    unsigned depth = atomic_load_explicit(&worker->native_domain_depth, memory_order_relaxed);
+    if (depth >= LLAM_NATIVE_DOMAIN_DEPTH_MAX) _Exit(125);
+    /* Publish the global hint before depth. Balanced nested signals on this M
+     * restore this exact depth before its interrupted activation continues. */
+    atomic_fetch_add_explicit(&g_llam_native_domains, 1U, memory_order_acq_rel);
+    atomic_fetch_add_explicit(&worker->native_domain_depth, 1U, memory_order_release);
+}
+
+static void llam_native_domain_leave_worker(llam_worker_t *worker) {
+    unsigned depth = atomic_load_explicit(&worker->native_domain_depth, memory_order_acquire);
+    if (depth == 0U) _Exit(125);
+    atomic_fetch_sub_explicit(&worker->native_domain_depth, 1U, memory_order_acq_rel);
+    atomic_fetch_sub_explicit(&g_llam_native_domains, 1U, memory_order_release);
+}
+
 void llam_managed_native_enter(void) {
     llam_worker_t *worker = llam_native_domain_lookup(llam_native_domain_id());
     if (worker == NULL) return;
-    unsigned depth = atomic_load_explicit(&worker->native_domain_depth, memory_order_relaxed);
-    if (depth >= LLAM_NATIVE_DOMAIN_DEPTH_MAX) _Exit(125);
-    /* Publish the global slow-path hint before depth. Only this native thread
-     * and balanced nested signals write its depth, so it cannot change between
-     * this load and RMW except for a nested guard that also returns to this depth. */
-    atomic_fetch_add_explicit(&g_llam_native_domains, 1U, memory_order_acq_rel);
-    atomic_fetch_add_explicit(&worker->native_domain_depth, 1U, memory_order_release);
+    llam_native_domain_enter_worker(worker);
 }
 
 void llam_managed_native_leave(void) {
     llam_worker_t *worker = llam_native_domain_lookup(llam_native_domain_id());
     if (worker == NULL) return;
-    unsigned depth = atomic_load_explicit(&worker->native_domain_depth, memory_order_acquire);
-    if (depth == 0U) _Exit(125);
-    atomic_fetch_sub_explicit(&worker->native_domain_depth, 1U, memory_order_acq_rel);
-    atomic_fetch_sub_explicit(&g_llam_native_domains, 1U, memory_order_release);
+    llam_native_domain_leave_worker(worker);
+}
+
+/* Public regions deliberately permit their own nested guard, but never an
+ * unknown native entry guard. Resolve authority from the kernel-TID binding
+ * before looking at G/P; inherited scheduler TLS is not evidence of authority. */
+static llam_worker_t *llam_preempt_region_context(llam_task_t **task_out) {
+    llam_worker_t *worker = llam_native_domain_lookup(llam_native_domain_id());
+    if (worker == NULL || atomic_load_explicit(&worker->native_domain_depth, memory_order_acquire) !=
+                          worker->preempt_region_depth) { errno = ENOTSUP; return NULL; }
+    llam_task_t *task = llam_worker_load_active_g(worker);
+    if (task == NULL || atomic_load_explicit(&worker->current_p, memory_order_acquire) == NULL ||
+        atomic_load_explicit(&task->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+        atomic_load_explicit(&task->opaque_blocking_depth, memory_order_acquire) != 0U) {
+        errno = ENOTSUP;
+        return NULL;
+    }
+    if (worker->preempt_region_depth != 0U &&
+        (worker->preempt_region_task != task || worker->preempt_region_generation !=
+         atomic_load_explicit(&task->run_generation, memory_order_acquire))) {
+        errno = EINVAL;
+        return NULL;
+    }
+    *task_out = task;
+    return worker;
+}
+
+int llam_preempt_region_enter(void) {
+    llam_task_t *task;
+    llam_worker_t *worker = llam_preempt_region_context(&task);
+    if (worker == NULL) return -1;
+    if (worker->preempt_region_depth >= LLAM_NATIVE_DOMAIN_DEPTH_MAX) { errno = EOVERFLOW; return -1; }
+    /* Guard publication precedes public ownership. A nested native callback
+     * therefore always observes an extra guard and cannot impersonate us. */
+    /* Stay in this runtime instance even if a host interposes public guards. */
+    llam_native_domain_enter_worker(worker);
+    if (worker->preempt_region_depth == 0U) {
+        worker->preempt_region_task = task;
+        worker->preempt_region_generation = atomic_load_explicit(&task->run_generation, memory_order_acquire);
+    }
+    worker->preempt_region_depth += 1U;
+    return 0;
+}
+
+int llam_preempt_region_leave(void) {
+    llam_task_t *task;
+    llam_worker_t *worker = llam_preempt_region_context(&task);
+    if (worker == NULL) return -1;
+    if (worker->preempt_region_depth == 0U) { errno = EINVAL; return -1; }
+    worker->preempt_region_depth -= 1U;
+    bool outermost = worker->preempt_region_depth == 0U;
+    if (outermost) {
+        worker->preempt_region_task = NULL;
+        worker->preempt_region_generation = 0U;
+    }
+    /* Ownership withdrawal precedes unguarding, so neither callbacks nor a
+     * resumed native capture can observe a stale region owner. */
+    llam_native_domain_leave_worker(worker);
+    if (outermost) llam_task_safepoint();
+    return 0;
 }
 
 #if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))

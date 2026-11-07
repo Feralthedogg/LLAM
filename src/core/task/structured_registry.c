@@ -17,10 +17,10 @@
 #include "structured_internal.h"
 
 pthread_mutex_t g_llam_structured_lock = PTHREAD_MUTEX_INITIALIZER;
-static llam_public_slot_table_t g_llam_structured_slots[3];
+static llam_public_slot_table_t g_llam_structured_slots[4];
 
 static llam_public_slot_table_t *llam_structured_table(uint32_t family) {
-    if (family < LLAM_PUBLIC_HANDLE_FAMILY_SCOPE || family > LLAM_PUBLIC_HANDLE_FAMILY_VALUE) return NULL;
+    if (family < LLAM_PUBLIC_HANDLE_FAMILY_SCOPE || family > LLAM_PUBLIC_HANDLE_FAMILY_LOCAL_EXECUTOR) return NULL;
     return &g_llam_structured_slots[family - LLAM_PUBLIC_HANDLE_FAMILY_SCOPE];
 }
 

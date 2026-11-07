@@ -447,6 +447,11 @@ static void llam_cancel_sleep_wait(llam_task_t *task, llam_runtime_t *rt, uint64
     }
 }
 
+static bool llam_cancel_deferred_for_borrowed_drain(const llam_task_t *task, const llam_runtime_t *rt) {
+    return atomic_load_explicit(&task->borrowed_drain_depth, memory_order_acquire) != 0U &&
+           atomic_load_explicit(&rt->fatal_errno, memory_order_acquire) == 0;
+}
+
 static void llam_cancel_task_wait_impl(llam_task_t *task, uint64_t expected_generation) {
     llam_runtime_t *rt = llam_timer_task_runtime(task);
     llam_wait_reason_t wait_reason;
@@ -458,6 +463,8 @@ static void llam_cancel_task_wait_impl(llam_task_t *task, uint64_t expected_gene
     if (task == NULL || rt == NULL || rt->active_shards == 0U) {
         return;
     }
+
+    if (llam_cancel_deferred_for_borrowed_drain(task, rt)) return;
 
     wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason,
                                                            memory_order_acquire);
@@ -472,6 +479,10 @@ static void llam_cancel_task_wait_impl(llam_task_t *task, uint64_t expected_gene
     wait_generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
                                                      memory_order_acquire);
     if (expected_generation != 0U && wait_generation != expected_generation) goto done;
+    /* The new wait generation publishes the G's cleanup mask. Recheck after
+     * acquiring that generation so a stop scan cannot cancel a newly parked
+     * drain using a mask sampled before its entry. Fatal errors remain visible. */
+    if (llam_cancel_deferred_for_borrowed_drain(task, rt)) goto done;
     wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason,
                                                            memory_order_acquire);
     parked_shard = atomic_load_explicit(&task->parked_shard, memory_order_acquire);

@@ -69,7 +69,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(len(rows), len({row[0] for row in rows}))
         self.assertEqual(len(rows), len({row[1] for row in rows}))
         path = self.work / "public-contracts.c"
-        path.write_text('#include "llam/managed.h"\n#include "llam/io.h"\n#include "llam/scope.h"\n' + "".join(
+        path.write_text('#include "llam/managed.h"\n#include "llam/io.h"\n#include "llam/scope.h"\n#include "llam/executor.h"\n' + "".join(
             f"__typeof__(&{name}) const contract_{identity} = &{name};\n" for identity, name, _ in rows))
         ir = path.with_suffix(".ll")
         result = self.command([str(self.llvm / "clang"), *self.native_flags, "-I", str(ROOT / "include"),

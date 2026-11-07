@@ -28,6 +28,29 @@
 #include "runtime_internal.h"
 #include "task_group_internal.h"
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static pthread_mutex_t g_group_spawn_hook_lock = PTHREAD_MUTEX_INITIALIZER;
+static void (*g_group_spawn_hook)(unsigned, void *);
+static void *g_group_spawn_hook_arg;
+
+void llam_task_group_test_spawn_hook(void (*hook)(unsigned, void *), void *argument) {
+    pthread_mutex_lock(&g_group_spawn_hook_lock);
+    g_group_spawn_hook = hook;
+    g_group_spawn_hook_arg = argument;
+    pthread_mutex_unlock(&g_group_spawn_hook_lock);
+}
+
+static void llam_group_spawn_test_point(unsigned point) {
+    pthread_mutex_lock(&g_group_spawn_hook_lock);
+    void (*hook)(unsigned, void *) = g_group_spawn_hook;
+    void *argument = g_group_spawn_hook_arg;
+    pthread_mutex_unlock(&g_group_spawn_hook_lock);
+    if (hook != NULL) hook(point, argument);
+}
+#else
+#define llam_group_spawn_test_point(point) ((void)0)
+#endif
+
 /**
  * @brief Return true when an ABI prefix contains a complete spawn option field.
  *
@@ -82,40 +105,29 @@ static int llam_task_group_reserve_locked(llam_task_group_t *group, size_t neede
     return 0;
 }
 
+static int llam_task_group_prepare(llam_task_group_t *group, llam_runtime_t *owner, uint32_t flags) {
+    group->owner_runtime = owner;
+    group->flags = flags;
+    atomic_init(&group->lifetime_refs, 1U);
+    llam_public_active_op_init(&group->active_ops);
+    int error = pthread_mutex_init(&group->lock, NULL);
+    if (error != 0) { errno = error; return -1; }
+    group->lock_initialized = true;
+    group->cancel_token = llam_cancel_token_create_owned(owner);
+    if (group->cancel_token == NULL) return -1;
+    group->drain_event = llam_channel_create_owned(1U, owner);
+    return group->drain_event != NULL ? 0 : -1;
+}
+
 static llam_task_group_t *llam_task_group_create_owned(llam_runtime_t *owner_runtime, uint32_t flags) {
     if (llam_runtime_check_creation_owner(owner_runtime) != 0) return NULL;
-
-
-    llam_task_group_t *group = calloc(1, sizeof(*group));
-    int rc;
-
-    if (group == NULL) {
-        return NULL;
-    }
-    rc = pthread_mutex_init(&group->lock, NULL);
-    if (rc != 0) {
-        free(group);
-        // Preserve pthread's direct error code for FFI callers.
-        errno = rc;
-        return NULL;
-    }
-    group->lock_initialized = true;
-    group->owner_runtime = owner_runtime;
-    group->flags = flags;
-    llam_public_active_op_init(&group->active_ops);
-    group->cancel_token = llam_cancel_token_create_owned(owner_runtime);
-    if (group->cancel_token == NULL) {
-        pthread_mutex_destroy(&group->lock);
-        free(group);
-        return NULL;
-    }
-    if (llam_task_group_register_live(group) != 0) {
-        int saved_errno = errno;
-
-        (void)llam_cancel_token_destroy(group->cancel_token);
-        pthread_mutex_destroy(&group->lock);
-        free(group);
-        errno = saved_errno;
+    llam_task_group_t *group = calloc(1U, sizeof(*group));
+    if (group == NULL) return NULL;
+    if (llam_task_group_prepare(group, owner_runtime, flags) != 0 ||
+        llam_task_group_register_live(group) != 0) {
+        int error = errno;
+        llam_task_group_storage_free(group);
+        errno = error;
         return NULL;
     }
     return llam_task_group_public_handle(group);
@@ -174,120 +186,80 @@ llam_task_group_t *llam_runtime_task_group_create_ex(llam_runtime_t *runtime,
     return result;
 }
 
-llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
-                                      llam_task_fn fn,
-                                      void *arg,
-                                      const llam_spawn_opts_t *opts,
-                                      size_t opts_size) {
-    LLAM_NATIVE_API_GUARD(NULL);
+static int llam_group_spawn_options(const llam_spawn_opts_t *input, size_t size,
+                                     llam_spawn_opts_t *out) {
+    *out = (llam_spawn_opts_t){.task_class = LLAM_TASK_CLASS_DEFAULT, .stack_class = LLAM_STACK_CLASS_DEFAULT};
+    if (input == NULL) return 0;
+    if (size == 0U) { errno = EINVAL; return -1; }
+    llam_spawn_opts_t raw = {0};
+    memcpy(&raw, input, size < sizeof(raw) ? size : sizeof(raw));
+#define COPY_GROUP_SPAWN_FIELD(field) \
+    if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(size, field)) out->field = raw.field
+    COPY_GROUP_SPAWN_FIELD(task_class);
+    COPY_GROUP_SPAWN_FIELD(stack_class);
+    COPY_GROUP_SPAWN_FIELD(flags);
+    COPY_GROUP_SPAWN_FIELD(deadline_ns);
+    COPY_GROUP_SPAWN_FIELD(cancel_token);
+    COPY_GROUP_SPAWN_FIELD(local_executor);
+#undef COPY_GROUP_SPAWN_FIELD
+    return 0;
+}
 
-    llam_spawn_opts_t raw_opts;
-    llam_spawn_opts_t effective_opts;
-    size_t copy_size;
-    llam_task_t *task;
-    llam_runtime_t *owner_runtime;
-    size_t max_items;
-    size_t available;
-    size_t needed;
-
-    if (group == NULL || fn == NULL) {
-        errno = EINVAL;
-        return NULL;
-    }
-    memset(&effective_opts, 0, sizeof(effective_opts));
-    effective_opts.task_class = (uint32_t)LLAM_TASK_CLASS_DEFAULT;
-    effective_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_DEFAULT;
-    if (opts != NULL) {
-        if (opts_size == 0U) {
-            errno = EINVAL;
-            return NULL;
-        }
-        memset(&raw_opts, 0, sizeof(raw_opts));
-        copy_size = opts_size < sizeof(raw_opts) ? opts_size : sizeof(raw_opts);
-        memcpy(&raw_opts, opts, copy_size);
-        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, task_class)) {
-            effective_opts.task_class = raw_opts.task_class;
-        }
-        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, stack_class)) {
-            effective_opts.stack_class = raw_opts.stack_class;
-        }
-        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, flags)) {
-            effective_opts.flags = raw_opts.flags;
-        }
-        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, deadline_ns)) {
-            effective_opts.deadline_ns = raw_opts.deadline_ns;
-        }
-        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, cancel_token)) {
-            effective_opts.cancel_token = raw_opts.cancel_token;
-        }
-    }
-    if (llam_task_group_lock_live(group, &group) != 0) {
-        return NULL;
-    }
-    if (group->joining) {
-        pthread_mutex_unlock(&group->lock);
+static int llam_group_reserve_spawn_locked(llam_task_group_t *group, llam_spawn_opts_t *opts) {
+    if (group->sealed) { errno = EPIPE; return -1; }
+    /* Ordinary cancel operations may race admission; only a saturated pin
+     * sentinel or another consumer prevents a new reservation. */
+    if (group->joining || llam_public_active_op_is_saturated(llam_public_active_op_count(&group->active_ops))) {
         errno = EBUSY;
-        return NULL;
+        return -1;
     }
-    if (llam_public_active_op_is_saturated(llam_public_active_op_count(&group->active_ops))) {
-        /*
-         * Do not treat ordinary active ops as a spawn exclusion gate: group
-         * cancel and spawn are allowed to race by design.  Only the saturated
-         * sentinel is rejected so corrupted/exhausted public-op state fails
-         * closed instead of creating a new child while teardown is unsafe.
-         */
-        pthread_mutex_unlock(&group->lock);
-        errno = EBUSY;
-        return NULL;
-    }
-    max_items = SIZE_MAX / sizeof(*group->tasks);
-    if (group->count >= max_items) {
-        /*
-         * Keep corrupted or future-imported group state from wrapping
-         * group->count + 1 to zero and then writing a spawned child through a
-         * bogus tasks[SIZE_MAX] slot.
-         */
-        pthread_mutex_unlock(&group->lock);
+    size_t max_items = SIZE_MAX / sizeof(*group->tasks);
+    /* Every active spawn owns a promised append slot. Subtraction preserves
+     * this bound even for imported/corrupted counters near SIZE_MAX. */
+    if (group->count >= max_items || group->active_spawns >= max_items - group->count) {
         errno = ENOMEM;
-        return NULL;
+        return -1;
     }
-    available = max_items - group->count;
-    if (group->active_spawns >= available) {
-        /*
-         * Every active spawn is a unique promised append slot. Subtraction
-         * keeps the check defined even for corrupted/imported near-SIZE_MAX
-         * state and prevents a new promise from exceeding the maximum array.
-         */
-        pthread_mutex_unlock(&group->lock);
-        errno = ENOMEM;
-        return NULL;
-    }
-    needed = group->count + group->active_spawns + 1U;
-    if (llam_task_group_reserve_locked(group, needed) != 0) {
-        pthread_mutex_unlock(&group->lock);
-        return NULL;
-    }
+    size_t needed = group->count + group->active_spawns + 1U;
+    if (llam_task_group_reserve_locked(group, needed) != 0) return -1;
+    if (group->pending_retirements == SIZE_MAX) { errno = EOVERFLOW; return -1; }
     group->active_spawns += 1U;
-    owner_runtime = group->owner_runtime;
-    if (effective_opts.cancel_token == NULL) {
-        effective_opts.cancel_token = group->cancel_token;
-    }
-    pthread_mutex_unlock(&group->lock);
+    group->pending_retirements += 1U;
+    if (opts->cancel_token == NULL) opts->cancel_token = group->cancel_token;
+    return 0;
+}
 
-    /*
-     * Children belong to the group's owner runtime, not whichever runtime or
-     * unmanaged host thread happens to call the group API. Ownership is attached
-     * inside spawn before runnable publication; marking the returned borrowed
-     * handle afterward leaves a race where a child can consume it first.
-     */
-    task = llam_runtime_spawn_group_owned_ex(owner_runtime, group, fn, arg, &effective_opts, sizeof(effective_opts));
-
+static void llam_group_finish_spawn(llam_task_group_t *group, llam_task_t *task) {
     pthread_mutex_lock(&group->lock);
     group->active_spawns -= 1U;
-    if (task != NULL) {
-        group->tasks[group->count++] = task;
-    }
+    if (task != NULL) group->tasks[group->count++] = task;
+    else group->pending_retirements -= 1U;
+    bool signal = llam_task_group_signal_locked(group);
     pthread_mutex_unlock(&group->lock);
+    llam_task_group_signal(group, signal);
+}
+
+llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
+                                      llam_task_fn fn, void *arg,
+                                      const llam_spawn_opts_t *opts, size_t opts_size) {
+    LLAM_NATIVE_API_GUARD(NULL);
+    if (group == NULL || fn == NULL) { errno = EINVAL; return NULL; }
+    llam_spawn_opts_t effective;
+    if (llam_group_spawn_options(opts, opts_size, &effective) != 0) return NULL;
+    llam_group_spawn_test_point(1U);
+    if (llam_task_group_lock_live(group, &group) != 0) return NULL;
+    int reserved = llam_group_reserve_spawn_locked(group, &effective);
+    int error = errno;
+    pthread_mutex_unlock(&group->lock);
+    if (reserved != 0) { errno = error; return NULL; }
+    llam_group_spawn_test_point(2U);
+    /* Execution ownership is attached before runnable publication; group
+     * admission remains retained until this call appends or rolls back. */
+    llam_task_t *task = llam_runtime_spawn_group_owned_ex(group->owner_runtime, group,
+                                                          fn, arg, &effective, sizeof(effective));
+    error = errno;
+    llam_group_finish_spawn(group, task);
+    if (task == NULL) errno = error;
     return task;
 }
 
@@ -297,7 +269,9 @@ llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
                                    const llam_spawn_opts_t *opts) {
     LLAM_NATIVE_API_GUARD(NULL);
 
-    return llam_task_group_spawn_ex(group, fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
+    /* New tail fields require the caller-size handshake of the _ex form. */
+    size_t size = opts != NULL ? offsetof(llam_spawn_opts_t, local_executor) : 0U;
+    return llam_task_group_spawn_ex(group, fn, arg, opts, size);
 }
 
 int llam_task_group_cancel(llam_task_group_t *group) {
@@ -332,41 +306,21 @@ int llam_task_group_cancel(llam_task_group_t *group) {
     return 0;
 }
 
-static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline, uint64_t deadline_ns) {
-    llam_task_t **tasks;
-    size_t count;
-    size_t i;
-
-    if (llam_task_group_lock_live(group, &group) != 0) {
-        return -1;
-    }
-
-    if (group->active_spawns != 0U ||
-        llam_public_active_op_count(&group->active_ops) != 0U ||
-        group->joining) {
-        pthread_mutex_unlock(&group->lock);
-        errno = EBUSY;
-        return -1;
-    }
-    group->joining = true;
-    tasks = group->tasks;
-    count = group->count;
+int llam_task_group_consume_children(llam_task_group_t *group, bool has_deadline, uint64_t deadline_ns) {
+    pthread_mutex_lock(&group->lock);
+    if (!group->joining || group->active_spawns != 0U) abort();
+    llam_task_t **tasks = group->tasks;
+    size_t count = group->count;
     group->count = 0U;
     pthread_mutex_unlock(&group->lock);
-
-    for (i = 0U; i < count; ++i) {
-        int join_rc = llam_task_group_join_child_handle(tasks[i], group, has_deadline, deadline_ns);
-
-        if (join_rc != 0) {
-            int saved_errno = errno;
-
+    for (size_t i = 0U; i < count; ++i) {
+        if (llam_task_group_join_child_handle(tasks[i], group, has_deadline, deadline_ns) != 0) {
+            int error = errno;
             pthread_mutex_lock(&group->lock);
-            while (i < count) {
-                group->tasks[group->count++] = tasks[i++];
-            }
+            while (i < count) group->tasks[group->count++] = tasks[i++];
             group->joining = false;
             pthread_mutex_unlock(&group->lock);
-            errno = saved_errno;
+            errno = error;
             return -1;
         }
     }
@@ -374,6 +328,18 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
     group->joining = false;
     pthread_mutex_unlock(&group->lock);
     return 0;
+}
+
+static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline, uint64_t deadline_ns) {
+    if (llam_task_group_lock_live(group, &group) != 0) return -1;
+    if (group->active_spawns != 0U || llam_public_active_op_count(&group->active_ops) != 0U || group->joining) {
+        pthread_mutex_unlock(&group->lock);
+        errno = EBUSY;
+        return -1;
+    }
+    group->joining = true;
+    pthread_mutex_unlock(&group->lock);
+    return llam_task_group_consume_children(group, has_deadline, deadline_ns);
 }
 
 int llam_task_group_join(llam_task_group_t *group) {

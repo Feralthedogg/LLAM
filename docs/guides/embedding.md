@@ -231,3 +231,29 @@ releasing any referenced memory. A future can outlive the drained scope and runt
 Use the C ABI from other languages or the optional C++17 host wrapper. This host
 integration does not qualify another language's task code for asynchronous capture;
 task entries still follow the managed compiler/image admission contract.
+
+
+## Borrowed scopes and local domains
+
+Development ABI 2.6 adds `llam_task_group_drain` for children borrowing a parent's
+stack. Request group cancellation if needed, then drain before leaving the scope.
+Successful drain seals admission and consumes every accepted child handle after
+execution retirement, even if the caller is cancelled, its request deadline has
+expired, or the runtime is stopping. It has no timeout. On fatal failure, keep
+borrowed storage alive or terminate; do not unwind a live loan. Ordinary group join
+and bounded owned-scope drain keep their existing contracts.
+
+For thread-affine local children, create a shared executor with
+`llam_runtime_local_executor_create_ex` and pass it in each root/child spawn option.
+It owns one native thread shared by the domain. Construct local values on that
+thread; an arbitrary pointer submitted by another thread does not become safe to
+transfer merely by selecting this executor. A caller outside the domain drains
+it before releasing domain-wide storage and destroys the handle afterward.
+See [execution controls](../reference/api/executors.md) for the complete admission,
+thread, cleanup and short no-preemption contracts.
+
+For borrowed I/O, release the buffer loan only when the original operation returns.
+A cancel or close request on another task is not completion. Operation return
+includes backend/helper retirement, so LLAM and the kernel no longer access that
+operation's caller-owned buffer, including after timeout or cancellation. This
+memory-lifetime guarantee does not roll back transferred bytes or side effects.

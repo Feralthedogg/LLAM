@@ -77,6 +77,20 @@ class NativeBoundaryTests(unittest.TestCase):
             self.assertIn("→", sources["src/core/example.c"])
             self.assertTrue(all("→" in source for source in headers.values()))
 
+    def test_region_owner_validation_cannot_be_removed(self) -> None:
+        self.assertTrue(self.mutated("src/core/preempt/native_domain.c",
+                                    "worker->preempt_region_depth) { errno = ENOTSUP; return NULL; }",
+                                    "0U) { errno = ENOTSUP; return NULL; }"))
+
+    def test_region_must_publish_the_native_guard(self) -> None:
+        self.assertTrue(self.mutated("src/core/preempt/native_domain.c",
+                                    "llam_native_domain_enter_worker(worker);\n    if (worker->preempt_region_depth",
+                                    "if (worker->preempt_region_depth"))
+
+    def test_region_leave_preserves_pending_preemption(self) -> None:
+        self.assertTrue(self.mutated("src/core/preempt/native_domain.c",
+                                    "if (outermost) llam_task_safepoint();", "(void)outermost;"))
+
     def test_removed_entry_gate(self) -> None:
         self.assertTrue(self.mutated("src/core/task/yield_join_sleep.c", "LLAM_NATIVE_API_GUARD();", ""))
 

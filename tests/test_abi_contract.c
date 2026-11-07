@@ -56,6 +56,8 @@ _Static_assert(offsetof(llam_scope_report_t, runtime_error) == 64U, "scope error
 ASSERT_FIELD_U32(llam_outcome_t, kind);
 ASSERT_FIELD_U32(llam_type_descriptor_t, alignment);
 
+_Static_assert(offsetof(llam_spawn_opts_t, local_executor) == 32U, "ABI2.5 spawn prefix changed");
+_Static_assert(sizeof(llam_spawn_opts_t) == 40U, "ABI2.6 executor tail layout");
 ASSERT_FIELD_U32(llam_spawn_opts_t, task_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, stack_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, flags);

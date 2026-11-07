@@ -4,6 +4,17 @@
 
 ### Added
 
+* add ABI 2.6 borrowed group drain: seal admission and defer caller cancellation,
+  request deadlines and ordinary runtime stop until all accepted children retire.
+* add short nested no-preemption regions with native-binding ownership, suspension
+  refusal, pending cancellation preservation and fail-stop on unbalanced task exit.
+* add shared local executors on one LLAM-owned native thread, retaining same-thread
+  execution through asynchronous capture, managed waits and task cleanup; executor
+  drain additionally waits for native thread/TLS exit. Append an optional executor
+  handle to spawn options while preserving the old 32-byte prefix.
+* add terminal I/O buffer-loan regressions for cancellation and close, including
+  helper fallback and native Windows HANDLEs; require native executor/region tests
+  and a relocated installed-SDK consumer in the managed compiler CI chain.
 * add ABI 2.5 owned task scopes, semantic type descriptors, independent futures and
   exactly-once owned values, with success/application-error/cancellation/runtime-error
   outcomes distinct from wait failures; preserve existing ABI major 2 layouts.
@@ -15,7 +26,7 @@
 
 ### Changed
 
-* document ABI 2.5 as a development addition after stable 3.0.0 (ABI 2.4), including
+* document ABI 2.5/2.6 as development additions after stable 3.0.0 (ABI 2.4), including
   retained ownership after timeout, independent result lifetimes and callback rules.
 
 ## 3.0.0 - 2026-11-05
