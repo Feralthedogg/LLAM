@@ -15,27 +15,27 @@
  * See LICENSE.
  */
 
-#ifndef LLAM_CAVO_EXECUTION_FIXTURE_H
-#define LLAM_CAVO_EXECUTION_FIXTURE_H
+#ifndef LLAM_EXECUTION_CONTROLS_FIXTURE_H
+#define LLAM_EXECUTION_CONTROLS_FIXTURE_H
 #include "llam/runtime.h"
 #include "llam/executor.h"
 #include <stdatomic.h>
 #include <stdbool.h>
-typedef struct cavo_execution_work {
+typedef struct execution_controls_work {
     llam_runtime_t *runtime;
     llam_cancel_token_t *token;
     atomic_uint peer_ready, phase, probe_done, peer_done, errors, cancellation_seen;
     uint64_t iterations;
-} cavo_execution_work_t;
-typedef struct cavo_local_native_work cavo_local_native_work_t;
-typedef struct cavo_local_native_child {
-    cavo_local_native_work_t *work;
+} execution_controls_work_t;
+typedef struct local_executor_native_work local_executor_native_work_t;
+typedef struct local_executor_native_child {
+    local_executor_native_work_t *work;
     uint64_t before, after, cleanup;
     unsigned value;
     atomic_uint ready;
-} cavo_local_native_child_t;
+} local_executor_native_child_t;
 
-struct cavo_local_native_work {
+struct local_executor_native_work {
     llam_runtime_t *runtime;
     llam_local_executor_t *executor;
     llam_cancel_token_t *token;

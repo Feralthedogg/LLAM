@@ -17,7 +17,7 @@
 
 #include "runtime_internal.h"
 #include "llam/io.h"
-#include "cavo_lifetime_internal.h"
+#include "borrowed_lifetime_internal.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -42,11 +42,16 @@ typedef struct io_loan_case {
     size_t filled;
 } io_loan_case_t;
 
-static void io_check(io_loan_case_t *test, bool passed, const char *where) {
+static void record_io_check(io_loan_case_t *test, bool passed, const char *where) {
     if (!passed && atomic_fetch_add(&test->failures, 1U) == 0U)
         fprintf(stderr, "I/O loan %s/%s: %s errno=%d\n", test->writing ? "write" : "read",
                 test->close_request ? "close" : "cancel", where, errno);
 }
+#define io_check(test, expression, where) do { \
+    /* MSVC C11 atomics need evaluation outside the bool call argument. */ \
+    bool checked = (expression); \
+    record_io_check((test), checked, (where)); \
+} while (0)
 
 #if LLAM_PLATFORM_WINDOWS
 static bool io_pipe_open(io_loan_case_t *test) {
@@ -255,6 +260,11 @@ static void io_controller(void *data) {
     if (test->close_request) {
         io_check(test, io_close_end(test, test->writing) == 0, "close pending operation");
         test->target_closed = true;
+        /* io_uring retains its own file reference after close. Drive the
+         * original request to actual completion before testing loan return;
+         * close itself is not a completion or cancellation acknowledgement. */
+        void *unused;
+        io_check(test, llam_call_blocking_result(io_probe_peer, test, &unused) == 0, "finish closed operation");
     } else io_check(test, llam_cancel_token_cancel(test->token) == 0, "request cancellation");
     if (pending && io_wait_for_phase(test, true)) {
         io_check(test, test->result == 1 || (!test->writing && test->close_request && test->result == 0) ||
@@ -291,7 +301,7 @@ static bool io_run_case(bool writing, bool closing, bool helper) {
     return true;
 }
 
-bool cavo_io_lifetime_cases(bool force_helper) {
+bool borrowed_io_lifetime_cases(bool force_helper) {
 #if LLAM_PLATFORM_WINDOWS
     CHECK(!force_helper);
     CHECK(_putenv_s("LLAM_DIRECT_BLOCKING_IO", "0") == 0);
@@ -310,6 +320,6 @@ bool cavo_io_lifetime_cases(bool force_helper) {
 #if !LLAM_PLATFORM_WINDOWS
     CHECK(signal(SIGPIPE, previous_sigpipe) != SIG_ERR);
 #endif
-    puts("Cavo I/O loans: pending read/write cancellation and close preserve terminal buffer access");
+    puts("LLAM I/O loans: pending read/write cancellation and close preserve terminal buffer access");
     return true;
 }

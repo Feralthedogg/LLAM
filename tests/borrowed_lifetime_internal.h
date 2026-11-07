@@ -15,8 +15,8 @@
  * See LICENSE.
  */
 
-#ifndef LLAM_CAVO_LIFETIME_INTERNAL_H
-#define LLAM_CAVO_LIFETIME_INTERNAL_H
+#ifndef LLAM_BORROWED_LIFETIME_INTERNAL_H
+#define LLAM_BORROWED_LIFETIME_INTERNAL_H
 #include <stdbool.h>
-bool cavo_io_lifetime_cases(bool force_helper);
+bool borrowed_io_lifetime_cases(bool force_helper);
 #endif

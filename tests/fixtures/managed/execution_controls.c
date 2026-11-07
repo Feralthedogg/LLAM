@@ -15,31 +15,31 @@
  * See LICENSE.
  */
 
-#include "cavo_execution.h"
+#include "execution_controls.h"
 #include "llam/executor.h"
 #include "llam/managed.h"
 
-__attribute__((annotate("llam-native-affine"))) void cavo_fixture_abort(void);
+__attribute__((annotate("llam-native-affine"))) void execution_fixture_abort(void);
 
-static void cavo_execution_error(cavo_execution_work_t *work) {
+static void execution_controls_error(execution_controls_work_t *work) {
     atomic_store_explicit(&work->errors, 1U, memory_order_release);
 }
 
-void cavo_critical_peer(void *argument) {
-    cavo_execution_work_t *work = argument;
+void fixture_critical_peer(void *argument) {
+    execution_controls_work_t *work = argument;
     atomic_store_explicit(&work->peer_ready, 1U, memory_order_release);
     for (uint64_t i = 0U; i != UINT64_C(2000000000); ++i) {
         unsigned phase = atomic_load_explicit(&work->phase, memory_order_acquire);
-        if (phase == 2U) cavo_execution_error(work);
+        if (phase == 2U) execution_controls_error(work);
         if (phase >= 3U) {
             atomic_store_explicit(&work->peer_done, 1U, memory_order_release);
             return;
         }
     }
-    cavo_execution_error(work);
+    execution_controls_error(work);
 }
 
-static int cavo_critical_begin(cavo_execution_work_t *work) {
+static int fixture_critical_begin(execution_controls_work_t *work) {
     for (uint64_t i = 0U; i != UINT64_C(2000000000); ++i) {
         if (atomic_load_explicit(&work->peer_ready, memory_order_acquire)) {
             if (llam_preempt_region_enter() != 0) break;
@@ -48,75 +48,75 @@ static int cavo_critical_begin(cavo_execution_work_t *work) {
             break;
         }
     }
-    cavo_execution_error(work);
+    execution_controls_error(work);
     atomic_store_explicit(&work->phase, 3U, memory_order_release);
     return -1;
 }
 
-void cavo_critical_entry(void *argument) {
-    cavo_execution_work_t *work = argument;
+void fixture_critical_entry(void *argument) {
+    execution_controls_work_t *work = argument;
     /* Both rendezvous loops are call-free before entry. One P cannot advance
      * both tasks without real native capture outside the critical region. */
-    if (cavo_critical_begin(work) != 0) return;
-    if (llam_sleep_ns(1U) != -1) cavo_execution_error(work);
+    if (fixture_critical_begin(work) != 0) return;
+    if (llam_sleep_ns(1U) != -1) execution_controls_error(work);
     atomic_store_explicit(&work->phase, 2U, memory_order_release);
     uint64_t i = 0U;
     for (; i != UINT64_C(2000000000); ++i) {
         if (atomic_load_explicit(&work->probe_done, memory_order_acquire)) break;
     }
     work->iterations = i;
-    if (i == UINT64_C(2000000000)) cavo_execution_error(work);
-    if (llam_preempt_region_leave() != 0 || llam_sleep_ns(1U) != -1) cavo_execution_error(work);
+    if (i == UINT64_C(2000000000)) execution_controls_error(work);
+    if (llam_preempt_region_leave() != 0 || llam_sleep_ns(1U) != -1) execution_controls_error(work);
     atomic_store_explicit(&work->phase, 3U, memory_order_release);
-    if (llam_preempt_region_leave() != 0) cavo_execution_error(work);
+    if (llam_preempt_region_leave() != 0) execution_controls_error(work);
     if (llam_cancel_token_is_cancelled(work->token) == 1 && llam_sleep_ns(UINT64_C(1000000)) == -1)
         atomic_store_explicit(&work->cancellation_seen, 1U, memory_order_release);
     for (i = 0U; i != UINT64_C(2000000000); ++i) {
         if (atomic_load_explicit(&work->peer_done, memory_order_acquire)) return;
     }
-    cavo_execution_error(work);
+    execution_controls_error(work);
 }
 
-static void cavo_local_error(cavo_local_native_work_t *work) {
+static void fixture_local_error(local_executor_native_work_t *work) {
     atomic_store_explicit(&work->errors, 1U, memory_order_release);
 }
 
-static uint64_t cavo_local_identity(cavo_local_native_work_t *work) {
+static uint64_t fixture_local_identity(local_executor_native_work_t *work) {
     void *identity = NULL;
     if (llam_call_native_affine_result(work->identity, NULL, &identity) != 0) {
-        cavo_local_error(work);
+        fixture_local_error(work);
         return 0U;
     }
     return (uint64_t)(uintptr_t)identity;
 }
 
-static void cavo_local_child(void *argument) {
-    cavo_local_native_child_t *child = argument;
-    cavo_local_native_work_t *work = child->work;
-    if (llam_task_local_set_owned(work->key, child, work->cleanup) != 0) cavo_local_error(work);
-    child->before = cavo_local_identity(work);
+static void fixture_local_child(void *argument) {
+    local_executor_native_child_t *child = argument;
+    local_executor_native_work_t *work = child->work;
+    if (llam_task_local_set_owned(work->key, child, work->cleanup) != 0) fixture_local_error(work);
+    child->before = fixture_local_identity(work);
     uint64_t i;
     for (i = 0U; i != UINT64_C(2000000000); ++i)
         if (atomic_load_explicit(&work->go, memory_order_acquire)) break;
-    if (i == UINT64_C(2000000000)) cavo_local_error(work);
+    if (i == UINT64_C(2000000000)) fixture_local_error(work);
     llam_yield();
-    if (llam_sleep_ns(UINT64_C(1000000)) != 0) cavo_local_error(work);
-    child->after = cavo_local_identity(work);
-    if (llam_preempt_region_enter() != 0) cavo_local_error(work);
+    if (llam_sleep_ns(UINT64_C(1000000)) != 0) fixture_local_error(work);
+    child->after = fixture_local_identity(work);
+    if (llam_preempt_region_enter() != 0) fixture_local_error(work);
     else {
         work->shared_value += 1U;
-        if (llam_preempt_region_leave() != 0) cavo_local_error(work);
+        if (llam_preempt_region_leave() != 0) fixture_local_error(work);
     }
     child->value = 42U;
     atomic_store_explicit(&child->ready, 1U, memory_order_release);
     for (i = 0U; i != UINT64_C(10000); ++i) {
         if (atomic_load_explicit(&work->release_children, memory_order_acquire)) return;
-        if (llam_sleep_ns(UINT64_C(1000000)) != 0) cavo_local_error(work);
+        if (llam_sleep_ns(UINT64_C(1000000)) != 0) fixture_local_error(work);
     }
-    cavo_fixture_abort();
+    execution_fixture_abort();
 }
 
-static bool cavo_local_wait_children(cavo_local_native_child_t children[3]) {
+static bool fixture_local_wait_children(local_executor_native_child_t children[3]) {
     for (uint64_t i = 0U; i != UINT64_C(2000000000); ++i) {
         if (atomic_load_explicit(&children[0].ready, memory_order_acquire) &&
             atomic_load_explicit(&children[1].ready, memory_order_acquire) &&
@@ -125,33 +125,33 @@ static bool cavo_local_wait_children(cavo_local_native_child_t children[3]) {
     return false;
 }
 
-void cavo_local_root(void *argument) {
-    cavo_local_native_work_t *work = argument;
-    work->root_identity = cavo_local_identity(work);
+void fixture_local_root(void *argument) {
+    local_executor_native_work_t *work = argument;
+    work->root_identity = fixture_local_identity(work);
     llam_task_group_t *group = llam_runtime_task_group_create(work->runtime);
-    if (group == NULL) { cavo_local_error(work); return; }
-    cavo_local_native_child_t children[3] = {0};
+    if (group == NULL) { fixture_local_error(work); return; }
+    local_executor_native_child_t children[3] = {0};
     llam_spawn_opts_t options = {0};
     options.local_executor = work->executor;
     for (unsigned i = 0U; i != 3U; ++i) {
         children[i].work = work;
         atomic_init(&children[i].ready, 0U);
-        if (llam_task_group_spawn_ex(group, cavo_local_child, &children[i], &options, sizeof(options)) == NULL)
-            cavo_local_error(work);
+        if (llam_task_group_spawn_ex(group, fixture_local_child, &children[i], &options, sizeof(options)) == NULL)
+            fixture_local_error(work);
     }
     atomic_store_explicit(&work->go, 1U, memory_order_release);
     /* No call/poll here: only async capture can let same-M children finish. */
-    if (!cavo_local_wait_children(children)) cavo_fixture_abort();
+    if (!fixture_local_wait_children(children)) execution_fixture_abort();
     if (llam_local_executor_close(work->executor) != 0 || llam_cancel_token_cancel(work->token) != 0)
-        cavo_local_error(work);
+        fixture_local_error(work);
     atomic_store_explicit(&work->draining, 1U, memory_order_release);
-    if (llam_task_group_drain(group) != 0) cavo_fixture_abort();
+    if (llam_task_group_drain(group) != 0) execution_fixture_abort();
     for (unsigned i = 0U; i != 3U; ++i) {
         if (children[i].value != 43U || children[i].before != work->root_identity ||
             children[i].after != work->root_identity || children[i].cleanup != work->root_identity)
-            cavo_fixture_abort();
+            execution_fixture_abort();
     }
     if (work->root_identity == 0U || work->shared_value != 3U || llam_task_group_destroy(group) != 0)
-        cavo_local_error(work);
+        fixture_local_error(work);
     atomic_store_explicit(&work->checked, 1U, memory_order_release);
 }

@@ -248,7 +248,7 @@ claim that the POSIX managed SDK launcher is qualified on Windows.
 
 ## Development borrowed/local execution gate
 
-ABI 2.6 adds `test_cavo_lifetime` and `test_cavo_execution` to Make and CTest.
+ABI 2.6 adds `test_borrowed_lifetime` and `test_execution_controls` to Make and CTest.
 The lifetime suite covers borrowed group cancellation, expired request budgets,
 runtime stop, active admission, real callback/cleanup retirement and owner checks.
 Its I/O variants reuse buffers immediately after pending read/write cancel or close;
@@ -262,8 +262,8 @@ return. It also checks a real shared local thread, close/admission, stale handle
 self-drain refusal, independent task handles and delayed TLS/FLS destructors.
 Both suites run with the separate `make test-asan` objects.
 
-With required LLVM tooling, `test_cavo_preempt_regions` and
-`test_cavo_local_native` run qualified no-poll fixtures on a single processor.
+With required LLVM tooling, `test_preempt_regions_native` and
+`test_local_executor_native` run qualified no-poll fixtures on a single processor.
 The mandatory managed CI driver requires both tests and a relocated SDK consumer;
 missing or skipped tests fail that gate. Native Windows CTest validates the core
 executor/region and IOCP/HANDLE lifetime paths. The Unix LLVM fixture does not

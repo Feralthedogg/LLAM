@@ -15,8 +15,8 @@
  * See LICENSE.
  */
 
-#ifndef LLAM_CAVO_EXECUTION_INTERNAL_H
-#define LLAM_CAVO_EXECUTION_INTERNAL_H
+#ifndef LLAM_EXECUTION_CONTROLS_INTERNAL_H
+#define LLAM_EXECUTION_CONTROLS_INTERNAL_H
 #include <stdbool.h>
-bool cavo_local_executor_cases(bool native);
+bool local_executor_cases(bool native);
 #endif

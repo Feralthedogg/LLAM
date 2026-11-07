@@ -200,13 +200,13 @@ def test_rejections(sdk: InstalledSdk, work: Path, env: dict[str, str]) -> None:
 def test_local_executor(sdk: InstalledSdk, work: Path, args: argparse.Namespace,
                         env: dict[str, str], native_flags: list[str]) -> None:
     fixtures = ROOT / "tests" / "fixtures" / "managed"
-    task, host = work / "cavo_task.o", work / "cavo_host.o"
+    task, host = work / "execution_task.o", work / "execution_host.o"
     image = work / "local-executor-sdk-consumer"
     include = ["-I", str(sdk.include)]
-    run([sdk.driver, *include, "-c", str(fixtures / "cavo_execution.c"), "-o", str(task)], env=env)
+    run([sdk.driver, *include, "-c", str(fixtures / "execution_controls.c"), "-o", str(task)], env=env)
     run([str(args.llvm_bin.resolve() / "clang"), *native_flags, *include, "-std=c11",
          "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror", "-O2", "-pthread",
-         "-c", str(fixtures / "cavo_consumer.c"), "-o", str(host)], env=env)
+         "-c", str(fixtures / "local_executor_consumer.c"), "-o", str(host)], env=env)
     run([sdk.driver, str(task), str(host), str(sdk.runtime), "-pthread",
          "-Wl,-rpath," + str(sdk.runtime.parent), "-o", str(image)], env=env)
     run([sys.executable, str(sdk.verifier), str(image), "--objdump",

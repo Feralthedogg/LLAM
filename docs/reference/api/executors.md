@@ -102,7 +102,7 @@ with the short regions above. This also requires language-level effect and borro
 checks. Owned-scope/future value destructors keep their thread-neutral contract;
 place thread-affine cleanup in the local task wrapper or task-local exit cleanup.
 
-The [installed SDK fixture](https://github.com/Feralthedogg/LLAM/blob/main/tests/fixtures/managed/cavo_consumer.c)
+The [installed SDK fixture](https://github.com/Feralthedogg/LLAM/blob/main/tests/fixtures/managed/local_executor_consumer.c)
 uses a root and three local children, parent cancellation, borrowed group drain,
 no-poll asynchronous progress and same-thread cleanup. The native runtime suite
 also delays a native TLS destructor to verify that executor drain waits for it.

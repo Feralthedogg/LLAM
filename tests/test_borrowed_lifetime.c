@@ -16,7 +16,7 @@
  */
 
 #include "runtime_internal.h"
-#include "cavo_lifetime_internal.h"
+#include "borrowed_lifetime_internal.h"
 #include "core/task/task_group_internal.h"
 #include <stdio.h>
 #include <string.h>
@@ -41,9 +41,14 @@ typedef struct borrowed_capture {
     unsigned value;
 } borrowed_capture_t;
 
-static void task_check(lifetime_case_t *test, bool passed) {
+static void record_task_check(lifetime_case_t *test, bool passed) {
     if (!passed) atomic_fetch_add(&test->failures, 1U);
 }
+#define task_check(test, expression) do { \
+    /* MSVC C11 atomics need evaluation outside the bool call argument. */ \
+    bool checked = (expression); \
+    record_task_check((test), checked); \
+} while (0)
 
 static bool case_create(lifetime_case_t *test) {
     memset(test, 0, sizeof(*test));
@@ -303,14 +308,14 @@ static bool group_cases(void) {
     CHECK(reject_peer_runtime());
     CHECK(drain_races_admission(1U));
     CHECK(drain_races_admission(2U));
-    puts("Cavo group drain: borrowed callback/cleanup retirement, cancellation, deadlines, stop and ownership passed");
+    puts("LLAM group drain: borrowed callback/cleanup retirement, cancellation, deadlines, stop and ownership passed");
     return true;
 }
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--group") == 0) return group_cases() ? 0 : 1;
-    if (argc == 2 && strcmp(argv[1], "--io") == 0) return cavo_io_lifetime_cases(false) ? 0 : 1;
-    if (argc == 2 && strcmp(argv[1], "--io-helper") == 0) return cavo_io_lifetime_cases(true) ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--io") == 0) return borrowed_io_lifetime_cases(false) ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--io-helper") == 0) return borrowed_io_lifetime_cases(true) ? 0 : 1;
     if (argc != 1) { fprintf(stderr, "unsupported lifetime test selection\n"); return 2; }
-    return group_cases() && cavo_io_lifetime_cases(false) ? 0 : 1;
+    return group_cases() && borrowed_io_lifetime_cases(false) ? 0 : 1;
 }

@@ -865,28 +865,28 @@ add_executable(test_api_usability tests/test_api_usability.c)
 target_link_libraries(test_api_usability PRIVATE llam_runtime)
 target_include_directories(test_api_usability PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
 
-add_executable(test_cavo_lifetime tests/test_cavo_lifetime.c tests/cavo_io_lifetime.c)
-target_link_libraries(test_cavo_lifetime PRIVATE llam_runtime_testhooks)
-target_compile_definitions(test_cavo_lifetime PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
-target_include_directories(test_cavo_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
-add_test(NAME test_cavo_lifetime COMMAND test_cavo_lifetime)
-set_tests_properties(test_cavo_lifetime PROPERTIES TIMEOUT 30)
+add_executable(test_borrowed_lifetime tests/test_borrowed_lifetime.c tests/borrowed_io_lifetime.c)
+target_link_libraries(test_borrowed_lifetime PRIVATE llam_runtime_testhooks)
+target_compile_definitions(test_borrowed_lifetime PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+target_include_directories(test_borrowed_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
+add_test(NAME test_borrowed_lifetime COMMAND test_borrowed_lifetime)
+set_tests_properties(test_borrowed_lifetime PROPERTIES TIMEOUT 30)
 if(NOT WIN32)
-    add_test(NAME test_cavo_io_helper COMMAND test_cavo_lifetime --io-helper)
-    set_tests_properties(test_cavo_io_helper PROPERTIES TIMEOUT 30)
+    add_test(NAME test_borrowed_io_helper COMMAND test_borrowed_lifetime --io-helper)
+    set_tests_properties(test_borrowed_io_helper PROPERTIES TIMEOUT 30)
 endif()
 
-add_executable(test_cavo_execution tests/test_cavo_execution.c tests/cavo_local_executor.c)
-target_link_libraries(test_cavo_execution PRIVATE llam_runtime ${CMAKE_DL_LIBS})
-target_include_directories(test_cavo_execution PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
-add_test(NAME test_cavo_execution COMMAND test_cavo_execution)
-set_tests_properties(test_cavo_execution PROPERTIES TIMEOUT 30)
+add_executable(test_execution_controls tests/test_execution_controls.c tests/local_executor_cases.c)
+target_link_libraries(test_execution_controls PRIVATE llam_runtime ${CMAKE_DL_LIBS})
+target_include_directories(test_execution_controls PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
+add_test(NAME test_execution_controls COMMAND test_execution_controls)
+set_tests_properties(test_execution_controls PROPERTIES TIMEOUT 30)
 if(Python3_FOUND)
-    add_test(NAME test_cavo_region_unbalanced
+    add_test(NAME test_preempt_region_unbalanced
         COMMAND ${Python3_EXECUTABLE} -c
             "import subprocess,sys; result=subprocess.run([sys.argv[1], '--unbalanced']); sys.exit(0 if result.returncode == 125 else 1)"
-            $<TARGET_FILE:test_cavo_execution>)
-    set_tests_properties(test_cavo_region_unbalanced PROPERTIES TIMEOUT 15)
+            $<TARGET_FILE:test_execution_controls>)
+    set_tests_properties(test_preempt_region_unbalanced PROPERTIES TIMEOUT 15)
 endif()
 
 add_executable(test_scope_values tests/test_scope_values.c)
@@ -1910,8 +1910,8 @@ foreach(LLAM_TEST_TARGET
         test_api_usability
         test_scope
         test_scope_values
-        test_cavo_lifetime
-        test_cavo_execution
+        test_borrowed_lifetime
+        test_execution_controls
         test_runtime_api_edges
         test_runtime_select_edges
         test_runtime_io_dump
@@ -2196,8 +2196,8 @@ if(LLAM_MANAGED_PLUGIN_ACTIVE AND Python3_FOUND)
             set(LLAM_MANAGED_IMAGE_LINK_FLAGS -dynamiclib -Wl,-undefined,dynamic_lookup
                 -fno-register-global-dtors-with-atexit)
         endif()
-        set(LLAM_CAVO_EXECUTION_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/cavo-execution-fixture${CMAKE_SHARED_LIBRARY_SUFFIX}")
-        add_custom_command(OUTPUT "${LLAM_CAVO_EXECUTION_FIXTURE}"
+        set(LLAM_EXECUTION_CONTROLS_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/execution-controls-fixture${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        add_custom_command(OUTPUT "${LLAM_EXECUTION_CONTROLS_FIXTURE}"
             COMMAND ${CMAKE_COMMAND} -E env
                 "LLAM_LLVM_BIN=${LLVM_TOOLS_BINARY_DIR}"
                 "LLAM_MANAGED_PLUGIN=$<TARGET_FILE:llam_managed_pass>"
@@ -2205,25 +2205,25 @@ if(LLAM_MANAGED_PLUGIN_ACTIVE AND Python3_FOUND)
                 ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/preempt/managed_driver.py
                 --llam-managed=required ${LLAM_MANAGED_IMAGE_TARGET_FLAGS} ${LLAM_MANAGED_IMAGE_LINK_FLAGS}
                 -I${CMAKE_CURRENT_SOURCE_DIR}/include
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/managed/cavo_execution.c
-                -o "${LLAM_CAVO_EXECUTION_FIXTURE}"
-            DEPENDS llam_managed_pass tests/fixtures/managed/cavo_execution.c
-                tests/fixtures/managed/cavo_execution.h include/llam/executor.h include/llam/runtime.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/managed/execution_controls.c
+                -o "${LLAM_EXECUTION_CONTROLS_FIXTURE}"
+            DEPENDS llam_managed_pass tests/fixtures/managed/execution_controls.c
+                tests/fixtures/managed/execution_controls.h include/llam/executor.h include/llam/runtime.h
                 tools/preempt/managed_driver.py tools/preempt/managed_verify.py
                 tools/preempt/managed_runtime_contracts.def VERBATIM)
-        add_custom_target(cavo_execution_fixture DEPENDS "${LLAM_CAVO_EXECUTION_FIXTURE}")
-        add_dependencies(test_cavo_execution cavo_execution_fixture)
-        target_compile_definitions(test_cavo_execution PRIVATE
-            LLAM_CAVO_NATIVE_FIXTURE_PATH="${LLAM_CAVO_EXECUTION_FIXTURE}")
+        add_custom_target(execution_controls_fixture DEPENDS "${LLAM_EXECUTION_CONTROLS_FIXTURE}")
+        add_dependencies(test_execution_controls execution_controls_fixture)
+        target_compile_definitions(test_execution_controls PRIVATE
+            LLAM_EXECUTION_FIXTURE_PATH="${LLAM_EXECUTION_CONTROLS_FIXTURE}")
         if(APPLE)
-            target_link_options(test_cavo_execution PRIVATE -Wl,-export_dynamic)
+            target_link_options(test_execution_controls PRIVATE -Wl,-export_dynamic)
         else()
-            target_link_options(test_cavo_execution PRIVATE -Wl,--export-dynamic)
+            target_link_options(test_execution_controls PRIVATE -Wl,--export-dynamic)
         endif()
-        add_test(NAME test_cavo_preempt_regions COMMAND test_cavo_execution --critical)
-        set_tests_properties(test_cavo_preempt_regions PROPERTIES TIMEOUT 30)
-        add_test(NAME test_cavo_local_native COMMAND test_cavo_execution --local)
-        set_tests_properties(test_cavo_local_native PROPERTIES TIMEOUT 30)
+        add_test(NAME test_preempt_regions_native COMMAND test_execution_controls --critical)
+        set_tests_properties(test_preempt_regions_native PROPERTIES TIMEOUT 30)
+        add_test(NAME test_local_executor_native COMMAND test_execution_controls --local)
+        set_tests_properties(test_local_executor_native PROPERTIES TIMEOUT 30)
 
         foreach(LLAM_FIXTURE_KIND image affine)
             set(LLAM_FIXTURE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/managed-${LLAM_FIXTURE_KIND}-fixture${CMAKE_SHARED_LIBRARY_SUFFIX}")

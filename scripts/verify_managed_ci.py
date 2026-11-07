@@ -30,13 +30,13 @@ REQUIRED_TESTS = (
     "test_managed_runtime_contracts",
     "test_managed_image_internal",
     "test_managed_sdk",
-    "test_cavo_preempt_regions",
-    "test_cavo_local_native",
+    "test_preempt_regions_native",
+    "test_local_executor_native",
 )
 BUILD_TARGETS = (
     "llam_managed_pass", "llam_runtime", "llam_runtime_shared",
     "llam_preempt_metadata_inspect", "test_managed_image_internal",
-    "test_cavo_execution",
+    "test_execution_controls",
     "demo", "stress", "bench", "server", "server_lossless", "server_flood",
 )
 

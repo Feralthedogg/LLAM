@@ -19,9 +19,9 @@
 #include "core/task/local_executor_internal.h"
 #include "llam/executor.h"
 #include "llam/managed.h"
-#include "cavo_execution_internal.h"
-#include "fixtures/managed/cavo_execution.h"
-#if defined(LLAM_CAVO_NATIVE_FIXTURE_PATH)
+#include "execution_controls_internal.h"
+#include "fixtures/managed/execution_controls.h"
+#if defined(LLAM_EXECUTION_FIXTURE_PATH)
 #include <dlfcn.h>
 #endif
 #include <stdio.h>
@@ -55,9 +55,14 @@ struct local_case {
     unsigned shared_value;
 };
 
-static void local_check(local_case_t *test, bool passed) {
+static void record_local_check(local_case_t *test, bool passed) {
     if (!passed) atomic_fetch_add(&test->failures, 1U);
 }
+#define local_check(test, expression) do { \
+    /* MSVC C11 atomics need evaluation outside the bool call argument. */ \
+    bool checked = (expression); \
+    record_local_check((test), checked); \
+} while (0)
 
 static void local_cleanup(void *data) {
     local_child_t *child = data;
@@ -312,21 +317,21 @@ static bool local_rejects_closing_binding(void) {
 
 /* A native-affine fail-stop hook for the fixture: fail without unwinding a
  * parent stack whose children might still own a loan. */
-void cavo_fixture_abort(void) { _Exit(125); }
+void execution_fixture_abort(void) { _Exit(125); }
 
-#if defined(LLAM_CAVO_NATIVE_FIXTURE_PATH)
+#if defined(LLAM_EXECUTION_FIXTURE_PATH)
 static void *local_native_identity(void *argument) {
     (void)argument;
     return (void *)(uintptr_t)pthread_self();
 }
 
 static void local_native_cleanup(void *argument) {
-    cavo_local_native_child_t *child = argument;
+    local_executor_native_child_t *child = argument;
     child->cleanup = (uint64_t)(uintptr_t)pthread_self();
     child->value += 1U;
 }
 
-static bool native_root_parked(cavo_local_native_work_t *work) {
+static bool native_root_parked(local_executor_native_work_t *work) {
     llam_task_t *root = llam_task_resolve_public_handle(work->root);
     if (root == NULL) return false;
     bool parked = atomic_load(&root->borrowed_drain_depth) != 0U &&
@@ -336,12 +341,12 @@ static bool native_root_parked(cavo_local_native_work_t *work) {
 }
 
 static void *local_native_release(void *argument) {
-    cavo_local_native_work_t *work = argument;
+    local_executor_native_work_t *work = argument;
     uint64_t limit = llam_now_ns() + UINT64_C(5000000000);
     for (;;) {
-        if (atomic_load(&work->errors)) cavo_fixture_abort();
+        if (atomic_load(&work->errors)) execution_fixture_abort();
         if (atomic_load(&work->draining) && native_root_parked(work)) break;
-        if (llam_now_ns() >= limit) cavo_fixture_abort();
+        if (llam_now_ns() >= limit) execution_fixture_abort();
         struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000L};
         nanosleep(&pause, NULL);
     }
@@ -349,7 +354,7 @@ static void *local_native_release(void *argument) {
     return NULL;
 }
 
-static bool local_native_work_init(cavo_local_native_work_t *work, llam_runtime_t *runtime) {
+static bool local_native_work_init(local_executor_native_work_t *work, llam_runtime_t *runtime) {
     memset(work, 0, sizeof(*work));
     work->runtime = runtime;
     work->identity = local_native_identity;
@@ -366,7 +371,7 @@ static bool local_native_work_init(cavo_local_native_work_t *work, llam_runtime_
 }
 
 static bool local_native_execute(llam_runtime_t *runtime, llam_task_fn entry) {
-    cavo_local_native_work_t work;
+    local_executor_native_work_t work;
     CHECK(local_native_work_init(&work, runtime));
     llam_spawn_opts_t options;
     CHECK(llam_spawn_opts_init(&options, sizeof(options)) == 0);
@@ -387,10 +392,10 @@ static bool local_native_execute(llam_runtime_t *runtime, llam_task_fn entry) {
 }
 
 static bool local_native_case(void) {
-    void *module = dlopen(LLAM_CAVO_NATIVE_FIXTURE_PATH, RTLD_NOW | RTLD_LOCAL);
+    void *module = dlopen(LLAM_EXECUTION_FIXTURE_PATH, RTLD_NOW | RTLD_LOCAL);
     if (module == NULL) fprintf(stderr, "local fixture load: %s\n", dlerror());
     CHECK(module != NULL);
-    void *symbol = dlsym(module, "cavo_local_root");
+    void *symbol = dlsym(module, "fixture_local_root");
     llam_task_fn entry = NULL;
     _Static_assert(sizeof(entry) == sizeof(symbol), "native entry ABI");
     memcpy(&entry, &symbol, sizeof(entry));
@@ -412,9 +417,9 @@ static bool local_native_case(void) {
 }
 #endif
 
-bool cavo_local_executor_cases(bool native) {
+bool local_executor_cases(bool native) {
     if (native) {
-#if defined(LLAM_CAVO_NATIVE_FIXTURE_PATH)
+#if defined(LLAM_EXECUTION_FIXTURE_PATH)
         return local_native_case();
 #else
         fprintf(stderr, "qualified local fixture unavailable\n");

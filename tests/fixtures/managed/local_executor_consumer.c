@@ -15,7 +15,7 @@
  * See LICENSE.
  */
 
-#include "cavo_execution.h"
+#include "execution_controls.h"
 #include "llam/executor.h"
 #include "llam/managed.h"
 #include <pthread.h>
@@ -26,8 +26,8 @@
 #define REQUIRE(condition) do { if (!(condition)) { \
     fprintf(stderr, "local SDK:%d: %s\n", __LINE__, #condition); _Exit(1); } } while (0)
 
-void cavo_local_root(void *argument);
-void cavo_fixture_abort(void) { _Exit(125); }
+void fixture_local_root(void *argument);
+void execution_fixture_abort(void) { _Exit(125); }
 
 static void *native_identity(void *argument) {
     (void)argument;
@@ -35,13 +35,13 @@ static void *native_identity(void *argument) {
 }
 
 static void native_cleanup(void *argument) {
-    cavo_local_native_child_t *child = argument;
+    local_executor_native_child_t *child = argument;
     child->cleanup = (uint64_t)(uintptr_t)pthread_self();
     child->value += 1U;
 }
 
 static void *release_children(void *argument) {
-    cavo_local_native_work_t *work = argument;
+    local_executor_native_work_t *work = argument;
     uint64_t limit = llam_now_ns() + UINT64_C(5000000000);
     while (!atomic_load_explicit(&work->draining, memory_order_acquire)) {
         REQUIRE(!atomic_load(&work->errors) && llam_now_ns() < limit);
@@ -52,7 +52,7 @@ static void *release_children(void *argument) {
     return NULL;
 }
 
-static void prepare(cavo_local_native_work_t *work) {
+static void prepare(local_executor_native_work_t *work) {
     llam_runtime_opts_t runtime_options;
     llam_preempt_opts_t policy;
     llam_local_executor_opts_t executor_options;
@@ -74,7 +74,7 @@ static void prepare(cavo_local_native_work_t *work) {
 }
 
 int main(void) {
-    cavo_local_native_work_t work = {0};
+    local_executor_native_work_t work = {0};
     atomic_init(&work.go, 0U);
     atomic_init(&work.errors, 0U);
     atomic_init(&work.checked, 0U);
@@ -85,7 +85,7 @@ int main(void) {
     REQUIRE(llam_spawn_opts_init(&spawn, sizeof(spawn)) == 0);
     spawn.local_executor = work.executor;
     spawn.cancel_token = work.token;
-    work.root = llam_runtime_spawn_ex(work.runtime, cavo_local_root, &work, &spawn, sizeof(spawn));
+    work.root = llam_runtime_spawn_ex(work.runtime, fixture_local_root, &work, &spawn, sizeof(spawn));
     REQUIRE(work.root != NULL);
     pthread_t release;
     REQUIRE(pthread_create(&release, NULL, release_children, &work) == 0);

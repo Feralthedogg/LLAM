@@ -16,19 +16,19 @@
  */
 
 #include "runtime_internal.h"
-#include "cavo_execution_internal.h"
+#include "execution_controls_internal.h"
 #include "llam/executor.h"
 #include "llam/managed.h"
-#include "fixtures/managed/cavo_execution.h"
+#include "fixtures/managed/execution_controls.h"
 #include <stdio.h>
 #include <string.h>
-#if defined(LLAM_CAVO_NATIVE_FIXTURE_PATH)
+#if defined(LLAM_EXECUTION_FIXTURE_PATH)
 #include <dlfcn.h>
 #endif
 
-#define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "Cavo execution:%d: %s errno=%d\n", __LINE__, #expr, errno); return false; } } while (0)
+#define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "LLAM execution:%d: %s errno=%d\n", __LINE__, #expr, errno); return false; } } while (0)
 #define TASK_CHECK(errors, expr) do { bool passed = (expr); if (!passed) { \
-    fprintf(stderr, "Cavo critical:%d: %s errno=%d\n", __LINE__, #expr, errno); ++*(errors); } } while (0)
+    fprintf(stderr, "LLAM critical:%d: %s errno=%d\n", __LINE__, #expr, errno); ++*(errors); } } while (0)
 
 static void critical_compat_entry(void *argument) {
     unsigned *errors = argument;
@@ -80,7 +80,7 @@ static bool critical_compat(bool unbalanced) {
     return true;
 }
 
-#if defined(LLAM_CAVO_NATIVE_FIXTURE_PATH)
+#if defined(LLAM_EXECUTION_FIXTURE_PATH)
 static bool task_symbol(void *module, const char *name, llam_task_fn *out) {
     void *symbol = dlsym(module, name);
     _Static_assert(sizeof(symbol) == sizeof(*out), "native function pointer ABI");
@@ -89,7 +89,7 @@ static bool task_symbol(void *module, const char *name, llam_task_fn *out) {
 }
 
 static void *critical_probe(void *argument) {
-    cavo_execution_work_t *work = argument;
+    execution_controls_work_t *work = argument;
     uint64_t limit = llam_now_ns() + UINT64_C(3000000000);
     while (atomic_load(&work->phase) != 2U && llam_now_ns() < limit) {
         struct timespec pause = {.tv_sec = 0, .tv_nsec = 100000L};
@@ -114,7 +114,7 @@ static void *critical_probe(void *argument) {
 }
 
 static bool critical_native_run(llam_runtime_t *runtime, llam_task_fn entry, llam_task_fn peer_entry) {
-    cavo_execution_work_t work = {.runtime = runtime};
+    execution_controls_work_t work = {.runtime = runtime};
     atomic_init(&work.peer_ready, 0U);
     atomic_init(&work.phase, 0U);
     atomic_init(&work.probe_done, 0U);
@@ -142,12 +142,12 @@ static bool critical_native_run(llam_runtime_t *runtime, llam_task_fn entry, lla
 }
 
 static bool critical_native(void) {
-    void *module = dlopen(LLAM_CAVO_NATIVE_FIXTURE_PATH, RTLD_NOW | RTLD_LOCAL);
+    void *module = dlopen(LLAM_EXECUTION_FIXTURE_PATH, RTLD_NOW | RTLD_LOCAL);
     if (module == NULL) fprintf(stderr, "fixture load: %s\n", dlerror());
     CHECK(module != NULL);
     llam_task_fn entry, peer;
-    CHECK(task_symbol(module, "cavo_critical_entry", &entry));
-    CHECK(task_symbol(module, "cavo_critical_peer", &peer));
+    CHECK(task_symbol(module, "fixture_critical_entry", &entry));
+    CHECK(task_symbol(module, "fixture_critical_peer", &peer));
     llam_runtime_opts_t options;
     CHECK(llam_runtime_opts_init(&options, sizeof(options)) == 0);
     options.deterministic = 1U;
@@ -165,11 +165,11 @@ static bool critical_native(void) {
 #endif
 
 int main(int argc, char **argv) {
-    if (argc == 1) return critical_compat(false) && cavo_local_executor_cases(false) ? 0 : 1;
-    if (argc == 2 && strcmp(argv[1], "--local-cooperative") == 0) return cavo_local_executor_cases(false) ? 0 : 1;
-    if (argc == 2 && strcmp(argv[1], "--local") == 0) return cavo_local_executor_cases(true) ? 0 : 1;
+    if (argc == 1) return critical_compat(false) && local_executor_cases(false) ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--local-cooperative") == 0) return local_executor_cases(false) ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--local") == 0) return local_executor_cases(true) ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--unbalanced") == 0) return critical_compat(true) ? 0 : 1;
-#if defined(LLAM_CAVO_NATIVE_FIXTURE_PATH)
+#if defined(LLAM_EXECUTION_FIXTURE_PATH)
     if (argc == 2 && strcmp(argv[1], "--critical") == 0) return critical_native() ? 0 : 1;
 #endif
     fprintf(stderr, "requested native execution fixture is unavailable\n");
