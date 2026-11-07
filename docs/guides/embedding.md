@@ -217,3 +217,17 @@ same-process memory read/write.
 
 Use a process boundary and broker-mode isolation when untrusted code must not
 read runtime internals. See [Security model](../reference/security/index.md).
+
+## Development: owned task scopes
+
+ABI 2.5 adds [owned scopes and typed outcomes](../reference/api/scopes.md) for
+embedders that need separate execution ownership and result ownership. The stable
+3.0.0 archive remains ABI 2.4. Create a scope on the explicit runtime, submit owned
+arguments and retain futures. On cancellation, use a scope cleanup deadline;
+`llam_scope_cancel_and_drain_until` shields the caller's cancelled request budget
+while preserving its explicit cleanup deadline. Retry after timeout before
+releasing any referenced memory. A future can outlive the drained scope and runtime.
+
+Use the C ABI from other languages or the optional C++17 host wrapper. This host
+integration does not qualify another language's task code for asynchronous capture;
+task entries still follow the managed compiler/image admission contract.

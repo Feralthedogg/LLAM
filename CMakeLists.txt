@@ -23,7 +23,7 @@ endif()
 project(llam VERSION 3.0.0 LANGUAGES C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 2)
-set(LLAM_ABI_VERSION_MINOR 4)
+set(LLAM_ABI_VERSION_MINOR 5)
 set(LLAM_LIBRARY_VERSION "${PROJECT_VERSION}")
 
 include(GNUInstallDirs)
@@ -190,6 +190,14 @@ set(LLAM_RUNTIME_SOURCES
     src/core/task/task_group.c
     src/core/task/task_group_registry.c
     src/core/task/task_local.c
+    src/core/task/structured_registry.c
+    src/core/task/scope_options.c
+    src/core/task/owned_value.c
+    src/core/task/scope.c
+    src/core/task/scope_spawn.c
+    src/core/task/scope_wait.c
+    src/core/task/future.c
+    src/core/task/scoped_completion.c
     src/core/task/task_reclaim.c
     src/core/task/task_stack.c
     src/core/wait/wait_accounting.c
@@ -852,6 +860,28 @@ target_link_libraries(test_multi_runtime_core PRIVATE llam_runtime)
 add_executable(test_api_usability tests/test_api_usability.c)
 target_link_libraries(test_api_usability PRIVATE llam_runtime)
 target_include_directories(test_api_usability PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
+
+add_executable(test_scope_values tests/test_scope_values.c)
+target_link_libraries(test_scope_values PRIVATE llam_runtime)
+
+# C++ is optional for the C runtime, required only for the typed host binding test.
+include(CheckLanguage)
+check_language(CXX)
+if(CMAKE_CXX_COMPILER)
+    enable_language(CXX)
+    add_executable(test_scope_cpp tests/test_scope_cpp.cpp)
+    target_link_libraries(test_scope_cpp PRIVATE llam_runtime)
+    set_target_properties(test_scope_cpp PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME test_scope_cpp COMMAND test_scope_cpp)
+endif()
+add_executable(example_scoped_results examples/scoped_results.c)
+target_link_libraries(example_scoped_results PRIVATE llam_runtime)
+add_test(NAME example_scoped_results COMMAND example_scoped_results)
+
+add_executable(test_scope tests/test_scope.c)
+target_link_libraries(test_scope PRIVATE llam_runtime_testhooks)
+target_compile_definitions(test_scope PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+target_include_directories(test_scope PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/internal)
 
 add_executable(test_runtime_api_edges ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_runtime_api_edges.c
@@ -1850,6 +1880,8 @@ foreach(LLAM_TEST_TARGET
         test_runtime_core
         test_multi_runtime_core
         test_api_usability
+        test_scope
+        test_scope_values
         test_runtime_api_edges
         test_runtime_select_edges
         test_runtime_io_dump
@@ -1918,6 +1950,12 @@ add_test(NAME test_abi_compat COMMAND test_abi_compat)
 add_test(NAME test_runtime_core COMMAND test_runtime_core)
 add_test(NAME test_multi_runtime_core COMMAND test_multi_runtime_core)
 add_test(NAME test_api_usability COMMAND test_api_usability)
+add_test(NAME test_scope_values COMMAND test_scope_values)
+add_test(NAME test_scope COMMAND test_scope)
+add_test(NAME test_scope_native_io COMMAND test_scope --io-native)
+set_tests_properties(test_scope PROPERTIES TIMEOUT 30)
+set_tests_properties(test_scope_native_io PROPERTIES TIMEOUT 30
+    ENVIRONMENT "LLAM_DIRECT_BLOCKING_IO=0;LLAM_DIRECT_BLOCKING_POLL=0;LLAM_WINDOWS_IOCP_TCP_POLLIN=1")
 set_tests_properties(test_api_usability PROPERTIES TIMEOUT 30)
 add_test(NAME test_runtime_select_edges COMMAND test_runtime_select_edges)
 add_test(NAME test_runtime_group_local_edges COMMAND test_runtime_group_local_edges)

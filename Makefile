@@ -82,6 +82,10 @@ CLEAN_FILES = \
 	test_runtime_core \
 	test_multi_runtime_core \
 	test_api_usability \
+	test_scope_values \
+	test_scope \
+	test_scope_cpp \
+	example_scoped_results \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -159,6 +163,8 @@ CLEAN_FILES = \
 	asan-test_magic2_internal \
 	asan-test_multi_runtime_core \
 	asan-test_api_usability \
+	asan-test_scope \
+	asan-test_scope_values \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability \
 	noowner-test_runtime_select_edges \
@@ -324,7 +330,8 @@ endif
 LLAM_PUBLIC_HDRS = \
 	include/llam/io.h \
 	include/llam/platform.h \
-	include/llam/runtime.h
+	include/llam/runtime.h \
+	include/llam/scope.h
 
 RUNTIME_PRIV_HDRS = \
 	$(LLAM_PUBLIC_HDRS) \
@@ -369,6 +376,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_proto_io.h \
 	src/internal/runtime_proto_sync.h \
 	src/core/task/task_group_internal.h \
+	src/core/task/structured_internal.h \
 	src/core/task/task_handle_registry_internal.h \
 	src/engine/runtime_watchdog_internal.h \
 	src/io/runtime_io_api_internal.h \
@@ -514,6 +522,14 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/task/task_group.o \
 	$(OBJDIR)/src/core/task/task_group_registry.o \
 	$(OBJDIR)/src/core/task/task_local.o \
+	$(OBJDIR)/src/core/task/structured_registry.o \
+	$(OBJDIR)/src/core/task/scope_options.o \
+	$(OBJDIR)/src/core/task/owned_value.o \
+	$(OBJDIR)/src/core/task/scope.o \
+	$(OBJDIR)/src/core/task/scope_spawn.o \
+	$(OBJDIR)/src/core/task/scope_wait.o \
+	$(OBJDIR)/src/core/task/future.o \
+	$(OBJDIR)/src/core/task/scoped_completion.o \
 	$(OBJDIR)/src/io/api/io_api.o \
 	$(OBJDIR)/src/io/api/direct.o \
 	$(OBJDIR)/src/io/api/direct_tuning.o \
@@ -665,7 +681,8 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/sched/scheduler.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/reinject.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/core_queue.o \
-	$(TESTHOOK_OBJDIR)/src/core/task/yield_join_sleep.o
+	$(TESTHOOK_OBJDIR)/src/core/task/yield_join_sleep.o \
+	$(TESTHOOK_OBJDIR)/src/core/task/scope_spawn.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/memory/task_span.o \
@@ -693,7 +710,8 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/sched/scheduler.o \
 		$(OBJDIR)/src/core/sched/reinject.o \
 		$(OBJDIR)/src/core/sched/core_queue.o \
-		$(OBJDIR)/src/core/task/yield_join_sleep.o, \
+		$(OBJDIR)/src/core/task/yield_join_sleep.o \
+		$(OBJDIR)/src/core/task/scope_spawn.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 ifneq ($(filter $(OBJDIR)/src/core/context/async_context_linux_x86_64.o,$(RUNTIME_OBJS)),)
@@ -1006,6 +1024,10 @@ LINK_TARGETS = \
 	test_runtime_core \
 	test_multi_runtime_core \
 	test_api_usability \
+	test_scope_values \
+	test_scope \
+	test_scope_cpp \
+	example_scoped_results \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -1073,7 +1095,7 @@ WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
 WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_watchdog_liveness|test_worker_identity_internal|test_legacy_lease_internal|test_execution_lease_internal|test_processor_resource_internal|test_processor_queue_timer_internal|test_processor_allocator_io_internal|test_foreign_detach_internal|test_relief_worker_internal|test_preempt_capabilities|test_default_policy_internal|test_magic2_internal|test_preempt_metadata|test_preempt_metadata_registration|test_preempt_sdk_metadata|test_preempt_cmake_install|test_worker_identity_boundary|test_legacy_lease_boundary|check_legacy_lease_boundary|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
-WINDOWS_CTEST_REGEX := $(WINDOWS_CTEST_REGEX)|test_api_usability|example_explicit_runtime|test_shared_load|test_runtime_regressions|test_sdk_install
+WINDOWS_CTEST_REGEX := $(WINDOWS_CTEST_REGEX)|test_scope_values|test_scope|test_scope_native_io|test_scope_cpp|example_scoped_results|test_api_usability|example_explicit_runtime|test_shared_load|test_runtime_regressions|test_sdk_install
 WINDOWS_CMAKE_TARGETS = \
 	example_explicit_runtime \
 	test_windows_async_multim_oracle \
@@ -1094,6 +1116,10 @@ WINDOWS_CMAKE_TARGETS = \
 	test_runtime_core \
 	test_multi_runtime_core \
 	test_api_usability \
+	test_scope_values \
+	test_scope \
+	test_scope_cpp \
+	example_scoped_results \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -1293,7 +1319,7 @@ audit-shared-exports: shared
 audit-production-test-hooks: static shared
 	$(PYTHON) scripts/audit_production_test_hooks.py ./libllam_runtime.a ./$(SHLIB_REAL) || { status=$$?; test "$$status" -eq 77; }
 
-test: test_api_usability test_capsule_pool_internal test_managed_catalog_internal test_managed_foreign_internal test_managed_scheduler_internal test_native_domain_internal test_execution_lease_internal test_watchdog_liveness_internal test_handoff_protocol bench_handoff test_io_watch_index test_large_select
+test: test_scope_values test_scope test_scope_cpp example_scoped_results test_api_usability test_capsule_pool_internal test_managed_catalog_internal test_managed_foreign_internal test_managed_scheduler_internal test_native_domain_internal test_execution_lease_internal test_watchdog_liveness_internal test_handoff_protocol bench_handoff test_io_watch_index test_large_select
 test: test-managed-bookkeeping
 .PHONY: test-managed-bookkeeping
 test-managed-bookkeeping: test_managed_scheduler_internal
@@ -1331,6 +1357,11 @@ test: test_runtime_regressions test_lcwe_model bench_lcwe_model test_abi_contrac
 	./test_runtime_regressions
 	./test_multi_runtime_core
 	./test_api_usability
+	./test_scope_values
+	./test_scope
+	LLAM_DIRECT_BLOCKING_IO=0 LLAM_DIRECT_BLOCKING_POLL=0 LLAM_WINDOWS_IOCP_TCP_POLLIN=1 ./test_scope --io-native
+	./test_scope_cpp
+	./example_scoped_results
 	./example_explicit_runtime
 	./example_explicit_runtime --cancel
 	./test_runtime_api_edges
@@ -2280,6 +2311,8 @@ ASAN_TEST_TARGETS = \
 	asan-test_magic2_internal \
 	asan-test_multi_runtime_core \
 	asan-test_api_usability \
+	asan-test_scope \
+	asan-test_scope_values \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability
 
@@ -2374,6 +2407,8 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_magic2_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_api_usability; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_scope; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_scope_values; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
 	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
@@ -3326,6 +3361,26 @@ ifneq ($(HOST_PLATFORM),windows)
 test_api_usability: $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS) $(LDLIBS)
 
+test_scope_values: $(RUNTIME_OBJS) $(OBJDIR)/tests/test_scope_values.o
+	$(CC) $(CFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
+$(OBJDIR)/tests/test_scope.o: CPPFLAGS += -DLLAM_ENABLE_TEST_HOOKS=1
+
+test_scope: $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_scope.o
+	$(CC) $(CFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
+test_scope_cpp: $(RUNTIME_OBJS) tests/test_scope_cpp.cpp include/llam/future.hpp $(LLAM_PUBLIC_HDRS)
+	$(CXX) $(CPPFLAGS) $(filter-out -std=c11,$(CFLAGS)) -std=c++17 -o $@ tests/test_scope_cpp.cpp $(RUNTIME_OBJS) $(LDLIBS)
+
+example_scoped_results: $(RUNTIME_OBJS) $(OBJDIR)/examples/scoped_results.o
+	$(CC) $(CFLAGS) -o $@ $(filter %.o,$^) $(LDLIBS)
+
+asan-test_scope: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_scope.o
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(OBJDIR)/tests/test_scope.o $(LDLIBS)
+
+asan-test_scope_values: require-sanitizer-target $(RUNTIME_OBJS) $(OBJDIR)/tests/test_scope_values.o
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(OBJDIR)/tests/test_scope_values.o $(LDLIBS)
+
 asan-test_api_usability tsan-test_api_usability: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_API_USABILITY_OBJS) $(LDLIBS)
 
@@ -3341,6 +3396,10 @@ test-docs-api-coverage:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/test_docs_api_coverage.py
 
 test: test-platform-support test-docs-api-coverage example_explicit_runtime
+
+$(OBJDIR)/examples/scoped_results.o: examples/scoped_results.c $(LLAM_PUBLIC_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/explicit_runtime.o: examples/explicit_runtime.c $(LLAM_PUBLIC_HDRS)
 	@mkdir -p $(dir $@)

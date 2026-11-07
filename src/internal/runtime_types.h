@@ -1072,6 +1072,8 @@ struct llam_task {
     bool io_scope_active;
     /* Non-NULL means the task handle is borrowed and only this group may join it. */
     llam_task_group_t *owning_group;
+    /* Scope execution owns this completion reference until final task retirement. */
+    llam_future_t *scope_completion;
     llam_task_fn entry;
     void *arg;
     llam_managed_catalog_t *managed_catalog;
@@ -1179,6 +1181,8 @@ struct llam_task {
     llam_timer_node_t embedded_timer_node;
     llam_timer_node_t *active_timer;
     atomic_uint preempt_requested;
+    /* Only internal cleanup waits alter this G-local policy; tokens stay set. */
+    atomic_uint cleanup_wait_depth;
     atomic_uint completed;
     atomic_uint reclaim_ready;
     atomic_uint reclaim_claimed;
@@ -1769,6 +1773,8 @@ struct llam_runtime {
     /* Constructed before native threads start; never resized during execution. */
     llam_execution_lease_mode_t execution_lease_mode;
     llam_managed_catalog_t *managed_catalog;
+    /* Structured lock protects appends; teardown takes this after workers join. */
+    llam_future_t *scope_retirements;
     const struct llam_managed_scheduler_ops *managed_scheduler_ops;
     void *managed_scheduler_data;
     llam_worker_t **worker_slots;

@@ -399,7 +399,7 @@ void llam_cancel_token_release_task_ref(llam_cancel_token_t *token) {
  * be armed.
  */
 bool llam_task_cancel_token_is_cancelled(const llam_task_t *task) {
-    if (task == NULL) return false;
+    if (task == NULL || atomic_load_explicit(&task->cleanup_wait_depth, memory_order_relaxed) != 0U) return false;
     /* Task/group sources are retained for G lifetime. The operation source is
      * G-owned and stable until every offloaded callback has completed. */
     for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {

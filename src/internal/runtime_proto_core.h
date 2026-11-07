@@ -55,6 +55,11 @@ void llam_yield_internal(void);
 #endif
 void llam_task_local_clear(llam_task_t *task);
 void llam_task_local_cleanup_owned(llam_task_t *task);
+void llam_scoped_task_entry_returned(llam_task_t *task);
+void llam_scoped_task_prepare_retire(llam_task_t *task);
+void llam_scoped_task_retire(llam_task_t *task);
+llam_future_t *llam_scoped_task_take_retired(llam_runtime_t *runtime);
+void llam_scoped_task_collect_retired(llam_future_t *head);
 void llam_call_native_affine_cleanup(llam_blocking_fn fn, void *arg);
 bool llam_task_scan_ref_try_acquire(llam_runtime_t *rt, llam_task_t *task);
 bool llam_task_scan_ref_release(llam_runtime_t *rt, llam_task_t *task);
@@ -500,11 +505,12 @@ static inline llam_cancel_token_t *llam_task_cancel_source(const llam_task_t *ta
          : index == 1U ? task->group_cancel_token : task->operation_cancel_token;
 }
 static inline bool llam_task_has_cancel_tokens(const llam_task_t *task) {
-    return task != NULL && (task->cancel_token != NULL || task->group_cancel_token != NULL ||
+    return task != NULL && atomic_load_explicit(&task->cleanup_wait_depth, memory_order_relaxed) == 0U &&
+                           (task->cancel_token != NULL || task->group_cancel_token != NULL ||
                             task->operation_cancel_token != NULL);
 }
 static inline uint64_t llam_task_request_deadline(const llam_task_t *task) {
-    if (task == NULL) return 0U;
+    if (task == NULL || atomic_load_explicit(&task->cleanup_wait_depth, memory_order_relaxed) != 0U) return 0U;
     uint64_t a = task->request_deadline_ns, b = task->operation_deadline_ns;
     return a == 0U ? b : (b == 0U || a < b ? a : b);
 }

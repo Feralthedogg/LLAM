@@ -1,7 +1,7 @@
 # API overview
 
 This page maps the stable public surface in `include/llam/runtime.h`,
-`include/llam/io.h`, `include/llam/managed.h`, and `include/llam/platform.h`. Use it to find the right API
+`include/llam/scope.h` (development ABI 2.5), `include/llam/io.h`, `include/llam/managed.h`, and `include/llam/platform.h`. Use it to find the right API
 group quickly, then check [Options](../options/runtime.md) and [ABI contract](../abi/index.md)
 when you need field-level or binary-compatibility rules.
 
@@ -14,6 +14,10 @@ when you need field-level or binary-compatibility rules.
 - [Tasks](tasks.md)
 
     Spawn, join, results, groups, and task-local values.
+
+- [Owned scopes and typed outcomes](scopes.md)
+
+    Development ABI 2.5: owned inputs, independent futures, and cancellation-safe drain.
 
 - [Time and cancellation](time.md)
 

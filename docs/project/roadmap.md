@@ -32,7 +32,7 @@ must state which code LLAM can preempt, where foreign code runs, and how its mem
 remains valid. The managed C qualification in 3.0.0 does not qualify another
 language's stacks, garbage collector, exceptions, or JIT-generated code.
 
-The next compiler priority is to make LLAM's managed compilation pipeline reusable
+After the owned task composition foundation below, the next compiler priority is to make LLAM's managed compilation pipeline reusable
 by other LLVM-based language frontends. Host event-loop adapters are a separate
 integration track: they let a host use LLAM services, while compiler integration
 qualifies that language's own task code for asynchronous preemption.
@@ -66,12 +66,15 @@ establish a qualified asynchronous profile.
 ## Milestones
 
 Runtime stabilization continues across every stage. The next implementation
-priority is the LLVM frontend boundary, starting with a common IR input path and
-then qualifying one additional ahead-of-time language frontend.
+priority is typed outcomes and cancellation-safe scope drain. The development
+tree implements these as additive ABI 2.5; native verification remains required
+for every supported profile. The next compiler milestone is a common IR input
+path, then one additional ahead-of-time language frontend.
 
 | Stage | Status | Deliverable | Dependency |
 | --- | --- | --- | --- |
-| 1. LLVM frontend integration | Next | A common IR input path and a qualified additional language frontend using the LLAM compiler/runtime contract. | 3.0.0 managed C baseline and native qualification |
+| 0. Owned task composition | Implemented in development ABI 2.5; not in stable 3.0.0 | Typed owned results, independent futures and cancellation-safe scope drain; [API contract](../reference/api/scopes.md). | Existing lifetime/ownership and native retirement contracts |
+| 1. LLVM frontend integration | Next compiler milestone | A common IR input path and a qualified additional language frontend using the LLAM compiler/runtime contract. | 3.0.0 managed C baseline and native qualification |
 | 2. Host integration | Planned | Nonblocking submission and completion delivery for an external host loop. | Current runtime contracts; can progress alongside stage 1 |
 | 3. Backend operation contracts | Planned | Shared operation and memory-lifetime conformance across native backends and host adapters. | Current backend contracts; develop alongside stage 2 |
 | 4. Resource control and fairness | Planned | Bounded queues and measurable progress under mixed workloads. | Stages 2 and 3 |

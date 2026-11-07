@@ -42,6 +42,31 @@
  */
 
 #include "runtime_internal.h"
+#include "structured_internal.h"
+
+typedef struct llam_spawn_owner {
+    llam_task_group_t *group;
+    llam_future_t *completion;
+} llam_spawn_owner_t;
+
+static llam_cancel_token_t *llam_spawn_owner_cancel(const llam_spawn_owner_t *owner) {
+    if (owner == NULL) return NULL;
+    if (owner->completion != NULL) return owner->completion->scope->cancel_token;
+    if (owner->group != NULL && (owner->group->flags & LLAM_TASK_GROUP_F_LINK_CANCEL) != 0U)
+        return owner->group->cancel_token;
+    return NULL;
+}
+
+static void llam_spawn_attach_completion(llam_task_t *task, const llam_spawn_owner_t *owner) {
+    if (owner == NULL || owner->completion == NULL) return;
+    task->scope_completion = owner->completion;
+    /* The runnable queue publishes all ownership fields together. The scope
+     * retains execution; only its independent future is exposed to the caller. */
+    atomic_store_explicit(&task->detached, 1U, memory_order_relaxed);
+    pthread_mutex_lock(&g_llam_structured_lock);
+    owner->completion->task_id = task->id;
+    pthread_mutex_unlock(&g_llam_structured_lock);
+}
 
 /**
  * @brief Decide whether a local spawn burst should wake other scheduler shards.
@@ -179,6 +204,29 @@ static void llam_spawn_release_unpublished_cancel_token(llam_task_t *task) {
     task->group_cancel_token = NULL;
 }
 
+static int llam_spawn_retain_cancellation(llam_task_t *task, llam_runtime_t *runtime,
+                                          const llam_spawn_opts_t *opts, const llam_spawn_owner_t *owner) {
+    llam_cancel_token_t *owner_cancel = llam_spawn_owner_cancel(owner);
+    llam_cancel_token_t *primary = opts != NULL ? opts->cancel_token : NULL;
+    if (primary == NULL && owner != NULL && owner->completion != NULL) primary = owner_cancel;
+    /* Ownership and both cancellation sources precede runnable publication. */
+    task->owning_group = owner != NULL ? owner->group : NULL;
+    task->cancel_token = primary;
+    if (primary != NULL && llam_cancel_token_retain_task_ref_for_runtime(primary, runtime,
+                                                                         &task->cancel_token) != 0) {
+        task->cancel_token = NULL;
+        return -1;
+    }
+    if (owner_cancel != NULL && primary != owner_cancel &&
+        llam_cancel_token_retain_task_ref_for_runtime(owner_cancel, runtime, &task->group_cancel_token) != 0) {
+        int error = errno;
+        llam_spawn_release_unpublished_cancel_token(task);
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
 /** @brief Return true when @p task_class is a supported public task class. */
 static bool llam_public_task_class_valid(uint32_t task_class) {
     return task_class == (uint32_t)LLAM_TASK_CLASS_LATENCY ||
@@ -279,7 +327,7 @@ static void llam_windows_async_host_spawn_release(llam_runtime_t *rt) {
  * @param fn Task entry point. Must be non-NULL.
  * @param arg Opaque argument passed to @p fn when the task starts.
  * @param opts Optional spawn options. NULL selects default task/stack classes.
- * @param owning_group Optional task group that owns the returned borrowed
+ * @param owner Optional group or scoped completion that owns the returned borrowed
  *        diagnostics handle. NULL keeps the task as a normal join/detach handle.
  *
  * @return Newly allocated task handle on success, or NULL with errno set on
@@ -293,7 +341,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
                                                 void *arg,
                                                 const llam_spawn_opts_t *opts,
                                                 size_t opts_size,
-                                                llam_task_group_t *owning_group) {
+                                                const llam_spawn_owner_t *owner) {
     llam_spawn_opts_t raw_opts;
     llam_spawn_opts_t opts_storage;
     llam_task_t *task;
@@ -478,30 +526,8 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
     atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
     task->deadline_ns = 0U;
     task->request_deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
-    task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
-    /*
-     * Group-owned tasks must be marked before publication.  Marking after the
-     * runnable enqueue lets a concurrently running child consume its borrowed
-     * handle via llam_join/llam_detach before the group can claim ownership.
-     */
-    task->owning_group = owning_group;
-    if (LLAM_UNLIKELY(task->cancel_token != NULL &&
-                      llam_cancel_token_retain_task_ref_for_runtime(task->cancel_token, rt, &task->cancel_token) != 0)) {
-        task->cancel_token = NULL;
-        llam_task_allocator_free(task);
-#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
-        if (windows_async_host_reservation) {
-            llam_windows_async_host_spawn_release(rt);
-        }
-#endif
-        return NULL;
-    }
-    if (owning_group != NULL && (owning_group->flags & LLAM_TASK_GROUP_F_LINK_CANCEL) != 0U &&
-        opts != NULL && opts->cancel_token != owning_group->cancel_token &&
-        llam_cancel_token_retain_task_ref_for_runtime(owning_group->cancel_token, rt,
-                                                      &task->group_cancel_token) != 0) {
+    if (llam_spawn_retain_cancellation(task, rt, opts, owner) != 0) {
         int saved_errno = errno;
-        llam_spawn_release_unpublished_cancel_token(task);
         llam_task_allocator_free(task);
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64 && defined(LLAM_EXPERIMENTAL_ASYNC_PREEMPT)
         if (windows_async_host_reservation) llam_windows_async_host_spawn_release(rt);
@@ -544,6 +570,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         return NULL;
     }
 
+    llam_spawn_attach_completion(task, owner);
     task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
     task_list_eager = llam_task_list_eager_enabled(rt);
     /*
@@ -654,9 +681,17 @@ llam_task_t *llam_runtime_spawn_group_owned_ex(llam_runtime_t *runtime,
     if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
         return NULL;
     }
-    task = llam_spawn_on_runtime_owned(pinned_runtime, fn, arg, opts, opts_size, owning_group);
+    const llam_spawn_owner_t owner = {.group = owning_group};
+    task = llam_spawn_on_runtime_owned(pinned_runtime, fn, arg, opts, opts_size, &owner);
     llam_runtime_end_public_op(pinned_runtime);
     return task;
+}
+
+llam_task_t *llam_runtime_spawn_scoped(llam_runtime_t *runtime, llam_future_t *completion,
+                                      const llam_typed_task_spec_t *spec, void *argument) {
+    const llam_spawn_owner_t owner = {.completion = completion};
+    return llam_spawn_on_runtime_owned(runtime, spec->entry, argument, spec->spawn_opts,
+                                       (size_t)spec->spawn_opts_size, &owner);
 }
 
 /* Public callers have already checked the native domain on this same M. */

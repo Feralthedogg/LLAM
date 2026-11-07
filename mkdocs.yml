@@ -105,6 +105,7 @@ nav:
           - API overview: reference/api/index.md
           - Lifecycle: reference/api/lifecycle.md
           - Tasks: reference/api/tasks.md
+          - Owned scopes and typed outcomes: reference/api/scopes.md
           - Time and cancellation: reference/api/time.md
           - Sync and channels: reference/api/sync.md
           - I/O: reference/api/io.md

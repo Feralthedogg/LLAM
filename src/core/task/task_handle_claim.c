@@ -58,6 +58,11 @@ static int llam_task_claim_join_public_handle_for_group(const llam_task_t *handl
         errno = EINVAL;
         return -1;
     }
+    if (LLAM_UNLIKELY(task->scope_completion != NULL)) {
+        pthread_mutex_unlock(&g_llam_task_registry_lock);
+        errno = EBUSY;
+        return -1;
+    }
     if (LLAM_UNLIKELY(atomic_load_explicit(&task->detached, memory_order_acquire) != 0U)) {
         pthread_mutex_unlock(&g_llam_task_registry_lock);
         errno = EINVAL;
@@ -181,7 +186,7 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
         errno = EINVAL;
         return -1;
     }
-    if (LLAM_UNLIKELY(task->owning_group != NULL)) {
+    if (LLAM_UNLIKELY(task->owning_group != NULL || task->scope_completion != NULL)) {
         pthread_mutex_unlock(&g_llam_task_registry_lock);
         errno = EBUSY;
         return -1;

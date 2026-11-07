@@ -227,3 +227,20 @@ example chat server policy: lifecycle races, task handle ownership, cancellation
 token destroy/cancel races, lost wakeups, channel close/select races, blocking
 callback cancellation, managed/unmanaged boundary behavior, POSIX I/O edge
 semantics, owned-buffer lifetime after shutdown, and runtime dump ownership.
+
+## Development scope/result gate
+
+ABI 2.5 adds `test_scope_values`, `test_scope`, `test_scope_native_io` (CTest),
+and optional C++17 `test_scope_cpp`. `make test` builds and executes the value,
+scope, native I/O variant, C++ host and `example_scoped_results` checks.
+The scope suite covers admission/close races, cancellation before/during cleanup,
+expired request budgets, bounded/unbounded cleanup, helper and I/O retirement,
+concurrent consumption, wrong-runtime handles and runtime teardown.
+
+`make test-asan` includes scope and owned-value tests in its separate sanitizer
+object directory. The managed installed-SDK gate compiles a real managed C scope
+fixture, verifies its final image, and runs a C++ host consumer against relocated
+headers and shared runtime. It requires default asynchronous admission, progress
+through a no-safepoint rendezvous, and successful typed take after runtime teardown.
+Native Windows CTest executes scope and IOCP poll-retirement cases; it does not
+claim that the POSIX managed SDK launcher is qualified on Windows.

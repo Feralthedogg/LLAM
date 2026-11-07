@@ -105,6 +105,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->operation_deadline_ns = 0U;
     task->request_deadline_ns = 0U;
     task->io_scope_active = false;
+    task->scope_completion = NULL;
     memset(&task->application_result, 0, sizeof(task->application_result));
     for (unsigned i = 0U; i < LLAM_CANCEL_SOURCE_COUNT; ++i) {
         task->cancel_links[i].task = task;
@@ -164,6 +165,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->embedded_timer_node.owner_runtime = owner_runtime;
     task->active_timer = NULL;
     atomic_init(&task->preempt_requested, 0U);
+    atomic_init(&task->cleanup_wait_depth, 0U);
     atomic_init(&task->completed, 0U);
     atomic_init(&task->reclaim_ready, 0U);
     atomic_init(&task->reclaim_claimed, 0U);
@@ -268,6 +270,7 @@ void llam_task_allocator_free(llam_task_t *task) {
     }
     llam_task_local_clear(task);
     llam_managed_task_release(task);
+    llam_scoped_task_retire(task);
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
     if (task->alloc_external_pool) {

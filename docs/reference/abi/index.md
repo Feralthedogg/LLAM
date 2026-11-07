@@ -6,20 +6,30 @@ implementations may rely on when loading LLAM dynamically.
 ## Stable public ABI
 
 LLAM exposes one stable public ABI family: public symbols declared in
-`include/llam/runtime.h`, `include/llam/io.h` and `include/llam/managed.h`.
+`include/llam/runtime.h`, `include/llam/io.h`, `include/llam/managed.h`, and
+`include/llam/scope.h` (development ABI 2.5).
 
 All other non-static implementation symbols are private even if a platform
 linker happens to export them. Language runtimes must bind only documented
 public symbols.
 
-The current public ABI version is:
+The development tree public ABI version is (published 3.0.0 archives remain ABI 2.4):
 
 ```text
 LLAM_VERSION         = 3.0.0
 LLAM_ABI_VERSION_MAJOR = 2
-LLAM_ABI_VERSION_MINOR = 4
+LLAM_ABI_VERSION_MINOR = 5
 LLAM_ABI_VERSION       = (major << 16) | minor
 ```
+
+ABI 2.5 adds owned scopes, typed value handles, independent futures and cancellation-safe
+scope drain in `<llam/scope.h>`. It preserves all existing layouts and group/result
+contracts. The new descriptor and result-contract records are fixed 32/64-byte
+layouts; outcome and scope reports are 24/72 bytes on supported 64-bit ABIs.
+Ownership-bearing calls require complete V1 prefixes before transferring pointers.
+Scope reports allow compatible-prefix copies. New symbol availability requires
+minor >= 5. The optional `<llam/future.hpp>` C++17 host wrapper adds no runtime
+symbols. See [owned scopes](../api/scopes.md) for ownership and callback lifetimes.
 
 ABI 2.4 adds `llam_runtime_create_compat`, `llam_runtime_init_compat_ex` and
 `llam_runtime_init_compat` for the former boundary/safepoint behavior. In 3.0 the

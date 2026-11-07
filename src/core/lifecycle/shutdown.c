@@ -62,9 +62,11 @@ static void llam_runtime_close_ready_fd(llam_fd_t fd) {
  * The function tolerates partial initialization so failed init paths can reuse
  * normal shutdown cleanup.
  */
-static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
+static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt,
+                                                               llam_future_t **scoped_retired) {
     unsigned i;
     llam_managed_catalog_t *retired_catalog = NULL;
+    *scoped_retired = NULL;
 
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
@@ -544,6 +546,7 @@ static llam_managed_catalog_t *llam_runtime_shutdown_unlocked(llam_runtime_t *rt
      * scheduler/backend state.
      */
     llam_runtime_unregister_handle(rt);
+    *scoped_retired = llam_scoped_task_take_retired(rt);
     // Clear the runtime last so accidental post-shutdown reads fail closed.
     memset(rt, 0, sizeof(*rt));
     return retired_catalog;
@@ -672,8 +675,10 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
                 llam_runtime_wait_exec_stopped(rt);
             }
             llam_runtime_lifecycle_lock();
-            llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt);
+            llam_future_t *scoped_retired;
+            llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt, &scoped_retired);
             llam_runtime_lifecycle_unlock();
+            llam_scoped_task_collect_retired(scoped_retired);
             llam_managed_catalog_retire(retired);
         }
     }
@@ -712,8 +717,10 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt) {
             llam_runtime_wait_exec_stopped(rt);
         }
         llam_runtime_lifecycle_lock();
-        llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt);
+        llam_future_t *scoped_retired;
+        llam_managed_catalog_t *retired = llam_runtime_shutdown_unlocked(rt, &scoped_retired);
         llam_runtime_lifecycle_unlock();
+        llam_scoped_task_collect_retired(scoped_retired);
         llam_managed_catalog_retire(retired);
     }
 

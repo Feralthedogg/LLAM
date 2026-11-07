@@ -35,7 +35,7 @@ from pygments.lexers import CLexer
 log = logging.getLogger("mkdocs.hooks.llam")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HEADERS = ("runtime.h", "io.h", "managed.h", "platform.h")
+HEADERS = ("runtime.h", "scope.h", "io.h", "managed.h", "platform.h")
 GITHUB_BLOB = "https://github.com/Feralthedogg/LLAM/blob/main/"
 
 SYMBOLS = {}

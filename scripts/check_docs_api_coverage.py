@@ -26,7 +26,7 @@ from pathlib import Path
 import re
 import sys
 
-HEADERS = ("runtime.h", "io.h", "managed.h", "platform.h")
+HEADERS = ("runtime.h", "scope.h", "io.h", "managed.h", "platform.h")
 RESERVED = frozenset({"llam_managed_native_enter", "llam_managed_native_leave"})
 RESERVED_SECTION = "Reserved compiler ABI"
 

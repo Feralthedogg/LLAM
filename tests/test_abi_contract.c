@@ -21,6 +21,7 @@
  */
 
 #include "llam/runtime.h"
+#include "llam/scope.h"
 
 #include <errno.h>
 #include <stddef.h>
@@ -44,6 +45,16 @@ _Static_assert(LLAM_PLATFORM_FREEBSD == 0, "retired FreeBSD macro must remain in
 _Static_assert(LLAM_PLATFORM_OPENBSD == 0, "retired OpenBSD macro must remain inert");
 _Static_assert(LLAM_PLATFORM_NETBSD == 0, "retired NetBSD macro must remain inert");
 _Static_assert(LLAM_PLATFORM_DRAGONFLY == 0, "retired DragonFly macro must remain inert");
+
+_Static_assert(sizeof(llam_type_descriptor_t) == 32U, "typed value descriptor layout");
+_Static_assert(sizeof(llam_result_contract_t) == 64U, "result type pair layout");
+_Static_assert(sizeof(llam_scope_opts_t) == 8U, "scope options V1 prefix");
+_Static_assert(sizeof(llam_outcome_t) == 24U, "owned outcome layout");
+_Static_assert(offsetof(llam_outcome_t, value) == 8U, "owned payload offset");
+_Static_assert(sizeof(llam_scope_report_t) == 72U, "scope report V1 layout");
+_Static_assert(offsetof(llam_scope_report_t, runtime_error) == 64U, "scope error offset");
+ASSERT_FIELD_U32(llam_outcome_t, kind);
+ASSERT_FIELD_U32(llam_type_descriptor_t, alignment);
 
 ASSERT_FIELD_U32(llam_spawn_opts_t, task_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, stack_class);

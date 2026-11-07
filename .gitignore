@@ -116,6 +116,7 @@ scripts/__pycache__/
 
 # API usability example/tests and generated compiler-tool bytecode.
 /example_explicit_runtime
+/example_scoped_results
 /test_api_usability
 /asan-test_api_usability
 /tsan-test_api_usability

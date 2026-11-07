@@ -60,7 +60,7 @@ extern "C" {
 #define LLAM_VERSION_PATCH 0U
 
 #define LLAM_ABI_VERSION_MAJOR 2U
-#define LLAM_ABI_VERSION_MINOR 4U
+#define LLAM_ABI_VERSION_MINOR 5U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 
@@ -93,6 +93,9 @@ typedef struct llam_abi_info {
 
 /* Public opaque handles. */
 typedef struct llam_task llam_task_t;
+typedef struct llam_scope llam_scope_t;
+typedef struct llam_future llam_future_t;
+typedef struct llam_value llam_value_t;
 typedef struct llam_mutex llam_mutex_t;
 typedef struct llam_cond llam_cond_t;
 typedef struct llam_channel llam_channel_t;

@@ -68,3 +68,18 @@ Check where each call may run and how LLAM reads deadline values.
   the operation had already become ready.
 - LLAM preserves syscall-style `errno` values for I/O operations and does not
   translate them into backend-specific domains.
+
+## Development: scope cleanup waits
+
+ABI 2.5 [scope drain](../api/scopes.md) is a cleanup operation: it temporarily
+shields the current task's application cancellation and inherited request budget.
+The explicit cleanup deadline, runtime failure, and shutdown still apply. The
+mask is local to that task and restored on every return; no token is reset and
+peer tasks remain cancellable. Managed waits park instead of blocking workers.
+A future's ordinary wait keeps the normal cancellation/deadline policy.
+
+Scope quiescence includes backend, native and blocking-call retirement and owned
+argument/task-local cleanup. A timeout preserves ownership; a scope child cannot
+drain its own scope. Owned-value drop callbacks run outside runtime locks but must
+be nonblocking, thread-neutral, non-throwing and must not reenter LLAM. Provider code
+and callback contexts must outlive retained results, even after runtime destruction.

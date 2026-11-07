@@ -1,5 +1,23 @@
 # LLAM ChangeLog
 
+## Unreleased
+
+### Added
+
+* add ABI 2.5 owned task scopes, semantic type descriptors, independent futures and
+  exactly-once owned values, with success/application-error/cancellation/runtime-error
+  outcomes distinct from wait failures; preserve existing ABI major 2 layouts.
+* add cancellation-safe scope drain that shields the caller's request cancellation
+  and inherited budget while honoring an explicit cleanup deadline, and publishes
+  quiescence only after native/I/O/helper and owned cleanup retirement.
+* add move-only C++17 host wrappers, compiler runtime-import contracts, a relocated
+  managed-C/C++ SDK consumer, native scope regressions and checked C examples.
+
+### Changed
+
+* document ABI 2.5 as a development addition after stable 3.0.0 (ABI 2.4), including
+  retained ownership after timeout, independent result lifetimes and callback rules.
+
 ## 3.0.0 - 2026-11-05
 
 ### Added

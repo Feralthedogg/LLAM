@@ -26,7 +26,7 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PUBLIC_HEADERS = ("runtime.h", "io.h", "platform.h", "managed.h")
+PUBLIC_HEADERS = ("runtime.h", "scope.h", "io.h", "platform.h", "managed.h")
 PUBLIC_FN_RE = re.compile(r"\bLLAM_API\b[\s\S]*?\b(llam_[A-Za-z0-9_]+)\s*\(")
 LLAM_SYMBOL_RE = re.compile(r"^_?(llam_[A-Za-z0-9_]+)$")
 

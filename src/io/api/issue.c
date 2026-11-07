@@ -95,6 +95,7 @@ void llam_task_exit_internal(void) {
     }
     rt = task->owner_runtime;
     llam_task_local_cleanup_owned(task);
+    llam_scoped_task_entry_returned(task);
 
     pthread_mutex_lock(&task->lock);
     task->state = LLAM_TASK_STATE_DEAD;

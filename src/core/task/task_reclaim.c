@@ -430,6 +430,7 @@ void llam_task_release_resources(llam_task_t *task) {
     if (task == NULL) {
         return;
     }
+    llam_scoped_task_prepare_retire(task);
     llam_cancel_token_unregister_task(task);
     if (task->cancel_token != NULL) llam_cancel_token_release_task_ref(task->cancel_token);
     if (task->group_cancel_token != NULL) llam_cancel_token_release_task_ref(task->group_cancel_token);
@@ -450,6 +451,12 @@ void llam_task_release_resources(llam_task_t *task) {
     llam_task_local_clear(task);
     /* Images outlive native capsules, stacks and task-local finalizers. */
     llam_managed_task_release(task);
+    /* Whole-runtime teardown bypasses individual allocator returns. Carry its
+     * completion references past the lifecycle lock; ordinary frees publish
+     * after admission capacity has also been released by the allocator. */
+    if (task->scope_completion != NULL &&
+        atomic_load_explicit(&task->owner_runtime->shutdown_requested, memory_order_acquire))
+        llam_scoped_task_retire(task);
 }
 
 void llam_free_task(llam_task_t *task) {
